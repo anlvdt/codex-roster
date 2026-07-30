@@ -53,15 +53,18 @@ fn account_view(
     };
     AccountView {
         id: account.id,
+        provider: account.provider,
         email: account.email,
         subject: account.subject,
         name: account.name,
+        custom_label: account.custom_label,
         plan_label: account.plan_label,
         environment: account.environment,
         is_active: active_id.is_some_and(|id| id == account.id),
         created_at: account.created_at,
         updated_at: account.updated_at,
         last_activated_at: account.last_activated_at,
+        archived: account.archived,
         usage,
         usage_error,
     }

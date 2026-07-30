@@ -108,7 +108,7 @@ where
         }
         match self.rebuild_menu() {
             Ok(menu) => match TrayIconBuilder::new()
-                .with_tooltip("Codex account switcher")
+                .with_tooltip(crate::PRODUCT_NAME)
                 .with_icon(load_codex_icon())
                 .with_menu(Box::new(menu))
                 .build()
@@ -436,7 +436,7 @@ fn visible_width(text: &str) -> usize {
 }
 
 fn load_codex_icon() -> Icon {
-    if let Ok(icon) = decode_icon_bytes(include_bytes!("../assets/codex-account-switcher.ico")) {
+    if let Ok(icon) = decode_icon_bytes(include_bytes!("../assets/codex-roster.ico")) {
         return icon;
     }
     candidate_icon_paths()
@@ -478,7 +478,10 @@ fn allocate_console() {
 
 fn candidate_icon_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Some(path) = std::env::var_os("CODEX_ACCOUNT_SWITCHER_ICON") {
+    if let Some(path) = std::env::var_os("ACCOUNT_HUB_ICON")
+        .or_else(|| std::env::var_os("NEXT_ACCOUNT_ICON"))
+        .or_else(|| std::env::var_os("CODEX_ACCOUNT_SWITCHER_ICON"))
+    {
         paths.push(PathBuf::from(path));
     }
     if let Ok(current) = std::env::current_exe()
@@ -540,7 +543,9 @@ fn fallback_icon() -> Icon {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{AccountUsageView, EnvironmentKind, UsageSource, UsageWindowView};
+    use crate::model::{
+        AccountUsageView, AiProvider, EnvironmentKind, UsageSource, UsageWindowView,
+    };
     use time::{Date, Month, OffsetDateTime, Time};
 
     #[test]
@@ -550,6 +555,7 @@ mod tests {
             .replace_time(Time::from_hms(0, 52, 0).unwrap());
         let mut account = AccountView {
             id: Uuid::new_v4(),
+            provider: AiProvider::OpenAi,
             email: "person@example.com".to_owned(),
             subject: Some("sub".to_owned()),
             name: None,
@@ -588,6 +594,7 @@ mod tests {
     fn tray_account_label_marks_login_required_usage_error() {
         let account = AccountView {
             id: Uuid::new_v4(),
+            provider: AiProvider::OpenAi,
             email: "person@example.com".to_owned(),
             subject: Some("sub".to_owned()),
             name: None,
@@ -631,6 +638,7 @@ mod tests {
     fn tray_saved_accounts_keeps_active_flag_without_rendered_active_id() {
         let active = AccountView {
             id: Uuid::new_v4(),
+            provider: AiProvider::OpenAi,
             email: "active@example.com".to_owned(),
             subject: Some("sub".to_owned()),
             name: None,
@@ -662,6 +670,7 @@ mod tests {
     fn active_account_fallback_requires_live_identity_match() {
         let account = AccountView {
             id: Uuid::new_v4(),
+            provider: AiProvider::OpenAi,
             email: "active@example.com".to_owned(),
             subject: Some("sub".to_owned()),
             name: None,
@@ -699,6 +708,7 @@ mod tests {
             .replace_time(Time::from_hms(0, 52, 0).unwrap());
         let mut saved_account = AccountView {
             id: Uuid::new_v4(),
+            provider: AiProvider::OpenAi,
             email: "stale@example.com".to_owned(),
             subject: Some("sub".to_owned()),
             name: None,

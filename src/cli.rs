@@ -1,3 +1,6 @@
+use std::io::Read;
+use std::path::PathBuf;
+
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use time::OffsetDateTime;
@@ -7,8 +10,9 @@ use crate::app::{App, InteractiveExit, InteractiveMode};
 use crate::env;
 use crate::model::{
     AccountUsageView, AccountView, AutoStartUsageWindowsRunOutput,
-    AutoStartUsageWindowsStatusOutput, RunningCodexProcess, UsageOutput,
+    AutoStartUsageWindowsStatusOutput, RunningCodexProcess, TokenUsageSummaryOutput, UsageOutput,
 };
+use crate::openai_status::fetch_openai_status;
 use crate::process::format_process_table;
 use crate::repository::SnapshotRepository;
 use crate::secrets::MigratingSecretStore;
@@ -16,9 +20,10 @@ use crate::usage::{usage_error_label, usage_error_requires_login};
 
 #[derive(Parser)]
 #[command(
+    name = crate::CLI_NAME,
     author,
     version,
-    about = "Switch Codex accounts by snapshotting live auth state"
+    about = "Manage Codex accounts across the CLI and IDE"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -56,6 +61,39 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    Archive {
+        account_id: Uuid,
+        #[arg(long)]
+        restore: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Export {
+        output: PathBuf,
+        #[arg(long)]
+        password_stdin: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Import {
+        input: PathBuf,
+        #[arg(long)]
+        password_stdin: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    RestoreAccountListBackup {
+        #[arg(long)]
+        json: bool,
+    },
+    RestoreFullBackup {
+        #[arg(long)]
+        json: bool,
+    },
+    CreateAutomaticFullBackup {
+        #[arg(long)]
+        json: bool,
+    },
     AutoStartUsageWindows {
         #[arg(long, conflicts_with = "disable")]
         enable: bool,
@@ -63,6 +101,28 @@ enum Command {
         disable: bool,
         #[arg(long)]
         run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    RecoverLegacySnapshots {
+        #[arg(long)]
+        json: bool,
+    },
+    TokenUsage {
+        #[arg(long)]
+        json: bool,
+    },
+    ResetOutlook {
+        #[arg(long)]
+        json: bool,
+    },
+    OpenAiStatus {
+        #[arg(long)]
+        json: bool,
+    },
+    SetLabel {
+        account_id: Uuid,
+        label: String,
         #[arg(long)]
         json: bool,
     },
@@ -183,6 +243,77 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::Archive {
+            account_id,
+            restore,
+            json,
+        }) => {
+            app.set_account_archived(account_id, !restore)?;
+            if json {
+                print_json(&serde_json::json!({ "account_id": account_id, "archived": !restore }))?;
+            } else {
+                println!(
+                    "{} {account_id}",
+                    if restore { "Restored" } else { "Archived" }
+                );
+            }
+            Ok(())
+        }
+        Some(Command::Export {
+            output,
+            password_stdin,
+            json,
+        }) => {
+            let password = backup_password(password_stdin)?;
+            let accounts = app.export_backup(&output, &password)?;
+            if json {
+                print_json(&serde_json::json!({ "output": output, "accounts": accounts }))?;
+            } else {
+                println!("Exported {accounts} accounts to {}", output.display());
+            }
+            Ok(())
+        }
+        Some(Command::Import {
+            input,
+            password_stdin,
+            json,
+        }) => {
+            let password = backup_password(password_stdin)?;
+            let (created, updated) = app.import_backup(&input, &password)?;
+            if json {
+                print_json(&serde_json::json!({ "created": created, "updated": updated }))?;
+            } else {
+                println!("Imported {created} new and updated {updated} saved accounts");
+            }
+            Ok(())
+        }
+        Some(Command::RestoreAccountListBackup { json }) => {
+            let accounts = app.restore_latest_account_list_backup()?;
+            if json {
+                print_json(&serde_json::json!({ "accounts": accounts }))?;
+            } else {
+                println!("Restored account list with {accounts} accounts");
+            }
+            Ok(())
+        }
+        Some(Command::RestoreFullBackup { json }) => {
+            let accounts = app.restore_latest_full_backup()?;
+            if json {
+                print_json(&serde_json::json!({ "accounts": accounts }))?;
+            } else {
+                println!("Restored full backup with {accounts} accounts");
+            }
+            Ok(())
+        }
+        Some(Command::CreateAutomaticFullBackup { json }) => {
+            let accounts = app.create_automatic_full_backup()?;
+            if json {
+                print_json(&serde_json::json!({ "accounts": accounts }))?;
+            } else {
+                println!("Created automatic full backup with {accounts} accounts");
+            }
+            Ok(())
+        }
         Some(Command::AutoStartUsageWindows {
             enable,
             disable,
@@ -210,6 +341,84 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::RecoverLegacySnapshots { json }) => {
+            let output = app.recover_legacy_snapshots()?;
+            if json {
+                print_json(&output)?;
+            } else {
+                println!("Recovered snapshots: {}", output.recovered_accounts);
+                println!("Imported snapshots: {}", output.imported_accounts);
+                println!("Skipped snapshots: {}", output.skipped_accounts);
+            }
+            Ok(())
+        }
+        Some(Command::TokenUsage { json }) => {
+            let output = app.token_usage_summary()?;
+            if json {
+                print_json(&output)?;
+            } else {
+                print_token_usage_summary(&output);
+            }
+            Ok(())
+        }
+        Some(Command::ResetOutlook { json }) => {
+            let outlook = crate::reset_tracker::fetch_reset_outlook()?;
+            if json {
+                print_json(&outlook)?;
+            } else {
+                println!(
+                    "Global reset outlook: {}% in 24h, {}% in 48h",
+                    outlook.chance_24_hours, outlook.chance_48_hours
+                );
+                println!("Last reset: {}", outlook.last_reset_at);
+            }
+            Ok(())
+        }
+        Some(Command::OpenAiStatus { json }) => {
+            let status = fetch_openai_status()?;
+            if json {
+                print_json(&status)?;
+            } else {
+                println!("OpenAI: {}", status.description);
+                for component in status.codex_components {
+                    println!("{}: {}", component.name, component.status);
+                }
+            }
+            Ok(())
+        }
+        Some(Command::SetLabel {
+            account_id,
+            label,
+            json,
+        }) => {
+            let label = (!label.trim().is_empty()).then_some(label);
+            app.set_account_label(account_id, label.clone())?;
+            if json {
+                print_json(
+                    &serde_json::json!({ "account_id": account_id, "custom_label": label }),
+                )?;
+            } else {
+                println!("Updated {account_id} label");
+            }
+            Ok(())
+        }
+    }
+}
+
+fn backup_password(password_stdin: bool) -> Result<String> {
+    if password_stdin {
+        let mut password = String::new();
+        std::io::stdin().read_to_string(&mut password)?;
+        let password = password.trim_end_matches(['\r', '\n']).to_owned();
+        if password.is_empty() {
+            bail!("a backup password is required");
+        }
+        Ok(password)
+    } else {
+        dialoguer::Password::new()
+            .with_prompt("Backup password")
+            .interact()
+            .context("failed to read backup password")
     }
 }
 
@@ -331,6 +540,19 @@ fn print_auto_start_usage_windows_run(output: &AutoStartUsageWindowsRunOutput) {
     for skipped in &output.skipped {
         println!("Skipped: {skipped}");
     }
+}
+
+fn print_token_usage_summary(output: &TokenUsageSummaryOutput) {
+    println!("Local Codex session tokens:");
+    println!("Today: {}", output.today);
+    println!("Last 7 days: {}", output.last_7_days);
+    println!("Last 30 days: {}", output.last_30_days);
+    println!("Last 365 days: {}", output.last_365_days);
+    println!("All time: {}", output.all_time);
+    println!(
+        "Scanned {} sessions / {} token events",
+        output.sessions_scanned, output.token_events
+    );
 }
 
 fn print_usage_summary(usage: &AccountUsageView) {

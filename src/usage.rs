@@ -81,6 +81,8 @@ pub fn usage_error_requires_login(error: &str) -> bool {
     error.contains("login required")
         || error.contains("usage authorization failed")
         || error.contains("snapshot refresh token missing")
+        || error.contains("refresh_token_invalidated")
+        || error.contains("your session has ended")
         || (error.contains("token refresh failed")
             && (error.contains("invalid_grant")
                 || error.contains("refresh token")
@@ -231,7 +233,7 @@ fn update_snapshot_auth(snapshot: &SnapshotBlob, auth: &SnapshotAuth) -> Result<
 fn fetch_usage_response(access_token: &str, account_id: Option<&str>) -> Result<UsageResponse> {
     let mut request = ureq::get(USAGE_ENDPOINT)
         .header("Authorization", &format!("Bearer {access_token}"))
-        .header("User-Agent", "codex-account-switcher")
+        .header("User-Agent", "codex-roster")
         .config()
         .http_status_as_error(false)
         .timeout_global(Some(std::time::Duration::from_secs(5)))
@@ -418,6 +420,20 @@ mod tests {
 
         assert_eq!(usage_error_label(&message), "Login required");
         assert!(message.contains("Log in with this account again"));
+    }
+
+    #[test]
+    fn invalidated_refresh_token_is_login_required() {
+        let error = anyhow!(
+            "{}",
+            r#"token refresh failed with 401 Unauthorized: {"error":{"message":"Your session has ended. Please log in again.","code":"refresh_token_invalidated"}}"#
+        );
+
+        assert!(usage_error_requires_login(&format!("{error:#}")));
+        assert_eq!(
+            usage_error_label(&usage_error_message(&error)),
+            "Login required"
+        );
     }
 
     #[test]

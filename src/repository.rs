@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 mod codec;
 mod index_store;
@@ -7,15 +8,21 @@ use anyhow::{Context, Result, anyhow};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::model::{
-    AccountUsageView, DisplayIdentity, EnvironmentKind, SavedAccountMetadata, SnapshotBlob,
+use crate::backup::{
+    BackupAccount, BackupBundle, automatic_backup_password, newest_automatic_backup,
+    read_encrypted, write_encrypted,
 };
-use crate::secrets::SecretStore;
+use crate::model::{
+    AccountUsageView, AiProvider, DisplayIdentity, EnvironmentKind, SavedAccountMetadata,
+    SnapshotBlob,
+};
+use crate::secrets::{LocalSecretStore, SecretStore};
 use crate::usage::usage_error_requires_login;
 use codec::{decode_snapshot, encode_snapshot};
 use index_store::MetadataIndexStore;
 
 pub struct SnapshotRepository<S> {
+    data_dir: PathBuf,
     index_store: MetadataIndexStore,
     secret_store: S,
 }
@@ -26,6 +33,7 @@ where
 {
     pub fn new(data_dir: &Path, secret_store: S) -> Self {
         Self {
+            data_dir: data_dir.to_path_buf(),
             index_store: MetadataIndexStore::new(data_dir),
             secret_store,
         }
@@ -44,6 +52,72 @@ where
             .collect::<Vec<_>>();
         accounts.sort_by_key(|account| std::cmp::Reverse(account.updated_at));
         Ok(accounts)
+    }
+
+    pub fn recover_legacy_snapshots(
+        &self,
+        environment: &EnvironmentKind,
+        legacy_data_dir: &Path,
+    ) -> Result<(usize, usize, usize)> {
+        let legacy_index = MetadataIndexStore::new(legacy_data_dir).load_index()?;
+        let legacy_store = LocalSecretStore::new(&legacy_data_dir.join("snapshots"));
+        let mut current_index = self.index_store.load_index()?;
+        let mut recovered_accounts = 0;
+        let mut imported_accounts = 0;
+        let mut skipped_accounts = 0;
+
+        for legacy in legacy_index
+            .accounts
+            .into_iter()
+            .filter(|account| &account.environment == environment)
+        {
+            if legacy
+                .cached_usage_error
+                .as_deref()
+                .is_some_and(usage_error_requires_login)
+            {
+                skipped_accounts += 1;
+                continue;
+            }
+            let Some(encoded_snapshot) = legacy_store.load(&legacy.secret_key)? else {
+                skipped_accounts += 1;
+                continue;
+            };
+            if decode_snapshot(&encoded_snapshot).is_err() {
+                skipped_accounts += 1;
+                continue;
+            }
+
+            self.secret_store
+                .save(&legacy.secret_key, &encoded_snapshot)?;
+            if let Some(position) = current_index
+                .accounts
+                .iter()
+                .position(|account| account.id == legacy.id)
+            {
+                let current = &mut current_index.accounts[position];
+                current.email = legacy.email;
+                current.subject = legacy.subject;
+                current.name = legacy.name;
+                current.custom_label = legacy.custom_label;
+                current.plan_label = legacy.plan_label;
+                current.provider = legacy.provider;
+                current.secret_key = legacy.secret_key;
+                current.cached_usage = legacy.cached_usage;
+                current.cached_usage_error = None;
+                recovered_accounts += 1;
+            } else {
+                let mut imported = legacy;
+                imported.cached_usage_error = None;
+                current_index.accounts.push(imported);
+                imported_accounts += 1;
+            }
+        }
+
+        if recovered_accounts > 0 || imported_accounts > 0 {
+            self.index_store.save_index(&current_index)?;
+        }
+        Ok((recovered_accounts, imported_accounts, skipped_accounts))
     }
 
     pub fn get_account(
@@ -91,14 +165,17 @@ where
             let metadata = SavedAccountMetadata {
                 id,
                 environment: environment.clone(),
+                provider: AiProvider::OpenAi,
                 email: identity.email.clone(),
                 subject: identity.subject.clone(),
                 name: identity.name.clone(),
+                custom_label: None,
                 plan_label: identity.plan_label.clone(),
                 secret_key: format!("snapshot:{id}"),
                 created_at: now,
                 updated_at: now,
                 last_activated_at: None,
+                archived: false,
                 cached_usage: None,
                 cached_usage_error: None,
             };
@@ -109,6 +186,7 @@ where
         self.secret_store
             .save(&metadata.secret_key, &encoded_snapshot)?;
         self.index_store.save_index(&index)?;
+        let _ = self.write_automatic_full_backup(environment);
         Ok((metadata, created))
     }
 
@@ -159,6 +237,7 @@ where
         self.secret_store
             .save(&metadata.secret_key, &encoded_snapshot)?;
         self.index_store.save_index(&index)?;
+        let _ = self.write_automatic_full_backup(environment);
         Ok(metadata)
     }
 
@@ -186,7 +265,146 @@ where
         account.cached_usage_error = Some(usage_error);
         let metadata = account.clone();
         self.index_store.save_index(&index)?;
+        let _ = self.write_automatic_full_backup(environment);
         Ok(metadata)
+    }
+
+    pub fn set_custom_label(
+        &self,
+        environment: &EnvironmentKind,
+        account_id: Uuid,
+        custom_label: Option<String>,
+    ) -> Result<SavedAccountMetadata> {
+        let mut index = self.index_store.load_index()?;
+        let account = index
+            .accounts
+            .iter_mut()
+            .find(|account| account.id == account_id && &account.environment == environment)
+            .ok_or_else(|| anyhow!("saved account {account_id} not found"))?;
+        account.custom_label = custom_label.filter(|value| !value.trim().is_empty());
+        account.updated_at = OffsetDateTime::now_utc();
+        let metadata = account.clone();
+        self.index_store.save_index(&index)?;
+        let _ = self.write_automatic_full_backup(environment);
+        Ok(metadata)
+    }
+
+    pub fn set_archived(
+        &self,
+        environment: &EnvironmentKind,
+        account_id: Uuid,
+        archived: bool,
+    ) -> Result<SavedAccountMetadata> {
+        let mut index = self.index_store.load_index()?;
+        let account = index
+            .accounts
+            .iter_mut()
+            .find(|account| account.id == account_id && &account.environment == environment)
+            .ok_or_else(|| anyhow!("saved account {account_id} not found"))?;
+        account.archived = archived;
+        account.updated_at = OffsetDateTime::now_utc();
+        let metadata = account.clone();
+        self.index_store.save_index(&index)?;
+        let _ = self.write_automatic_full_backup(environment);
+        Ok(metadata)
+    }
+
+    pub fn export_backup(&self, environment: &EnvironmentKind) -> Result<BackupBundle> {
+        let mut accounts = Vec::new();
+        for metadata in self.list_accounts(environment)? {
+            let (_, snapshot) = self.load_snapshot(environment, metadata.id)?;
+            accounts.push(BackupAccount {
+                identity: DisplayIdentity {
+                    email: metadata.email,
+                    subject: metadata.subject,
+                    name: metadata.name,
+                    plan_label: metadata.plan_label,
+                },
+                custom_label: metadata.custom_label,
+                archived: metadata.archived,
+                snapshot,
+            });
+        }
+        Ok(BackupBundle::new(accounts))
+    }
+
+    pub fn import_backup(
+        &self,
+        environment: &EnvironmentKind,
+        backup: BackupBundle,
+    ) -> Result<(usize, usize)> {
+        let mut created = 0;
+        let mut updated = 0;
+        for account in backup.accounts {
+            let (metadata, was_created) =
+                self.save_snapshot(environment, &account.identity, &account.snapshot)?;
+            self.set_custom_label(environment, metadata.id, account.custom_label)?;
+            self.set_archived(environment, metadata.id, account.archived)?;
+            if was_created {
+                created += 1;
+            } else {
+                updated += 1;
+            }
+        }
+        Ok((created, updated))
+    }
+
+    pub fn restore_latest_account_list_backup(&self) -> Result<usize> {
+        self.index_store.restore_latest_automatic_backup()
+    }
+
+    pub fn restore_latest_full_backup(&self, environment: &EnvironmentKind) -> Result<usize> {
+        let password = automatic_backup_password()?;
+        let backup = read_encrypted(
+            &newest_automatic_backup(&self.automatic_backup_dir())?,
+            &password,
+        )?;
+        let count = backup.accounts.len();
+        self.index_store.save_index(&crate::model::MetadataIndex {
+            schema_version: crate::model::METADATA_SCHEMA_VERSION,
+            write_generation: 0,
+            accounts: Vec::new(),
+        })?;
+        let _ = self.import_backup(environment, backup)?;
+        Ok(count)
+    }
+
+    pub fn create_automatic_full_backup(&self, environment: &EnvironmentKind) -> Result<usize> {
+        let count = self.list_accounts(environment)?.len();
+        self.write_automatic_full_backup(environment)?;
+        Ok(count)
+    }
+
+    fn automatic_backup_dir(&self) -> PathBuf {
+        self.data_dir.join("automatic-full-backups")
+    }
+
+    fn write_automatic_full_backup(&self, environment: &EnvironmentKind) -> Result<()> {
+        let password = automatic_backup_password()?;
+        let backup = self.export_backup(environment)?;
+        let directory = self.automatic_backup_dir();
+        std::fs::create_dir_all(&directory)
+            .with_context(|| format!("failed to create {}", directory.display()))?;
+        let path = directory.join(format!(
+            "backup-{}-{}.codexroster",
+            OffsetDateTime::now_utc().unix_timestamp(),
+            Uuid::new_v4().simple()
+        ));
+        write_encrypted(&path, &backup, &password)?;
+        let mut backups = std::fs::read_dir(&directory)
+            .with_context(|| format!("failed to read {}", directory.display()))?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        backups.sort_by_key(|path| {
+            std::fs::metadata(path)
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+        });
+        for path in backups.into_iter().rev().skip(5) {
+            let _ = std::fs::remove_file(path);
+        }
+        Ok(())
     }
 
     pub fn delete_snapshot(&self, environment: &EnvironmentKind, account_id: Uuid) -> Result<()> {
@@ -215,6 +433,7 @@ where
             }
             return Err(error);
         }
+        let _ = self.write_automatic_full_backup(environment);
         Ok(())
     }
 
@@ -272,6 +491,7 @@ where
         for duplicate in duplicates {
             let _ = self.secret_store.delete(&duplicate.secret_key);
         }
+        let _ = self.write_automatic_full_backup(environment);
         Ok(updated)
     }
 }

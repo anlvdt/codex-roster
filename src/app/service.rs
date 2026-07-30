@@ -2,11 +2,13 @@ use anyhow::{Context, Result};
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::backup::{read_encrypted, write_encrypted};
 use crate::codex;
 use crate::env::AppEnv;
 use crate::model::{
-    ActivateOutput, DeleteOutput, DisplayIdentity, ListOutput, RunningCodexProcess, SaveAction,
-    SaveOutput, SnapshotBlob, StatusOutput, UsageOutput, UsageSource,
+    ActivateOutput, DeleteOutput, DisplayIdentity, LegacyRecoveryOutput, ListOutput,
+    RunningCodexProcess, SaveAction, SaveOutput, SnapshotBlob, StatusOutput,
+    TokenUsageSummaryOutput, UsageOutput, UsageSource,
 };
 use crate::repository::SnapshotRepository;
 use crate::secrets::SecretStore;
@@ -43,6 +45,21 @@ where
             current_account_saved_id: current_saved_id,
             saved_accounts: saved_accounts.len(),
             process_warnings: crate::process::detect_running_codex_processes(),
+        })
+    }
+
+    pub fn recover_legacy_snapshots(&self) -> Result<LegacyRecoveryOutput> {
+        let legacy_data_dir = self
+            .env
+            .home_dir
+            .join("Library/Application Support/com.nextide.account-switcher");
+        let (recovered_accounts, imported_accounts, skipped_accounts) = self
+            .repository
+            .recover_legacy_snapshots(&self.env.kind, &legacy_data_dir)?;
+        Ok(LegacyRecoveryOutput {
+            recovered_accounts,
+            imported_accounts,
+            skipped_accounts,
         })
     }
 
@@ -161,6 +178,49 @@ where
             let _ = self.usage(Some(account.id));
         }
         Ok(())
+    }
+
+    pub fn token_usage_summary(&self) -> Result<TokenUsageSummaryOutput> {
+        crate::token_usage::summarize_session_tokens(
+            &self.env.codex_root.join("sessions"),
+            time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc()),
+        )
+    }
+
+    pub fn set_account_label(&self, account_id: Uuid, custom_label: Option<String>) -> Result<()> {
+        self.repository
+            .set_custom_label(&self.env.kind, account_id, custom_label)?;
+        Ok(())
+    }
+
+    pub fn set_account_archived(&self, account_id: Uuid, archived: bool) -> Result<()> {
+        self.repository
+            .set_archived(&self.env.kind, account_id, archived)?;
+        Ok(())
+    }
+
+    pub fn export_backup(&self, path: &std::path::Path, password: &str) -> Result<usize> {
+        let backup = self.repository.export_backup(&self.env.kind)?;
+        let count = backup.accounts.len();
+        write_encrypted(path, &backup, password)?;
+        Ok(count)
+    }
+
+    pub fn import_backup(&self, path: &std::path::Path, password: &str) -> Result<(usize, usize)> {
+        self.repository
+            .import_backup(&self.env.kind, read_encrypted(path, password)?)
+    }
+
+    pub fn restore_latest_account_list_backup(&self) -> Result<usize> {
+        self.repository.restore_latest_account_list_backup()
+    }
+
+    pub fn restore_latest_full_backup(&self) -> Result<usize> {
+        self.repository.restore_latest_full_backup(&self.env.kind)
+    }
+
+    pub fn create_automatic_full_backup(&self) -> Result<usize> {
+        self.repository.create_automatic_full_backup(&self.env.kind)
     }
 
     pub fn usage(&self, account_id: Option<Uuid>) -> Result<UsageOutput> {

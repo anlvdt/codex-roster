@@ -6,6 +6,29 @@ pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 pub const METADATA_SCHEMA_VERSION: u32 = 1;
 pub const AUTH_FILES: [&str; 2] = ["auth.json", "cap_sid"];
 
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AiProvider {
+    #[default]
+    OpenAi,
+}
+
+impl<'de> Deserialize<'de> for AiProvider {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let _ = String::deserialize(deserializer)?;
+        Ok(Self::OpenAi)
+    }
+}
+
+impl std::fmt::Display for AiProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OpenAI / Codex")
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EnvironmentKind {
@@ -58,7 +81,7 @@ impl DisplayIdentity {
 
 #[cfg(test)]
 mod tests {
-    use super::DisplayIdentity;
+    use super::{AiProvider, DisplayIdentity};
 
     fn identity(email: &str, subject: Option<&str>) -> DisplayIdentity {
         DisplayIdentity {
@@ -87,20 +110,36 @@ mod tests {
                 .matches(&identity("other@example.com", None))
         );
     }
+
+    #[test]
+    fn legacy_provider_tags_normalize_to_openai() {
+        let provider: AiProvider = serde_json::from_str("\"cursor\"").expect("legacy provider");
+        assert_eq!(provider, AiProvider::OpenAi);
+        assert_eq!(
+            serde_json::to_string(&provider).expect("serialize provider"),
+            "\"open_ai\""
+        );
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SavedAccountMetadata {
     pub id: Uuid,
     pub environment: EnvironmentKind,
+    #[serde(default)]
+    pub provider: AiProvider,
     pub email: String,
     pub subject: Option<String>,
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_label: Option<String>,
     pub plan_label: Option<String>,
     pub secret_key: String,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
     pub last_activated_at: Option<OffsetDateTime>,
+    #[serde(default)]
+    pub archived: bool,
     #[serde(default)]
     pub cached_usage: Option<AccountUsageView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,15 +157,18 @@ pub struct MetadataIndex {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AccountView {
     pub id: Uuid,
+    pub provider: AiProvider,
     pub email: String,
     pub subject: Option<String>,
     pub name: Option<String>,
+    pub custom_label: Option<String>,
     pub plan_label: Option<String>,
     pub environment: EnvironmentKind,
     pub is_active: bool,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
     pub last_activated_at: Option<OffsetDateTime>,
+    pub archived: bool,
     pub usage: Option<AccountUsageView>,
     pub usage_error: Option<String>,
 }
@@ -206,6 +248,31 @@ pub struct RunningCodexProcess {
 #[derive(Clone, Debug, Serialize)]
 pub struct DeleteOutput {
     pub deleted_account_id: Uuid,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct LegacyRecoveryOutput {
+    pub recovered_accounts: usize,
+    pub imported_accounts: usize,
+    pub skipped_accounts: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TokenUsageSummaryOutput {
+    pub today: u64,
+    pub last_7_days: u64,
+    pub last_30_days: u64,
+    pub last_365_days: u64,
+    pub all_time: u64,
+    pub daily: Vec<TokenUsageDayOutput>,
+    pub sessions_scanned: usize,
+    pub token_events: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TokenUsageDayOutput {
+    pub date: String,
+    pub tokens: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

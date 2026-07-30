@@ -226,8 +226,7 @@ fn run_codex_usage_ping(
     snapshot: &SnapshotBlob,
     identity: &DisplayIdentity,
 ) -> Result<CodexUsagePingResult> {
-    let work_dir =
-        std::env::temp_dir().join(format!("codex-account-switcher-ping-{}", Uuid::new_v4()));
+    let work_dir = std::env::temp_dir().join(format!("codex-roster-ping-{}", Uuid::new_v4()));
     let result = run_codex_usage_ping_in_temp_home(env, snapshot, identity, &work_dir);
     let cleanup = remove_temp_auth_home(&work_dir);
     match (result, cleanup) {

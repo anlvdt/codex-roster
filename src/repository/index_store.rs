@@ -5,10 +5,14 @@ use std::time::SystemTime;
 use crate::file_store::{RecoveryFileKind, list_recovery_files, replace_file_with_recovery};
 use crate::model::{METADATA_SCHEMA_VERSION, MetadataIndex};
 use anyhow::{Context, Result, anyhow};
+use serde_json::Value;
+use time::{Date, OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 
 pub(super) struct MetadataIndexStore {
     metadata_path: PathBuf,
 }
+
+const AUTOMATIC_BACKUP_LIMIT: usize = 20;
 
 impl MetadataIndexStore {
     pub(super) fn new(data_dir: &Path) -> Self {
@@ -36,7 +40,60 @@ impl MetadataIndexStore {
         replace_file_with_recovery(&self.metadata_path, Some(json.as_bytes()), |temp_path| {
             fs::write(temp_path, &json)
                 .with_context(|| format!("failed to write {}", temp_path.display()))
-        })
+        })?;
+        let _ = self.write_automatic_backup(&persisted, &json);
+        Ok(())
+    }
+
+    pub(super) fn restore_latest_automatic_backup(&self) -> Result<usize> {
+        let (path, index) = self
+            .automatic_backup_candidates()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("no automatic account-list backup is available"))?;
+        let count = index.accounts.len();
+        self.save_index(&index)?;
+        eprintln!("restored account-list backup from {}", path.display());
+        Ok(count)
+    }
+
+    fn automatic_backup_dir(&self) -> PathBuf {
+        self.metadata_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("account-list-backups")
+    }
+
+    fn write_automatic_backup(&self, index: &MetadataIndex, json: &str) -> Result<()> {
+        let directory = self.automatic_backup_dir();
+        fs::create_dir_all(&directory)
+            .with_context(|| format!("failed to create {}", directory.display()))?;
+        let path = directory.join(format!("metadata-{:020}.json", index.write_generation));
+        fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
+        let backups = self.automatic_backup_candidates()?;
+        for (path, _) in backups.into_iter().skip(AUTOMATIC_BACKUP_LIMIT) {
+            let _ = fs::remove_file(path);
+        }
+        Ok(())
+    }
+
+    fn automatic_backup_candidates(&self) -> Result<Vec<(PathBuf, MetadataIndex)>> {
+        let directory = self.automatic_backup_dir();
+        if !directory.exists() {
+            return Ok(Vec::new());
+        }
+        let mut backups = fs::read_dir(&directory)
+            .with_context(|| format!("failed to read {}", directory.display()))?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let path = entry.path();
+                let raw = fs::read_to_string(&path).ok()?;
+                let index = parse_metadata_index(&raw).ok()?;
+                (index.schema_version == METADATA_SCHEMA_VERSION).then_some((path, index))
+            })
+            .collect::<Vec<_>>();
+        backups.sort_by_key(|entry| std::cmp::Reverse(entry.1.write_generation));
+        Ok(backups)
     }
 
     pub(super) fn best_available_index(&self) -> Result<Option<MetadataIndex>> {
@@ -59,9 +116,10 @@ impl MetadataIndexStore {
                         return None;
                     }
                 };
-                let mut index: MetadataIndex = match serde_json::from_str(&raw) {
+                let mut index: MetadataIndex = match parse_metadata_index(&raw) {
                     Ok(index) => index,
-                    Err(_) => {
+                    Err(error) => {
+                        eprintln!("failed to parse {}: {error}", entry.path.display());
                         invalid_kinds.push(entry.kind);
                         return None;
                     }
@@ -116,6 +174,64 @@ impl MetadataIndexStore {
     }
 }
 
+fn parse_metadata_index(raw: &str) -> serde_json::Result<MetadataIndex> {
+    match serde_json::from_str(raw) {
+        Ok(index) => Ok(index),
+        Err(_) => {
+            let mut value: Value = serde_json::from_str(raw)?;
+            normalize_legacy_timestamps(&mut value);
+            serde_json::from_value(value)
+        }
+    }
+}
+
+fn normalize_legacy_timestamps(value: &mut Value) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                normalize_legacy_timestamps(value);
+            }
+        }
+        Value::Object(values) => {
+            for (key, value) in values.iter_mut() {
+                if key.ends_with("_at")
+                    && let Some(normalized) = legacy_timestamp_to_current_format(value)
+                {
+                    *value = normalized;
+                } else {
+                    normalize_legacy_timestamps(value);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn legacy_timestamp_to_current_format(value: &Value) -> Option<Value> {
+    let timestamp = match value {
+        Value::String(value) => OffsetDateTime::parse(value, &Rfc3339).ok()?,
+        Value::Array(values) if values.len() == 9 => {
+            let value_at = |index: usize| values[index].as_i64();
+            let year = i32::try_from(value_at(0)?).ok()?;
+            let ordinal = u16::try_from(value_at(1)?).ok()?;
+            let hour = u8::try_from(value_at(2)?).ok()?;
+            let minute = u8::try_from(value_at(3)?).ok()?;
+            let second = u8::try_from(value_at(4)?).ok()?;
+            let nanosecond = u32::try_from(value_at(5)?).ok()?;
+            let offset_hour = i8::try_from(value_at(6)?).ok()?;
+            let offset_minute = i8::try_from(value_at(7)?).ok()?;
+            let offset_second = i8::try_from(value_at(8)?).ok()?;
+            Date::from_ordinal_date(year, ordinal)
+                .ok()?
+                .with_hms_nano(hour, minute, second, nanosecond)
+                .ok()?
+                .assume_offset(UtcOffset::from_hms(offset_hour, offset_minute, offset_second).ok()?)
+        }
+        _ => return None,
+    };
+    serde_json::to_value(timestamp).ok()
+}
+
 struct RecoveryCandidate {
     kind: RecoveryFileKind,
     write_generation: u64,
@@ -129,5 +245,59 @@ fn recovery_priority(kind: RecoveryFileKind) -> u8 {
         RecoveryFileKind::Pending => 2,
         RecoveryFileKind::Temp => 1,
         RecoveryFileKind::Backup => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_metadata_index;
+
+    #[test]
+    fn reads_mixed_legacy_timestamp_formats() {
+        let index = parse_metadata_index(
+            r#"{
+                "schema_version": 1,
+                "write_generation": 4,
+                "accounts": [{
+                    "id": "7501f28d-909b-410e-b6b2-0a89a2edb93d",
+                    "environment": "macos",
+                    "email": "person@example.com",
+                    "subject": null,
+                    "name": null,
+                    "plan_label": null,
+                    "secret_key": "snapshot:7501f28d-909b-410e-b6b2-0a89a2edb93d",
+                    "created_at": [2026, 186, 3, 44, 33, 165334000, 0, 0, 0],
+                    "updated_at": [2026, 186, 3, 44, 33, 165334000, 0, 0, 0],
+                    "last_activated_at": null,
+                    "cached_usage": {
+                        "source": "saved_access_token",
+                        "fetched_at": "2026-07-08T03:25:29.269473Z",
+                        "five_hour": {
+                            "used_percent": 25,
+                            "remaining_percent": 75,
+                            "reset_at": "2026-07-08T08:25:29Z"
+                        },
+                        "weekly": null,
+                        "credits": null
+                    },
+                    "workspace_name": "Personal",
+                    "is_archived": false
+                }]
+            }"#,
+        )
+        .expect("legacy index");
+
+        assert_eq!(index.accounts.len(), 1);
+        assert_eq!(index.accounts[0].email, "person@example.com");
+        assert_eq!(index.accounts[0].created_at.year(), 2026);
+        assert_eq!(
+            index.accounts[0]
+                .cached_usage
+                .as_ref()
+                .expect("usage")
+                .fetched_at
+                .year(),
+            2026
+        );
     }
 }

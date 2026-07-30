@@ -1,4 +1,9 @@
 /target
+/build
+/macos/NextAccount/.build
+__pycache__/
+*.pyc
+/assets/account-hub.png
 
 
 # Planning files

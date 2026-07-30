@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.2.0 - 2026-07-30
+
+### Added
+
+- Added the native macOS Codex Roster app, including a menu-bar companion, account dashboard, usage cards, and safe activation confirmation.
+- Added provider-oriented dashboard rows, reset countdowns, neutral unavailable-usage states, and a compact five-account quick-switch menu.
+- Added project attribution and license boundaries in `CREDITS.md` for UI/UX research sources.
+- Added a native About & Support page plus `AUTHORS.md`, with local-first privacy boundaries, authorship, contact guidance, and original-foundation acknowledgement.
+- Added a Vietnamese-first bilingual interface with an in-app Vietnamese/English language switch that persists across launches.
+- Added local Codex session-token statistics for today, 7 days, 30 days, and 12 months, with duplicate token snapshots excluded.
+- Added native Add Account and Edit Account flows, including persistent custom display names and a live weekly-quota percentage in the menu bar.
+- Added encrypted password-protected export/import, full local Keychain-encrypted automatic session backups, persistent archive state, and native Launch at Login.
+- Added opt-in automatic switching only when the active account is exhausted and a freshly checked saved account has usable quota.
+
+### Changed
+
+- Refined the native dashboard hierarchy: semantic status-card labels, stronger numeric typography, clearer sidebar account rows, and unambiguous M/B local-token units.
+- Focused Codex Roster exclusively on OpenAI / Codex after reviewing unsupported third-party account storage and quota surfaces; legacy provider tags are normalized to OpenAI / Codex on read.
+
+- Renamed the product and CLI from codex-account-switcher to Codex Roster / `codex-roster` for the focused OpenAI / Codex workflow.
+- Moved application data to the `codexroster/codex-roster` product directory, with a one-time migration of Account Hub, Next Account, and Next IDE data directories.
+
+## Unreleased
+
 ## v0.1.5 - 2026-05-22
 
 ### Added

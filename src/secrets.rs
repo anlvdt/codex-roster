@@ -320,14 +320,19 @@ type DefaultLegacyStore = NoopLegacyStore;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 #[derive(Clone, Debug)]
 pub struct KeyringLegacyStore {
-    service_name: &'static str,
+    service_names: [&'static str; 4],
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 impl Default for KeyringLegacyStore {
     fn default() -> Self {
         Self {
-            service_name: "codex-account-switcher",
+            service_names: [
+                "codex-roster",
+                "account-hub",
+                "next-account",
+                "codex-account-switcher",
+            ],
         }
     }
 }
@@ -335,20 +340,30 @@ impl Default for KeyringLegacyStore {
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 impl LegacySnapshotStore for KeyringLegacyStore {
     fn load_legacy(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let entry = keyring::Entry::new(self.service_name, key)?;
-        match entry.get_password() {
-            Ok(value) => Ok(Some(value.into_bytes())),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(error).context("failed to load legacy snapshot from keychain"),
+        for service_name in self.service_names {
+            let entry = keyring::Entry::new(service_name, key)?;
+            match entry.get_password() {
+                Ok(value) => return Ok(Some(value.into_bytes())),
+                Err(keyring::Error::NoEntry) => continue,
+                Err(error) => {
+                    return Err(error).context("failed to load legacy snapshot from keychain");
+                }
+            }
         }
+        Ok(None)
     }
 
     fn delete_legacy(&self, key: &str) -> Result<()> {
-        let entry = keyring::Entry::new(self.service_name, key)?;
-        match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(error).context("failed to delete legacy snapshot from keychain"),
+        for service_name in self.service_names {
+            let entry = keyring::Entry::new(service_name, key)?;
+            match entry.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => {}
+                Err(error) => {
+                    return Err(error).context("failed to delete legacy snapshot from keychain");
+                }
+            }
         }
+        Ok(())
     }
 }
 

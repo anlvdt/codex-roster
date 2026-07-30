@@ -43,6 +43,7 @@ pub fn parse_identity_from_id_token(id_token: &str) -> Result<DisplayIdentity> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
+    // This is the ChatGPT subscription claim, not a separate Codex entitlement.
     let plan_label = claims
         .get("https://api.openai.com/auth")
         .and_then(Value::as_object)

@@ -1,7 +1,7 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 set -euo pipefail
 
-root_dir="${0:A:h:h}"
+root_dir="$(cd "$(dirname "$0")/.." && pwd)"
 app_root="$root_dir/build/Codex Roster.app"
 target_dir="$root_dir/build/cargo-target"
 swift_package="$root_dir/macos/NextAccount"

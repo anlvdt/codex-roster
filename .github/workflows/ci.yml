@@ -27,3 +27,6 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Run tests
         run: cargo test
+      - name: Build the native macOS app
+        if: runner.os == 'macOS'
+        run: bash scripts/build-macos-app.sh

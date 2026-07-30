@@ -64,6 +64,7 @@ struct CodexRosterApp: App {
                     store.refreshResetOutlook(silently: true)
                     store.refreshOpenAIStatus(silently: true)
                     store.startAutoSwitchMonitoring()
+                    store.startQuotaMonitoring()
                     store.ensureAutomaticFullBackup()
                 }
         }
@@ -463,11 +464,33 @@ private struct DashboardView: View {
 
                 DisclosureGroup(isExpanded: $automationExpanded) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Toggle(language.text("Tự động cập nhật quota", "Refresh quota automatically"), isOn: Binding(
+                        Toggle(language.text("Cập nhật quota tài khoản đang dùng mỗi phút", "Refresh the current account quota every minute"), isOn: Binding(
                             get: { store.autoStartUsageWindows },
                             set: { store.setAutoStartUsageWindows($0) }
                         ))
                         .disabled(store.isWorking)
+                        Text(language.text(
+                            "Quota được lấy lại từ OpenAI mỗi phút khi app đang mở. Các tài khoản khác giữ kết quả kiểm tra gần nhất; dùng nút Quota để kiểm tra toàn bộ.",
+                            "While the app is open, the current account is checked with OpenAI every minute. Other accounts keep their last verified result; use Quota to check all accounts."
+                        ))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        if store.isRefreshingQuotaInBackground {
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text(language.text("Đang cập nhật quota…", "Updating quota…"))
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        } else if let lastQuotaRefreshAt = store.lastQuotaRefreshAt {
+                            Text(language.text(
+                                "Đã cập nhật \(lastQuotaRefreshAt.formatted(date: .omitted, time: .shortened))",
+                                "Updated \(lastQuotaRefreshAt.formatted(date: .omitted, time: .shortened))"
+                            ))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
                         Divider()
                         Toggle(language.text("Tự động chuyển khi hết quota", "Auto-switch when quota is exhausted"), isOn: Binding(
                             get: { store.autoSwitchWhenExhausted },
@@ -520,8 +543,16 @@ private struct DashboardView: View {
                     }
                     .padding(.top, 8)
                 } label: {
-                    Label(language.text("Tự động hóa", "Automation"), systemImage: "gearshape.2")
-                        .font(.subheadline.weight(.semibold))
+                    HStack {
+                        Label(language.text("Tự động hóa", "Automation"), systemImage: "gearshape.2")
+                            .font(.subheadline.weight(.semibold))
+                        Spacer()
+                        Text(store.autoStartUsageWindows
+                            ? language.text("Quota · mỗi phút", "Quota · every minute")
+                            : language.text("Quota · tắt", "Quota · off"))
+                            .font(.caption)
+                            .foregroundStyle(store.autoStartUsageWindows ? Color.green : Color.secondary)
+                    }
                 }
                 .padding(14)
                 .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: 13))

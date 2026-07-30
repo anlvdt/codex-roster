@@ -19,13 +19,17 @@ final class AccountStore: ObservableObject {
     @Published private(set) var isLoadingTokenUsage = false
     @Published private(set) var isLoadingResetOutlook = false
     @Published private(set) var isLoadingOpenAIStatus = false
+    @Published private(set) var isRefreshingQuotaInBackground = false
+    @Published private(set) var lastQuotaRefreshAt: Date?
     @Published var errorMessage: String?
 
     private let cli = AccountHubCLI()
     private let archivedAccountsMigrationKeys = ["codexRoster.archivedAccountIDs", "accountHub.archivedAccountIDs"]
     private var legacyArchivedAccountIDs: Set<UUID>
     private let autoSwitchWhenExhaustedKey = "codexRoster.autoSwitchWhenExhausted"
+    private let activeQuotaPollInterval: Duration = .seconds(60)
     private var autoSwitchTask: Task<Void, Never>?
+    private var quotaRefreshTask: Task<Void, Never>?
     private var autoSwitchAllExhaustedNotified = false
     private var isInteractiveLoginInProgress = false
 
@@ -114,6 +118,7 @@ final class AccountStore: ObservableObject {
                 _ = try? await self.cli.data(arguments: ["usage", account.id.uuidString, "--json"])
             }
             try await self.load()
+            self.lastQuotaRefreshAt = .now
         }
     }
 
@@ -121,6 +126,9 @@ final class AccountStore: ObservableObject {
         run {
             _ = try? await self.cli.data(arguments: ["usage", account.id.uuidString, "--json"])
             try await self.load()
+            if account.isActive {
+                self.lastQuotaRefreshAt = .now
+            }
         }
     }
 
@@ -128,6 +136,9 @@ final class AccountStore: ObservableObject {
         run {
             _ = try await self.cli.data(arguments: ["auto-start-usage-windows", enabled ? "--enable" : "--disable", "--json"])
             self.autoStartUsageWindows = enabled
+            if enabled {
+                await self.refreshActiveQuotaInBackground(allowWhileWorking: true)
+            }
         }
     }
 
@@ -196,7 +207,17 @@ final class AccountStore: ObservableObject {
         autoSwitchTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.checkAutoSwitchWhenExhausted()
-                try? await Task.sleep(for: .seconds(300))
+                try? await Task.sleep(for: .seconds(60))
+            }
+        }
+    }
+
+    func startQuotaMonitoring() {
+        guard quotaRefreshTask == nil else { return }
+        quotaRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.refreshActiveQuotaInBackground()
+                try? await Task.sleep(for: self?.activeQuotaPollInterval ?? .seconds(60))
             }
         }
     }
@@ -344,6 +365,26 @@ final class AccountStore: ObservableObject {
             autoSwitchAllExhaustedNotified = false
         } catch {
             autoSwitchState = .checkFailed
+        }
+    }
+
+    private func refreshActiveQuotaInBackground(allowWhileWorking: Bool = false) async {
+        guard autoStartUsageWindows,
+              (allowWhileWorking || !isWorking),
+              !isCheckingAutoSwitch,
+              !isRefreshingQuotaInBackground,
+              !isInteractiveLoginInProgress,
+              let activeAccount = accounts.first(where: { $0.isActive && !isArchived($0) }) else {
+            return
+        }
+        isRefreshingQuotaInBackground = true
+        defer { isRefreshingQuotaInBackground = false }
+        do {
+            _ = try await cli.data(arguments: ["usage", activeAccount.id.uuidString, "--json"])
+            try await load()
+            lastQuotaRefreshAt = .now
+        } catch {
+            // The last verified quota stays visible; manual refresh can surface the error.
         }
     }
 

@@ -21,9 +21,29 @@ private struct PointingHandCursor: ViewModifier {
     }
 }
 
+private struct MenuBarHoverFeedback: ViewModifier {
+    let cornerRadius: CGFloat
+    @State private var isHovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .contentShape(RoundedRectangle(cornerRadius: cornerRadius))
+            .background(
+                isHovering ? Color.primary.opacity(0.10) : .clear,
+                in: RoundedRectangle(cornerRadius: cornerRadius)
+            )
+            .onHover { isHovering = $0 }
+    }
+}
+
 private extension View {
     func pointingHandCursor() -> some View {
         modifier(PointingHandCursor())
+    }
+
+    func menuBarInteractive(cornerRadius: CGFloat = 8) -> some View {
+        modifier(MenuBarHoverFeedback(cornerRadius: cornerRadius))
+            .pointingHandCursor()
     }
 }
 
@@ -1723,7 +1743,8 @@ private struct MenuBarView: View {
                                 MenuBarAccountRow(account: account)
                             }
                             .buttonStyle(.plain)
-                            .pointingHandCursor()
+                            .frame(maxWidth: .infinity)
+                            .menuBarInteractive(cornerRadius: 9)
                             .disabled(store.isWorking)
                         }
                     }
@@ -1739,10 +1760,12 @@ private struct MenuBarView: View {
                         systemImage: "arrow.right"
                     )
                     .font(.caption.weight(.medium))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 4)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.tint)
-                .pointingHandCursor()
+                .menuBarInteractive()
             }
 
             if attentionCount > 0 {
@@ -1761,7 +1784,7 @@ private struct MenuBarView: View {
                     .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
                 }
                 .buttonStyle(.plain)
-                .pointingHandCursor()
+                .menuBarInteractive(cornerRadius: 9)
             }
 
             Toggle(isOn: Binding(
@@ -1773,7 +1796,9 @@ private struct MenuBarView: View {
             }
             .toggleStyle(.switch)
             .controlSize(.small)
-            .pointingHandCursor()
+            .padding(.horizontal, 4)
+            .padding(.vertical, 3)
+            .menuBarInteractive()
             .disabled(store.isWorking || store.isCheckingAutoSwitch)
 
             Divider()
@@ -1781,24 +1806,27 @@ private struct MenuBarView: View {
                 Button(language.text("Mở Codex Roster", "Open Codex Roster")) { openDashboard() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                    .pointingHandCursor()
+                    .menuBarInteractive()
                 Spacer()
                 Button { store.refresh() } label: {
                     Image(systemName: "arrow.clockwise")
                 }
                 .help(language.text("Làm mới", "Refresh"))
-                .pointingHandCursor()
+                .padding(4)
+                .menuBarInteractive()
                 .disabled(store.isWorking)
                 Button { openSettings() } label: {
                     Image(systemName: "info.circle")
                 }
                 .help(language.text("Giới thiệu", "About"))
-                .pointingHandCursor()
+                .padding(4)
+                .menuBarInteractive()
                 Button { NSApplication.shared.terminate(nil) } label: {
                     Image(systemName: "power")
                 }
                 .help(language.text("Thoát Codex Roster", "Quit Codex Roster"))
-                .pointingHandCursor()
+                .padding(4)
+                .menuBarInteractive()
             }
         }
         .padding(14)
@@ -1858,7 +1886,8 @@ private struct MenuBarServiceHealth: View {
                 .buttonStyle(.plain)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .pointingHandCursor()
+                .padding(3)
+                .menuBarInteractive()
                 .disabled(store.isLoadingOpenAIStatus)
             }
             .padding(.horizontal, 9)
@@ -1938,7 +1967,6 @@ private struct MenuBarCurrentSession: View {
 private struct MenuBarAccountRow: View {
     @EnvironmentObject private var language: LanguageStore
     let account: SavedAccount
-    @State private var isHovering = false
 
     var body: some View {
         HStack(spacing: 9) {
@@ -1966,8 +1994,6 @@ private struct MenuBarAccountRow: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
         .contentShape(RoundedRectangle(cornerRadius: 9))
-        .background(isHovering ? Color.accentColor.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 9))
-        .onHover { isHovering = $0 }
     }
 }
 

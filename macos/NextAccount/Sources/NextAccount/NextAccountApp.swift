@@ -9,6 +9,24 @@ private extension Notification.Name {
 
 private let dashboardCardFill = Color(nsColor: .controlBackgroundColor)
 
+private struct PointingHandCursor: ViewModifier {
+    func body(content: Content) -> some View {
+        content.onHover { isHovering in
+            if isHovering {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+    }
+}
+
+private extension View {
+    func pointingHandCursor() -> some View {
+        modifier(PointingHandCursor())
+    }
+}
+
 @main
 struct CodexRosterApp: App {
     @StateObject private var store = AccountStore()
@@ -1705,6 +1723,7 @@ private struct MenuBarView: View {
                                 MenuBarAccountRow(account: account)
                             }
                             .buttonStyle(.plain)
+                            .pointingHandCursor()
                             .disabled(store.isWorking)
                         }
                     }
@@ -1723,6 +1742,7 @@ private struct MenuBarView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.tint)
+                .pointingHandCursor()
             }
 
             if attentionCount > 0 {
@@ -1741,6 +1761,7 @@ private struct MenuBarView: View {
                     .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
             }
 
             Toggle(isOn: Binding(
@@ -1752,6 +1773,7 @@ private struct MenuBarView: View {
             }
             .toggleStyle(.switch)
             .controlSize(.small)
+            .pointingHandCursor()
             .disabled(store.isWorking || store.isCheckingAutoSwitch)
 
             Divider()
@@ -1759,20 +1781,24 @@ private struct MenuBarView: View {
                 Button(language.text("Mở Codex Roster", "Open Codex Roster")) { openDashboard() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
+                    .pointingHandCursor()
                 Spacer()
                 Button { store.refresh() } label: {
                     Image(systemName: "arrow.clockwise")
                 }
                 .help(language.text("Làm mới", "Refresh"))
+                .pointingHandCursor()
                 .disabled(store.isWorking)
                 Button { openSettings() } label: {
                     Image(systemName: "info.circle")
                 }
                 .help(language.text("Giới thiệu", "About"))
+                .pointingHandCursor()
                 Button { NSApplication.shared.terminate(nil) } label: {
                     Image(systemName: "power")
                 }
                 .help(language.text("Thoát Codex Roster", "Quit Codex Roster"))
+                .pointingHandCursor()
             }
         }
         .padding(14)
@@ -1832,6 +1858,7 @@ private struct MenuBarServiceHealth: View {
                 .buttonStyle(.plain)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .pointingHandCursor()
                 .disabled(store.isLoadingOpenAIStatus)
             }
             .padding(.horizontal, 9)
@@ -1911,6 +1938,7 @@ private struct MenuBarCurrentSession: View {
 private struct MenuBarAccountRow: View {
     @EnvironmentObject private var language: LanguageStore
     let account: SavedAccount
+    @State private var isHovering = false
 
     var body: some View {
         HStack(spacing: 9) {
@@ -1938,6 +1966,8 @@ private struct MenuBarAccountRow: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
         .contentShape(RoundedRectangle(cornerRadius: 9))
+        .background(isHovering ? Color.accentColor.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 9))
+        .onHover { isHovering = $0 }
     }
 }
 

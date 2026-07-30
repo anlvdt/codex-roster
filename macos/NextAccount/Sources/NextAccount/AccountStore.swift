@@ -216,6 +216,9 @@ final class AccountStore: ObservableObject {
         guard quotaRefreshTask == nil else { return }
         quotaRefreshTask = Task { [weak self] in
             while !Task.isCancelled {
+                while self?.isWorking == true && !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
                 await self?.refreshActiveQuotaInBackground()
                 try? await Task.sleep(for: self?.activeQuotaPollInterval ?? .seconds(60))
             }

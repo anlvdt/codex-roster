@@ -2126,6 +2126,30 @@ private struct AboutView: View {
                     }
                 }
 
+                AboutPanel(title: language.text("Tất cả tính năng", "Complete feature set"), icon: "checklist") {
+                    AboutFeatureGroup(title: language.text("Tài khoản & phiên", "Accounts & sessions")) {
+                        AboutBullet(icon: "person.badge.plus", text: language.text("Mở đăng nhập thiết bị OpenAI, sau đó lưu phiên Codex đang dùng mà không đọc mật khẩu, mã xác thực hoặc cookie trình duyệt.", "Open OpenAI device sign-in, then save the active Codex session without reading passwords, verification codes, or browser cookies."))
+                        AboutBullet(icon: "pencil", text: language.text("Đặt tên, sửa, tìm kiếm, lưu trữ, khôi phục và xóa từng tài khoản đã lưu.", "Label, edit, search, archive, restore, and remove each saved account."))
+                        AboutBullet(icon: "sidebar.left", text: language.text("Nhóm tài khoản sẵn sàng/cần đăng nhập, sắp xếp theo quota và hiển thị phần trăm trực tiếp ở sidebar.", "Group ready/needs-sign-in accounts, sort by quota, and show the percentage directly in the sidebar."))
+                    }
+                    AboutFeatureGroup(title: language.text("Quota & chuyển tài khoản", "Quota & switching")) {
+                        AboutBullet(icon: "gauge.with.dots.needle.50percent", text: language.text("Theo dõi quota Codex, thời điểm reset và gói ChatGPT; làm mới tài khoản đang dùng mỗi phút hoặc kiểm tra toàn bộ theo yêu cầu.", "Track Codex quota, reset timing, and ChatGPT plan; refresh the active account every minute or check every account on demand."))
+                        AboutBullet(icon: "arrow.left.arrow.right.circle", text: language.text("Chuyển nhanh từ menu bar; tự động chọn tài khoản còn quota khi tài khoản hiện tại hết quota nếu bạn bật công tắc.", "Quick-switch from the menu bar; optionally choose a saved account with usable quota when the active one is exhausted."))
+                        AboutBullet(icon: "arrow.triangle.2.circlepath", text: language.text("Đóng rồi mở lại Codex/ChatGPT sau khi bạn xác nhận chuyển tài khoản; không chuyển vòng lặp khi mọi tài khoản đều hết quota.", "Close and relaunch Codex/ChatGPT after you confirm a switch; never loops when every account is exhausted."))
+                    }
+                    AboutFeatureGroup(title: language.text("Theo dõi & sao lưu", "Monitoring & backup")) {
+                        AboutBullet(icon: "chart.bar.xaxis", text: language.text("Thống kê token cục bộ theo ngày, 7 ngày, 30 ngày và 12 tháng từ session logs.", "Read local session logs for token totals by day, 7 days, 30 days, and 12 months."))
+                        AboutBullet(icon: "waveform.path.ecg", text: language.text("Theo dõi trạng thái công khai OpenAI và tín hiệu reset cộng đồng, tách biệt với quota tài khoản thực tế.", "Show public OpenAI status and community reset outlook separately from each account's actual quota."))
+                        AboutBullet(icon: "lock.shield", text: language.text("Xuất/nhập file backup có mật khẩu; tự giữ 5 backup phiên đầy đủ được mã hóa bằng khóa Keychain trên máy này.", "Export/import password-protected backups; keep five full session backups encrypted with this Mac's Keychain key."))
+                        AboutBullet(icon: "arrow.counterclockwise", text: language.text("Khôi phục danh sách hoặc phiên sao lưu gần nhất sau khi xác nhận.", "Restore the latest account list or saved sessions after confirmation."))
+                    }
+                    AboutFeatureGroup(title: language.text("Trải nghiệm hệ thống", "System experience")) {
+                        AboutBullet(icon: "menubar.rectangle", text: language.text("Menu bar hiển thị quota hiện tại, chuyển nhanh, trạng thái dịch vụ, refresh, mở dashboard và thoát ứng dụng.", "Menu bar shows current quota, quick switching, service state, refresh, dashboard access, and quit."))
+                        AboutBullet(icon: "power", text: language.text("Tùy chọn mở Codex Roster khi đăng nhập macOS; hỗ trợ phím tắt, Dark Mode và song ngữ Việt–Anh (mặc định Tiếng Việt).", "Optionally launch at macOS sign-in; supports keyboard shortcuts, Dark Mode, and Vietnamese–English (Vietnamese by default)."))
+                        AboutBullet(icon: "desktopcomputer", text: language.text("Windows Preview đang phát triển bằng WinUI 3; dashboard và quota có sẵn, còn tự mở lại Codex trên Windows chỉ bật sau khi kiểm chứng an toàn.", "A WinUI 3 Windows Preview is in development; dashboard and quota are available, while Windows Codex relaunch waits for safe real-device validation."))
+                    }
+                }
+
                 AboutPanel(title: language.text("Quota & gói ChatGPT", "ChatGPT plans & quota"), icon: "gauge.with.dots.needle.50percent") {
                     Text(language.text("Codex có trong các gói ChatGPT. Nhãn GPT Free, Plus hoặc Pro chỉ cho biết gói ChatGPT; quota và thời điểm đặt lại thay đổi theo gói, model và mức sử dụng.", "Codex is included with ChatGPT plans. GPT Free, Plus, or Pro identifies the ChatGPT plan; quota and reset timing vary by plan, model, and usage."))
                     Button(language.text("Xem chính sách quota OpenAI", "View OpenAI quota policy")) { openURL(codexPricingURL) }
@@ -2226,6 +2250,21 @@ private struct AboutBullet: View {
         Label(text, systemImage: icon)
             .font(.caption)
             .foregroundStyle(.secondary)
+    }
+}
+
+private struct AboutFeatureGroup<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.primary)
+            content
+        }
+        .padding(.bottom, 4)
     }
 }
 

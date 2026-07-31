@@ -53,7 +53,7 @@ struct CodexRosterApp: App {
     @StateObject private var language = LanguageStore()
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: "dashboard") {
             ContentView()
                 .environmentObject(store)
                 .environmentObject(language)
@@ -1718,6 +1718,7 @@ private struct MenuBarView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
     @State private var accountForActivation: SavedAccount?
 
     private var quickSwitchAccounts: [SavedAccount] {
@@ -1891,8 +1892,13 @@ private struct MenuBarView: View {
     }
 
     private func openDashboard() {
+        openWindow(id: "dashboard")
         NSApplication.shared.activate(ignoringOtherApps: true)
-        NSApplication.shared.windows.first(where: \.isVisible)?.makeKeyAndOrderFront(nil)
+        DispatchQueue.main.async {
+            NSApplication.shared.windows
+                .first(where: { $0.identifier?.rawValue == "dashboard" })?
+                .makeKeyAndOrderFront(nil)
+        }
     }
 }
 

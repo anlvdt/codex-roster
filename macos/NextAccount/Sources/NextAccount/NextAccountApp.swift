@@ -8,6 +8,7 @@ private extension Notification.Name {
 }
 
 private let dashboardCardFill = Color(nsColor: .controlBackgroundColor)
+private let rosterActionBlue = Color(nsColor: .systemBlue)
 
 private struct PointingHandCursor: ViewModifier {
     func body(content: Content) -> some View {
@@ -1796,7 +1797,7 @@ private struct MenuBarView: View {
                     .padding(.vertical, 4)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(.tint)
+                .foregroundStyle(rosterActionBlue)
                 .menuBarInteractive()
             }
 
@@ -1947,7 +1948,7 @@ private struct MenuBarHeader: View {
         HStack(spacing: 9) {
             Image(systemName: "sparkles")
                 .font(.headline)
-                .foregroundStyle(.tint)
+                .foregroundStyle(rosterActionBlue)
                 .frame(width: 30, height: 30)
                 .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 9))
             VStack(alignment: .leading, spacing: 1) {
@@ -2012,7 +2013,7 @@ private struct MenuBarAccountRow: View {
     var body: some View {
         HStack(spacing: 9) {
             Image(systemName: "arrow.left.arrow.right.circle")
-                .foregroundStyle(.tint)
+                .foregroundStyle(rosterActionBlue)
                 .font(.body)
             VStack(alignment: .leading, spacing: 1) {
                 Text(account.displayName)

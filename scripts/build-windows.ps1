@@ -8,6 +8,7 @@ Push-Location $root
 try {
     cargo build --release
     dotnet publish $project --configuration Release --runtime win-x64 --self-contained false --output $output
+    New-Item -ItemType Directory -Force -Path $output | Out-Null
     Copy-Item (Join-Path $root "target/release/codex-roster.exe") (Join-Path $output "codex-roster.exe") -Force
     Write-Host "Built Windows Preview: $output"
 }

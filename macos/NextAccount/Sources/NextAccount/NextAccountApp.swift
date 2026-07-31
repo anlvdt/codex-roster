@@ -53,8 +53,12 @@ struct CodexRosterApp: App {
     @StateObject private var store = AccountStore()
     @StateObject private var language = LanguageStore()
 
+    init() {
+        NSApplication.shared.setActivationPolicy(.accessory)
+    }
+
     var body: some Scene {
-        WindowGroup(id: "dashboard") {
+        Window("Codex Roster", id: "dashboard") {
             ContentView()
                 .environmentObject(store)
                 .environmentObject(language)

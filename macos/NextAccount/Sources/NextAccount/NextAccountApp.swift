@@ -1834,32 +1834,36 @@ private struct MenuBarView: View {
             .disabled(store.isWorking || store.isCheckingAutoSwitch)
 
             Divider()
-            HStack(spacing: 7) {
+                .padding(.top, 4)
+            HStack(spacing: 10) {
                 Button(language.text("Mở Codex Roster", "Open Codex Roster")) { openDashboard() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .menuBarInteractive()
-                Spacer()
-                Button { store.refresh() } label: {
-                    Image(systemName: "arrow.clockwise")
+                Spacer(minLength: 14)
+                HStack(spacing: 8) {
+                    Button { store.refresh() } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .help(language.text("Làm mới", "Refresh"))
+                    .frame(width: 30, height: 28)
+                    .menuBarInteractive()
+                    .disabled(store.isWorking)
+                    Button { openSettings() } label: {
+                        Image(systemName: "info.circle")
+                    }
+                    .help(language.text("Giới thiệu", "About"))
+                    .frame(width: 30, height: 28)
+                    .menuBarInteractive()
+                    Button { NSApplication.shared.terminate(nil) } label: {
+                        Image(systemName: "power")
+                    }
+                    .help(language.text("Thoát Codex Roster", "Quit Codex Roster"))
+                    .frame(width: 30, height: 28)
+                    .menuBarInteractive()
                 }
-                .help(language.text("Làm mới", "Refresh"))
-                .padding(4)
-                .menuBarInteractive()
-                .disabled(store.isWorking)
-                Button { openSettings() } label: {
-                    Image(systemName: "info.circle")
-                }
-                .help(language.text("Giới thiệu", "About"))
-                .padding(4)
-                .menuBarInteractive()
-                Button { NSApplication.shared.terminate(nil) } label: {
-                    Image(systemName: "power")
-                }
-                .help(language.text("Thoát Codex Roster", "Quit Codex Roster"))
-                .padding(4)
-                .menuBarInteractive()
             }
+            .padding(.vertical, 2)
         }
         .padding(14)
         .frame(width: 356, alignment: .leading)
@@ -2053,8 +2057,10 @@ private struct MenuBarQuota: View {
             Text(window.relativeReset(in: language.language))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.88)
         }
-        .frame(width: 58, alignment: .trailing)
+        .frame(width: 108, alignment: .trailing)
     }
 }
 

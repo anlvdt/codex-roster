@@ -5,6 +5,7 @@ root_dir="$(cd "$(dirname "$0")/.." && pwd)"
 app_root="$root_dir/build/Codex Roster.app"
 target_dir="$root_dir/build/cargo-target"
 swift_package="$root_dir/macos/NextAccount"
+mkdir -p "$root_dir/build"
 iconset_root="$(mktemp -d "$root_dir/build/CodexRoster.XXXXXX")"
 iconset="$iconset_root/CodexRoster.iconset"
 

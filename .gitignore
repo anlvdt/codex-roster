@@ -1,6 +1,8 @@
 /target
 /build
 /macos/NextAccount/.build
+/windows/CodexRoster.Windows/bin
+/windows/CodexRoster.Windows/obj
 __pycache__/
 *.pyc
 /assets/account-hub.png

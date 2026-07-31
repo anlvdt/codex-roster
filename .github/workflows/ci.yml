@@ -27,6 +27,15 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Run tests
         run: cargo test
+      - name: Set up .NET for the Windows Preview
+        if: runner.os == 'Windows'
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build the native Windows Preview
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/build-windows.ps1
       - name: Build the native macOS app
         if: runner.os == 'macOS'
         run: bash scripts/build-macos-app.sh

@@ -1,6 +1,6 @@
 # Codex Roster
 
-Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex.
+Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex. A native Windows Preview is now in development.
 
 [English](#english) · [Tiếng Việt](#tiếng-việt)
 
@@ -41,6 +41,10 @@ Build locally:
 zsh scripts/build-macos-app.sh
 open "build/Codex Roster.app"
 ```
+
+### Windows Preview
+
+The Windows shell uses **WinUI 3** and calls the same Rust CLI; see [windows/README.md](windows/README.md). It currently targets real-device testing, not public production use. The existing Windows CLI and tray remain available while the full Fluent dashboard is completed.
 
 ### CLI
 
@@ -113,6 +117,10 @@ Tự build:
 zsh scripts/build-macos-app.sh
 open "build/Codex Roster.app"
 ```
+
+### Windows Preview
+
+Bản shell Windows native dùng **WinUI 3** và gọi chung Rust CLI; xem [windows/README.md](windows/README.md). Bản này đang dành cho kiểm chứng trên Windows thật, chưa phải bản phát hành production.
 
 ### Riêng tư, trạng thái và ghi nhận
 

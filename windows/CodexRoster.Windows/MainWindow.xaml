@@ -1,0 +1,128 @@
+<Window
+    x:Class="CodexRoster.Windows.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:CodexRoster.Windows"
+    xmlns:models="using:CodexRoster.Windows.Models"
+    Title="Codex Roster">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <CommandBar DefaultLabelPosition="Right" IsOpen="False">
+            <AppBarButton Icon="Add" Label="Thêm tài khoản" Click="AddAccount_Click" />
+            <AppBarButton Icon="Save" Label="Lưu phiên hiện tại" Click="SaveCurrent_Click" />
+            <AppBarButton Icon="Refresh" Label="Quota" Click="RefreshQuota_Click" />
+            <AppBarButton Icon="Sync" Label="Làm mới" Click="Refresh_Click" />
+        </CommandBar>
+
+        <NavigationView Grid.Row="1" PaneDisplayMode="Left" IsBackButtonVisible="Collapsed" PaneTitle="Codex Roster">
+            <NavigationView.MenuItems>
+                <NavigationViewItem Content="Tổng quan" Icon="Home" IsSelected="True" />
+                <NavigationViewItem Content="Tài khoản đã lưu" Icon="Contact" />
+                <NavigationViewItem Content="Sao lưu &amp; khôi phục" Icon="Save" />
+            </NavigationView.MenuItems>
+            <NavigationView.PaneFooter>
+                <StackPanel Spacing="4" Padding="12">
+                    <TextBlock Text="Windows Preview" Style="BodyStrongTextBlockStyle" />
+                    <TextBlock Text="OpenAI / Codex · local-first" Style="CaptionTextBlockStyle" Opacity="0.7" />
+                </StackPanel>
+            </NavigationView.PaneFooter>
+
+            <ScrollViewer>
+                <StackPanel Spacing="20" Padding="28" MaxWidth="1320">
+                    <Grid ColumnSpacing="16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Border Padding="18" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                            <StackPanel Spacing="6">
+                                <TextBlock Text="Tài khoản đã lưu" Style="BodyStrongTextBlockStyle" />
+                                <TextBlock Text="{x:Bind ViewModel.SavedAccountCount, Mode=OneWay}" Style="TitleTextBlockStyle" />
+                                <TextBlock Text="phiên Codex trên máy này" Style="CaptionTextBlockStyle" Opacity="0.7" />
+                            </StackPanel>
+                        </Border>
+                        <Border Grid.Column="1" Padding="18" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                            <StackPanel Spacing="6">
+                                <TextBlock Text="Sẵn sàng chuyển" Style="BodyStrongTextBlockStyle" />
+                                <TextBlock Text="{x:Bind ViewModel.ReadyAccountCount, Mode=OneWay}" Style="TitleTextBlockStyle" />
+                                <TextBlock Text="có quota đã xác minh" Style="CaptionTextBlockStyle" Opacity="0.7" />
+                            </StackPanel>
+                        </Border>
+                        <Border Grid.Column="2" Padding="18" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                            <StackPanel Spacing="6">
+                                <TextBlock Text="Tài khoản hiện tại" Style="BodyStrongTextBlockStyle" />
+                                <TextBlock Text="{x:Bind ViewModel.CurrentAccountLabel, Mode=OneWay}" TextTrimming="CharacterEllipsis" Style="SubtitleTextBlockStyle" />
+                                <TextBlock Text="quota và reset được cập nhật qua OpenAI" Style="CaptionTextBlockStyle" Opacity="0.7" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+
+                    <InfoBar IsOpen="{x:Bind ViewModel.HasError, Mode=OneWay}" Severity="Warning" Title="Không thể làm mới" Message="{x:Bind ViewModel.ErrorMessage, Mode=OneWay}" IsClosable="True" />
+
+                    <Grid ColumnSpacing="20">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="2*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Spacing="10">
+                            <TextBlock Text="Tài khoản OpenAI / Codex" Style="TitleTextBlockStyle" />
+                            <TextBlock Text="Quota hiện tại, gói ChatGPT và thời điểm reset của phiên đã lưu." Style="BodyTextBlockStyle" Opacity="0.7" />
+                            <ListView ItemsSource="{x:Bind ViewModel.Accounts, Mode=OneWay}" SelectionMode="None" IsItemClickEnabled="False">
+                                <ListView.ItemTemplate>
+                                    <DataTemplate x:DataType="models:AccountItem">
+                                        <Grid Padding="12" ColumnSpacing="12">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="130" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Spacing="3">
+                                                <TextBlock Text="{x:Bind DisplayName}" Style="BodyStrongTextBlockStyle" />
+                                                <TextBlock Text="{x:Bind Email}" Style="CaptionTextBlockStyle" Opacity="0.72" TextTrimming="CharacterEllipsis" />
+                                                <TextBlock Text="{x:Bind PlanLabel}" Style="CaptionTextBlockStyle" Opacity="0.62" />
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="4">
+                                                <TextBlock Text="{x:Bind QuotaLabel}" HorizontalAlignment="Right" Style="BodyStrongTextBlockStyle" />
+                                                <ProgressBar Value="{x:Bind QuotaPercent}" Maximum="100" />
+                                                <TextBlock Text="{x:Bind ResetLabel}" HorizontalAlignment="Right" Style="CaptionTextBlockStyle" Opacity="0.7" />
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                                                <Button Content="Chuyển" Tag="{x:Bind}" Click="ActivateAccount_Click" IsEnabled="{x:Bind CanActivate}" />
+                                                <Button Content="⋯" Tag="{x:Bind}" Click="AccountActions_Click" />
+                                            </StackPanel>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ListView.ItemTemplate>
+                            </ListView>
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="1" Spacing="12">
+                            <Border Padding="16" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                                <StackPanel Spacing="8">
+                                    <TextBlock Text="Cập nhật quota" Style="BodyStrongTextBlockStyle" />
+                                    <TextBlock Text="Tài khoản đang dùng được làm mới mỗi phút khi chế độ tự động được bật." TextWrapping="Wrap" Style="BodyTextBlockStyle" Opacity="0.72" />
+                                    <ToggleSwitch Header="Tự động làm mới quota" IsOn="{x:Bind ViewModel.AutoQuotaRefresh, Mode=TwoWay}" Toggled="AutoQuotaRefresh_Toggled" />
+                                    <TextBlock Text="{x:Bind ViewModel.QuotaRefreshStatus, Mode=OneWay}" Style="CaptionTextBlockStyle" Opacity="0.72" />
+                                </StackPanel>
+                            </Border>
+                            <Border Padding="16" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                                <StackPanel Spacing="8">
+                                    <TextBlock Text="Windows Preview" Style="BodyStrongTextBlockStyle" />
+                                    <TextBlock Text="Dashboard và quota đã sẵn sàng. Tự mở lại app Codex sau khi chuyển tài khoản sẽ được bật sau khi kiểm chứng trên Windows." TextWrapping="Wrap" Style="BodyTextBlockStyle" Opacity="0.72" />
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </Grid>
+                </StackPanel>
+            </ScrollViewer>
+        </NavigationView>
+
+        <ProgressBar Grid.Row="2" IsIndeterminate="True" Visibility="{x:Bind ViewModel.BusyVisibility, Mode=OneWay}" />
+    </Grid>
+</Window>

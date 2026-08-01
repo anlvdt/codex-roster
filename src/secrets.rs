@@ -175,7 +175,7 @@ impl LocalSecretStore {
 }
 
 fn encrypt_local_snapshot(value: &[u8]) -> Result<Vec<u8>> {
-    let password = crate::backup::local_snapshot_password()?;
+    let password = crate::backup::local_snapshot_password_for_write()?;
     let encryptor = age::Encryptor::with_user_passphrase(SecretString::from(password));
     let mut writer = encryptor
         .wrap_output(Vec::new())

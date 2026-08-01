@@ -1105,9 +1105,9 @@ mod tests {
     }
 
     #[test]
-    fn force_running_always_enables_stability_verification() {
+    fn force_running_does_not_force_stability_verification_without_live_processes() {
         let warnings = Vec::new();
-        assert!(should_verify_activation_stability(true, &warnings));
+        assert!(!should_verify_activation_stability(true, &warnings));
         assert!(!should_verify_activation_stability(false, &warnings));
 
         let warnings = vec![RunningCodexProcess {
@@ -1117,6 +1117,7 @@ mod tests {
             summary: None,
         }];
         assert!(should_verify_activation_stability(false, &warnings));
+        assert!(should_verify_activation_stability(true, &warnings));
     }
 
     #[test]

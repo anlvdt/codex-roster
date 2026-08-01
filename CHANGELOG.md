@@ -34,6 +34,10 @@
 
 ## Unreleased
 
+### Notes
+
+- **macOS Keychain prompt:** When Codex Roster (or its bundled `codex-roster` helper, or a local `cargo test` / `cargo run` binary named like `codex_roster-<hash>`) reads the local encryption key, macOS may ask for access to Keychain item **`com.codexroster.app`**. That key only encrypts saved snapshots and automatic backups on this Mac. Choose **Allow** / **Always Allow** if the item name matches; **Deny** leaves those sessions unreadable. This dialog is from macOS and is not an OpenAI password prompt. See the README “macOS Keychain prompt” section.
+
 ## v0.1.5 - 2026-05-22
 
 ### Added

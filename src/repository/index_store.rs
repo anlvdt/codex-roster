@@ -24,15 +24,42 @@ impl MetadataIndexStore {
     pub(super) fn load_index(&self) -> Result<MetadataIndex> {
         match self.best_available_index()? {
             Some(index) => Ok(index),
-            None => Ok(MetadataIndex {
-                schema_version: METADATA_SCHEMA_VERSION,
-                write_generation: 0,
-                accounts: Vec::new(),
-            }),
+            None => {
+                // Prefer a non-empty automatic list backup over silently starting empty.
+                // An empty index followed by any save permanently orphans snapshot files.
+                if let Some((path, index)) = self.best_non_empty_automatic_backup()? {
+                    eprintln!(
+                        "recovered account list ({} accounts) from {}",
+                        index.accounts.len(),
+                        path.display()
+                    );
+                    return Ok(index);
+                }
+                if self.snapshots_dir_has_files() {
+                    return Err(anyhow!(
+                        "account metadata is missing or unreadable, but encrypted snapshots still exist under {}. Restore with `codex-roster restore-account-list-backup` or `codex-roster restore-full-backup` before saving again.",
+                        self.snapshots_dir().display()
+                    ));
+                }
+                Ok(MetadataIndex {
+                    schema_version: METADATA_SCHEMA_VERSION,
+                    write_generation: 0,
+                    accounts: Vec::new(),
+                })
+            }
         }
     }
 
     pub(super) fn save_index(&self, index: &MetadataIndex) -> Result<()> {
+        if let Some(existing) = self.best_available_index()?
+            && existing.accounts.len() >= 2
+            && index.accounts.is_empty()
+        {
+            return Err(anyhow!(
+                "refusing to overwrite {} saved accounts with an empty account list",
+                existing.accounts.len()
+            ));
+        }
         let mut persisted = index.clone();
         persisted.write_generation = index.write_generation.saturating_add(1);
         let json =
@@ -46,10 +73,15 @@ impl MetadataIndexStore {
     }
 
     pub(super) fn restore_latest_automatic_backup(&self) -> Result<usize> {
+        // Prefer the backup with the most accounts; tie-break on newest generation.
+        // Restoring "latest gen" after a wipe would otherwise re-apply the damaged list.
         let (path, index) = self
-            .automatic_backup_candidates()?
-            .into_iter()
-            .next()
+            .best_non_empty_automatic_backup()?
+            .or_else(|| {
+                self.automatic_backup_candidates()
+                    .ok()
+                    .and_then(|mut backups| backups.drain(..).next())
+            })
             .ok_or_else(|| anyhow!("no automatic account-list backup is available"))?;
         let count = index.accounts.len();
         self.save_index(&index)?;
@@ -62,6 +94,39 @@ impl MetadataIndexStore {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("account-list-backups")
+    }
+
+    fn snapshots_dir(&self) -> PathBuf {
+        self.metadata_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("snapshots")
+    }
+
+    fn snapshots_dir_has_files(&self) -> bool {
+        let directory = self.snapshots_dir();
+        fs::read_dir(&directory)
+            .ok()
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .any(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("snapshot"))
+            })
+            .unwrap_or(false)
+    }
+
+    fn best_non_empty_automatic_backup(&self) -> Result<Option<(PathBuf, MetadataIndex)>> {
+        let mut backups = self.automatic_backup_candidates()?;
+        backups.retain(|(_, index)| !index.accounts.is_empty());
+        backups.sort_by(|left, right| {
+            right
+                .1
+                .accounts
+                .len()
+                .cmp(&left.1.accounts.len())
+                .then_with(|| right.1.write_generation.cmp(&left.1.write_generation))
+        });
+        Ok(backups.into_iter().next())
     }
 
     fn write_automatic_backup(&self, index: &MetadataIndex, json: &str) -> Result<()> {

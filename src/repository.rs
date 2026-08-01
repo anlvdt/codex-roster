@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 mod codec;
 mod index_store;
@@ -10,8 +10,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::backup::{
-    BackupAccount, BackupBundle, MAX_BACKUP_ACCOUNTS, automatic_backup_password,
-    newest_automatic_backup, read_encrypted, write_encrypted,
+    BackupAccount, BackupBundle, MAX_BACKUP_ACCOUNTS, automatic_backup_password, read_encrypted,
+    write_encrypted,
 };
 use crate::model::{
     AccountUsageView, AiProvider, DisplayIdentity, EnvironmentKind, METADATA_SCHEMA_VERSION,
@@ -151,6 +151,27 @@ where
         identity: &DisplayIdentity,
         snapshot: &SnapshotBlob,
     ) -> Result<(SavedAccountMetadata, bool)> {
+        self.save_snapshot_inner(environment, identity, snapshot, true)
+    }
+
+    /// Persist the live account without decrypting every snapshot for a full backup.
+    /// Used on the activate hot path where backup latency would block switching.
+    pub fn save_snapshot_without_backup(
+        &self,
+        environment: &EnvironmentKind,
+        identity: &DisplayIdentity,
+        snapshot: &SnapshotBlob,
+    ) -> Result<(SavedAccountMetadata, bool)> {
+        self.save_snapshot_inner(environment, identity, snapshot, false)
+    }
+
+    fn save_snapshot_inner(
+        &self,
+        environment: &EnvironmentKind,
+        identity: &DisplayIdentity,
+        snapshot: &SnapshotBlob,
+        write_backup: bool,
+    ) -> Result<(SavedAccountMetadata, bool)> {
         let mut index = self.index_store.load_index()?;
         let now = OffsetDateTime::now_utc();
         let encoded_snapshot = encode_snapshot(snapshot)?;
@@ -200,7 +221,9 @@ where
         self.secret_store
             .save(&metadata.secret_key, &encoded_snapshot)?;
         self.index_store.save_index(&index)?;
-        let _ = self.write_automatic_full_backup(environment);
+        if write_backup {
+            self.maybe_write_automatic_full_backup(environment);
+        }
         Ok((metadata, created))
     }
 
@@ -233,6 +256,30 @@ where
         snapshot: &SnapshotBlob,
         usage: Option<AccountUsageView>,
     ) -> Result<SavedAccountMetadata> {
+        self.replace_snapshot_inner(environment, account_id, identity, snapshot, usage, true)
+    }
+
+    /// Update cached usage/auth without decrypting every account for a full backup.
+    pub fn replace_snapshot_without_backup(
+        &self,
+        environment: &EnvironmentKind,
+        account_id: Uuid,
+        identity: &DisplayIdentity,
+        snapshot: &SnapshotBlob,
+        usage: Option<AccountUsageView>,
+    ) -> Result<SavedAccountMetadata> {
+        self.replace_snapshot_inner(environment, account_id, identity, snapshot, usage, false)
+    }
+
+    fn replace_snapshot_inner(
+        &self,
+        environment: &EnvironmentKind,
+        account_id: Uuid,
+        identity: &DisplayIdentity,
+        snapshot: &SnapshotBlob,
+        usage: Option<AccountUsageView>,
+        write_backup: bool,
+    ) -> Result<SavedAccountMetadata> {
         let mut index = self.index_store.load_index()?;
         let position = index
             .accounts
@@ -251,7 +298,9 @@ where
         self.secret_store
             .save(&metadata.secret_key, &encoded_snapshot)?;
         self.index_store.save_index(&index)?;
-        let _ = self.write_automatic_full_backup(environment);
+        if write_backup {
+            self.maybe_write_automatic_full_backup(environment);
+        }
         Ok(metadata)
     }
 
@@ -279,7 +328,6 @@ where
         account.cached_usage_error = Some(usage_error);
         let metadata = account.clone();
         self.index_store.save_index(&index)?;
-        let _ = self.write_automatic_full_backup(environment);
         Ok(metadata)
     }
 
@@ -299,7 +347,6 @@ where
         account.updated_at = OffsetDateTime::now_utc();
         let metadata = account.clone();
         self.index_store.save_index(&index)?;
-        let _ = self.write_automatic_full_backup(environment);
         Ok(metadata)
     }
 
@@ -319,7 +366,6 @@ where
         account.updated_at = OffsetDateTime::now_utc();
         let metadata = account.clone();
         self.index_store.save_index(&index)?;
-        let _ = self.write_automatic_full_backup(environment);
         Ok(metadata)
     }
 
@@ -349,7 +395,7 @@ where
     ) -> Result<(usize, usize)> {
         let prepared = self.prepare_backup_import(environment, backup, false)?;
         self.apply_backup_import(&prepared)?;
-        let _ = self.write_automatic_full_backup(environment);
+        let _ = self.maybe_write_automatic_full_backup(environment);
         Ok((prepared.created, prepared.updated))
     }
 
@@ -359,10 +405,11 @@ where
 
     pub fn restore_latest_full_backup(&self, environment: &EnvironmentKind) -> Result<usize> {
         let password = automatic_backup_password()?;
-        let backup = read_encrypted(
-            &newest_automatic_backup(&self.automatic_backup_dir())?,
-            &password,
-        )?;
+        // Prefer the fullest readable backup so a newer empty/shrunk backup cannot
+        // destroy a larger prior roster when the user asks to restore.
+        let backup = self
+            .best_automatic_full_backup(&password)?
+            .ok_or_else(|| anyhow!("no automatic full backup is available"))?;
         let count = backup.accounts.len();
         let previous_index = self.index_store.load_index()?;
         let prepared = self.prepare_backup_import(environment, backup, true)?;
@@ -379,8 +426,48 @@ where
         }) {
             let _ = self.secret_store.delete(&removed.secret_key);
         }
-        let _ = self.write_automatic_full_backup(environment);
+        let _ = self.maybe_write_automatic_full_backup(environment);
         Ok(count)
+    }
+
+    fn best_automatic_full_backup(&self, password: &str) -> Result<Option<BackupBundle>> {
+        let directory = self.automatic_backup_dir();
+        if !directory.exists() {
+            return Ok(None);
+        }
+        let mut paths = std::fs::read_dir(&directory)
+            .with_context(|| format!("failed to read {}", directory.display()))?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension().and_then(|extension| extension.to_str()) == Some("codexroster")
+            })
+            .collect::<Vec<_>>();
+        paths.sort_by_key(|path| {
+            std::cmp::Reverse(
+                std::fs::metadata(path)
+                    .and_then(|metadata| metadata.modified())
+                    .unwrap_or(SystemTime::UNIX_EPOCH),
+            )
+        });
+        let mut best: Option<BackupBundle> = None;
+        for path in paths {
+            let Ok(bundle) = read_encrypted(&path, password) else {
+                continue;
+            };
+            let replace = match &best {
+                None => true,
+                Some(current) => {
+                    bundle.accounts.len() > current.accounts.len()
+                        || (bundle.accounts.len() == current.accounts.len()
+                            && bundle.exported_at > current.exported_at)
+                }
+            };
+            if replace {
+                best = Some(bundle);
+            }
+        }
+        Ok(best)
     }
 
     fn prepare_backup_import(
@@ -540,6 +627,35 @@ where
         self.data_dir.join("automatic-full-backups")
     }
 
+    /// Full backups decrypt every saved snapshot with scrypt. Never do that on the
+    /// activate/switch hot path more than once per cooldown window.
+    const AUTOMATIC_FULL_BACKUP_COOLDOWN: Duration = Duration::from_secs(30 * 60);
+
+    fn maybe_write_automatic_full_backup(&self, environment: &EnvironmentKind) {
+        if !self.should_write_automatic_full_backup() {
+            return;
+        }
+        let _ = self.write_automatic_full_backup(environment);
+    }
+
+    fn should_write_automatic_full_backup(&self) -> bool {
+        let directory = self.automatic_backup_dir();
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            return true;
+        };
+        let newest = entries
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.metadata().ok()?.modified().ok())
+            .max();
+        match newest {
+            Some(modified) => SystemTime::now()
+                .duration_since(modified)
+                .map(|age| age >= Self::AUTOMATIC_FULL_BACKUP_COOLDOWN)
+                .unwrap_or(true),
+            None => true,
+        }
+    }
+
     fn write_automatic_full_backup(&self, environment: &EnvironmentKind) -> Result<()> {
         let password = automatic_backup_password()?;
         let backup = self.export_backup(environment)?;
@@ -594,7 +710,7 @@ where
             }
             return Err(error);
         }
-        let _ = self.write_automatic_full_backup(environment);
+        let _ = self.maybe_write_automatic_full_backup(environment);
         Ok(())
     }
 
@@ -613,6 +729,8 @@ where
         else {
             return Err(anyhow!("saved account {account_id} not found"));
         };
+        // Only collapse true same-subject duplicates. Email-only matches used to
+        // delete unrelated subjectless rows during activate and silently shrink the roster.
         let duplicate_positions = index
             .accounts
             .iter()
@@ -620,13 +738,7 @@ where
             .filter(|(position, account)| {
                 *position != account_position
                     && &account.environment == environment
-                    && DisplayIdentity {
-                        email: account.email.clone(),
-                        subject: account.subject.clone(),
-                        name: account.name.clone(),
-                        plan_label: account.plan_label.clone(),
-                    }
-                    .matches(identity)
+                    && subjects_equal(account.subject.as_deref(), identity.subject.as_deref())
             })
             .map(|(position, _)| position)
             .collect::<Vec<_>>();
@@ -652,9 +764,12 @@ where
         for duplicate in duplicates {
             let _ = self.secret_store.delete(&duplicate.secret_key);
         }
-        let _ = self.write_automatic_full_backup(environment);
         Ok(updated)
     }
+}
+
+fn subjects_equal(left: Option<&str>, right: Option<&str>) -> bool {
+    matches!((left, right), (Some(left), Some(right)) if left == right)
 }
 
 fn backup_identity_matches_snapshot(
@@ -1164,6 +1279,34 @@ mod tests {
 
         let recovered = repo.get_account(&env, saved.id).expect("recover account");
         assert!(recovered.is_some());
+    }
+
+    #[test]
+    fn activation_sync_keeps_rows_with_different_subjects() {
+        let temp = tempdir().expect("tempdir");
+        let repo = SnapshotRepository::new(temp.path(), MemorySecretStore::default());
+        let env = EnvironmentKind::Windows;
+        let snapshot = SnapshotBlob {
+            schema_version: 1,
+            files: vec![],
+        };
+
+        let other = repo
+            .save_snapshot(&env, &identity("other@example.com", "sub-other"), &snapshot)
+            .expect("save other")
+            .0;
+        let current = repo
+            .save_snapshot(&env, &identity("current@example.com", "sub-1"), &snapshot)
+            .expect("save current")
+            .0;
+
+        repo.sync_activated_account(&env, current.id, &identity("current@example.com", "sub-1"))
+            .expect("sync");
+
+        let accounts = repo.list_accounts(&env).expect("list");
+        assert_eq!(accounts.len(), 2);
+        assert!(accounts.iter().any(|account| account.id == other.id));
+        assert!(accounts.iter().any(|account| account.id == current.id));
     }
 
     #[test]

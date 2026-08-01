@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
 use age::secrecy::SecretString;
@@ -111,12 +113,18 @@ fn ensure_password(password: &str) -> Result<()> {
 }
 
 pub fn automatic_backup_password() -> Result<String> {
-    keyring_password(AUTOMATIC_BACKUP_KEY_ACCOUNT, "automatic-backup")
+    cached_keyring_password(AUTOMATIC_BACKUP_KEY_ACCOUNT, "automatic-backup", true)
 }
 
 #[cfg(not(test))]
 pub fn local_snapshot_password() -> Result<String> {
-    keyring_password(LOCAL_SNAPSHOT_KEY_ACCOUNT, "local-snapshot")
+    // Decrypt path: never mint a replacement key (that bricks existing ciphertext).
+    cached_keyring_password(LOCAL_SNAPSHOT_KEY_ACCOUNT, "local-snapshot", false)
+}
+
+#[cfg(not(test))]
+pub fn local_snapshot_password_for_write() -> Result<String> {
+    cached_keyring_password(LOCAL_SNAPSHOT_KEY_ACCOUNT, "local-snapshot", true)
 }
 
 #[cfg(test)]
@@ -124,12 +132,34 @@ pub fn local_snapshot_password() -> Result<String> {
     Ok("codex-roster-test-local-snapshot-key".to_owned())
 }
 
-fn keyring_password(account: &str, key_name: &str) -> Result<String> {
+#[cfg(test)]
+pub fn local_snapshot_password_for_write() -> Result<String> {
+    local_snapshot_password()
+}
+
+fn cached_keyring_password(account: &str, key_name: &str, allow_create: bool) -> Result<String> {
+    // One Keychain read per process — avoids repeated Unlock Keychain dialogs
+    // during auto-switch usage fan-out / encrypt/decrypt loops.
+    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock()
+        && let Some(password) = guard.get(account)
+    {
+        return Ok(password.clone());
+    }
+    let password = keyring_password(account, key_name, allow_create)?;
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(account.to_owned(), password.clone());
+    }
+    Ok(password)
+}
+
+fn keyring_password(account: &str, key_name: &str, allow_create: bool) -> Result<String> {
     let entry = keyring::Entry::new(AUTOMATIC_BACKUP_KEY_SERVICE, account)
         .with_context(|| format!("failed to access the {key_name} key"))?;
     match entry.get_password() {
         Ok(password) if !password.is_empty() => Ok(password),
-        Ok(_) | Err(keyring::Error::NoEntry) => {
+        Ok(_) | Err(keyring::Error::NoEntry) if allow_create => {
             let password = format!(
                 "{}{}",
                 uuid::Uuid::new_v4().simple(),
@@ -140,6 +170,9 @@ fn keyring_password(account: &str, key_name: &str) -> Result<String> {
             })?;
             Ok(password)
         }
+        Ok(_) | Err(keyring::Error::NoEntry) => Err(anyhow!(
+            "the {key_name} key is missing from the system credential store; existing encrypted sessions cannot be opened until that key is restored"
+        )),
         Err(error) => Err(error).with_context(|| {
             format!("failed to read the {key_name} key from the system credential store")
         }),

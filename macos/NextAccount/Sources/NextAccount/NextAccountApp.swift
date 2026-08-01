@@ -3,6 +3,7 @@ import SwiftUI
 
 private extension Notification.Name {
     static let showAddAccount = Notification.Name("codexRoster.showAddAccount")
+    static let showReloginAccount = Notification.Name("codexRoster.showReloginAccount")
     static let exportBackup = Notification.Name("codexRoster.exportBackup")
     static let importBackup = Notification.Name("codexRoster.importBackup")
 }
@@ -64,12 +65,9 @@ struct CodexRosterApp: App {
                 .environmentObject(language)
                 .environment(\.locale, language.language.locale)
                 .task {
-                    store.refresh()
                     store.refreshTokenUsage(silently: true)
                     store.refreshResetOutlook(silently: true)
                     store.refreshOpenAIStatus(silently: true)
-                    store.startAutoSwitchMonitoring()
-                    store.startQuotaMonitoring()
                     store.ensureAutomaticFullBackup()
                 }
         }
@@ -102,12 +100,22 @@ struct CodexRosterApp: App {
                 .environmentObject(store)
                 .environmentObject(language)
                 .environment(\.locale, language.language.locale)
+                .task {
+                    store.startCoreMonitoring()
+                }
         } label: {
             Label(menuBarTitle, systemImage: "person.3.sequence.fill")
                 .labelStyle(.titleAndIcon)
                 .accessibilityLabel("Codex Roster \(menuBarTitle)")
         }
         .menuBarExtraStyle(.window)
+
+        Window(language.text("Giới thiệu", "About"), id: "about") {
+            AboutView()
+                .environmentObject(language)
+                .environment(\.locale, language.language.locale)
+        }
+        .defaultSize(width: 560, height: 720)
 
         Settings {
             AboutView()
@@ -131,6 +139,7 @@ struct ContentView: View {
     @State private var accountForActivation: SavedAccount?
     @State private var accountForDeletion: SavedAccount?
     @State private var accountForEditing: SavedAccount?
+    @State private var accountForRelogin: SavedAccount?
     @State private var showingAddAccount = false
     @State private var backupOperation: BackupOperation?
 
@@ -144,7 +153,8 @@ struct ContentView: View {
                     if selection == account.id { selection = nil }
                 },
                 restore: { store.restore($0) },
-                remove: { accountForDeletion = $0 }
+                remove: { accountForDeletion = $0 },
+                relogin: { accountForRelogin = $0 }
             )
         } detail: {
             detailContent
@@ -153,6 +163,17 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showAddAccount)) { _ in
             showingAddAccount = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .showReloginAccount)) { notification in
+            let id = (notification.object as? String).flatMap(UUID.init(uuidString:))
+                ?? notification.object as? UUID
+            if let id, let account = store.accounts.first(where: { $0.id == id }) {
+                selection = id
+                accountForRelogin = account
+            } else if let account = store.accounts.first(where: { !store.isArchived($0) && $0.requiresLogin }) {
+                selection = account.id
+                accountForRelogin = account
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .exportBackup)) { _ in
             backupOperation = .export
         }
@@ -160,7 +181,7 @@ struct ContentView: View {
             backupOperation = .import
         }
         .overlay {
-            if store.isWorking {
+            if store.isBusyForActions {
                 ProgressView()
                     .controlSize(.large)
                     .padding(24)
@@ -169,6 +190,11 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showingAddAccount) {
             AddAccountSheet()
+                .environmentObject(store)
+                .environmentObject(language)
+        }
+        .sheet(item: $accountForRelogin) { account in
+            ReloginAccountSheet(account: account)
                 .environmentObject(store)
                 .environmentObject(language)
         }
@@ -248,10 +274,11 @@ struct ContentView: View {
                     selection = nil
                 },
                 restore: { store.restore(selected) },
-                remove: { accountForDeletion = selected }
+                remove: { accountForDeletion = selected },
+                relogin: { accountForRelogin = selected }
             )
         } else {
-            DashboardView(selection: $selection)
+            DashboardView(selection: $selection, relogin: { accountForRelogin = $0 })
         }
     }
 
@@ -264,14 +291,16 @@ struct ContentView: View {
 private struct AccountSidebar: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
+    @Environment(\.openWindow) private var openWindow
     @Binding var selection: UUID?
     let edit: (SavedAccount) -> Void
     let archive: (SavedAccount) -> Void
     let restore: (SavedAccount) -> Void
     let remove: (SavedAccount) -> Void
+    let relogin: (SavedAccount) -> Void
     @State private var searchText = ""
     @State private var expandedReadyProviders = Set(AIProvider.allCases.map(\.rawValue))
-    @State private var expandedAttentionProviders: Set<String> = []
+    @State private var expandedAttentionProviders = Set(AIProvider.allCases.map(\.rawValue))
     @State private var expandedArchived = false
 
     var body: some View {
@@ -283,7 +312,7 @@ private struct AccountSidebar: View {
         .searchable(text: $searchText, prompt: language.text("Tìm tài khoản", "Search accounts"))
         .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 340)
         .safeAreaInset(edge: .bottom) {
-            SettingsLink {
+            Button(action: openAboutWindow) {
                 Label(language.text("Giới thiệu", "About"), systemImage: "heart.text.square")
                     .font(.subheadline.weight(.medium))
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -292,6 +321,16 @@ private struct AccountSidebar: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 11)
             .background(.bar)
+        }
+    }
+
+    private func openAboutWindow() {
+        openWindow(id: "about")
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        DispatchQueue.main.async {
+            NSApplication.shared.windows
+                .first(where: { $0.identifier?.rawValue == "about" })?
+                .makeKeyAndOrderFront(nil)
         }
     }
 
@@ -357,6 +396,7 @@ private struct AccountSidebar: View {
                         archive: archive,
                         restore: restore,
                         remove: remove,
+                        relogin: relogin,
                         selection: $selection
                     )
                         .tag(account.id)
@@ -381,6 +421,7 @@ private struct AccountSidebar: View {
                             archive: archive,
                             restore: restore,
                             remove: remove,
+                            relogin: relogin,
                             selection: $selection
                         )
                         .tag(account.id)
@@ -427,6 +468,7 @@ private struct DashboardView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @Binding var selection: UUID?
+    let relogin: (SavedAccount) -> Void
     @State private var automationExpanded = false
     @State private var confirmingFullBackupRestore = false
 
@@ -447,7 +489,8 @@ private struct DashboardView: View {
                     accountCount: store.accounts.count,
                     readyAccounts: readyAccounts,
                     attentionAccounts: attentionAccounts,
-                    selection: $selection
+                    selection: $selection,
+                    relogin: relogin
                 )
 
                 ProviderOverview(selection: $selection)
@@ -501,7 +544,7 @@ private struct DashboardView: View {
                             get: { store.autoSwitchWhenExhausted },
                             set: { store.setAutoSwitchWhenExhausted($0) }
                         ))
-                        .disabled(store.isWorking)
+                        .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
                         Text(language.text("Khi tài khoản hiện tại còn 0%, app sẽ tìm tài khoản đã lưu còn quota rồi chuyển an toàn. Nếu ChatGPT/Codex đang chạy, thao tác sẽ được hoãn để bảo vệ công việc; app không tự đóng tiến trình.", "When the current account reaches 0%, the app finds a saved account with quota and switches safely. If ChatGPT/Codex is running, the switch is deferred to protect active work; the app never force-closes processes."))
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -523,12 +566,12 @@ private struct DashboardView: View {
                             Button(language.text("Kiểm tra ngay", "Run refresh check now")) {
                                 store.runUsageWindowCheck()
                             }
-                            .disabled(store.isWorking || store.isCheckingAutoSwitch)
+                            .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
                             if store.autoSwitchWhenExhausted {
                                 Button(language.text("Kiểm tra & chuyển", "Check & switch")) {
                                     store.runAutoSwitchCheck()
                                 }
-                                .disabled(store.isWorking || store.isCheckingAutoSwitch)
+                                .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
                             }
                             Spacer()
                             Button(language.text("Khôi phục tài khoản cũ", "Recover older accounts")) {
@@ -543,6 +586,12 @@ private struct DashboardView: View {
                         .controlSize(.small)
                         .disabled(store.isWorking)
                         Text(language.text("Tự động giữ 5 bản sao đầy đủ được mã hóa bằng khóa trong Keychain của máy này; khôi phục xong có thể đăng nhập lại Codex.", "Keeps 5 full backups encrypted with this Mac's Keychain key; restored accounts can sign in to Codex again."))
+                        Text(language.text(
+                            "Nếu macOS hỏi quyền Keychain cho \"com.codexroster.app\", hãy Allow / Always Allow — đó là khóa mã hóa cục bộ, không phải mật khẩu OpenAI. Xem Giới thiệu để biết thêm.",
+                            "If macOS asks for Keychain access to \"com.codexroster.app\", choose Allow / Always Allow — that is the local encryption key, not your OpenAI password. See About for details."
+                        ))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -586,10 +635,29 @@ private struct DashboardView: View {
                                         Text(account.email)
                                             .font(.caption)
                                             .foregroundStyle(.secondary)
+                                            .textSelection(.enabled)
                                     }
                                     Spacer()
+                                    Button {
+                                        copyAccountEmail(account.email)
+                                    } label: {
+                                        Image(systemName: "doc.on.doc")
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .help(language.text("Sao chép email", "Copy email"))
+                                    Button(language.text("Đăng nhập lại", "Sign in again")) {
+                                        selection = account.id
+                                        relogin(account)
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(.orange)
                                     Button(language.text("Xem", "Review")) { selection = account.id }
                                         .buttonStyle(.borderless)
+                                }
+                                .contextMenu {
+                                    Button(language.text("Sao chép email", "Copy email")) {
+                                        copyAccountEmail(account.email)
+                                    }
                                 }
                                 .padding(.vertical, 9)
                                 if account.id != attentionAccounts.prefix(3).last?.id {
@@ -646,6 +714,7 @@ private struct DashboardHero: View {
     let readyAccounts: [SavedAccount]
     let attentionAccounts: [SavedAccount]
     @Binding var selection: UUID?
+    let relogin: (SavedAccount) -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 22) {
@@ -675,8 +744,9 @@ private struct DashboardHero: View {
                     .lineLimit(2)
                     .textSelection(.enabled)
                 if let firstAttention = attentionAccounts.first {
-                    Button(language.text("Xử lý \(attentionAccounts.count) tài khoản", "Review \(attentionAccounts.count) accounts")) {
+                    Button(language.text("Đăng nhập lại \(attentionAccounts.count) tài khoản", "Sign in again for \(attentionAccounts.count) accounts")) {
                         selection = firstAttention.id
+                        relogin(firstAttention)
                     }
                     .controlSize(.small)
                 } else if let active = readyAccounts.first(where: \.isActive) {
@@ -965,6 +1035,7 @@ private struct AccountRow: View {
     let archive: (SavedAccount) -> Void
     let restore: (SavedAccount) -> Void
     let remove: (SavedAccount) -> Void
+    let relogin: (SavedAccount) -> Void
     @Binding var selection: UUID?
 
     var body: some View {
@@ -980,9 +1051,16 @@ private struct AccountRow: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .textSelection(.enabled)
+                        .help(language.text("Nhấp đúp hoặc dùng menu để sao chép email", "Double-click or use the menu to copy email"))
                 }
                 Spacer(minLength: 4)
                 accountActionsMenu
+            }
+            .contextMenu {
+                Button(language.text("Sao chép email", "Copy email")) {
+                    copyAccountEmail(account.email)
+                }
             }
 
             HStack(spacing: 8) {
@@ -1002,6 +1080,12 @@ private struct AccountRow: View {
     private var accountActionsMenu: some View {
         Menu {
             Button(language.text("Xem chi tiết", "View details")) { selection = account.id }
+            Button(language.text("Sao chép email", "Copy email")) {
+                copyAccountEmail(account.email)
+            }
+            if !isArchived && account.requiresLogin {
+                Button(language.text("Đăng nhập lại…", "Sign in again…")) { relogin(account) }
+            }
             Button(language.text("Sửa", "Edit")) { edit(account) }
             if isArchived {
                 Button(language.text("Khôi phục", "Restore")) { restore(account) }
@@ -1552,6 +1636,7 @@ private struct AccountDetail: View {
     let archive: () -> Void
     let restore: () -> Void
     let remove: () -> Void
+    let relogin: () -> Void
 
     private var isArchived: Bool { store.isArchived(account) }
 
@@ -1564,9 +1649,17 @@ private struct AccountDetail: View {
                             .foregroundStyle(account.isActive ? .green : .secondary)
                         Text(account.displayName)
                             .font(.largeTitle.weight(.bold))
-                        if account.name != nil {
+                        HStack(spacing: 8) {
                             Text(account.email)
                                 .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                            Button {
+                                copyAccountEmail(account.email)
+                            } label: {
+                                Label(language.text("Sao chép", "Copy"), systemImage: "doc.on.doc")
+                            }
+                            .buttonStyle(.borderless)
+                            .help(language.text("Sao chép địa chỉ email", "Copy email address"))
                         }
                     }
                     Spacer()
@@ -1578,7 +1671,12 @@ private struct AccountDetail: View {
                     .disabled(store.isWorking)
                     Button(language.text("Xóa", "Remove"), role: .destructive, action: remove)
                         .disabled(store.isWorking)
-                    if !isArchived && !account.isActive && !account.requiresLogin {
+                    if !isArchived && account.requiresLogin {
+                        Button(language.text("Đăng nhập lại", "Sign in again"), action: relogin)
+                            .buttonStyle(.borderedProminent)
+                            .tint(.orange)
+                            .disabled(store.isWorking)
+                    } else if !isArchived && !account.isActive && !account.requiresLogin {
                         Button(language.text("Chuyển sang tài khoản này", "Activate"), action: activate)
                             .buttonStyle(.borderedProminent)
                             .disabled(store.isWorking)
@@ -1609,16 +1707,42 @@ private struct AccountDetail: View {
                 }
 
                 if account.requiresLogin {
-                    Label(language.text("Hãy đăng nhập lại tài khoản này trước khi chuyển.", "Sign in to this account again before it can be activated."), systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label(language.text("Phiên Codex của tài khoản này đã hết hạn hoặc bị đăng xuất.", "This account's Codex session expired or was logged out."), systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(language.text(
+                            "Đăng nhập lại bằng đúng email \(account.email), rồi lưu phiên mới vào Codex Roster.",
+                            "Sign in again with \(account.email), then save the new session into Codex Roster."
+                        ))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        Button(language.text("Bắt đầu đăng nhập lại…", "Start sign-in again…"), action: relogin)
+                            .buttonStyle(.borderedProminent)
+                            .tint(.orange)
+                            .disabled(store.isWorking || isArchived)
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
                 }
 
                 GroupBox(language.text("Chi tiết tài khoản", "Account details")) {
                     Grid(alignment: .leading, horizontalSpacing: 28, verticalSpacing: 12) {
                         GridRow { Text(language.text("Tên hiển thị", "Display name")).foregroundStyle(.secondary); Text(account.displayName) }
+                        GridRow {
+                            Text(language.text("Email", "Email")).foregroundStyle(.secondary)
+                            HStack(spacing: 8) {
+                                Text(account.email)
+                                    .textSelection(.enabled)
+                                Button {
+                                    copyAccountEmail(account.email)
+                                } label: {
+                                    Image(systemName: "doc.on.doc")
+                                }
+                                .buttonStyle(.borderless)
+                                .help(language.text("Sao chép địa chỉ email", "Copy email address"))
+                            }
+                        }
                         GridRow { Text(language.text("Gói ChatGPT", "ChatGPT plan")).foregroundStyle(.secondary); Text(account.planLabel ?? language.text("Chưa có", "Not available")) }
                         GridRow { Text(language.text("Trạng thái", "Status")).foregroundStyle(.secondary); Text(account.usageStatus(in: language.language)) }
                         GridRow { Text(language.text("Môi trường", "Environment")).foregroundStyle(.secondary); Text(account.environment.capitalized) }
@@ -1638,6 +1762,120 @@ private struct AccountDetail: View {
             .padding(32)
         }
         .navigationTitle(account.email)
+    }
+}
+
+private struct ReloginAccountSheet: View {
+    @EnvironmentObject private var store: AccountStore
+    @EnvironmentObject private var language: LanguageStore
+    @Environment(\.dismiss) private var dismiss
+    let account: SavedAccount
+    @State private var loginStarted = false
+    @State private var localError: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Label(language.text("Đăng nhập lại", "Sign in again"), systemImage: "arrow.triangle.2.circlepath")
+                .font(.title2.weight(.bold))
+                .foregroundStyle(.orange)
+
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(language.text(
+                    "Làm mới phiên Codex cho \(account.displayName) (\(account.email)).",
+                    "Refresh the Codex session for \(account.displayName) (\(account.email))."
+                ))
+                .foregroundStyle(.secondary)
+                Button {
+                    copyAccountEmail(account.email)
+                } label: {
+                    Label(language.text("Sao chép email", "Copy email"), systemImage: "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+            }
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label(language.text("1. Đăng nhập đúng tài khoản này", "1. Sign in with this exact account"), systemImage: "arrow.right.circle.fill")
+                        .font(.headline)
+                    Text(language.text(
+                        "Trang OpenAI và Terminal sẽ mở. Hãy chọn/đăng nhập \(account.email), hoàn tất mã xác thực, rồi quay lại đây.",
+                        "OpenAI and Terminal will open. Sign in as \(account.email), finish device verification, then return here."
+                    ))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    Button(language.text("Mở đăng nhập OpenAI", "Open OpenAI sign-in")) {
+                        localError = nil
+                        loginStarted = true
+                        store.startRelogin(for: account)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                    .disabled(store.isWorking)
+
+                    if loginStarted {
+                        Label(language.text(
+                            "Đăng nhập đang chờ trong Terminal. Khi Codex báo thành công, lưu phiên ở bước 2.",
+                            "Sign-in is waiting in Terminal. When Codex confirms success, save the session in step 2."
+                        ), systemImage: "checkmark.circle")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label(language.text("2. Lưu phiên mới vào tài khoản này", "2. Save the new session to this account"), systemImage: "tray.and.arrow.down.fill")
+                        .font(.headline)
+                    Text(store.status?.currentAccount?.email ?? language.text(
+                        "Sau khi đăng nhập xong, email phiên hiện tại sẽ hiện ở đây.",
+                        "After sign-in finishes, the current session email appears here."
+                    ))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    HStack {
+                        Button(language.text("Tải lại trạng thái", "Reload status")) {
+                            store.refresh()
+                        }
+                        .disabled(store.isWorking)
+                        Spacer()
+                        Button(language.text("Lưu & khôi phục tài khoản", "Save & restore account")) {
+                            Task {
+                                do {
+                                    localError = nil
+                                    try await store.completeRelogin(for: account)
+                                    dismiss()
+                                } catch {
+                                    localError = error.localizedDescription
+                                }
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(store.isWorking || store.status?.currentAccount == nil)
+                    }
+                }
+            }
+
+            if let localError {
+                Label(localError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+            }
+
+            Label(language.text(
+                "Phiên Codex đang dùng sẽ được lưu trước khi mở đăng nhập mới. Phải đăng nhập đúng \(account.email).",
+                "The current Codex session is saved before the new sign-in. You must sign in as \(account.email)."
+            ), systemImage: "lock.shield")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+
+            HStack {
+                Spacer()
+                Button(language.text("Đóng", "Close")) { dismiss() }
+            }
+        }
+        .padding(24)
+        .frame(width: 560)
     }
 }
 
@@ -1724,7 +1962,6 @@ private struct UsageCard: View {
 private struct MenuBarView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
-    @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
     @State private var accountForActivation: SavedAccount?
 
@@ -1758,7 +1995,7 @@ private struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 12) {
             MenuBarHeader(savedCount: store.accounts.count, attentionCount: attentionCount)
 
-            if store.isWorking || store.errorMessage != nil || store.autoSwitchState != nil {
+            if store.isBusyForActions || store.isCheckingAutoSwitch || store.errorMessage != nil || store.autoSwitchState != nil {
                 MenuBarOperationStatus()
             }
 
@@ -1790,7 +2027,7 @@ private struct MenuBarView: View {
                             .buttonStyle(.plain)
                             .frame(maxWidth: .infinity)
                             .menuBarInteractive(cornerRadius: 9)
-                            .disabled(store.isWorking)
+                            .disabled(store.isBusyForActions)
                         }
                     }
                 }
@@ -1814,11 +2051,13 @@ private struct MenuBarView: View {
             }
 
             if attentionCount > 0 {
-                Button { openDashboard() } label: {
+                Button { openReloginFlow() } label: {
                     HStack(spacing: 7) {
                         Image(systemName: "exclamationmark.triangle.fill")
                         Text(language.text("\(attentionCount) tài khoản cần đăng nhập", "\(attentionCount) accounts need sign-in"))
                         Spacer()
+                        Text(language.text("Đăng nhập lại", "Sign in again"))
+                            .font(.caption2.weight(.semibold))
                         Image(systemName: "chevron.right")
                             .font(.caption2.weight(.bold))
                     }
@@ -1844,7 +2083,7 @@ private struct MenuBarView: View {
             .padding(.horizontal, 4)
             .padding(.vertical, 3)
             .menuBarInteractive()
-            .disabled(store.isWorking || store.isCheckingAutoSwitch)
+            .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
 
             Divider()
                 .padding(.top, 4)
@@ -1861,8 +2100,8 @@ private struct MenuBarView: View {
                     .help(language.text("Làm mới", "Refresh"))
                     .frame(width: 30, height: 28)
                     .menuBarInteractive()
-                    .disabled(store.isWorking)
-                    Button { openSettings() } label: {
+                    .disabled(store.isBusyForActions)
+                    Button { openAbout() } label: {
                         Image(systemName: "info.circle")
                     }
                     .help(language.text("Giới thiệu", "About"))
@@ -1898,9 +2137,13 @@ private struct MenuBarView: View {
         } message: {
             Text(language.text("Thao tác này sẽ đóng ChatGPT/Codex, chuyển sang tài khoản đã chọn rồi mở lại ChatGPT. Hãy lưu công việc đang làm trước khi tiếp tục.", "This closes ChatGPT/Codex, switches to the selected account, then relaunches ChatGPT. Save active work before continuing."))
         }
+        .onAppear {
+            store.refreshAccountsInBackground()
+        }
     }
 
     private func requestActivation(_ account: SavedAccount) {
+        store.noteMenuInteraction()
         if store.hasRunningCodexProcesses {
             accountForActivation = account
         } else {
@@ -1914,6 +2157,24 @@ private struct MenuBarView: View {
         DispatchQueue.main.async {
             NSApplication.shared.windows
                 .first(where: { $0.identifier?.rawValue == "dashboard" })?
+                .makeKeyAndOrderFront(nil)
+        }
+    }
+
+    private func openReloginFlow() {
+        let accountID = store.accounts.first { !store.isArchived($0) && $0.requiresLogin }?.id
+        openDashboard()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            NotificationCenter.default.post(name: .showReloginAccount, object: accountID?.uuidString)
+        }
+    }
+
+    private func openAbout() {
+        openWindow(id: "about")
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        DispatchQueue.main.async {
+            NSApplication.shared.windows
+                .first(where: { $0.identifier?.rawValue == "about" })?
                 .makeKeyAndOrderFront(nil)
         }
     }
@@ -1956,10 +2217,14 @@ private struct MenuBarOperationStatus: View {
     @EnvironmentObject private var language: LanguageStore
 
     private var message: String {
+        if store.isSwitching {
+            return language.text("Đang chuyển tài khoản…", "Switching account…")
+        }
         if store.isWorking {
-            return store.isCheckingAutoSwitch
-                ? language.text("Đang kiểm tra quota…", "Checking quota…")
-                : language.text("Đang cập nhật…", "Updating…")
+            return language.text("Đang cập nhật…", "Updating…")
+        }
+        if store.isCheckingAutoSwitch {
+            return language.text("Đang kiểm tra quota…", "Checking quota…")
         }
         if store.errorMessage != nil {
             return language.text("Cập nhật thất bại", "Update failed")
@@ -1980,7 +2245,7 @@ private struct MenuBarOperationStatus: View {
     }
 
     private var tint: Color {
-        if store.isWorking { return .secondary }
+        if store.isBusyForActions || store.isCheckingAutoSwitch { return .secondary }
         if store.errorMessage != nil { return .orange }
         switch store.autoSwitchState {
         case .some(.switched): return .green
@@ -1991,7 +2256,7 @@ private struct MenuBarOperationStatus: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            if store.isWorking {
+            if store.isBusyForActions || store.isCheckingAutoSwitch {
                 ProgressView()
                     .controlSize(.small)
             } else {
@@ -2076,12 +2341,29 @@ private struct MenuBarCurrentSession: View {
                 }
             }
             Spacer(minLength: 4)
+            if let emailToCopy = account?.email ?? email {
+                Button {
+                    copyAccountEmail(emailToCopy)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(.plain)
+                .help(language.text("Sao chép email", "Copy email"))
+                .menuBarInteractive()
+            }
             if let quota = account?.primaryQuotaWindow {
                 MenuBarQuota(window: quota)
             }
         }
         .padding(11)
         .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 12))
+        .contextMenu {
+            if let emailToCopy = account?.email ?? email {
+                Button(language.text("Sao chép email", "Copy email")) {
+                    copyAccountEmail(emailToCopy)
+                }
+            }
+        }
     }
 }
 
@@ -2115,6 +2397,11 @@ private struct MenuBarAccountRow: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
         .contentShape(RoundedRectangle(cornerRadius: 9))
+        .contextMenu {
+            Button(language.text("Sao chép email", "Copy email")) {
+                copyAccountEmail(account.email)
+            }
+        }
     }
 }
 
@@ -2207,6 +2494,27 @@ private struct AboutView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                }
+
+                AboutPanel(title: language.text("Thông báo Keychain macOS", "macOS Keychain prompt"), icon: "key.fill") {
+                    Text(language.text(
+                        "macOS có thể hỏi quyền truy cập mục Keychain \"com.codexroster.app\". Đây là khóa mã hóa cục bộ cho snapshot và bản sao lưu tự động trên máy này — không phải mật khẩu OpenAI.",
+                        "macOS may ask for access to Keychain item \"com.codexroster.app\". That is only this Mac's local encryption key for snapshots and automatic backups — not your OpenAI password."
+                    ))
+                    AboutBullet(
+                        icon: "checkmark.shield",
+                        text: language.text(
+                            "Chọn Allow hoặc Always Allow nếu tên mục là com.codexroster.app. Deny sẽ khiến phiên đã lưu không đọc được.",
+                            "Choose Allow or Always Allow when the item is com.codexroster.app. Deny leaves saved sessions unreadable."
+                        )
+                    )
+                    AboutBullet(
+                        icon: "terminal",
+                        text: language.text(
+                            "Khi tự build hoặc chạy cargo test, hộp thoại có thể hiện tên kiểu codex_roster-<hash>; đó vẫn là helper của Codex Roster.",
+                            "When you build locally or run cargo test, the dialog may show a name like codex_roster-<hash>; that is still the Codex Roster helper."
+                        )
+                    )
                 }
 
                 AboutPanel(title: language.text("Tất cả tính năng", "Complete feature set"), icon: "checklist") {
@@ -2349,6 +2657,11 @@ private struct AboutFeatureGroup<Content: View>: View {
         }
         .padding(.bottom, 4)
     }
+}
+
+private func copyAccountEmail(_ email: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(email, forType: .string)
 }
 
 private extension Array where Element == SavedAccount {

@@ -77,7 +77,26 @@ where
     }
 
     pub fn auto_switch(&self, apply: bool) -> Result<AutoSwitchOutput> {
+        self.auto_switch_with_candidate(apply, None)
+    }
+
+    pub fn auto_switch_with_candidate(
+        &self,
+        apply: bool,
+        preferred_candidate_id: Option<Uuid>,
+    ) -> Result<AutoSwitchOutput> {
         let enabled = self.auto_switch_enabled()?;
+        // Apply reuses the prior decision when possible — avoid a second Keychain/network
+        // fan-out that unlocks the keychain and blocks ChatGPT relaunch.
+        if apply {
+            return self.apply_auto_switch(enabled, preferred_candidate_id);
+        }
+        self.decide_auto_switch(enabled)
+    }
+
+    fn decide_auto_switch(&self, enabled: bool) -> Result<AutoSwitchOutput> {
+        // Fresh check of the live account only. Candidates prefer cached quota to
+        // avoid decrypting every saved snapshot on each 60s poll.
         let _ = self.usage(None)?;
         let active = self
             .list()?
@@ -105,8 +124,10 @@ where
             ));
         }
 
+        let settings = load_settings(&self.env.app_data_dir)?;
+        let now = time::OffsetDateTime::now_utc();
         let candidates = self.repository.list_accounts(&self.env.kind)?;
-        let mut refreshed_candidate_ids = HashSet::new();
+        let mut usable_candidate_ids = HashSet::new();
         for candidate in candidates.iter().filter(|candidate| {
             candidate.id != active.id
                 && !candidate.archived
@@ -115,13 +136,18 @@ where
                     .as_deref()
                     .is_some_and(usage_error_requires_login)
         }) {
+            // Fresh cache (usable or not) skips network/decrypt. Only refresh stale/missing.
+            if cached_usage_is_fresh(candidate.cached_usage.as_ref(), now) {
+                if is_usable_for_switch(candidate.cached_usage.as_ref()) {
+                    usable_candidate_ids.insert(candidate.id);
+                }
+                continue;
+            }
             if self.usage(Some(candidate.id)).is_ok() {
-                refreshed_candidate_ids.insert(candidate.id);
+                usable_candidate_ids.insert(candidate.id);
             }
         }
 
-        let settings = load_settings(&self.env.app_data_dir)?;
-        let now = time::OffsetDateTime::now_utc();
         let candidate = self
             .list()?
             .accounts
@@ -134,7 +160,7 @@ where
                         .as_deref()
                         .is_some_and(usage_error_requires_login)
                     && is_usable_for_switch(candidate.usage.as_ref())
-                    && refreshed_candidate_ids.contains(&candidate.id)
+                    && usable_candidate_ids.contains(&candidate.id)
                     && !is_in_auto_switch_cooldown(&settings, candidate.id, now)
             })
             .max_by_key(|candidate| switch_quota_score(candidate.usage.as_ref()));
@@ -149,16 +175,95 @@ where
                 Some("No eligible saved account has fresh usable quota.".to_owned()),
             ));
         };
-        if !apply {
+        Ok(auto_switch_output(
+            enabled,
+            "ready",
+            Some(active.id),
+            Some(candidate.id),
+            Some(account_display_name(&candidate)),
+            None,
+        ))
+    }
+
+    fn apply_auto_switch(
+        &self,
+        enabled: bool,
+        preferred_candidate_id: Option<Uuid>,
+    ) -> Result<AutoSwitchOutput> {
+        let accounts = self.list()?.accounts;
+        let active = accounts.iter().find(|account| account.is_active);
+        let Some(active) = active else {
             return Ok(auto_switch_output(
                 enabled,
-                "ready",
+                "waiting_for_login",
+                None,
+                None,
+                None,
+                None,
+            ));
+        };
+        if !is_exhausted_for_switch(active.usage.as_ref()) {
+            // Active may have recovered quota between check and apply.
+            return Ok(auto_switch_output(
+                enabled,
+                "active_has_quota",
                 Some(active.id),
-                Some(candidate.id),
-                Some(account_display_name(&candidate)),
+                None,
+                None,
                 None,
             ));
         }
+
+        let settings = load_settings(&self.env.app_data_dir)?;
+        let now = time::OffsetDateTime::now_utc();
+        let candidate = if let Some(preferred_id) = preferred_candidate_id {
+            // Revalidate only the decided candidate — never re-rank a stale roster cache.
+            match self.usage(Some(preferred_id)) {
+                Ok(_) => self
+                    .list()?
+                    .accounts
+                    .into_iter()
+                    .find(|account| account.id == preferred_id)
+                    .filter(|candidate| {
+                        candidate.id != active.id
+                            && !candidate.archived
+                            && !candidate
+                                .usage_error
+                                .as_deref()
+                                .is_some_and(usage_error_requires_login)
+                            && is_usable_for_switch(candidate.usage.as_ref())
+                            && !is_in_auto_switch_cooldown(&settings, candidate.id, now)
+                    }),
+                Err(_) => None,
+            }
+        } else {
+            accounts
+                .iter()
+                .filter(|candidate| {
+                    candidate.id != active.id
+                        && !candidate.archived
+                        && !candidate
+                            .usage_error
+                            .as_deref()
+                            .is_some_and(usage_error_requires_login)
+                        && is_usable_for_switch(candidate.usage.as_ref())
+                        && !is_in_auto_switch_cooldown(&settings, candidate.id, now)
+                })
+                .max_by_key(|candidate| switch_quota_score(candidate.usage.as_ref()))
+                .cloned()
+        };
+
+        let Some(candidate) = candidate else {
+            return Ok(auto_switch_output(
+                enabled,
+                "all_accounts_exhausted",
+                Some(active.id),
+                None,
+                None,
+                Some("No eligible saved account has usable quota.".to_owned()),
+            ));
+        };
+
         let warnings = self.activation_preflight_warnings();
         if !warnings.is_empty() {
             return Ok(auto_switch_output(
@@ -219,6 +324,14 @@ where
     }
 
     pub fn save_current(&self) -> Result<SaveOutput> {
+        self.save_current_inner(true)
+    }
+
+    fn save_current_for_activation(&self) -> Result<SaveOutput> {
+        self.save_current_inner(false)
+    }
+
+    fn save_current_inner(&self, write_backup: bool) -> Result<SaveOutput> {
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         let live = codex::read_live_auth_bundle(&self.env).with_context(|| {
             format!(
@@ -226,9 +339,16 @@ where
                 self.env.codex_root.display()
             )
         })?;
-        let (metadata, created) =
+        let (metadata, created) = if write_backup {
             self.repository
-                .save_snapshot(&self.env.kind, &live.identity, &live.snapshot)?;
+                .save_snapshot(&self.env.kind, &live.identity, &live.snapshot)?
+        } else {
+            self.repository.save_snapshot_without_backup(
+                &self.env.kind,
+                &live.identity,
+                &live.snapshot,
+            )?
+        };
         Ok(SaveOutput {
             account: account_view(metadata.clone(), Some(metadata.id), None, None),
             action: if created {
@@ -287,8 +407,21 @@ where
         let (snapshot, snapshot_identity, restore_identity) =
             self.load_activation_target(account_id)?;
         let verify_stable = should_verify_activation_stability(force_running, &warnings);
-        codex::restore_snapshot(&self.env, &snapshot, &restore_identity, verify_stable)
-            .context("failed to restore the selected account snapshot")?;
+        let verify_retries = if force_running { 2 } else { 4 };
+        let verify_delay = if force_running {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(250)
+        };
+        codex::restore_snapshot_with_retry(
+            &self.env,
+            &snapshot,
+            &restore_identity,
+            verify_stable,
+            verify_retries,
+            verify_delay,
+        )
+        .context("failed to restore the selected account snapshot")?;
         let metadata = self
             .repository
             .sync_activated_account(&self.env.kind, account_id, &snapshot_identity)
@@ -309,10 +442,7 @@ where
         let Some(_current_saved) = match_saved_account(&saved_accounts, &live.identity) else {
             return;
         };
-        let Ok(saved) = self.save_current() else {
-            return;
-        };
-        let _ = self.usage(Some(saved.account.id));
+        let _ = self.save_current_for_activation();
     }
 
     fn load_activation_target(
@@ -400,7 +530,8 @@ where
     }
 
     pub fn usage(&self, account_id: Option<Uuid>) -> Result<UsageOutput> {
-        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        // Keep the exclusive lock off the network path so account activation is
+        // not blocked by a background quota refresh.
         match account_id {
             Some(account_id) => {
                 let (snapshot, _, _) = self.load_activation_target(account_id)?;
@@ -413,6 +544,7 @@ where
                 let (output, refreshed_snapshot) = match fetch_usage(target) {
                     Ok(result) => result,
                     Err(error) => {
+                        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
                         let _ = self.repository.record_usage_error(
                             &self.env.kind,
                             account_id,
@@ -421,7 +553,8 @@ where
                         return Err(error);
                     }
                 };
-                self.repository.replace_snapshot(
+                let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+                self.repository.replace_snapshot_without_backup(
                     &self.env.kind,
                     account_id,
                     &output.account,
@@ -448,10 +581,12 @@ where
                 let (output, refreshed_snapshot) = match fetch_usage(target) {
                     Ok(result) => result,
                     Err(error) => {
+                        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
                         self.record_usage_error_for_identity(&live_identity, &error);
                         return Err(error);
                     }
                 };
+                let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
                 if refreshed_snapshot != live_snapshot
                     && live_bundle_still_matches_snapshot(&self.env, &live_snapshot)
                 {
@@ -459,7 +594,7 @@ where
                         .context("refreshed live auth but failed to update local auth files")?;
                 }
                 if let Some(account_id) = self.saved_account_id_for_identity(&live_identity) {
-                    self.repository.replace_snapshot(
+                    self.repository.replace_snapshot_without_backup(
                         &self.env.kind,
                         account_id,
                         &output.account,
@@ -567,6 +702,13 @@ fn is_in_auto_switch_cooldown(
         && settings
             .last_auto_switch_at
             .is_some_and(|last_switch| now - last_switch < time::Duration::minutes(5))
+}
+
+fn cached_usage_is_fresh(
+    usage: Option<&crate::model::AccountUsageView>,
+    now: time::OffsetDateTime,
+) -> bool {
+    usage.is_some_and(|usage| now - usage.fetched_at < time::Duration::minutes(15))
 }
 
 fn account_display_name(account: &AccountView) -> String {

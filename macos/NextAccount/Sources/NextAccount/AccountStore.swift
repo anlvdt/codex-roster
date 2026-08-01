@@ -16,6 +16,7 @@ final class AccountStore: ObservableObject {
     @Published private(set) var launchAtLoginEnabled: Bool
     @Published private(set) var backupStatusMessage: String?
     @Published private(set) var isWorking = false
+    @Published private(set) var isSwitching = false
     @Published private(set) var isLoadingTokenUsage = false
     @Published private(set) var isLoadingResetOutlook = false
     @Published private(set) var isLoadingOpenAIStatus = false
@@ -32,6 +33,9 @@ final class AccountStore: ObservableObject {
     private var quotaRefreshTask: Task<Void, Never>?
     private var autoSwitchAllExhaustedNotified = false
     private var isInteractiveLoginInProgress = false
+    private var coreBootstrapStarted = false
+    private var menuInteractionUntil: Date?
+    private var isRefreshingAccountsInBackground = false
 
     init() {
         let defaults = UserDefaults.standard
@@ -45,7 +49,16 @@ final class AccountStore: ObservableObject {
     }
 
     var hasRunningCodexProcesses: Bool {
-        !(status?.processWarnings.isEmpty ?? true)
+        ChatGPTDesktop.isRunning
+    }
+
+    /// True while a user-driven roster mutation is in flight (not background quota checks).
+    var isBusyForActions: Bool {
+        isWorking || isSwitching
+    }
+
+    func noteMenuInteraction() {
+        menuInteractionUntil = Date().addingTimeInterval(2)
     }
 
     func isArchived(_ account: SavedAccount) -> Bool {
@@ -67,8 +80,14 @@ final class AccountStore: ObservableObject {
     }
 
     func refresh() {
-        run {
-            try await self.load()
+        // Soft reload — do not freeze the dashboard behind the global busy overlay.
+        guard !isBusyForActions else { return }
+        Task {
+            do {
+                try await self.load()
+            } catch {
+                self.errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -92,17 +111,83 @@ final class AccountStore: ObservableObject {
         }
     }
 
-    func activate(_ account: SavedAccount, force: Bool = false) {
+    /// Open device login so the user can refresh an expired saved account.
+    func startRelogin(for _: SavedAccount) {
+        isInteractiveLoginInProgress = true
         run {
-            if force {
-                try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
+            let liveStatus: StatusOutput = try await self.cli.decode(StatusOutput.self, arguments: ["status"])
+            // Preserve the currently active session before replacing it with a re-login.
+            if liveStatus.currentAccount != nil {
+                _ = try await self.cli.data(arguments: ["save", "--json"])
             }
-            var arguments = ["activate", account.id.uuidString, "--json"]
-            if force { arguments.append("--force") }
-            _ = try await self.cli.data(arguments: arguments)
+            try CodexLoginLauncher.start()
             try await self.load()
-            try await ChatGPTDesktop.launch()
         }
+    }
+
+    /// Save the live Codex session after re-login and confirm the target account recovered.
+    @MainActor
+    func completeRelogin(for account: SavedAccount) async throws {
+        guard !isWorking else { return }
+        isWorking = true
+        defer { isWorking = false }
+        _ = try await cli.data(arguments: ["save", "--json"])
+        isInteractiveLoginInProgress = false
+        try await load()
+        if let currentEmail = status?.currentAccount?.email,
+           currentEmail.caseInsensitiveCompare(account.email) != .orderedSame {
+            throw CLIError(
+                "Phiên hiện tại là \(currentEmail), không phải \(account.email). Hãy đăng nhập đúng tài khoản rồi lưu lại."
+            )
+        }
+        _ = try? await cli.data(arguments: ["usage", account.id.uuidString, "--json"])
+        try await load()
+        if accounts.first(where: { $0.id == account.id })?.requiresLogin == true {
+            throw CLIError(
+                "Tài khoản \(account.email) vẫn cần đăng nhập. Hãy hoàn tất OpenAI device login rồi thử lưu lại."
+            )
+        }
+    }
+
+    func activate(_ account: SavedAccount, force: Bool = false) {
+        run(switching: true) {
+            let relaunch = force
+                ? try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
+                : ChatGPTDesktop.RelaunchPlan.preferredDesktop()
+            var arguments = ["activate", account.id.uuidString]
+            if force { arguments.append("--force") }
+            let activated: ActivateOutput = try await self.cli.decode(ActivateOutput.self, arguments: arguments)
+            self.applyActivatedAccount(activated.account)
+            // Auth is restored — bring ChatGPT Desktop back immediately.
+            relaunch.launchNow()
+            let accountID = activated.account.id
+            Task {
+                try? await self.reloadAccountsAfterSwitch()
+                self.refreshUsageAfterSwitch(accountID: accountID)
+            }
+        }
+    }
+
+    func refreshAccountsInBackground() {
+        noteMenuInteraction()
+        guard !isBusyForActions, !isRefreshingAccountsInBackground else { return }
+        isRefreshingAccountsInBackground = true
+        Task {
+            defer { isRefreshingAccountsInBackground = false }
+            do {
+                try await reloadAccountsAfterSwitch()
+            } catch {
+                // Keep cached roster visible; manual refresh can surface the error.
+            }
+        }
+    }
+
+    func startCoreMonitoring() {
+        guard !coreBootstrapStarted else { return }
+        coreBootstrapStarted = true
+        refresh()
+        startAutoSwitchMonitoring()
+        startQuotaMonitoring()
     }
 
     func delete(_ account: SavedAccount) {
@@ -149,7 +234,7 @@ final class AccountStore: ObservableObject {
             self.autoSwitchState = nil
             self.autoSwitchAllExhaustedNotified = false
             if enabled {
-                await self.checkAutoSwitchWhenExhausted()
+                Task { await self.checkAutoSwitchWhenExhausted() }
             }
         }
     }
@@ -218,7 +303,7 @@ final class AccountStore: ObservableObject {
         guard quotaRefreshTask == nil else { return }
         quotaRefreshTask = Task { [weak self] in
             while !Task.isCancelled {
-                while self?.isWorking == true && !Task.isCancelled {
+                while (self?.isBusyForActions == true || self?.shouldDeferBackgroundWork == true) && !Task.isCancelled {
                     try? await Task.sleep(for: .milliseconds(250))
                 }
                 await self?.refreshActiveQuotaInBackground()
@@ -326,15 +411,16 @@ final class AccountStore: ObservableObject {
     }
 
     private func checkAutoSwitchWhenExhausted() async {
-        guard autoSwitchWhenExhausted, !isWorking, !isCheckingAutoSwitch else { return }
+        guard autoSwitchWhenExhausted, !isBusyForActions, !isCheckingAutoSwitch, !shouldDeferBackgroundWork else { return }
         isCheckingAutoSwitch = true
-        isWorking = true
-        defer {
-            isCheckingAutoSwitch = false
-            isWorking = false
-        }
+        defer { isCheckingAutoSwitch = false }
         guard !isInteractiveLoginInProgress else {
             autoSwitchState = .waitingForLogin
+            return
+        }
+        // Never force-quit ChatGPT on the automatic path.
+        if ChatGPTDesktop.isRunning {
+            autoSwitchState = .waitingForProcesses
             return
         }
         do {
@@ -351,29 +437,46 @@ final class AccountStore: ObservableObject {
                     autoSwitchAllExhaustedNotified = true
                 }
             case "ready":
-                try await ChatGPTDesktop.prepareForAccountSwitch()
-                let applied: AutoSwitchOutput = try await cli.decode(AutoSwitchOutput.self, arguments: ["auto-switch", "--apply"])
+                guard !isBusyForActions else { return }
+                if ChatGPTDesktop.isRunning {
+                    autoSwitchState = .waitingForProcesses
+                    return
+                }
+                isSwitching = true
+                defer { isSwitching = false }
+                var applyArguments = ["auto-switch", "--apply"]
+                if let candidateId = decision.candidateAccountId {
+                    applyArguments += ["--account-id", candidateId.uuidString]
+                }
+                let applied: AutoSwitchOutput = try await cli.decode(AutoSwitchOutput.self, arguments: applyArguments)
                 guard applied.status == "switched" else {
                     autoSwitchState = applied.status == "waiting_for_processes" ? .waitingForProcesses : .checkFailed
                     return
                 }
-                try await load()
-                try await ChatGPTDesktop.launch()
+                try await reloadAccountsAfterSwitch()
+                // ChatGPT was closed for a safe auto-switch — reopen with the new account.
+                ChatGPTDesktop.RelaunchPlan.preferredDesktop().launchNow()
                 autoSwitchState = .switched(applied.candidateDisplayName ?? "tài khoản khác")
                 autoSwitchAllExhaustedNotified = false
             default:
                 autoSwitchState = .checkFailed
             }
         } catch {
-            autoSwitchState = .checkFailed
+            let message = error.localizedDescription.lowercased()
+            if message.contains("chatgpt") || message.contains("codex") {
+                autoSwitchState = .waitingForProcesses
+            } else {
+                autoSwitchState = .checkFailed
+            }
         }
     }
 
     private func refreshActiveQuotaInBackground(allowWhileWorking: Bool = false) async {
         guard autoStartUsageWindows,
-              (allowWhileWorking || !isWorking),
+              (allowWhileWorking || !isBusyForActions),
               !isCheckingAutoSwitch,
               !isRefreshingQuotaInBackground,
+              !shouldDeferBackgroundWork,
               !isInteractiveLoginInProgress,
               let activeAccount = accounts.first(where: { $0.isActive && !isArchived($0) }) else {
             return
@@ -382,23 +485,66 @@ final class AccountStore: ObservableObject {
         defer { isRefreshingQuotaInBackground = false }
         do {
             _ = try await cli.data(arguments: ["usage", activeAccount.id.uuidString, "--json"])
-            try await load()
+            try await reloadAccountsAfterSwitch()
             lastQuotaRefreshAt = .now
         } catch {
             // The last verified quota stays visible; manual refresh can surface the error.
         }
     }
 
-    private func run(_ operation: @escaping @MainActor () async throws -> Void) {
-        guard !isWorking else { return }
+    private var shouldDeferBackgroundWork: Bool {
+        menuInteractionUntil.map { $0 > Date() } ?? false
+    }
+
+    private func run(switching: Bool = false, _ operation: @escaping @MainActor () async throws -> Void) {
+        guard !isBusyForActions else { return }
         isWorking = true
+        isSwitching = switching
         errorMessage = nil
         Task {
-            defer { isWorking = false }
+            defer {
+                isWorking = false
+                isSwitching = false
+            }
             do {
                 try await operation()
             } catch {
                 errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func reloadAccountsAfterSwitch() async throws {
+        async let status: StatusOutput = cli.decode(StatusOutput.self, arguments: ["status"])
+        async let accounts: AccountListOutput = cli.decode(AccountListOutput.self, arguments: ["list"])
+        let (loadedStatus, loadedAccounts) = try await (status, accounts)
+        self.status = loadedStatus
+        self.accounts = loadedAccounts.accounts
+    }
+
+    private func applyActivatedAccount(_ account: SavedAccount) {
+        accounts = accounts.map { existing in
+            if existing.id == account.id {
+                return account.withActiveState(true)
+            }
+            return existing.withActiveState(false)
+        }
+        if !accounts.contains(where: { $0.id == account.id }) {
+            accounts.insert(account.withActiveState(true), at: 0)
+        }
+        status = StatusOutput(
+            currentAccount: AccountIdentity(email: account.email),
+            processWarnings: status?.processWarnings ?? []
+        )
+    }
+
+    private func refreshUsageAfterSwitch(accountID: UUID) {
+        Task {
+            _ = try? await cli.data(arguments: ["usage", accountID.uuidString, "--json"])
+            guard !isBusyForActions else { return }
+            try? await reloadAccountsAfterSwitch()
+            if accounts.contains(where: { $0.id == accountID && $0.isActive }) {
+                lastQuotaRefreshAt = .now
             }
         }
     }
@@ -570,51 +716,168 @@ private enum CodexLoginLauncher {
 }
 
 private enum ChatGPTDesktop {
+    /// ChatGPT Desktop on macOS currently ships as `com.openai.codex`.
     private static let bundleIdentifiers = ["com.openai.codex", "com.openai.chat"]
+    private static let knownAppPaths = [
+        "/Applications/ChatGPT.app",
+        "/Applications/Codex.app",
+    ]
+    private static let terminatePollInterval: Duration = .milliseconds(40)
+    private static let forceTerminateDeadline: Duration = .milliseconds(800)
 
-    static func prepareForAccountSwitch(force: Bool = false) async throws {
-        let runningApps = bundleIdentifiers.flatMap(NSRunningApplication.runningApplications(withBundleIdentifier:))
-        guard !runningApps.isEmpty else { return }
-        guard force else {
-            throw CLIError("Codex hoặc ChatGPT đang chạy. Tự động chuyển đã được hoãn để tránh mất công việc.")
-        }
-        for app in runningApps {
-            app.terminate()
-        }
-        try? await Task.sleep(for: .seconds(2))
-        let remainingApps = bundleIdentifiers.flatMap(NSRunningApplication.runningApplications(withBundleIdentifier:))
-        guard !remainingApps.isEmpty else { return }
-        for app in remainingApps {
-            app.forceTerminate()
-        }
-        try? await Task.sleep(for: .seconds(1))
-        if !bundleIdentifiers.flatMap(NSRunningApplication.runningApplications(withBundleIdentifier:)).isEmpty {
-            throw CLIError("Không thể đóng hoàn toàn Codex hoặc ChatGPT trước khi chuyển tài khoản.")
-        }
-    }
+    struct RelaunchPlan {
+        let bundleIDs: [String]
+        let appURLs: [URL]
 
-    static func launch() async throws {
-        let appURL = bundleIdentifiers.lazy
-            .compactMap(NSWorkspace.shared.urlForApplication(withBundleIdentifier:))
-            .first
-            ?? ["/Applications/ChatGPT.app", "/Applications/Codex.app"]
-                .map(URL.init(fileURLWithPath:))
-                .first(where: { FileManager.default.fileExists(atPath: $0.path) })
-        guard let appURL else {
-            throw CLIError("Không tìm thấy ChatGPT hoặc Codex Desktop trên máy này.")
+        static func preferredDesktop() -> RelaunchPlan {
+            let urls = resolvedAppURLs(for: bundleIdentifiers)
+            let ids = bundleIdentifiers.filter { id in
+                NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) != nil
+                    || knownAppPaths.contains(where: { path in
+                        FileManager.default.fileExists(atPath: path)
+                            && bundleIdentifier(at: URL(fileURLWithPath: path)) == id
+                    })
+            }
+            return RelaunchPlan(
+                bundleIDs: ids.isEmpty ? ["com.openai.codex"] : ids,
+                appURLs: urls
+            )
         }
 
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { _, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
+        func launchNow() {
+            Task.detached(priority: .userInitiated) {
+                // LaunchServices often rejects an immediate reopen after force-quit.
+                try? await Task.sleep(for: .milliseconds(250))
+                await openDesktop()
+                try? await Task.sleep(for: .milliseconds(800))
+                let stillClosed = await MainActor.run { !ChatGPTDesktop.isRunning }
+                if stillClosed {
+                    await openDesktop()
                 }
             }
         }
+
+        private func openDesktop() async {
+            // `/usr/bin/open` is reliable from a menu-bar accessory app;
+            // NSWorkspace.openApplication frequently fails silently there.
+            for bundleID in bundleIDs {
+                if await openViaLaunchServices(arguments: ["-b", bundleID]) {
+                    return
+                }
+            }
+            for appURL in appURLs {
+                if await openViaLaunchServices(arguments: ["-a", appURL.path]) {
+                    return
+                }
+            }
+            for path in knownAppPaths where FileManager.default.fileExists(atPath: path) {
+                if await openViaLaunchServices(arguments: ["-a", path]) {
+                    return
+                }
+            }
+        }
+
+        private func openViaLaunchServices(arguments: [String]) async -> Bool {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let process = Process()
+                    process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+                    process.arguments = arguments
+                    process.standardOutput = FileHandle.nullDevice
+                    process.standardError = FileHandle.nullDevice
+                    do {
+                        try process.run()
+                        process.waitUntilExit()
+                        continuation.resume(returning: process.terminationStatus == 0)
+                    } catch {
+                        continuation.resume(returning: false)
+                    }
+                }
+            }
+        }
+    }
+
+    static var isRunning: Bool {
+        !runningApplications.isEmpty
+    }
+
+    private static var runningApplications: [NSRunningApplication] {
+        bundleIdentifiers.flatMap(NSRunningApplication.runningApplications(withBundleIdentifier:))
+    }
+
+    /// Quits ChatGPT Desktop when `force` is true, and returns which apps to reopen.
+    @discardableResult
+    static func prepareForAccountSwitch(force: Bool = false) async throws -> RelaunchPlan {
+        let runningApps = runningApplications
+        let runningBundleIDs = Array(Set(runningApps.compactMap(\.bundleIdentifier)))
+            .sorted { lhs, rhs in
+                bundleIdentifiers.firstIndex(of: lhs) ?? 99 < bundleIdentifiers.firstIndex(of: rhs) ?? 99
+            }
+        let relaunchIDs = runningBundleIDs.isEmpty ? bundleIdentifiers : runningBundleIDs
+        let relaunch = RelaunchPlan(
+            bundleIDs: relaunchIDs,
+            appURLs: resolvedAppURLs(for: relaunchIDs)
+        )
+
+        guard !runningApps.isEmpty else { return relaunch }
+        guard force else {
+            throw CLIError("Codex hoặc ChatGPT đang chạy. Tự động chuyển đã được hoãn để tránh mất công việc.")
+        }
+
+        for app in runningApps {
+            app.forceTerminate()
+        }
+        if await waitUntilQuit(deadline: forceTerminateDeadline) {
+            return relaunch
+        }
+        for app in runningApplications {
+            app.forceTerminate()
+        }
+        if await waitUntilQuit(deadline: .milliseconds(400)) {
+            return relaunch
+        }
+        throw CLIError("Không thể đóng hoàn toàn ChatGPT Desktop trước khi chuyển tài khoản.")
+    }
+
+    private static func resolvedAppURLs(for bundleIDs: [String]) -> [URL] {
+        var urls: [URL] = []
+        var seen = Set<URL>()
+        for bundleID in bundleIDs {
+            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID),
+               seen.insert(url).inserted {
+                urls.append(url)
+            }
+        }
+        if urls.isEmpty {
+            for path in knownAppPaths {
+                let url = URL(fileURLWithPath: path)
+                if FileManager.default.fileExists(atPath: url.path), seen.insert(url).inserted {
+                    urls.append(url)
+                }
+            }
+        }
+        return urls
+    }
+
+    private static func bundleIdentifier(at appURL: URL) -> String? {
+        let infoURL = appURL.appendingPathComponent("Contents/Info.plist")
+        guard let data = try? Data(contentsOf: infoURL),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let bundleID = plist["CFBundleIdentifier"] as? String else {
+            return nil
+        }
+        return bundleID
+    }
+
+    private static func waitUntilQuit(deadline: Duration) async -> Bool {
+        let started = ContinuousClock.now
+        while ContinuousClock.now - started < deadline {
+            if runningApplications.isEmpty {
+                return true
+            }
+            try? await Task.sleep(for: terminatePollInterval)
+        }
+        return runningApplications.isEmpty
     }
 }
 
@@ -635,10 +898,19 @@ private enum LaunchAtLogin {
 struct StatusOutput: Decodable {
     let currentAccount: AccountIdentity?
     let processWarnings: [RunningProcess]
+
+    init(currentAccount: AccountIdentity?, processWarnings: [RunningProcess]) {
+        self.currentAccount = currentAccount
+        self.processWarnings = processWarnings
+    }
 }
 
 struct AccountIdentity: Decodable {
     let email: String
+
+    init(email: String) {
+        self.email = email
+    }
 }
 
 struct RunningProcess: Decodable {
@@ -647,6 +919,10 @@ struct RunningProcess: Decodable {
 
 struct AccountListOutput: Decodable {
     let accounts: [SavedAccount]
+}
+
+struct ActivateOutput: Decodable {
+    let account: SavedAccount
 }
 
 struct TokenUsageSummary: Decodable {
@@ -707,6 +983,48 @@ struct SavedAccount: Identifiable, Decodable {
     let archived: Bool
     let usage: AccountUsage?
     let usageError: String?
+
+    func withActiveState(_ isActive: Bool) -> SavedAccount {
+        SavedAccount(
+            id: id,
+            provider: provider,
+            email: email,
+            name: name,
+            customLabel: customLabel,
+            planLabel: planLabel,
+            environment: environment,
+            isActive: isActive,
+            archived: archived,
+            usage: usage,
+            usageError: usageError
+        )
+    }
+
+    init(
+        id: UUID,
+        provider: String,
+        email: String,
+        name: String?,
+        customLabel: String?,
+        planLabel: String?,
+        environment: String,
+        isActive: Bool,
+        archived: Bool,
+        usage: AccountUsage?,
+        usageError: String?
+    ) {
+        self.id = id
+        self.provider = provider
+        self.email = email
+        self.name = name
+        self.customLabel = customLabel
+        self.planLabel = planLabel
+        self.environment = environment
+        self.isActive = isActive
+        self.archived = archived
+        self.usage = usage
+        self.usageError = usageError
+    }
 
     func usageStatus(in language: AppLanguage) -> String {
         if let usageError { return usageError }
@@ -844,6 +1162,7 @@ struct AutoStartUsageWindowsStatus: Decodable {
 struct AutoSwitchOutput: Decodable {
     let enabled: Bool
     let status: String
+    let candidateAccountId: UUID?
     let candidateDisplayName: String?
 }
 

@@ -77,6 +77,24 @@ pub fn restore_snapshot(
     expected_identity: &DisplayIdentity,
     verify_stable: bool,
 ) -> Result<()> {
+    restore_snapshot_with_retry(
+        env,
+        snapshot,
+        expected_identity,
+        verify_stable,
+        4,
+        Duration::from_millis(250),
+    )
+}
+
+pub fn restore_snapshot_with_retry(
+    env: &AppEnv,
+    snapshot: &SnapshotBlob,
+    expected_identity: &DisplayIdentity,
+    verify_stable: bool,
+    stable_attempts: usize,
+    stable_delay: Duration,
+) -> Result<()> {
     validate_snapshot(snapshot)?;
     fs::create_dir_all(&env.codex_root)
         .with_context(|| format!("failed to create {}", env.codex_root.display()))?;
@@ -108,8 +126,8 @@ pub fn restore_snapshot(
             env,
             snapshot,
             expected_identity,
-            4,
-            Duration::from_millis(250),
+            stable_attempts,
+            stable_delay,
         )
     {
         let _ = restore_from_backup(&env.codex_root, &backup_dir);

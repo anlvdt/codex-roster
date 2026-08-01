@@ -106,8 +106,10 @@ fn subject_bound_identity_matches(expected: &DisplayIdentity, snapshot: &Display
 }
 
 fn should_verify_activation_stability(
-    force_running: bool,
+    _force_running: bool,
     warnings: &[RunningCodexProcess],
 ) -> bool {
-    force_running || !warnings.is_empty()
+    // Only wait for stability when a Codex/ChatGPT process is still alive.
+    // `--force` after the macOS UI already quit apps must stay fast.
+    !warnings.is_empty()
 }

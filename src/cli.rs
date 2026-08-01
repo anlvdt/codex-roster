@@ -111,6 +111,9 @@ enum Command {
         disable: bool,
         #[arg(long, conflicts_with = "status")]
         apply: bool,
+        /// Optional candidate chosen by a prior `auto-switch` decision (skips re-fan-out).
+        #[arg(long, requires = "apply")]
+        account_id: Option<Uuid>,
         #[arg(long)]
         status: bool,
         #[arg(long)]
@@ -357,6 +360,7 @@ pub fn run() -> Result<()> {
             enable,
             disable,
             apply,
+            account_id,
             status,
             json,
         }) => {
@@ -375,7 +379,7 @@ pub fn run() -> Result<()> {
                     detail: None,
                 }
             } else {
-                app.auto_switch(apply)?
+                app.auto_switch_with_candidate(apply, account_id)?
             };
             if json {
                 print_json(&output)?;

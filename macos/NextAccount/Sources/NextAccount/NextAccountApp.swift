@@ -2343,6 +2343,12 @@ private struct MenuBarOperationStatus: View {
     }
 }
 
+private enum AppInfo {
+    static var shortVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.2"
+    }
+}
+
 private struct MenuBarHeader: View {
     @EnvironmentObject private var language: LanguageStore
     let savedCount: Int
@@ -2356,8 +2362,14 @@ private struct MenuBarHeader: View {
                 .frame(width: 30, height: 30)
                 .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 9))
             VStack(alignment: .leading, spacing: 1) {
-                Text("Codex Roster")
-                    .font(.headline)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("Codex Roster")
+                        .font(.headline)
+                    Text("v\(AppInfo.shortVersion)")
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .help(language.text("Phiên bản \(AppInfo.shortVersion)", "Version \(AppInfo.shortVersion)"))
+                }
                 Text(language.text("OpenAI / Codex · \(savedCount) đã lưu", "OpenAI / Codex · \(savedCount) saved"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -2540,9 +2552,7 @@ private struct AboutView: View {
     @EnvironmentObject private var language: LanguageStore
     @Environment(\.openURL) private var openURL
 
-    private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.2"
-    }
+    private var appVersion: String { AppInfo.shortVersion }
 
     private let authorURL = URL(string: "https://github.com/anlvdt")!
     private let foundationURL = URL(string: "https://github.com/Pimpmuckl/codex-account-switcher")!

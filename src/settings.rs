@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+use uuid::Uuid;
 
 use crate::file_store::replace_file_with_recovery;
 
@@ -10,6 +12,12 @@ use crate::file_store::replace_file_with_recovery;
 pub struct AppSettings {
     #[serde(default)]
     pub auto_start_usage_windows: bool,
+    #[serde(default)]
+    pub auto_switch_when_exhausted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_auto_switch_at: Option<OffsetDateTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_auto_switch_target: Option<Uuid>,
 }
 
 pub fn load_settings(app_data_dir: &Path) -> Result<AppSettings> {
@@ -59,6 +67,7 @@ mod tests {
             temp.path(),
             &AppSettings {
                 auto_start_usage_windows: true,
+                ..AppSettings::default()
             },
         )
         .expect("save settings");

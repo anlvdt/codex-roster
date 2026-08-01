@@ -18,6 +18,7 @@ use crate::model::{
     AUTH_FILES, AutoStartUsageWindowAccountResult, AutoStartUsageWindowsRunOutput,
     AutoStartUsageWindowsStatusOutput, DisplayIdentity, SnapshotBlob,
 };
+use crate::operation_lock::OperationLock;
 use crate::repository::SnapshotRepository;
 use crate::secrets::{MigratingSecretStore, SecretStore};
 use crate::settings::{load_settings, save_settings};
@@ -42,6 +43,7 @@ where
         &self,
         enabled: bool,
     ) -> Result<AutoStartUsageWindowsStatusOutput> {
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         let mut settings = load_settings(&self.env.app_data_dir)?;
         settings.auto_start_usage_windows = enabled;
         save_settings(&self.env.app_data_dir, &settings)?;
@@ -117,21 +119,24 @@ where
         let (_, snapshot) = self.repository.load_snapshot(&self.env.kind, account_id)?;
         let identity = codex::identity_from_snapshot(&snapshot)?;
         let ping_result = run_codex_usage_ping(&self.env, &snapshot, &identity)?;
-        let (current_metadata, current_snapshot) =
-            self.repository.load_snapshot(&self.env.kind, account_id)?;
-        if current_snapshot != snapshot {
-            return Err(anyhow!(
-                "saved snapshot changed while ping was running; skipped write-back"
-            ));
+        {
+            let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+            let (current_metadata, current_snapshot) =
+                self.repository.load_snapshot(&self.env.kind, account_id)?;
+            if current_snapshot != snapshot {
+                return Err(anyhow!(
+                    "saved snapshot changed while ping was running; skipped write-back"
+                ));
+            }
+            let refreshed_identity = codex::identity_from_snapshot(&ping_result.snapshot)?;
+            self.repository.replace_snapshot(
+                &self.env.kind,
+                account_id,
+                &refreshed_identity,
+                &ping_result.snapshot,
+                current_metadata.cached_usage,
+            )?;
         }
-        let refreshed_identity = codex::identity_from_snapshot(&ping_result.snapshot)?;
-        self.repository.replace_snapshot(
-            &self.env.kind,
-            account_id,
-            &refreshed_identity,
-            &ping_result.snapshot,
-            current_metadata.cached_usage,
-        )?;
         let usage = self.usage(Some(account_id))?;
         let now = OffsetDateTime::now_utc();
         let status = match usage.usage.weekly {

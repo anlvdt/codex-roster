@@ -14,6 +14,9 @@ public sealed class RosterViewModel : INotifyPropertyChanged
     private readonly DispatcherQueueTimer? _quotaTimer;
     private bool _isBusy;
     private bool _autoQuotaRefresh;
+    private bool _autoSwitchWhenExhausted;
+    private bool _isCheckingAutoSwitch;
+    private bool _settingsLoaded;
     private string _errorMessage = string.Empty;
     private string _currentAccountLabel = "Chưa đăng nhập";
     private string _quotaRefreshStatus = "Tắt";
@@ -29,6 +32,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged
     public bool IsBusy { get => _isBusy; private set { Set(ref _isBusy, value); OnPropertyChanged(nameof(BusyVisibility)); } }
     public Visibility BusyVisibility => IsBusy ? Visibility.Visible : Visibility.Collapsed;
     public bool AutoQuotaRefresh { get => _autoQuotaRefresh; set => Set(ref _autoQuotaRefresh, value); }
+    public bool AutoSwitchWhenExhausted { get => _autoSwitchWhenExhausted; set => Set(ref _autoSwitchWhenExhausted, value); }
     public string QuotaRefreshStatus { get => _quotaRefreshStatus; private set => Set(ref _quotaRefreshStatus, value); }
 
     public RosterViewModel()
@@ -37,7 +41,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged
         if (_quotaTimer is not null)
         {
             _quotaTimer.Interval = TimeSpan.FromMinutes(1);
-            _quotaTimer.Tick += async (_, _) => await RefreshActiveQuotaAsync(silent: true);
+            _quotaTimer.Tick += async (_, _) => await RunQuotaTimerAsync();
         }
     }
 
@@ -47,8 +51,11 @@ public sealed class RosterViewModel : INotifyPropertyChanged
         try
         {
             var settings = await _cli.ReadAsync<AutoQuotaSettings>("auto-start-usage-windows");
+            var autoSwitch = await _cli.ReadAsync<AutoSwitchOutput>("auto-switch", "--status");
             AutoQuotaRefresh = settings.Enabled;
+            AutoSwitchWhenExhausted = autoSwitch.Enabled;
             UpdateQuotaTimer();
+            _settingsLoaded = true;
             if (AutoQuotaRefresh) await RefreshActiveQuotaAsync(silent: true);
         }
         catch
@@ -136,11 +143,22 @@ public sealed class RosterViewModel : INotifyPropertyChanged
 
     public async Task SetAutoQuotaRefreshAsync()
     {
+        if (!_settingsLoaded) return;
         await RunAsync(async () =>
         {
             await _cli.RunCommandAsync("auto-start-usage-windows", AutoQuotaRefresh ? "--enable" : "--disable");
             UpdateQuotaTimer();
             if (AutoQuotaRefresh) await RefreshActiveQuotaAsync(silent: true);
+        });
+    }
+
+    public async Task SetAutoSwitchWhenExhaustedAsync()
+    {
+        if (!_settingsLoaded) return;
+        await RunAsync(async () =>
+        {
+            await _cli.RunCommandAsync("auto-switch", AutoSwitchWhenExhausted ? "--enable" : "--disable");
+            UpdateQuotaTimer();
         });
     }
 
@@ -165,6 +183,56 @@ public sealed class RosterViewModel : INotifyPropertyChanged
         }
     }
 
+    private async Task RunQuotaTimerAsync()
+    {
+        if (IsBusy) return;
+        if (AutoQuotaRefresh) await RefreshActiveQuotaAsync(silent: true);
+        if (AutoSwitchWhenExhausted) await CheckAutoSwitchAsync(silent: true);
+    }
+
+    private async Task CheckAutoSwitchAsync(bool silent)
+    {
+        if (!AutoSwitchWhenExhausted || IsBusy || _isCheckingAutoSwitch) return;
+        _isCheckingAutoSwitch = true;
+        try
+        {
+            var decision = await _cli.ReadAsync<AutoSwitchOutput>("auto-switch");
+            if (decision.Status == "active_has_quota") return;
+            if (decision.Status == "all_accounts_exhausted")
+            {
+                QuotaRefreshStatus = "Tất cả tài khoản đã hết quota.";
+                return;
+            }
+            if (decision.Status != "ready")
+            {
+                QuotaRefreshStatus = "Tự động chuyển đang chờ phiên Codex an toàn.";
+                return;
+            }
+            var applied = await _cli.ReadAsync<AutoSwitchOutput>("auto-switch", "--apply");
+            if (applied.Status == "switched")
+            {
+                await RefreshRosterDataAsync();
+                QuotaRefreshStatus = $"Đã tự động chuyển sang {applied.CandidateDisplayName ?? "tài khoản khác"}. Mở lại Codex để dùng phiên mới.";
+            }
+            else if (applied.Status == "waiting_for_processes")
+            {
+                QuotaRefreshStatus = "Đóng Codex trước khi tự động chuyển để bảo vệ công việc đang làm.";
+            }
+        }
+        catch when (silent)
+        {
+            QuotaRefreshStatus = "Tự động chuyển sẽ thử lại sau.";
+        }
+        catch
+        {
+            ErrorMessage = "Không thể kiểm tra điều kiện tự động chuyển tài khoản.";
+        }
+        finally
+        {
+            _isCheckingAutoSwitch = false;
+        }
+    }
+
     private async Task RefreshRosterDataAsync()
     {
         var list = await _cli.ReadAsync<AccountListResponse>("list");
@@ -184,9 +252,9 @@ public sealed class RosterViewModel : INotifyPropertyChanged
 
     private void UpdateQuotaTimer()
     {
-        QuotaRefreshStatus = AutoQuotaRefresh ? "Tự động kiểm tra mỗi phút" : "Tắt";
+        QuotaRefreshStatus = (AutoQuotaRefresh || AutoSwitchWhenExhausted) ? "Tự động kiểm tra mỗi phút" : "Tắt";
         if (_quotaTimer is null) return;
-        if (AutoQuotaRefresh) _quotaTimer.Start(); else _quotaTimer.Stop();
+        if (AutoQuotaRefresh || AutoSwitchWhenExhausted) _quotaTimer.Start(); else _quotaTimer.Stop();
     }
 
     private async Task RunAsync(Func<Task> operation)

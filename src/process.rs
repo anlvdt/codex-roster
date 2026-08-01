@@ -72,14 +72,19 @@ pub fn format_process_table(processes: &[RunningCodexProcess]) -> Vec<String> {
 }
 
 fn matches_codex_process(name: &str, command: &[String]) -> bool {
-    if matches!(name, "codex" | "codex.exe") {
+    if matches!(name, "codex" | "codex.exe" | "chatgpt" | "chatgpt.exe") {
         return true;
     }
     command
         .iter()
         .filter_map(|token| path_file_name(token))
         .map(|token| token.to_ascii_lowercase())
-        .any(|token| matches!(token.as_str(), "codex" | "codex.exe" | "codex.js"))
+        .any(|token| {
+            matches!(
+                token.as_str(),
+                "codex" | "codex.exe" | "codex.js" | "chatgpt" | "chatgpt.exe"
+            )
+        })
 }
 
 fn format_process(pid: Pid, name: &str, command: &[String]) -> RunningCodexProcess {
@@ -259,6 +264,11 @@ mod tests {
                 "review".to_owned()
             ]
         ));
+    }
+
+    #[test]
+    fn matches_codex_process_detects_chatgpt_desktop() {
+        assert!(matches_codex_process("ChatGPT", &["ChatGPT".to_owned()]));
     }
 
     #[test]

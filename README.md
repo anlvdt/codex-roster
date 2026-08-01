@@ -21,7 +21,7 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
 
 `GPT Free`, `GPT Plus`, and `GPT Pro` identify the ChatGPT plan. They do not imply a fixed Codex quota. Codex Roster displays the quota/reset windows returned for the signed-in account.
 
-**Auto-switch when quota is exhausted** is opt-in. It checks the active account, refreshes candidate quota, and switches only when the active account is at `0%` and another saved account has usable quota in every reported window. If every account is exhausted, it leaves ChatGPT untouched.
+**Auto-switch when quota is exhausted** is opt-in and shared by the macOS and Windows clients. It refreshes the active account and every candidate, then switches only when the active account is at `0%` and another saved account has usable quota in every reported window. It never chooses cached or stale candidate quota. The switch is deferred while Codex or ChatGPT is still running; automatic mode does not force-quit applications. If every account is exhausted, it leaves the current session untouched.
 
 ### Backup and recovery
 
@@ -44,7 +44,7 @@ open "build/Codex Roster.app"
 
 ### Windows Preview
 
-The Windows shell uses **WinUI 3** and calls the same Rust CLI; see [windows/README.md](windows/README.md). It currently targets real-device testing, not public production use. The existing Windows CLI and tray remain available while the full Fluent dashboard is completed.
+The Windows shell uses **WinUI 3** and calls the same Rust CLI; see [windows/README.md](windows/README.md). It can monitor quota and safely auto-switch only after Codex is closed; it does not force-close or relaunch Codex automatically. It currently targets real-device testing, not public production use.
 
 ### CLI
 
@@ -62,6 +62,7 @@ codex-roster export OUTPUT.codexroster [--password-stdin] [--json]
 codex-roster import INPUT.codexroster [--password-stdin] [--json]
 codex-roster restore-full-backup [--json]
 codex-roster auto-start-usage-windows [--enable|--disable] [--run] [--json]
+codex-roster auto-switch [--enable|--disable|--status|--apply] [--json]
 codex-roster token-usage [--json]
 codex-roster reset-outlook [--json]
 codex-roster open-ai-status [--json]
@@ -97,7 +98,7 @@ swift build --package-path macos/NextAccount
 
 `GPT Free`, `GPT Plus`, `GPT Pro` là nhãn gói ChatGPT, không phải quota Codex cố định. Codex Roster hiển thị quota/thời điểm reset thực tế được trả về cho tài khoản đang đăng nhập.
 
-Chế độ **Tự động chuyển khi hết quota** là tùy chọn. Ứng dụng chỉ chuyển khi tài khoản hiện tại còn `0%`, đã làm mới quota tài khoản dự phòng và tài khoản đó còn quota ở mọi cửa sổ được trả về. Nếu mọi tài khoản đều hết quota, ChatGPT không bị đóng hay chuyển vòng lặp.
+Chế độ **Tự động chuyển khi hết quota** là tùy chọn và dùng chung chính sách trên macOS/Windows. Ứng dụng làm mới tài khoản hiện tại và từng ứng viên, chỉ chuyển khi tài khoản hiện tại còn `0%` và ứng viên còn quota ở mọi cửa sổ được trả về. App không dùng quota cache cũ, không force-close Codex/ChatGPT: nếu app vẫn đang chạy thì tự động chuyển được hoãn để bảo vệ công việc. Nếu mọi tài khoản đều hết quota, phiên hiện tại không bị thay đổi.
 
 ### Sao lưu và khôi phục
 
@@ -120,7 +121,7 @@ open "build/Codex Roster.app"
 
 ### Windows Preview
 
-Bản shell Windows native dùng **WinUI 3** và gọi chung Rust CLI; xem [windows/README.md](windows/README.md). Bản này đang dành cho kiểm chứng trên Windows thật, chưa phải bản phát hành production.
+Bản shell Windows native dùng **WinUI 3** và gọi chung Rust CLI; xem [windows/README.md](windows/README.md). Bản này có thể tự chuyển an toàn sau khi Codex đã đóng, nhưng không force-close hay tự mở lại Codex. Bản này đang dành cho kiểm chứng trên Windows thật, chưa phải bản phát hành production.
 
 ### Riêng tư, trạng thái và ghi nhận
 

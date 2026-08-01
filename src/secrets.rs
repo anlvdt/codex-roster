@@ -1,15 +1,19 @@
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::file_store::{RecoveryFileKind, list_recovery_files, replace_file_with_recovery};
 use crate::model::SnapshotBlob;
+use age::secrecy::SecretString;
 use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use flate2::read::GzDecoder;
 
 const SNAPSHOT_ENCODING_V1_MAGIC: &[u8] = b"cas-snapshot-v1\n";
+const ENCRYPTED_LOCAL_SNAPSHOT_MAGIC: &[u8] = b"cas-secret-v2\n";
+const MAX_DECRYPTED_SNAPSHOT_BYTES: u64 = 4 * 1024 * 1024;
 
 pub trait SecretStore {
     fn save(&self, key: &str, value: &[u8]) -> Result<()>;
@@ -64,8 +68,9 @@ impl LocalSecretStore {
     fn save_local(&self, key: &str, value: &[u8]) -> Result<()> {
         ensure_store_dir(&self.root_dir)?;
         let path = self.path_for_key(key);
+        let encrypted = encrypt_local_snapshot(value)?;
         replace_file_with_recovery(&path, None, |temp_path| {
-            write_private_file(temp_path, value)
+            write_private_file(temp_path, &encrypted)
         })
     }
 
@@ -74,11 +79,20 @@ impl LocalSecretStore {
         let mut saw_invalid = false;
         let mut canonical_error = None;
         let canonical_value = match fs::read(&path) {
-            Ok(value) if snapshot_payload_is_valid(&value) => Some(value),
-            Ok(_) => {
-                saw_invalid = true;
-                None
-            }
+            Ok(value) => match decrypt_local_snapshot(&value) {
+                Ok(value) if snapshot_payload_is_valid(&value) => Some(value),
+                Ok(_) => {
+                    saw_invalid = true;
+                    None
+                }
+                Err(error) => {
+                    canonical_error =
+                        Some(Err(error).with_context(|| {
+                            format!("failed to decrypt snapshot {}", path.display())
+                        }));
+                    None
+                }
+            },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 canonical_error = Some(
@@ -100,7 +114,15 @@ impl LocalSecretStore {
             {
                 continue;
             }
-            let value = match fs::read(&recovery_path) {
+            let value = match fs::read(&recovery_path)
+                .with_context(|| {
+                    format!(
+                        "failed to read snapshot recovery {}",
+                        recovery_path.display()
+                    )
+                })
+                .and_then(|value| decrypt_local_snapshot(&value))
+            {
                 Ok(value) => value,
                 Err(_) => continue,
             };
@@ -108,11 +130,18 @@ impl LocalSecretStore {
                 saw_invalid = true;
                 continue;
             }
-            let _ = self.save_local(key, &value);
+            self.save_local(key, &value)
+                .context("failed to re-encrypt recovered snapshot data")?;
             return Ok(Some(value));
         }
 
         if let Some(value) = canonical_value {
+            if fs::read(&path)
+                .ok()
+                .is_none_or(|stored| !stored.starts_with(ENCRYPTED_LOCAL_SNAPSHOT_MAGIC))
+            {
+                self.save_local(key, &value)?;
+            }
             return Ok(Some(value));
         }
         if saw_invalid {
@@ -143,6 +172,51 @@ impl LocalSecretStore {
         }
         first_error.unwrap_or(Ok(()))
     }
+}
+
+fn encrypt_local_snapshot(value: &[u8]) -> Result<Vec<u8>> {
+    let password = crate::backup::local_snapshot_password()?;
+    let encryptor = age::Encryptor::with_user_passphrase(SecretString::from(password));
+    let mut writer = encryptor
+        .wrap_output(Vec::new())
+        .context("failed to initialize local snapshot encryption")?;
+    writer
+        .write_all(value)
+        .context("failed to encrypt local snapshot")?;
+    let encrypted = writer
+        .finish()
+        .context("failed to finalize local snapshot encryption")?;
+    let mut payload = ENCRYPTED_LOCAL_SNAPSHOT_MAGIC.to_vec();
+    payload.extend(encrypted);
+    Ok(payload)
+}
+
+fn decrypt_local_snapshot(value: &[u8]) -> Result<Vec<u8>> {
+    let Some(encrypted) = value.strip_prefix(ENCRYPTED_LOCAL_SNAPSHOT_MAGIC) else {
+        return Ok(value.to_vec());
+    };
+    let password = crate::backup::local_snapshot_password()?;
+    let decryptor =
+        age::Decryptor::new(encrypted).context("local snapshot is not valid encrypted data")?;
+    if !decryptor.is_scrypt() {
+        return Err(anyhow!(
+            "local snapshot is not protected by the expected credential key"
+        ));
+    }
+    let identity = age::scrypt::Identity::new(SecretString::from(password));
+    let mut reader = decryptor
+        .decrypt(std::iter::once(&identity as &dyn age::Identity))
+        .context("could not decrypt local snapshot")?;
+    let mut plaintext = Vec::new();
+    reader
+        .by_ref()
+        .take(MAX_DECRYPTED_SNAPSHOT_BYTES + 1)
+        .read_to_end(&mut plaintext)
+        .context("failed to read decrypted local snapshot")?;
+    if plaintext.len() as u64 > MAX_DECRYPTED_SNAPSHOT_BYTES {
+        return Err(anyhow!("decrypted local snapshot exceeds the allowed size"));
+    }
+    Ok(plaintext)
 }
 
 impl SecretStore for LocalSecretStore {
@@ -297,7 +371,13 @@ fn snapshot_payload_is_valid(value: &[u8]) -> bool {
     if let Some(compressed) = value.strip_prefix(SNAPSHOT_ENCODING_V1_MAGIC) {
         let mut decoder = GzDecoder::new(compressed);
         let mut decoded = Vec::new();
-        if std::io::Read::read_to_end(&mut decoder, &mut decoded).is_err() {
+        if decoder
+            .by_ref()
+            .take(MAX_DECRYPTED_SNAPSHOT_BYTES + 1)
+            .read_to_end(&mut decoded)
+            .is_err()
+            || decoded.len() as u64 > MAX_DECRYPTED_SNAPSHOT_BYTES
+        {
             return false;
         }
         return serde_json::from_slice::<SnapshotBlob>(&decoded).is_ok();
@@ -428,7 +508,10 @@ mod tests {
     use anyhow::Result;
     use tempfile::tempdir;
 
-    use super::{LegacySnapshotStore, LocalSecretStore, MigratingSecretStore, SecretStore};
+    use super::{
+        ENCRYPTED_LOCAL_SNAPSHOT_MAGIC, LegacySnapshotStore, LocalSecretStore,
+        MigratingSecretStore, SecretStore,
+    };
     use crate::model::{SnapshotBlob, SnapshotFile};
 
     #[derive(Clone, Default)]
@@ -527,6 +610,23 @@ mod tests {
             .expect("load")
             .expect("payload");
         assert_eq!(loaded, payload);
+    }
+
+    #[test]
+    fn local_store_encrypts_snapshot_payload_at_rest() {
+        let temp = tempdir().expect("tempdir");
+        let store = LocalSecretStore::new(temp.path());
+        let payload = valid_snapshot_bytes();
+        store.save("snapshot:test", &payload).expect("save");
+
+        let stored = fs::read(temp.path().join("c25hcHNob3Q6dGVzdA.snapshot")).expect("stored");
+
+        assert!(stored.starts_with(ENCRYPTED_LOCAL_SNAPSHOT_MAGIC));
+        assert!(
+            !stored
+                .windows(payload.len())
+                .any(|window| window == payload)
+        );
     }
 
     #[test]

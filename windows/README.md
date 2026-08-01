@@ -7,10 +7,11 @@ This folder contains the native **WinUI 3** Windows Preview. It is deliberately 
 - Native Fluent dashboard, sidebar and account quota list.
 - Device sign-in launcher, save current session, activate and archive/restore saved accounts.
 - One-minute polling for the active account when automatic quota refresh is enabled.
+- Opt-in automatic quota switching through the shared Rust policy, deferred while Codex is running.
 - Existing Rust system tray remains the temporary tray implementation for Windows.
 - Local Credential Manager, encrypted backup, CLI, quota and snapshot logic remain in Rust.
 
-The Preview intentionally does **not** close/relaunch the Windows Codex desktop app automatically. That integration needs verification against the actual Windows app package and lifecycle before it is safe to enable.
+The Preview intentionally does **not** close/relaunch the Windows Codex desktop app automatically. Auto-switch is therefore deferred until Codex is closed. That integration needs verification against the actual Windows app package and lifecycle before it is safe to enable.
 
 ## Build on Windows
 

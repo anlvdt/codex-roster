@@ -8,6 +8,7 @@ use flate2::write::GzEncoder;
 use crate::model::SnapshotBlob;
 
 pub(super) const SNAPSHOT_ENCODING_V1_MAGIC: &[u8] = b"cas-snapshot-v1\n";
+const MAX_DECODED_SNAPSHOT_BYTES: u64 = 4 * 1024 * 1024;
 
 pub(super) fn encode_snapshot(snapshot: &SnapshotBlob) -> Result<Vec<u8>> {
     let serialized = serde_json::to_vec(snapshot).context("failed to serialize snapshot")?;
@@ -27,8 +28,13 @@ pub(super) fn decode_snapshot(encoded: &[u8]) -> Result<SnapshotBlob> {
         let mut decoder = GzDecoder::new(compressed);
         let mut serialized = Vec::new();
         decoder
+            .by_ref()
+            .take(MAX_DECODED_SNAPSHOT_BYTES + 1)
             .read_to_end(&mut serialized)
             .context("failed to decompress stored snapshot")?;
+        if serialized.len() as u64 > MAX_DECODED_SNAPSHOT_BYTES {
+            anyhow::bail!("stored snapshot exceeds the allowed decoded size");
+        }
         return serde_json::from_slice(&serialized).context("failed to parse stored snapshot");
     }
 

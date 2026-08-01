@@ -22,6 +22,16 @@
 - Renamed the product and CLI from codex-account-switcher to Codex Roster / `codex-roster` for the focused OpenAI / Codex workflow.
 - Moved application data to the `codexroster/codex-roster` product directory, with a one-time migration of Account Hub, Next Account, and Next IDE data directories.
 
+## v0.2.1 - 2026-08-01
+
+### Security and reliability
+
+- Hardened snapshot import and restore against unmanaged files, path traversal, oversized payloads, and identity mismatches.
+- Encrypted local snapshots with a system credential-store key and protected temporary auth files with private permissions.
+- Added cross-process operation locking, atomic backup import/restore, rollback, and active-account compare-and-swap checks.
+- Made automatic switching defer safely while Codex or ChatGPT is running, with cooldowns and serialized Windows checks.
+- Updated vulnerable Rust dependencies and added regression coverage for backup, rollback, and staging boundaries.
+
 ## Unreleased
 
 ## v0.1.5 - 2026-05-22

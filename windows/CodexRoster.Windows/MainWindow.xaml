@@ -108,13 +108,14 @@
                                     <TextBlock Text="Cập nhật quota" Style="{StaticResource BodyStrongTextBlockStyle}" />
                                     <TextBlock Text="Tài khoản đang dùng được làm mới mỗi phút khi chế độ tự động được bật." TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}" Opacity="0.72" />
                                     <ToggleSwitch Header="Tự động làm mới quota" IsOn="{x:Bind ViewModel.AutoQuotaRefresh, Mode=TwoWay}" Toggled="AutoQuotaRefresh_Toggled" />
+                                    <ToggleSwitch Header="Tự động chuyển khi hết quota" IsOn="{x:Bind ViewModel.AutoSwitchWhenExhausted, Mode=TwoWay}" Toggled="AutoSwitchWhenExhausted_Toggled" />
                                     <TextBlock Text="{x:Bind ViewModel.QuotaRefreshStatus, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.72" />
                                 </StackPanel>
                             </Border>
                             <Border Padding="16" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
                                 <StackPanel Spacing="8">
                                     <TextBlock Text="Windows Preview" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                                    <TextBlock Text="Dashboard và quota đã sẵn sàng. Tự mở lại app Codex sau khi chuyển tài khoản sẽ được bật sau khi kiểm chứng trên Windows." TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}" Opacity="0.72" />
+                                    <TextBlock Text="Tự động chuyển sẽ đợi Codex đóng để bảo vệ công việc đang làm. Tự mở lại Codex sẽ được bật sau khi kiểm chứng trên Windows." TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}" Opacity="0.72" />
                                 </StackPanel>
                             </Border>
                         </StackPanel>

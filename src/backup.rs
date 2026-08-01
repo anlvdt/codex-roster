@@ -12,6 +12,11 @@ use crate::model::{DisplayIdentity, SnapshotBlob};
 const BACKUP_SCHEMA_VERSION: u32 = 1;
 const AUTOMATIC_BACKUP_KEY_SERVICE: &str = "com.codexroster.app";
 const AUTOMATIC_BACKUP_KEY_ACCOUNT: &str = "automatic-backup-key-v1";
+#[cfg(not(test))]
+const LOCAL_SNAPSHOT_KEY_ACCOUNT: &str = "local-snapshot-key-v1";
+const MAX_ENCRYPTED_BACKUP_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_DECRYPTED_BACKUP_BYTES: u64 = 96 * 1024 * 1024;
+pub const MAX_BACKUP_ACCOUNTS: usize = 100;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BackupBundle {
@@ -58,6 +63,11 @@ pub fn write_encrypted(path: &Path, bundle: &BackupBundle, password: &str) -> Re
 
 pub fn read_encrypted(path: &Path, password: &str) -> Result<BackupBundle> {
     ensure_password(password)?;
+    let metadata =
+        std::fs::metadata(path).with_context(|| format!("failed to inspect {}", path.display()))?;
+    if metadata.len() > MAX_ENCRYPTED_BACKUP_BYTES {
+        return Err(anyhow!("backup exceeds the allowed encrypted size"));
+    }
     let encrypted =
         std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     let decryptor = age::Decryptor::new(encrypted.as_slice())
@@ -71,8 +81,13 @@ pub fn read_encrypted(path: &Path, password: &str) -> Result<BackupBundle> {
         .context("could not decrypt backup; check the password")?;
     let mut plaintext = Vec::new();
     reader
+        .by_ref()
+        .take(MAX_DECRYPTED_BACKUP_BYTES + 1)
         .read_to_end(&mut plaintext)
         .context("failed to read decrypted backup")?;
+    if plaintext.len() as u64 > MAX_DECRYPTED_BACKUP_BYTES {
+        return Err(anyhow!("decrypted backup exceeds the allowed size"));
+    }
     let bundle: BackupBundle =
         serde_json::from_slice(&plaintext).context("backup contents are invalid")?;
     if bundle.schema_version != BACKUP_SCHEMA_VERSION {
@@ -80,6 +95,9 @@ pub fn read_encrypted(path: &Path, password: &str) -> Result<BackupBundle> {
             "backup schema version {} is not supported",
             bundle.schema_version
         ));
+    }
+    if bundle.accounts.len() > MAX_BACKUP_ACCOUNTS {
+        return Err(anyhow!("backup contains too many accounts"));
     }
     Ok(bundle)
 }
@@ -93,8 +111,22 @@ fn ensure_password(password: &str) -> Result<()> {
 }
 
 pub fn automatic_backup_password() -> Result<String> {
-    let entry = keyring::Entry::new(AUTOMATIC_BACKUP_KEY_SERVICE, AUTOMATIC_BACKUP_KEY_ACCOUNT)
-        .context("failed to access the automatic-backup key")?;
+    keyring_password(AUTOMATIC_BACKUP_KEY_ACCOUNT, "automatic-backup")
+}
+
+#[cfg(not(test))]
+pub fn local_snapshot_password() -> Result<String> {
+    keyring_password(LOCAL_SNAPSHOT_KEY_ACCOUNT, "local-snapshot")
+}
+
+#[cfg(test)]
+pub fn local_snapshot_password() -> Result<String> {
+    Ok("codex-roster-test-local-snapshot-key".to_owned())
+}
+
+fn keyring_password(account: &str, key_name: &str) -> Result<String> {
+    let entry = keyring::Entry::new(AUTOMATIC_BACKUP_KEY_SERVICE, account)
+        .with_context(|| format!("failed to access the {key_name} key"))?;
     match entry.get_password() {
         Ok(password) if !password.is_empty() => Ok(password),
         Ok(_) | Err(keyring::Error::NoEntry) => {
@@ -103,12 +135,14 @@ pub fn automatic_backup_password() -> Result<String> {
                 uuid::Uuid::new_v4().simple(),
                 uuid::Uuid::new_v4().simple()
             );
-            entry
-                .set_password(&password)
-                .context("failed to store the automatic-backup key in Keychain")?;
+            entry.set_password(&password).with_context(|| {
+                format!("failed to store the {key_name} key in the system credential store")
+            })?;
             Ok(password)
         }
-        Err(error) => Err(error).context("failed to read the automatic-backup key from Keychain"),
+        Err(error) => Err(error).with_context(|| {
+            format!("failed to read the {key_name} key from the system credential store")
+        }),
     }
 }
 

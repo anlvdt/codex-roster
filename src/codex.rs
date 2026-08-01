@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 #[cfg(test)]
@@ -14,6 +14,9 @@ use crate::identity::parse_identity_from_auth_json;
 use crate::model::{
     AUTH_FILES, DisplayIdentity, SNAPSHOT_SCHEMA_VERSION, SnapshotBlob, SnapshotFile,
 };
+
+const MAX_AUTH_FILE_BYTES: usize = 1024 * 1024;
+const MAX_AUTH_FILE_BASE64_BYTES: usize = (MAX_AUTH_FILE_BYTES * 4).div_ceil(3);
 
 #[derive(Clone, Debug)]
 pub struct LiveAuthBundle {
@@ -56,6 +59,7 @@ pub fn read_live_auth_bundle(env: &AppEnv) -> Result<LiveAuthBundle> {
 }
 
 pub fn identity_from_snapshot(snapshot: &SnapshotBlob) -> Result<DisplayIdentity> {
+    validate_snapshot(snapshot)?;
     let auth_file = snapshot
         .files
         .iter()
@@ -73,7 +77,7 @@ pub fn restore_snapshot(
     expected_identity: &DisplayIdentity,
     verify_stable: bool,
 ) -> Result<()> {
-    ensure_snapshot_complete(snapshot)?;
+    validate_snapshot(snapshot)?;
     fs::create_dir_all(&env.codex_root)
         .with_context(|| format!("failed to create {}", env.codex_root.display()))?;
     let backup_dir = env
@@ -82,10 +86,8 @@ pub fn restore_snapshot(
     let temp_dir = env
         .codex_root
         .join(format!(".cas-restore-{}", Uuid::new_v4()));
-    fs::create_dir_all(&backup_dir)
-        .with_context(|| format!("failed to create {}", backup_dir.display()))?;
-    fs::create_dir_all(&temp_dir)
-        .with_context(|| format!("failed to create {}", temp_dir.display()))?;
+    create_private_directory(&backup_dir)?;
+    create_private_directory(&temp_dir)?;
 
     if let Err(error) = stage_and_restore(&env.codex_root, &backup_dir, &temp_dir, snapshot) {
         let _ = restore_from_backup(&env.codex_root, &backup_dir);
@@ -142,11 +144,42 @@ pub fn verify_live_snapshot_stable(
     )
 }
 
-fn ensure_snapshot_complete(snapshot: &SnapshotBlob) -> Result<()> {
+pub fn validate_snapshot(snapshot: &SnapshotBlob) -> Result<()> {
+    if snapshot.schema_version != SNAPSHOT_SCHEMA_VERSION {
+        bail!(
+            "unsupported snapshot schema version {}; expected {}",
+            snapshot.schema_version,
+            SNAPSHOT_SCHEMA_VERSION
+        );
+    }
+    if snapshot.files.len() != AUTH_FILES.len() {
+        bail!("snapshot must contain exactly the managed auth files");
+    }
     for file_name in AUTH_FILES {
-        if !snapshot.files.iter().any(|file| file.name == file_name) {
-            return Err(anyhow!("snapshot missing managed auth file {file_name}"));
+        let matches = snapshot
+            .files
+            .iter()
+            .filter(|file| file.name == file_name)
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            bail!("snapshot must contain exactly one {file_name}");
         }
+        if matches[0].bytes_base64.len() > MAX_AUTH_FILE_BASE64_BYTES {
+            bail!("snapshot file {file_name} exceeds the allowed size");
+        }
+        let decoded = STANDARD
+            .decode(&matches[0].bytes_base64)
+            .with_context(|| format!("failed to decode snapshot file {file_name}"))?;
+        if decoded.len() > MAX_AUTH_FILE_BYTES {
+            bail!("snapshot file {file_name} exceeds the allowed size");
+        }
+    }
+    if let Some(unmanaged) = snapshot.files.iter().find(|file| {
+        !AUTH_FILES
+            .iter()
+            .any(|managed_name| *managed_name == file.name)
+    }) {
+        bail!("snapshot contains unmanaged file {:?}", unmanaged.name);
     }
     Ok(())
 }
@@ -162,8 +195,7 @@ fn stage_and_restore(
             .decode(&file.bytes_base64)
             .with_context(|| format!("failed to decode snapshot file {}", file.name))?;
         let temp_path = temp_dir.join(&file.name);
-        fs::write(&temp_path, decoded)
-            .with_context(|| format!("failed to stage {}", temp_path.display()))?;
+        write_private_staged_file(&temp_path, &decoded)?;
     }
 
     for file_name in AUTH_FILES {
@@ -177,6 +209,7 @@ fn stage_and_restore(
                     backup_path.display()
                 )
             })?;
+            set_private_file_permissions(&backup_path)?;
             fs::remove_file(&live_path)
                 .with_context(|| format!("failed to remove {}", live_path.display()))?;
         }
@@ -189,6 +222,56 @@ fn stage_and_restore(
             )
         })?;
     }
+    Ok(())
+}
+
+fn create_private_directory(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+            .with_context(|| format!("failed to create {}", path.display()))?;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("failed to protect {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
+    Ok(())
+}
+
+fn write_private_staged_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("failed to stage {}", path.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("failed to stage {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    fs::write(path, bytes).with_context(|| format!("failed to stage {}", path.display()))?;
+    Ok(())
+}
+
+fn set_private_file_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to protect {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -207,6 +290,10 @@ fn restore_from_backup(codex_root: &Path, backup_dir: &Path) -> Result<()> {
                     backup_path.display(),
                     live_path.display()
                 )
+            })?;
+        } else if live_path.exists() {
+            fs::remove_file(&live_path).with_context(|| {
+                format!("failed to remove newly restored {}", live_path.display())
             })?;
         }
     }
@@ -329,6 +416,50 @@ mod tests {
     }
 
     #[test]
+    fn rejects_snapshot_with_unmanaged_or_duplicate_files() {
+        let snapshot = SnapshotBlob {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            files: vec![
+                SnapshotFile {
+                    name: "auth.json".to_owned(),
+                    bytes_base64: STANDARD.encode(b"{}"),
+                },
+                SnapshotFile {
+                    name: "cap_sid".to_owned(),
+                    bytes_base64: STANDARD.encode(b"sid"),
+                },
+                SnapshotFile {
+                    name: "../../.zshrc".to_owned(),
+                    bytes_base64: STANDARD.encode(b"malicious"),
+                },
+            ],
+        };
+
+        let error = validate_snapshot(&snapshot).expect_err("unmanaged file must be rejected");
+
+        assert!(format!("{error:#}").contains("exactly the managed auth files"));
+    }
+
+    #[test]
+    fn accepts_exact_managed_snapshot_files() {
+        let snapshot = SnapshotBlob {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            files: vec![
+                SnapshotFile {
+                    name: "auth.json".to_owned(),
+                    bytes_base64: STANDARD.encode(b"{}"),
+                },
+                SnapshotFile {
+                    name: "cap_sid".to_owned(),
+                    bytes_base64: STANDARD.encode(b"sid"),
+                },
+            ],
+        };
+
+        validate_snapshot(&snapshot).expect("managed snapshot remains supported");
+    }
+
+    #[test]
     fn restore_verification_uses_case_insensitive_email_when_subject_missing() -> Result<()> {
         let temp = tempdir()?;
         let codex_root = temp.path().join(".codex");
@@ -352,6 +483,72 @@ mod tests {
             plan_label: bundle.identity.plan_label.clone(),
         };
         restore_snapshot(&env, &bundle.snapshot, &expected, false)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_removes_auth_files_that_were_absent_before_restore() -> Result<()> {
+        let temp = tempdir()?;
+        let codex_root = temp.path().join(".codex");
+        fs::create_dir_all(&codex_root)?;
+        let before_auth = auth_json_fixture("before@example.com", "sub-before", Some("plus"));
+        fs::write(codex_root.join("auth.json"), &before_auth)?;
+        let env = AppEnv {
+            kind: EnvironmentKind::Linux,
+            home_dir: temp.path().to_path_buf(),
+            codex_root: codex_root.clone(),
+            app_data_dir: temp.path().join("data"),
+        };
+        let snapshot = SnapshotBlob {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            files: vec![
+                SnapshotFile {
+                    name: "auth.json".to_owned(),
+                    bytes_base64: STANDARD.encode(auth_json_fixture(
+                        "after@example.com",
+                        "sub-after",
+                        Some("pro"),
+                    )),
+                },
+                SnapshotFile {
+                    name: "cap_sid".to_owned(),
+                    bytes_base64: STANDARD.encode(b"sid-after"),
+                },
+            ],
+        };
+        let expected = DisplayIdentity {
+            email: "before@example.com".to_owned(),
+            subject: Some("sub-before".to_owned()),
+            name: None,
+            plan_label: None,
+        };
+
+        restore_snapshot(&env, &snapshot, &expected, false).expect_err("identity mismatch");
+
+        assert!(!codex_root.join("cap_sid").exists());
+        assert_eq!(
+            fs::read_to_string(codex_root.join("auth.json"))?,
+            before_auth
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_helpers_keep_auth_material_private() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir()?;
+        let directory = temp.path().join(".cas-restore-test");
+        create_private_directory(&directory)?;
+        let file = directory.join("auth.json");
+        write_private_staged_file(&file, b"secret")?;
+
+        assert_eq!(
+            fs::metadata(&directory)?.permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(fs::metadata(&file)?.permissions().mode() & 0o777, 0o600);
         Ok(())
     }
 

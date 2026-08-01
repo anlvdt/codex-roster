@@ -50,3 +50,12 @@ public sealed class UsageWindowDto
     [JsonPropertyName("reset_at")]
     public DateTimeOffset ResetAt { get; init; }
 }
+
+public sealed class AutoSwitchOutput
+{
+    public bool Enabled { get; init; }
+    public string Status { get; init; } = string.Empty;
+    [JsonPropertyName("candidate_display_name")]
+    public string? CandidateDisplayName { get; init; }
+    public string? Detail { get; init; }
+}

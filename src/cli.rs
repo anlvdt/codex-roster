@@ -104,6 +104,18 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    AutoSwitch {
+        #[arg(long, conflicts_with_all = ["disable", "apply", "status"])]
+        enable: bool,
+        #[arg(long, conflicts_with_all = ["enable", "apply", "status"])]
+        disable: bool,
+        #[arg(long, conflicts_with = "status")]
+        apply: bool,
+        #[arg(long)]
+        status: bool,
+        #[arg(long)]
+        json: bool,
+    },
     RecoverLegacySnapshots {
         #[arg(long)]
         json: bool,
@@ -338,6 +350,43 @@ pub fn run() -> Result<()> {
                 print_json(&status)?;
             } else {
                 print_auto_start_usage_windows_status(&status);
+            }
+            Ok(())
+        }
+        Some(Command::AutoSwitch {
+            enable,
+            disable,
+            apply,
+            status,
+            json,
+        }) => {
+            let output = if enable {
+                app.set_auto_switch_when_exhausted(true)?
+            } else if disable {
+                app.set_auto_switch_when_exhausted(false)?
+            } else if status {
+                let enabled = app.auto_switch_enabled()?;
+                crate::model::AutoSwitchOutput {
+                    enabled,
+                    status: if enabled { "enabled" } else { "disabled" }.to_owned(),
+                    active_account_id: None,
+                    candidate_account_id: None,
+                    candidate_display_name: None,
+                    detail: None,
+                }
+            } else {
+                app.auto_switch(apply)?
+            };
+            if json {
+                print_json(&output)?;
+            } else {
+                println!("Auto-switch: {}", output.status);
+                if let Some(candidate) = output.candidate_display_name {
+                    println!("Candidate: {candidate}");
+                }
+                if let Some(detail) = output.detail {
+                    println!("Detail: {detail}");
+                }
             }
             Ok(())
         }

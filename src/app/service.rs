@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -6,13 +7,17 @@ use crate::backup::{read_encrypted, write_encrypted};
 use crate::codex;
 use crate::env::AppEnv;
 use crate::model::{
-    ActivateOutput, DeleteOutput, DisplayIdentity, LegacyRecoveryOutput, ListOutput,
-    RunningCodexProcess, SaveAction, SaveOutput, SnapshotBlob, StatusOutput,
-    TokenUsageSummaryOutput, UsageOutput, UsageSource,
+    AccountUsageView, AccountView, ActivateOutput, AutoSwitchOutput, DeleteOutput, DisplayIdentity,
+    LegacyRecoveryOutput, ListOutput, RunningCodexProcess, SaveAction, SaveOutput, SnapshotBlob,
+    StatusOutput, TokenUsageSummaryOutput, UsageOutput, UsageSource,
 };
+use crate::operation_lock::OperationLock;
 use crate::repository::SnapshotRepository;
 use crate::secrets::SecretStore;
-use crate::usage::{fetch_usage, usage_error_message, usage_target_from_snapshot};
+use crate::settings::{load_settings, save_settings};
+use crate::usage::{
+    fetch_usage, usage_error_message, usage_error_requires_login, usage_target_from_snapshot,
+};
 
 use super::{
     App, account_view, match_saved_account, saved_identity, should_verify_activation_stability,
@@ -48,7 +53,141 @@ where
         })
     }
 
+    pub fn auto_switch_enabled(&self) -> Result<bool> {
+        Ok(load_settings(&self.env.app_data_dir)?.auto_switch_when_exhausted)
+    }
+
+    pub fn set_auto_switch_when_exhausted(&self, enabled: bool) -> Result<AutoSwitchOutput> {
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        let mut settings = load_settings(&self.env.app_data_dir)?;
+        settings.auto_switch_when_exhausted = enabled;
+        if !enabled {
+            settings.last_auto_switch_at = None;
+            settings.last_auto_switch_target = None;
+        }
+        save_settings(&self.env.app_data_dir, &settings)?;
+        Ok(AutoSwitchOutput {
+            enabled,
+            status: if enabled { "enabled" } else { "disabled" }.to_owned(),
+            active_account_id: None,
+            candidate_account_id: None,
+            candidate_display_name: None,
+            detail: None,
+        })
+    }
+
+    pub fn auto_switch(&self, apply: bool) -> Result<AutoSwitchOutput> {
+        let enabled = self.auto_switch_enabled()?;
+        let _ = self.usage(None)?;
+        let active = self
+            .list()?
+            .accounts
+            .into_iter()
+            .find(|account| account.is_active);
+        let Some(active) = active else {
+            return Ok(auto_switch_output(
+                enabled,
+                "waiting_for_login",
+                None,
+                None,
+                None,
+                None,
+            ));
+        };
+        if !is_exhausted_for_switch(active.usage.as_ref()) {
+            return Ok(auto_switch_output(
+                enabled,
+                "active_has_quota",
+                Some(active.id),
+                None,
+                None,
+                None,
+            ));
+        }
+
+        let candidates = self.repository.list_accounts(&self.env.kind)?;
+        let mut refreshed_candidate_ids = HashSet::new();
+        for candidate in candidates.iter().filter(|candidate| {
+            candidate.id != active.id
+                && !candidate.archived
+                && !candidate
+                    .cached_usage_error
+                    .as_deref()
+                    .is_some_and(usage_error_requires_login)
+        }) {
+            if self.usage(Some(candidate.id)).is_ok() {
+                refreshed_candidate_ids.insert(candidate.id);
+            }
+        }
+
+        let settings = load_settings(&self.env.app_data_dir)?;
+        let now = time::OffsetDateTime::now_utc();
+        let candidate = self
+            .list()?
+            .accounts
+            .into_iter()
+            .filter(|candidate| {
+                candidate.id != active.id
+                    && !candidate.archived
+                    && !candidate
+                        .usage_error
+                        .as_deref()
+                        .is_some_and(usage_error_requires_login)
+                    && is_usable_for_switch(candidate.usage.as_ref())
+                    && refreshed_candidate_ids.contains(&candidate.id)
+                    && !is_in_auto_switch_cooldown(&settings, candidate.id, now)
+            })
+            .max_by_key(|candidate| switch_quota_score(candidate.usage.as_ref()));
+
+        let Some(candidate) = candidate else {
+            return Ok(auto_switch_output(
+                enabled,
+                "all_accounts_exhausted",
+                Some(active.id),
+                None,
+                None,
+                Some("No eligible saved account has fresh usable quota.".to_owned()),
+            ));
+        };
+        if !apply {
+            return Ok(auto_switch_output(
+                enabled,
+                "ready",
+                Some(active.id),
+                Some(candidate.id),
+                Some(account_display_name(&candidate)),
+                None,
+            ));
+        }
+        let warnings = self.activation_preflight_warnings();
+        if !warnings.is_empty() {
+            return Ok(auto_switch_output(
+                enabled,
+                "waiting_for_processes",
+                Some(active.id),
+                Some(candidate.id),
+                Some(account_display_name(&candidate)),
+                Some("Close Codex and ChatGPT before automatic switching.".to_owned()),
+            ));
+        }
+        self.activate_if_active_matches(candidate.id, active.id)?;
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        let mut settings = load_settings(&self.env.app_data_dir)?;
+        settings.last_auto_switch_at = Some(now);
+        settings.last_auto_switch_target = Some(candidate.id);
+        save_settings(&self.env.app_data_dir, &settings)?;
+        Ok(auto_switch_output(
+            enabled,
+            "switched",
+            Some(active.id),
+            Some(candidate.id),
+            Some(account_display_name(&candidate)),
+            None,
+        ))
+    }
+
     pub fn recover_legacy_snapshots(&self) -> Result<LegacyRecoveryOutput> {
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         let legacy_data_dir = self
             .env
             .home_dir
@@ -80,6 +219,7 @@ where
     }
 
     pub fn save_current(&self) -> Result<SaveOutput> {
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         let live = codex::read_live_auth_bundle(&self.env).with_context(|| {
             format!(
                 "no live Codex auth bundle found at {}",
@@ -113,8 +253,37 @@ where
         account_id: Uuid,
         force_running: bool,
     ) -> Result<ActivateOutput> {
-        let warnings = crate::process::detect_running_codex_processes();
+        self.activate_with_expected_active(account_id, force_running, None)
+    }
+
+    fn activate_if_active_matches(
+        &self,
+        account_id: Uuid,
+        expected_active_id: Uuid,
+    ) -> Result<ActivateOutput> {
+        self.activate_with_expected_active(account_id, false, Some(expected_active_id))
+    }
+
+    fn activate_with_expected_active(
+        &self,
+        account_id: Uuid,
+        force_running: bool,
+        expected_active_id: Option<Uuid>,
+    ) -> Result<ActivateOutput> {
         self.refresh_current_saved_account_before_activation();
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        if let Some(expected_active_id) = expected_active_id {
+            let accounts = self.repository.list_accounts(&self.env.kind)?;
+            let live = codex::try_read_live_auth_bundle(&self.env)?;
+            let active_id = live
+                .as_ref()
+                .and_then(|bundle| match_saved_account(&accounts, &bundle.identity))
+                .map(|account| account.id);
+            if active_id != Some(expected_active_id) {
+                anyhow::bail!("automatic switch was superseded because the active account changed");
+            }
+        }
+        let warnings = crate::process::detect_running_codex_processes();
         let (snapshot, snapshot_identity, restore_identity) =
             self.load_activation_target(account_id)?;
         let verify_stable = should_verify_activation_stability(force_running, &warnings);
@@ -188,18 +357,21 @@ where
     }
 
     pub fn set_account_label(&self, account_id: Uuid, custom_label: Option<String>) -> Result<()> {
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         self.repository
             .set_custom_label(&self.env.kind, account_id, custom_label)?;
         Ok(())
     }
 
     pub fn set_account_archived(&self, account_id: Uuid, archived: bool) -> Result<()> {
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         self.repository
             .set_archived(&self.env.kind, account_id, archived)?;
         Ok(())
     }
 
     pub fn export_backup(&self, path: &std::path::Path, password: &str) -> Result<usize> {
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         let backup = self.repository.export_backup(&self.env.kind)?;
         let count = backup.accounts.len();
         write_encrypted(path, &backup, password)?;
@@ -207,23 +379,28 @@ where
     }
 
     pub fn import_backup(&self, path: &std::path::Path, password: &str) -> Result<(usize, usize)> {
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         self.repository
             .import_backup(&self.env.kind, read_encrypted(path, password)?)
     }
 
     pub fn restore_latest_account_list_backup(&self) -> Result<usize> {
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         self.repository.restore_latest_account_list_backup()
     }
 
     pub fn restore_latest_full_backup(&self) -> Result<usize> {
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         self.repository.restore_latest_full_backup(&self.env.kind)
     }
 
     pub fn create_automatic_full_backup(&self) -> Result<usize> {
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         self.repository.create_automatic_full_backup(&self.env.kind)
     }
 
     pub fn usage(&self, account_id: Option<Uuid>) -> Result<UsageOutput> {
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         match account_id {
             Some(account_id) => {
                 let (snapshot, _, _) = self.load_activation_target(account_id)?;
@@ -317,6 +494,7 @@ where
     }
 
     pub fn delete(&self, account_id: Uuid) -> Result<DeleteOutput> {
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         self.repository
             .delete_snapshot(&self.env.kind, account_id)?;
         Ok(DeleteOutput {
@@ -335,6 +513,70 @@ fn live_bundle_still_matches_snapshot(env: &AppEnv, snapshot: &SnapshotBlob) -> 
         }
     }
     false
+}
+
+fn auto_switch_output(
+    enabled: bool,
+    status: &str,
+    active_account_id: Option<Uuid>,
+    candidate_account_id: Option<Uuid>,
+    candidate_display_name: Option<String>,
+    detail: Option<String>,
+) -> AutoSwitchOutput {
+    AutoSwitchOutput {
+        enabled,
+        status: status.to_owned(),
+        active_account_id,
+        candidate_account_id,
+        candidate_display_name,
+        detail,
+    }
+}
+
+fn quota_windows(
+    usage: Option<&AccountUsageView>,
+) -> impl Iterator<Item = &crate::model::UsageWindowView> {
+    usage
+        .into_iter()
+        .flat_map(|usage| [usage.weekly.as_ref(), usage.five_hour.as_ref()])
+        .flatten()
+}
+
+fn is_exhausted_for_switch(usage: Option<&AccountUsageView>) -> bool {
+    quota_windows(usage).any(|window| window.remaining_percent == 0)
+}
+
+fn is_usable_for_switch(usage: Option<&AccountUsageView>) -> bool {
+    let windows = quota_windows(usage).collect::<Vec<_>>();
+    !windows.is_empty() && windows.iter().all(|window| window.remaining_percent > 0)
+}
+
+fn switch_quota_score(usage: Option<&AccountUsageView>) -> u8 {
+    quota_windows(usage)
+        .map(|window| window.remaining_percent)
+        .min()
+        .unwrap_or_default()
+}
+
+fn is_in_auto_switch_cooldown(
+    settings: &crate::settings::AppSettings,
+    candidate_id: Uuid,
+    now: time::OffsetDateTime,
+) -> bool {
+    settings.last_auto_switch_target == Some(candidate_id)
+        && settings
+            .last_auto_switch_at
+            .is_some_and(|last_switch| now - last_switch < time::Duration::minutes(5))
+}
+
+fn account_display_name(account: &AccountView) -> String {
+    account
+        .custom_label
+        .as_deref()
+        .filter(|label| !label.is_empty())
+        .or(account.name.as_deref().filter(|name| !name.is_empty()))
+        .unwrap_or(&account.email)
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -387,6 +629,28 @@ mod tests {
         let output = app.list().expect("list");
         assert_eq!(output.accounts.len(), 1);
         assert!(output.accounts[0].is_active);
+    }
+
+    #[test]
+    fn auto_switch_requires_every_reported_window_to_be_usable() {
+        let usage = AccountUsageView {
+            source: UsageSource::SavedAccessToken,
+            fetched_at: OffsetDateTime::now_utc(),
+            five_hour: Some(UsageWindowView {
+                used_percent: 100,
+                remaining_percent: 0,
+                reset_at: OffsetDateTime::now_utc(),
+            }),
+            weekly: Some(UsageWindowView {
+                used_percent: 10,
+                remaining_percent: 90,
+                reset_at: OffsetDateTime::now_utc(),
+            }),
+            credits: None,
+        };
+
+        assert!(is_exhausted_for_switch(Some(&usage)));
+        assert!(!is_usable_for_switch(Some(&usage)));
     }
 
     #[test]

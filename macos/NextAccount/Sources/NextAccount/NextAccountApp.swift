@@ -502,7 +502,7 @@ private struct DashboardView: View {
                             set: { store.setAutoSwitchWhenExhausted($0) }
                         ))
                         .disabled(store.isWorking)
-                        Text(language.text("Khi tài khoản hiện tại còn 0%, app sẽ tìm tài khoản đã lưu còn quota rồi chuyển và mở lại ChatGPT. Nếu tất cả đều hết quota, app giữ nguyên trạng thái.", "When the current account reaches 0%, the app finds a saved account with quota, switches it, and relaunches ChatGPT. If every account is exhausted, nothing is changed."))
+                        Text(language.text("Khi tài khoản hiện tại còn 0%, app sẽ tìm tài khoản đã lưu còn quota rồi chuyển an toàn. Nếu ChatGPT/Codex đang chạy, thao tác sẽ được hoãn để bảo vệ công việc; app không tự đóng tiến trình.", "When the current account reaches 0%, the app finds a saved account with quota and switches safely. If ChatGPT/Codex is running, the switch is deferred to protect active work; the app never force-closes processes."))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         if let autoSwitchState = store.autoSwitchState {
@@ -627,9 +627,11 @@ private struct DashboardView: View {
         switch state {
         case .waitingForLogin:
             language.text("Tự động chuyển đang tạm dừng trong khi bạn đăng nhập.", "Auto-switch is paused while you sign in.")
-        case .allAccountsExhausted:
-            language.text("Tất cả tài khoản đã hết quota; tự động chuyển sẽ thử lại sau.", "All accounts are out of quota; auto-switch will try again later.")
-        case .switched(let name):
+                case .allAccountsExhausted:
+                    language.text("Tất cả tài khoản đã hết quota; tự động chuyển sẽ thử lại sau.", "All accounts are out of quota; auto-switch will try again later.")
+                case .waitingForProcesses:
+                    language.text("Codex hoặc ChatGPT chưa đóng xong; tự động chuyển được hoãn để bảo vệ công việc đang làm.", "Codex or ChatGPT is still closing; auto-switch was deferred to protect active work.")
+                case .switched(let name):
             language.text("Đã tự động chuyển sang \(name).", "Automatically switched to \(name).")
         case .checkFailed:
             language.text("Không thể kiểm tra quota để tự động chuyển.", "Could not check quota for auto-switch.")
@@ -1727,19 +1729,21 @@ private struct MenuBarView: View {
     @State private var accountForActivation: SavedAccount?
 
     private var quickSwitchAccounts: [SavedAccount] {
-        readyAccounts
+        switchableAccounts
             .filter { !$0.isActive && !$0.requiresLogin }
             .sortedByWeeklyQuota()
             .prefix(3)
             .map { $0 }
     }
 
-    private var readyAccounts: [SavedAccount] {
-        store.accounts.filter { !store.isArchived($0) && !$0.requiresLogin }
+    private var switchableAccounts: [SavedAccount] {
+        store.accounts.filter {
+            !store.isArchived($0) && !$0.requiresLogin && $0.isUsableForSwitch
+        }
     }
 
     private var hiddenQuickSwitchCount: Int {
-        max(0, readyAccounts.filter { !$0.isActive }.count - quickSwitchAccounts.count)
+        max(0, switchableAccounts.filter { !$0.isActive }.count - quickSwitchAccounts.count)
     }
 
     private var attentionCount: Int {
@@ -1754,6 +1758,10 @@ private struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 12) {
             MenuBarHeader(savedCount: store.accounts.count, attentionCount: attentionCount)
 
+            if store.isWorking || store.errorMessage != nil || store.autoSwitchState != nil {
+                MenuBarOperationStatus()
+            }
+
             MenuBarServiceHealth()
 
             MenuBarCurrentSession(account: activeAccount, email: store.status?.currentAccount?.email)
@@ -1763,13 +1771,13 @@ private struct MenuBarView: View {
                     Text(language.text("Chuyển nhanh", "Quick switch"))
                         .font(.subheadline.weight(.semibold))
                     Spacer()
-                    Text(language.text("\(readyAccounts.filter { !$0.isActive }.count) khả dụng", "\(readyAccounts.filter { !$0.isActive }.count) available"))
+                    Text(language.text("\(switchableAccounts.filter { !$0.isActive }.count) có quota", "\(switchableAccounts.filter { !$0.isActive }.count) with quota"))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
 
                 if quickSwitchAccounts.isEmpty {
-                    Text(language.text("Chưa có tài khoản khác sẵn sàng để chuyển.", "No other saved account is ready to switch."))
+                    Text(language.text("Chưa có tài khoản khác có quota khả dụng để chuyển.", "No other saved account has quota available to switch."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 8)
@@ -1940,6 +1948,73 @@ private struct MenuBarServiceHealth: View {
             .padding(.vertical, 7)
             .background((status.isOperational ? Color.green : Color.orange).opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
         }
+    }
+}
+
+private struct MenuBarOperationStatus: View {
+    @EnvironmentObject private var store: AccountStore
+    @EnvironmentObject private var language: LanguageStore
+
+    private var message: String {
+        if store.isWorking {
+            return store.isCheckingAutoSwitch
+                ? language.text("Đang kiểm tra quota…", "Checking quota…")
+                : language.text("Đang cập nhật…", "Updating…")
+        }
+        if store.errorMessage != nil {
+            return language.text("Cập nhật thất bại", "Update failed")
+        }
+        guard let state = store.autoSwitchState else { return "" }
+        switch state {
+        case .waitingForLogin:
+            return language.text("Tự động chuyển tạm dừng khi đang đăng nhập", "Auto-switch paused while signing in")
+        case .allAccountsExhausted:
+            return language.text("Tất cả tài khoản đều hết quota", "All accounts are out of quota")
+        case .waitingForProcesses:
+            return language.text("Đang chờ ChatGPT/Codex đóng an toàn", "Waiting for ChatGPT/Codex to close safely")
+        case .switched(let name):
+            return language.text("Đã chuyển sang \(name)", "Switched to \(name)")
+        case .checkFailed:
+            return language.text("Không thể kiểm tra quota", "Quota check failed")
+        }
+    }
+
+    private var tint: Color {
+        if store.isWorking { return .secondary }
+        if store.errorMessage != nil { return .orange }
+        switch store.autoSwitchState {
+        case .some(.switched): return .green
+        case .some(.waitingForLogin), .some(.allAccountsExhausted), .some(.waitingForProcesses), .some(.checkFailed): return .orange
+        case .none: return .secondary
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if store.isWorking {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Image(systemName: store.errorMessage == nil ? "info.circle.fill" : "exclamationmark.triangle.fill")
+            }
+            Text(message)
+                .font(.caption.weight(.medium))
+                .lineLimit(2)
+            Spacer(minLength: 4)
+            if store.errorMessage != nil {
+                Button {
+                    store.errorMessage = nil
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+                .help(language.text("Đóng thông báo", "Dismiss"))
+            }
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
     }
 }
 

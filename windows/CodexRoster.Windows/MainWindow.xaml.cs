@@ -49,4 +49,9 @@ public sealed partial class MainWindow : Window
     {
         await ViewModel.SetAutoQuotaRefreshAsync();
     }
+
+    private async void AutoSwitchWhenExhausted_Toggled(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.SetAutoSwitchWhenExhaustedAsync();
+    }
 }

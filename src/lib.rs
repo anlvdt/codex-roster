@@ -10,6 +10,7 @@ pub mod file_store;
 pub mod identity;
 pub mod model;
 pub mod openai_status;
+pub mod operation_lock;
 pub mod process;
 pub mod repository;
 pub mod reset_tracker;

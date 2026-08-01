@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -9,12 +10,12 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::backup::{
-    BackupAccount, BackupBundle, automatic_backup_password, newest_automatic_backup,
-    read_encrypted, write_encrypted,
+    BackupAccount, BackupBundle, MAX_BACKUP_ACCOUNTS, automatic_backup_password,
+    newest_automatic_backup, read_encrypted, write_encrypted,
 };
 use crate::model::{
-    AccountUsageView, AiProvider, DisplayIdentity, EnvironmentKind, SavedAccountMetadata,
-    SnapshotBlob,
+    AccountUsageView, AiProvider, DisplayIdentity, EnvironmentKind, METADATA_SCHEMA_VERSION,
+    MetadataIndex, SavedAccountMetadata, SnapshotBlob,
 };
 use crate::secrets::{LocalSecretStore, SecretStore};
 use crate::usage::usage_error_requires_login;
@@ -25,6 +26,19 @@ pub struct SnapshotRepository<S> {
     data_dir: PathBuf,
     index_store: MetadataIndexStore,
     secret_store: S,
+}
+
+struct PreparedBackupImport {
+    index: MetadataIndex,
+    snapshots: Vec<PreparedSnapshot>,
+    created: usize,
+    updated: usize,
+}
+
+struct PreparedSnapshot {
+    secret_key: String,
+    encoded_snapshot: Vec<u8>,
+    previous_value: Option<Vec<u8>>,
 }
 
 impl<S> SnapshotRepository<S>
@@ -333,20 +347,10 @@ where
         environment: &EnvironmentKind,
         backup: BackupBundle,
     ) -> Result<(usize, usize)> {
-        let mut created = 0;
-        let mut updated = 0;
-        for account in backup.accounts {
-            let (metadata, was_created) =
-                self.save_snapshot(environment, &account.identity, &account.snapshot)?;
-            self.set_custom_label(environment, metadata.id, account.custom_label)?;
-            self.set_archived(environment, metadata.id, account.archived)?;
-            if was_created {
-                created += 1;
-            } else {
-                updated += 1;
-            }
-        }
-        Ok((created, updated))
+        let prepared = self.prepare_backup_import(environment, backup, false)?;
+        self.apply_backup_import(&prepared)?;
+        let _ = self.write_automatic_full_backup(environment);
+        Ok((prepared.created, prepared.updated))
     }
 
     pub fn restore_latest_account_list_backup(&self) -> Result<usize> {
@@ -360,13 +364,170 @@ where
             &password,
         )?;
         let count = backup.accounts.len();
-        self.index_store.save_index(&crate::model::MetadataIndex {
-            schema_version: crate::model::METADATA_SCHEMA_VERSION,
-            write_generation: 0,
-            accounts: Vec::new(),
-        })?;
-        let _ = self.import_backup(environment, backup)?;
+        let previous_index = self.index_store.load_index()?;
+        let prepared = self.prepare_backup_import(environment, backup, true)?;
+        self.apply_backup_import(&prepared)?;
+        let retained_keys = prepared
+            .index
+            .accounts
+            .iter()
+            .map(|account| account.secret_key.as_str())
+            .collect::<HashSet<_>>();
+        for removed in previous_index.accounts.iter().filter(|account| {
+            &account.environment == environment
+                && !retained_keys.contains(account.secret_key.as_str())
+        }) {
+            let _ = self.secret_store.delete(&removed.secret_key);
+        }
+        let _ = self.write_automatic_full_backup(environment);
         Ok(count)
+    }
+
+    fn prepare_backup_import(
+        &self,
+        environment: &EnvironmentKind,
+        backup: BackupBundle,
+        replace_environment: bool,
+    ) -> Result<PreparedBackupImport> {
+        if backup.accounts.len() > MAX_BACKUP_ACCOUNTS {
+            return Err(anyhow!("backup contains too many accounts"));
+        }
+        let current = self.index_store.load_index()?;
+        let mut index = if replace_environment {
+            MetadataIndex {
+                schema_version: METADATA_SCHEMA_VERSION,
+                write_generation: current.write_generation,
+                accounts: current
+                    .accounts
+                    .iter()
+                    .filter(|account| &account.environment != environment)
+                    .cloned()
+                    .collect(),
+            }
+        } else {
+            current.clone()
+        };
+        let now = OffsetDateTime::now_utc();
+        let mut seen_identities = HashSet::new();
+        let mut snapshots = Vec::with_capacity(backup.accounts.len());
+        let mut created = 0;
+        let mut updated = 0;
+
+        for account in backup.accounts {
+            crate::codex::validate_snapshot(&account.snapshot)
+                .context("backup contains an invalid account snapshot")?;
+            let snapshot_identity = crate::codex::identity_from_snapshot(&account.snapshot)
+                .context("backup snapshot identity is invalid")?;
+            if !backup_identity_matches_snapshot(&account.identity, &snapshot_identity) {
+                return Err(anyhow!(
+                    "backup metadata identity does not match its authentication snapshot"
+                ));
+            }
+            let identity_key = snapshot_identity
+                .subject
+                .as_deref()
+                .map(|subject| format!("subject:{subject}"))
+                .unwrap_or_else(|| {
+                    format!("email:{}", snapshot_identity.email.to_ascii_lowercase())
+                });
+            if !seen_identities.insert(identity_key) {
+                return Err(anyhow!("backup contains duplicate account identities"));
+            }
+            let encoded_snapshot = encode_snapshot(&account.snapshot)?;
+            let position = index.accounts.iter().position(|saved| {
+                &saved.environment == environment
+                    && DisplayIdentity {
+                        email: saved.email.clone(),
+                        subject: saved.subject.clone(),
+                        name: saved.name.clone(),
+                        plan_label: saved.plan_label.clone(),
+                    }
+                    .matches(&snapshot_identity)
+            });
+            let metadata = if let Some(position) = position {
+                let saved = &mut index.accounts[position];
+                saved.email = snapshot_identity.email.clone();
+                saved.subject = snapshot_identity.subject.clone();
+                saved.name = snapshot_identity.name.clone();
+                saved.plan_label = snapshot_identity.plan_label.clone();
+                saved.custom_label = account
+                    .custom_label
+                    .filter(|label| !label.trim().is_empty());
+                saved.archived = account.archived;
+                saved.cached_usage = None;
+                saved.cached_usage_error = None;
+                saved.updated_at = now;
+                updated += 1;
+                saved.clone()
+            } else {
+                let id = Uuid::new_v4();
+                let metadata = SavedAccountMetadata {
+                    id,
+                    environment: environment.clone(),
+                    provider: AiProvider::OpenAi,
+                    email: snapshot_identity.email.clone(),
+                    subject: snapshot_identity.subject.clone(),
+                    name: snapshot_identity.name.clone(),
+                    custom_label: account
+                        .custom_label
+                        .filter(|label| !label.trim().is_empty()),
+                    plan_label: snapshot_identity.plan_label.clone(),
+                    secret_key: format!("snapshot:{id}"),
+                    created_at: now,
+                    updated_at: now,
+                    last_activated_at: None,
+                    archived: account.archived,
+                    cached_usage: None,
+                    cached_usage_error: None,
+                };
+                index.accounts.push(metadata.clone());
+                created += 1;
+                metadata
+            };
+            snapshots.push(PreparedSnapshot {
+                previous_value: self.secret_store.load(&metadata.secret_key)?,
+                secret_key: metadata.secret_key,
+                encoded_snapshot,
+            });
+        }
+        Ok(PreparedBackupImport {
+            index,
+            snapshots,
+            created,
+            updated,
+        })
+    }
+
+    fn apply_backup_import(&self, prepared: &PreparedBackupImport) -> Result<()> {
+        let mut written = Vec::with_capacity(prepared.snapshots.len());
+        for snapshot in &prepared.snapshots {
+            if let Err(error) = self
+                .secret_store
+                .save(&snapshot.secret_key, &snapshot.encoded_snapshot)
+            {
+                self.restore_prepared_snapshots(&written);
+                return Err(error).context("failed to persist imported snapshot data");
+            }
+            written.push(snapshot);
+        }
+        if let Err(error) = self.index_store.save_index(&prepared.index) {
+            self.restore_prepared_snapshots(&written);
+            return Err(error).context("failed to persist imported roster metadata");
+        }
+        Ok(())
+    }
+
+    fn restore_prepared_snapshots(&self, snapshots: &[&PreparedSnapshot]) {
+        for snapshot in snapshots.iter().rev() {
+            match snapshot.previous_value.as_deref() {
+                Some(value) => {
+                    let _ = self.secret_store.save(&snapshot.secret_key, value);
+                }
+                None => {
+                    let _ = self.secret_store.delete(&snapshot.secret_key);
+                }
+            }
+        }
     }
 
     pub fn create_automatic_full_backup(&self, environment: &EnvironmentKind) -> Result<usize> {
@@ -496,6 +657,17 @@ where
     }
 }
 
+fn backup_identity_matches_snapshot(
+    metadata: &DisplayIdentity,
+    snapshot: &DisplayIdentity,
+) -> bool {
+    metadata.email.eq_ignore_ascii_case(&snapshot.email)
+        && metadata
+            .subject
+            .as_ref()
+            .is_none_or(|subject| snapshot.subject.as_ref() == Some(subject))
+}
+
 #[cfg(test)]
 impl<S> SnapshotRepository<S>
 where
@@ -511,10 +683,12 @@ mod tests {
     use std::fs;
 
     use anyhow::{Result, anyhow};
+    use base64::Engine;
     use tempfile::tempdir;
     use time::Duration;
 
     use super::*;
+    use crate::codex::auth_json_fixture;
     use crate::model::{METADATA_SCHEMA_VERSION, MetadataIndex};
     use crate::repository::codec::SNAPSHOT_ENCODING_V1_MAGIC;
     use crate::secrets::{SecretStore, test_support::MemorySecretStore};
@@ -525,6 +699,23 @@ mod tests {
             subject: Some(subject.to_owned()),
             name: Some("Tester".to_owned()),
             plan_label: Some("Pro".to_owned()),
+        }
+    }
+
+    fn valid_snapshot(email: &str, subject: &str) -> SnapshotBlob {
+        SnapshotBlob {
+            schema_version: 1,
+            files: vec![
+                crate::model::SnapshotFile {
+                    name: "auth.json".to_owned(),
+                    bytes_base64: base64::engine::general_purpose::STANDARD
+                        .encode(auth_json_fixture(email, subject, Some("pro"))),
+                },
+                crate::model::SnapshotFile {
+                    name: "cap_sid".to_owned(),
+                    bytes_base64: base64::engine::general_purpose::STANDARD.encode("sid"),
+                },
+            ],
         }
     }
 
@@ -561,6 +752,105 @@ mod tests {
         assert!(!created);
         assert_eq!(first.id, second.id);
         assert_eq!(second.email, "person2@example.com");
+    }
+
+    #[test]
+    fn import_rejects_backup_snapshot_with_unmanaged_file() {
+        let temp = tempdir().expect("tempdir");
+        let repo = SnapshotRepository::new(temp.path(), MemorySecretStore::default());
+        let backup = BackupBundle::new(vec![BackupAccount {
+            identity: identity("person@example.com", "sub-1"),
+            custom_label: None,
+            archived: false,
+            snapshot: SnapshotBlob {
+                schema_version: 1,
+                files: vec![
+                    crate::model::SnapshotFile {
+                        name: "auth.json".to_owned(),
+                        bytes_base64: "e30=".to_owned(),
+                    },
+                    crate::model::SnapshotFile {
+                        name: "cap_sid".to_owned(),
+                        bytes_base64: "c2lk".to_owned(),
+                    },
+                    crate::model::SnapshotFile {
+                        name: "/tmp/unmanaged".to_owned(),
+                        bytes_base64: "bWFsaWNpb3Vz".to_owned(),
+                    },
+                ],
+            },
+        }]);
+
+        let error = repo
+            .import_backup(&EnvironmentKind::Macos, backup)
+            .expect_err("unmanaged backup file must be rejected");
+
+        assert!(format!("{error:#}").contains("invalid account snapshot"));
+        assert!(
+            repo.list_accounts(&EnvironmentKind::Macos)
+                .expect("list")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn import_validates_every_account_before_mutating_the_roster() {
+        let temp = tempdir().expect("tempdir");
+        let repo = SnapshotRepository::new(temp.path(), MemorySecretStore::default());
+        let environment = EnvironmentKind::Macos;
+        repo.save_snapshot(
+            &environment,
+            &identity("existing@example.com", "existing"),
+            &valid_snapshot("existing@example.com", "existing"),
+        )
+        .expect("seed roster");
+        let backup = BackupBundle::new(vec![
+            BackupAccount {
+                identity: identity("valid@example.com", "valid"),
+                custom_label: None,
+                archived: false,
+                snapshot: valid_snapshot("valid@example.com", "valid"),
+            },
+            BackupAccount {
+                identity: identity("invalid@example.com", "invalid"),
+                custom_label: None,
+                archived: false,
+                snapshot: SnapshotBlob {
+                    schema_version: 1,
+                    files: vec![],
+                },
+            },
+        ]);
+
+        repo.import_backup(&environment, backup)
+            .expect_err("invalid later account must reject the whole import");
+
+        let accounts = repo.list_accounts(&environment).expect("list roster");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].email, "existing@example.com");
+    }
+
+    #[test]
+    fn import_rejects_metadata_that_does_not_match_the_snapshot_identity() {
+        let temp = tempdir().expect("tempdir");
+        let repo = SnapshotRepository::new(temp.path(), MemorySecretStore::default());
+        let backup = BackupBundle::new(vec![BackupAccount {
+            identity: identity("metadata@example.com", "metadata"),
+            custom_label: None,
+            archived: false,
+            snapshot: valid_snapshot("snapshot@example.com", "snapshot"),
+        }]);
+
+        let error = repo
+            .import_backup(&EnvironmentKind::Macos, backup)
+            .expect_err("mismatched backup metadata must be rejected");
+
+        assert!(format!("{error:#}").contains("metadata identity"));
+        assert!(
+            repo.list_accounts(&EnvironmentKind::Macos)
+                .expect("list roster")
+                .is_empty()
+        );
     }
 
     #[derive(Clone, Default)]

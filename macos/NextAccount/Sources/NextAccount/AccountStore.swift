@@ -26,7 +26,7 @@ final class AccountStore: ObservableObject {
     private let cli = AccountHubCLI()
     private let archivedAccountsMigrationKeys = ["codexRoster.archivedAccountIDs", "accountHub.archivedAccountIDs"]
     private var legacyArchivedAccountIDs: Set<UUID>
-    private let autoSwitchWhenExhaustedKey = "codexRoster.autoSwitchWhenExhausted"
+    private let legacyAutoSwitchWhenExhaustedKey = "codexRoster.autoSwitchWhenExhausted"
     private let activeQuotaPollInterval: Duration = .seconds(60)
     private var autoSwitchTask: Task<Void, Never>?
     private var quotaRefreshTask: Task<Void, Never>?
@@ -40,7 +40,7 @@ final class AccountStore: ObservableObject {
                 .flatMap { defaults.stringArray(forKey: $0) ?? [] }
                 .compactMap(UUID.init(uuidString:))
         )
-        autoSwitchWhenExhausted = defaults.bool(forKey: autoSwitchWhenExhaustedKey)
+        autoSwitchWhenExhausted = false
         launchAtLoginEnabled = LaunchAtLogin.isEnabled
     }
 
@@ -95,7 +95,7 @@ final class AccountStore: ObservableObject {
     func activate(_ account: SavedAccount, force: Bool = false) {
         run {
             if force {
-                try await ChatGPTDesktop.prepareForAccountSwitch()
+                try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
             }
             var arguments = ["activate", account.id.uuidString, "--json"]
             if force { arguments.append("--force") }
@@ -143,12 +143,14 @@ final class AccountStore: ObservableObject {
     }
 
     func setAutoSwitchWhenExhausted(_ enabled: Bool) {
-        autoSwitchWhenExhausted = enabled
-        UserDefaults.standard.set(enabled, forKey: autoSwitchWhenExhaustedKey)
-        autoSwitchState = nil
-        autoSwitchAllExhaustedNotified = false
-        if enabled {
-            Task { await checkAutoSwitchWhenExhausted() }
+        run {
+            _ = try await self.cli.data(arguments: ["auto-switch", enabled ? "--enable" : "--disable", "--json"])
+            self.autoSwitchWhenExhausted = enabled
+            self.autoSwitchState = nil
+            self.autoSwitchAllExhaustedNotified = false
+            if enabled {
+                await self.checkAutoSwitchWhenExhausted()
+            }
         }
     }
 
@@ -296,7 +298,8 @@ final class AccountStore: ObservableObject {
         async let status: StatusOutput = cli.decode(StatusOutput.self, arguments: ["status"])
         async let accounts: AccountListOutput = cli.decode(AccountListOutput.self, arguments: ["list"])
         async let settings: AutoStartUsageWindowsStatus = cli.decode(AutoStartUsageWindowsStatus.self, arguments: ["auto-start-usage-windows"])
-        let (loadedStatus, loadedAccounts, loadedSettings) = try await (status, accounts, settings)
+        async let autoSwitch: AutoSwitchOutput = cli.decode(AutoSwitchOutput.self, arguments: ["auto-switch", "--status"])
+        let (loadedStatus, loadedAccounts, loadedSettings, loadedAutoSwitch) = try await (status, accounts, settings, autoSwitch)
         self.status = loadedStatus
         self.accounts = loadedAccounts.accounts
         let pendingLegacyArchives = legacyArchivedAccountIDs.intersection(Set(loadedAccounts.accounts.map(\.id)))
@@ -311,6 +314,15 @@ final class AccountStore: ObservableObject {
             self.accounts = try await cli.decode(AccountListOutput.self, arguments: ["list"]).accounts
         }
         self.autoStartUsageWindows = loadedSettings.enabled
+        if !loadedAutoSwitch.enabled,
+           UserDefaults.standard.object(forKey: legacyAutoSwitchWhenExhaustedKey) != nil,
+           UserDefaults.standard.bool(forKey: legacyAutoSwitchWhenExhaustedKey) {
+            _ = try await cli.data(arguments: ["auto-switch", "--enable", "--json"])
+            UserDefaults.standard.removeObject(forKey: legacyAutoSwitchWhenExhaustedKey)
+            self.autoSwitchWhenExhausted = true
+        } else {
+            self.autoSwitchWhenExhausted = loadedAutoSwitch.enabled
+        }
     }
 
     private func checkAutoSwitchWhenExhausted() async {
@@ -326,46 +338,32 @@ final class AccountStore: ObservableObject {
             return
         }
         do {
-            _ = try await cli.data(arguments: ["usage", "--json"])
-            try await load()
-            guard let active = accounts.first(where: \.isActive),
-                  active.isExhaustedForSwitch else {
+            let decision: AutoSwitchOutput = try await cli.decode(AutoSwitchOutput.self, arguments: ["auto-switch"])
+            switch decision.status {
+            case "active_has_quota":
                 autoSwitchAllExhaustedNotified = false
                 autoSwitchState = nil
-                return
-            }
-
-            var refreshedCandidateIDs = Set<UUID>()
-            for account in accounts where account.id != active.id && !isArchived(account) && !account.requiresLogin {
-                if (try? await cli.data(arguments: ["usage", account.id.uuidString, "--json"])) != nil {
-                    refreshedCandidateIDs.insert(account.id)
-                }
-            }
-            try await load()
-
-            guard let replacement = accounts
-                .filter({ $0.id != active.id && !isArchived($0) && !$0.requiresLogin })
-                .filter({ refreshedCandidateIDs.contains($0.id) && $0.isUsableForSwitch })
-                .sorted(by: {
-                    if $0.switchQuotaScore != $1.switchQuotaScore {
-                        return $0.switchQuotaScore > $1.switchQuotaScore
-                    }
-                    return $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
-                })
-                .first else {
+            case "waiting_for_login":
+                autoSwitchState = .waitingForLogin
+            case "all_accounts_exhausted":
                 if !autoSwitchAllExhaustedNotified {
                     autoSwitchState = .allAccountsExhausted
                     autoSwitchAllExhaustedNotified = true
                 }
-                return
+            case "ready":
+                try await ChatGPTDesktop.prepareForAccountSwitch()
+                let applied: AutoSwitchOutput = try await cli.decode(AutoSwitchOutput.self, arguments: ["auto-switch", "--apply"])
+                guard applied.status == "switched" else {
+                    autoSwitchState = applied.status == "waiting_for_processes" ? .waitingForProcesses : .checkFailed
+                    return
+                }
+                try await load()
+                try await ChatGPTDesktop.launch()
+                autoSwitchState = .switched(applied.candidateDisplayName ?? "tài khoản khác")
+                autoSwitchAllExhaustedNotified = false
+            default:
+                autoSwitchState = .checkFailed
             }
-
-            try await ChatGPTDesktop.prepareForAccountSwitch()
-            _ = try await cli.data(arguments: ["activate", replacement.id.uuidString, "--force", "--json"])
-            try await load()
-            try await ChatGPTDesktop.launch()
-            autoSwitchState = .switched(replacement.displayName)
-            autoSwitchAllExhaustedNotified = false
         } catch {
             autoSwitchState = .checkFailed
         }
@@ -409,6 +407,7 @@ final class AccountStore: ObservableObject {
 enum AutoSwitchState: Equatable {
     case waitingForLogin
     case allAccountsExhausted
+    case waitingForProcesses
     case switched(String)
     case checkFailed
 }
@@ -440,6 +439,7 @@ private struct AccountHubCLI {
 
     private static func run(arguments: [String], standardInput: String? = nil) throws -> Data {
         let process = Process()
+        let completed = DispatchSemaphore(value: 0)
         let output = Pipe()
         let error = Pipe()
         let input = standardInput.map { _ in Pipe() }
@@ -464,19 +464,57 @@ private struct AccountHubCLI {
             process.arguments = ["codex-roster"] + arguments
         }
 
+        process.terminationHandler = { _ in completed.signal() }
         try process.run()
+        let captures = DispatchGroup()
+        let outputCapture = PipeCapture()
+        let errorCapture = PipeCapture()
+        captures.enter()
+        DispatchQueue.global(qos: .utility).async {
+            outputCapture.read(from: output.fileHandleForReading)
+            captures.leave()
+        }
+        captures.enter()
+        DispatchQueue.global(qos: .utility).async {
+            errorCapture.read(from: error.fileHandleForReading)
+            captures.leave()
+        }
         if let standardInput, let input {
             input.fileHandleForWriting.write(Data(standardInput.utf8))
             try? input.fileHandleForWriting.close()
         }
-        process.waitUntilExit()
-        let outputData = output.fileHandleForReading.readDataToEndOfFile()
+        if completed.wait(timeout: .now() + 120) == .timedOut {
+            process.terminate()
+            _ = completed.wait(timeout: .now() + 5)
+            captures.wait()
+            throw CLIError("Codex Roster did not finish within two minutes.")
+        }
+        captures.wait()
+        let outputData = outputCapture.data
         guard process.terminationStatus == 0 else {
-            let errorData = error.fileHandleForReading.readDataToEndOfFile()
+            let errorData = errorCapture.data
             let detail = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
             throw CLIError(detail?.isEmpty == false ? detail! : "The Codex Roster command failed.")
         }
         return outputData
+    }
+}
+
+private final class PipeCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var captured = Data()
+
+    var data: Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return captured
+    }
+
+    func read(from handle: FileHandle) {
+        let value = handle.readDataToEndOfFile()
+        lock.lock()
+        captured = value
+        lock.unlock()
     }
 }
 
@@ -532,22 +570,33 @@ private enum CodexLoginLauncher {
 }
 
 private enum ChatGPTDesktop {
-    private static let bundleIdentifier = "com.openai.codex"
+    private static let bundleIdentifiers = ["com.openai.codex", "com.openai.chat"]
 
-    static func prepareForAccountSwitch() async throws {
-        let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+    static func prepareForAccountSwitch(force: Bool = false) async throws {
+        let runningApps = bundleIdentifiers.flatMap(NSRunningApplication.runningApplications(withBundleIdentifier:))
+        guard !runningApps.isEmpty else { return }
+        guard force else {
+            throw CLIError("Codex hoặc ChatGPT đang chạy. Tự động chuyển đã được hoãn để tránh mất công việc.")
+        }
         for app in runningApps {
             app.terminate()
         }
-        try? await Task.sleep(for: .milliseconds(900))
-        for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier) {
+        try? await Task.sleep(for: .seconds(2))
+        let remainingApps = bundleIdentifiers.flatMap(NSRunningApplication.runningApplications(withBundleIdentifier:))
+        guard !remainingApps.isEmpty else { return }
+        for app in remainingApps {
             app.forceTerminate()
         }
-        try? await Task.sleep(for: .milliseconds(350))
+        try? await Task.sleep(for: .seconds(1))
+        if !bundleIdentifiers.flatMap(NSRunningApplication.runningApplications(withBundleIdentifier:)).isEmpty {
+            throw CLIError("Không thể đóng hoàn toàn Codex hoặc ChatGPT trước khi chuyển tài khoản.")
+        }
     }
 
     static func launch() async throws {
-        let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier)
+        let appURL = bundleIdentifiers.lazy
+            .compactMap(NSWorkspace.shared.urlForApplication(withBundleIdentifier:))
+            .first
             ?? ["/Applications/ChatGPT.app", "/Applications/Codex.app"]
                 .map(URL.init(fileURLWithPath:))
                 .first(where: { FileManager.default.fileExists(atPath: $0.path) })
@@ -790,6 +839,12 @@ struct RustDate: Decodable {
 
 struct AutoStartUsageWindowsStatus: Decodable {
     let enabled: Bool
+}
+
+struct AutoSwitchOutput: Decodable {
+    let enabled: Bool
+    let status: String
+    let candidateDisplayName: String?
 }
 
 enum AIProvider: String, CaseIterable, Identifiable {

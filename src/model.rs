@@ -211,6 +211,16 @@ pub struct AutoStartUsageWindowsRunOutput {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct AutoSwitchOutput {
+    pub enabled: bool,
+    pub status: String,
+    pub active_account_id: Option<Uuid>,
+    pub candidate_account_id: Option<Uuid>,
+    pub candidate_display_name: Option<String>,
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct AutoStartUsageWindowAccountResult {
     pub account_id: Uuid,
     pub email: String,

@@ -2148,6 +2148,10 @@ private struct AboutView: View {
     @EnvironmentObject private var language: LanguageStore
     @Environment(\.openURL) private var openURL
 
+    private var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.1"
+    }
+
     private let authorURL = URL(string: "https://github.com/anlvdt")!
     private let foundationURL = URL(string: "https://github.com/Pimpmuckl/codex-account-switcher")!
     private let codexBarURL = URL(string: "https://github.com/steipete/CodexBar")!
@@ -2170,7 +2174,7 @@ private struct AboutView: View {
                             .font(.title.weight(.bold))
                         Text(language.text("Quản lý tài khoản ChatGPT dùng với Codex", "ChatGPT account manager for Codex"))
                             .foregroundStyle(.secondary)
-                        Text(language.text("Phiên bản", "Version") + " 0.2.0")
+                        Text(language.text("Phiên bản", "Version") + " " + appVersion)
                             .font(.caption)
                             .foregroundStyle(.tertiary)
                     }

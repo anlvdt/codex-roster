@@ -90,8 +90,14 @@ struct CodexRosterApp: App {
             CommandGroup(after: .toolbar) {
                 Button(language.text("Làm mới", "Refresh")) { store.refresh() }
                     .keyboardShortcut("r", modifiers: .command)
-                Button(language.text("Cập nhật quota", "Refresh quota")) { store.refreshUsage() }
-                    .keyboardShortcut("u", modifiers: [.command, .shift])
+                Button(language.text("Cập nhật quota đang dùng", "Refresh active quota")) {
+                    store.refreshUsage(scope: .activeOnly)
+                }
+                .keyboardShortcut("u", modifiers: [.command, .shift])
+                Button(language.text("Cập nhật quota tất cả", "Refresh all quotas")) {
+                    store.refreshUsage(scope: .allSaved)
+                }
+                .keyboardShortcut("u", modifiers: [.command, .shift, .option])
             }
         }
 
@@ -232,7 +238,10 @@ struct ContentView: View {
             }
             Button(language.text("Hủy", "Cancel"), role: .cancel) { accountForActivation = nil }
         } message: {
-            Text(language.text("Thao tác này sẽ đóng ChatGPT/Codex, chuyển sang tài khoản đã chọn rồi mở lại ChatGPT. Hãy lưu công việc đang làm trước khi tiếp tục.", "This closes ChatGPT/Codex, switches to the selected account, then relaunches ChatGPT. Save active work before continuing."))
+            Text(language.text(
+                "Thao tác này sẽ thoát ChatGPT/Codex (thoát nhẹ, rồi force nếu cần), chuyển phiên ~/.codex, rồi mở lại Desktop để khớp tài khoản đã chọn. Hãy lưu công việc trước khi tiếp tục.",
+                "This quits ChatGPT/Codex (soft quit, then force if needed), switches the ~/.codex session, then relaunches Desktop to match the selected account. Save your work before continuing."
+            ))
         }
         .confirmationDialog(
             language.text("Xóa tài khoản đã lưu?", "Remove saved account?"),
@@ -311,6 +320,28 @@ private struct AccountSidebar: View {
         .navigationTitle("Codex Roster")
         .searchable(text: $searchText, prompt: language.text("Tìm tài khoản", "Search accounts"))
         .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 340)
+        .safeAreaInset(edge: .top) {
+            HStack(spacing: 8) {
+                Label(language.text("Sắp xếp", "Sort"), systemImage: "arrow.up.arrow.down")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Picker("", selection: Binding(
+                    get: { store.accountSortMode },
+                    set: { store.setAccountSortMode($0) }
+                )) {
+                    ForEach(AccountSortMode.allCases) { mode in
+                        Text(mode.title(in: language.language)).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.bar)
+        }
         .safeAreaInset(edge: .bottom) {
             Button(action: openAboutWindow) {
                 Label(language.text("Giới thiệu", "About"), systemImage: "heart.text.square")
@@ -349,8 +380,8 @@ private struct AccountSidebar: View {
     @ViewBuilder
     private func providerSection(_ provider: AIProvider) -> some View {
         let providerAccounts = accounts(for: provider)
-        let readyAccounts = providerAccounts.filter { !$0.requiresLogin }.sortedByWeeklyQuota()
-        let attentionAccounts = providerAccounts.filter(\.requiresLogin).sortedByWeeklyQuota()
+        let readyAccounts = store.sortedAccounts(providerAccounts.filter { !$0.requiresLogin })
+        let attentionAccounts = store.sortedAccounts(providerAccounts.filter(\.requiresLogin))
         Section {
             if providerAccounts.isEmpty {
                 ProviderEmptyRow(provider: provider)
@@ -409,7 +440,7 @@ private struct AccountSidebar: View {
 
     @ViewBuilder
     private var archivedSection: some View {
-        let archivedAccounts = store.accounts.filter(store.isArchived).sortedByWeeklyQuota()
+        let archivedAccounts = store.sortedAccounts(store.accounts.filter(store.isArchived))
         if !archivedAccounts.isEmpty {
             Section {
                 DisclosureGroup(isExpanded: $expandedArchived) {
@@ -473,11 +504,11 @@ private struct DashboardView: View {
     @State private var confirmingFullBackupRestore = false
 
     private var readyAccounts: [SavedAccount] {
-        store.accounts.filter { !store.isArchived($0) && !$0.requiresLogin }.sortedByWeeklyQuota()
+        store.sortedAccounts(store.accounts.filter { !store.isArchived($0) && !$0.requiresLogin })
     }
 
     private var attentionAccounts: [SavedAccount] {
-        store.accounts.filter { !store.isArchived($0) && $0.requiresLogin }.sortedByWeeklyQuota()
+        store.sortedAccounts(store.accounts.filter { !store.isArchived($0) && $0.requiresLogin })
     }
 
     var body: some View {
@@ -545,7 +576,10 @@ private struct DashboardView: View {
                             set: { store.setAutoSwitchWhenExhausted($0) }
                         ))
                         .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
-                        Text(language.text("Khi tài khoản hiện tại còn 0%, app sẽ tìm tài khoản đã lưu còn quota rồi chuyển an toàn. Nếu ChatGPT/Codex đang chạy, thao tác sẽ được hoãn để bảo vệ công việc; app không tự đóng tiến trình.", "When the current account reaches 0%, the app finds a saved account with quota and switches safely. If ChatGPT/Codex is running, the switch is deferred to protect active work; the app never force-closes processes."))
+                        Text(language.text(
+                            "Khi tài khoản Codex (~/.codex) còn 0%: tìm tài khoản còn quota → thoát ChatGPT (nhẹ rồi force nếu cần) → chuyển phiên → mở lại Desktop và xác nhận app đã chạy. Nhãn phiên theo ~/.codex, không đọc cookie đăng nhập riêng trong ChatGPT.",
+                            "When the Codex account (~/.codex) hits 0%: find an account with quota → quit ChatGPT (soft, then force if needed) → switch session → relaunch Desktop and confirm it is running. The session label follows ~/.codex and does not read a separate ChatGPT cookie login."
+                        ))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         if let autoSwitchState = store.autoSwitchState {
@@ -694,15 +728,21 @@ private struct DashboardView: View {
     private func autoSwitchStatusText(_ state: AutoSwitchState) -> String {
         switch state {
         case .waitingForLogin:
-            language.text("Tự động chuyển đang tạm dừng trong khi bạn đăng nhập.", "Auto-switch is paused while you sign in.")
-                case .allAccountsExhausted:
-                    language.text("Tất cả tài khoản đã hết quota; tự động chuyển sẽ thử lại sau.", "All accounts are out of quota; auto-switch will try again later.")
-                case .waitingForProcesses:
-                    language.text("Codex hoặc ChatGPT chưa đóng xong; tự động chuyển được hoãn để bảo vệ công việc đang làm.", "Codex or ChatGPT is still closing; auto-switch was deferred to protect active work.")
-                case .switched(let name):
-            language.text("Đã tự động chuyển sang \(name).", "Automatically switched to \(name).")
+            language.text("Tự động chuyển tạm dừng trong khi bạn đăng nhập.", "Auto-switch is paused while you sign in.")
+        case .allAccountsExhausted:
+            language.text("Tất cả tài khoản đã hết quota; tự động chuyển sẽ thử lại sau.", "All accounts are out of quota; auto-switch will try again later.")
+        case .closingDesktop:
+            language.text("Đang đóng ChatGPT/Codex trước khi chuyển tài khoản hết quota…", "Closing ChatGPT/Codex before switching the exhausted account…")
+        case .switchingAccount:
+            language.text("Đang chuyển phiên ~/.codex sang tài khoản còn quota…", "Switching the ~/.codex session to an account with quota…")
+        case .relaunchingDesktop:
+            language.text("Đang mở lại ChatGPT để khớp phiên Codex vừa chuyển…", "Relaunching ChatGPT to match the switched Codex session…")
+        case .waitingForProcesses:
+            language.text("Không đóng được ChatGPT/Codex; hãy đóng thủ công rồi bấm Kiểm tra & chuyển.", "Could not quit ChatGPT/Codex; quit it manually, then tap Check & switch.")
+        case .switched(let name):
+            language.text("Đã tự động chuyển sang \(name) và mở lại ChatGPT.", "Automatically switched to \(name) and relaunched ChatGPT.")
         case .checkFailed:
-            language.text("Không thể kiểm tra quota để tự động chuyển.", "Could not check quota for auto-switch.")
+            language.text("Không thể kiểm tra/chuyển quota tự động. Thử Kiểm tra & chuyển.", "Could not auto-check/switch quota. Try Check & switch.")
         }
     }
 }
@@ -736,13 +776,16 @@ private struct DashboardHero: View {
             Spacer(minLength: 8)
 
             VStack(alignment: .leading, spacing: 8) {
-                Label(language.text("Đang dùng", "In use"), systemImage: "person.crop.circle.fill")
+                Label(language.text("Phiên Codex", "Codex session"), systemImage: "person.crop.circle.fill")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.tint)
                 Text(currentAccount ?? language.text("Chưa đăng nhập", "Not signed in"))
                     .font(.body.weight(.semibold))
                     .lineLimit(2)
                     .textSelection(.enabled)
+                Text(language.text("Theo ~/.codex · khớp ChatGPT sau khi mở lại", "From ~/.codex · matches ChatGPT after relaunch"))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
                 if let firstAttention = attentionAccounts.first {
                     Button(language.text("Đăng nhập lại \(attentionAccounts.count) tài khoản", "Sign in again for \(attentionAccounts.count) accounts")) {
                         selection = firstAttention.id
@@ -1435,7 +1478,7 @@ private struct ProviderStatusRow: View {
     }
 
     private var readyAccounts: [SavedAccount] {
-        accounts.filter { !$0.requiresLogin }.sortedByWeeklyQuota()
+        store.sortedAccounts(accounts.filter { !$0.requiresLogin })
     }
 
     private var attentionCount: Int {
@@ -1506,7 +1549,7 @@ private struct ProviderStatusRow: View {
                 .controlSize(.small)
                 if provider == .openAI {
                     Button(language.text("Cập nhật", "Refresh")) {
-                        store.refreshUsage()
+                        store.refreshUsage(scope: .activeOnly)
                     }
                     .controlSize(.small)
                     .disabled(store.isWorking)
@@ -1966,11 +2009,10 @@ private struct MenuBarView: View {
     @State private var accountForActivation: SavedAccount?
 
     private var quickSwitchAccounts: [SavedAccount] {
-        switchableAccounts
-            .filter { !$0.isActive && !$0.requiresLogin }
-            .sortedByWeeklyQuota()
-            .prefix(3)
-            .map { $0 }
+        Array(
+            store.sortedAccounts(switchableAccounts.filter { !$0.isActive && !$0.requiresLogin })
+                .prefix(5)
+        )
     }
 
     private var switchableAccounts: [SavedAccount] {
@@ -2001,7 +2043,11 @@ private struct MenuBarView: View {
 
             MenuBarServiceHealth()
 
-            MenuBarCurrentSession(account: activeAccount, email: store.status?.currentAccount?.email)
+            MenuBarCurrentSession(
+                account: activeAccount,
+                email: store.status?.currentAccount?.email,
+                chatGPTRunning: store.hasRunningCodexProcesses
+            )
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
@@ -2084,6 +2130,10 @@ private struct MenuBarView: View {
             .padding(.vertical, 3)
             .menuBarInteractive()
             .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
+            .help(language.text(
+                "Hết quota: đóng ChatGPT (thoát nhẹ rồi force nếu cần), chuyển ~/.codex, rồi mở lại Desktop.",
+                "When exhausted: quit ChatGPT (soft then force if needed), switch ~/.codex, then relaunch Desktop."
+            ))
 
             Divider()
                 .padding(.top, 4)
@@ -2135,7 +2185,10 @@ private struct MenuBarView: View {
             }
             Button(language.text("Hủy", "Cancel"), role: .cancel) { accountForActivation = nil }
         } message: {
-            Text(language.text("Thao tác này sẽ đóng ChatGPT/Codex, chuyển sang tài khoản đã chọn rồi mở lại ChatGPT. Hãy lưu công việc đang làm trước khi tiếp tục.", "This closes ChatGPT/Codex, switches to the selected account, then relaunches ChatGPT. Save active work before continuing."))
+            Text(language.text(
+                "Thao tác này sẽ thoát ChatGPT/Codex (thoát nhẹ, rồi force nếu cần), chuyển phiên ~/.codex, rồi mở lại Desktop để khớp tài khoản đã chọn. Hãy lưu công việc trước khi tiếp tục.",
+                "This quits ChatGPT/Codex (soft quit, then force if needed), switches the ~/.codex session, then relaunches Desktop to match the selected account. Save your work before continuing."
+            ))
         }
         .onAppear {
             store.refreshAccountsInBackground()
@@ -2235,12 +2288,18 @@ private struct MenuBarOperationStatus: View {
             return language.text("Tự động chuyển tạm dừng khi đang đăng nhập", "Auto-switch paused while signing in")
         case .allAccountsExhausted:
             return language.text("Tất cả tài khoản đều hết quota", "All accounts are out of quota")
+        case .closingDesktop:
+            return language.text("Đang đóng ChatGPT để tự chuyển…", "Closing ChatGPT to auto-switch…")
+        case .switchingAccount:
+            return language.text("Đang chuyển phiên Codex…", "Switching Codex session…")
+        case .relaunchingDesktop:
+            return language.text("Đang mở lại ChatGPT…", "Relaunching ChatGPT…")
         case .waitingForProcesses:
-            return language.text("Đang chờ ChatGPT/Codex đóng an toàn", "Waiting for ChatGPT/Codex to close safely")
+            return language.text("Không đóng được ChatGPT — đóng thủ công", "Could not quit ChatGPT — quit manually")
         case .switched(let name):
             return language.text("Đã chuyển sang \(name)", "Switched to \(name)")
         case .checkFailed:
-            return language.text("Không thể kiểm tra quota", "Quota check failed")
+            return language.text("Không thể kiểm tra/chuyển quota", "Quota check/switch failed")
         }
     }
 
@@ -2249,6 +2308,7 @@ private struct MenuBarOperationStatus: View {
         if store.errorMessage != nil { return .orange }
         switch store.autoSwitchState {
         case .some(.switched): return .green
+        case .some(.closingDesktop), .some(.switchingAccount), .some(.relaunchingDesktop): return .secondary
         case .some(.waitingForLogin), .some(.allAccountsExhausted), .some(.waitingForProcesses), .some(.checkFailed): return .orange
         case .none: return .secondary
         }
@@ -2317,42 +2377,83 @@ private struct MenuBarHeader: View {
 }
 
 private struct MenuBarCurrentSession: View {
+    @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     let account: SavedAccount?
     let email: String?
+    let chatGPTRunning: Bool
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: account == nil ? "person.crop.circle.badge.questionmark" : "checkmark.circle.fill")
-                .font(.title3)
-                .foregroundStyle(account == nil ? Color.secondary : Color.green)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(language.text("Đang dùng", "In use"))
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Text(account?.displayName ?? email ?? language.text("Chưa đăng nhập", "Not signed in"))
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-                if let account, account.displayName != account.email {
-                    Text(account.email)
-                        .font(.caption)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: account == nil ? "person.crop.circle.badge.questionmark" : "checkmark.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(account == nil ? Color.secondary : Color.green)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(language.text("Phiên Codex (~/.codex)", "Codex session (~/.codex)"))
+                        .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
+                    Text(account?.displayName ?? email ?? language.text("Chưa đăng nhập", "Not signed in"))
+                        .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
+                    if let account, account.displayName != account.email {
+                        Text(account.email)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 4)
+                if let emailToCopy = account?.email ?? email {
+                    Button {
+                        copyAccountEmail(emailToCopy)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .buttonStyle(.plain)
+                    .help(language.text("Sao chép email", "Copy email"))
+                    .menuBarInteractive()
+                }
+                if let quota = account?.primaryQuotaWindow {
+                    MenuBarQuota(window: quota)
                 }
             }
-            Spacer(minLength: 4)
-            if let emailToCopy = account?.email ?? email {
+            if chatGPTRunning {
                 Button {
-                    copyAccountEmail(emailToCopy)
+                    store.resyncChatGPTDesktop()
                 } label: {
-                    Image(systemName: "doc.on.doc")
+                    Label(
+                        language.text("Mở lại ChatGPT theo phiên này", "Relaunch ChatGPT with this session"),
+                        systemImage: "arrow.triangle.2.circlepath"
+                    )
+                    .font(.caption.weight(.semibold))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(rosterActionBlue.opacity(0.14), in: RoundedRectangle(cornerRadius: 8))
                 }
                 .buttonStyle(.plain)
-                .help(language.text("Sao chép email", "Copy email"))
+                .foregroundStyle(rosterActionBlue)
+                .disabled(store.isBusyForActions)
+                .menuBarInteractive(cornerRadius: 8)
+                .help(language.text(
+                    "Đóng rồi mở lại ChatGPT để giao diện khớp phiên Codex hiện tại.",
+                    "Quit and reopen ChatGPT so the UI matches the current Codex session."
+                ))
+            } else {
+                Button {
+                    store.resyncChatGPTDesktop()
+                } label: {
+                    Label(
+                        language.text("Mở ChatGPT theo phiên này", "Open ChatGPT with this session"),
+                        systemImage: "play.fill"
+                    )
+                    .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(rosterActionBlue)
+                .disabled(store.isBusyForActions)
                 .menuBarInteractive()
-            }
-            if let quota = account?.primaryQuotaWindow {
-                MenuBarQuota(window: quota)
             }
         }
         .padding(11)
@@ -2363,6 +2464,10 @@ private struct MenuBarCurrentSession: View {
                     copyAccountEmail(emailToCopy)
                 }
             }
+            Button(language.text("Mở lại ChatGPT theo phiên này", "Relaunch ChatGPT with this session")) {
+                store.resyncChatGPTDesktop()
+            }
+            .disabled(store.isBusyForActions)
         }
     }
 }
@@ -2436,7 +2541,7 @@ private struct AboutView: View {
     @Environment(\.openURL) private var openURL
 
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.1"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.2"
     }
 
     private let authorURL = URL(string: "https://github.com/anlvdt")!
@@ -2521,12 +2626,13 @@ private struct AboutView: View {
                     AboutFeatureGroup(title: language.text("Tài khoản & phiên", "Accounts & sessions")) {
                         AboutBullet(icon: "person.badge.plus", text: language.text("Mở đăng nhập thiết bị OpenAI, sau đó lưu phiên Codex đang dùng mà không đọc mật khẩu, mã xác thực hoặc cookie trình duyệt.", "Open OpenAI device sign-in, then save the active Codex session without reading passwords, verification codes, or browser cookies."))
                         AboutBullet(icon: "pencil", text: language.text("Đặt tên, sửa, tìm kiếm, lưu trữ, khôi phục và xóa từng tài khoản đã lưu.", "Label, edit, search, archive, restore, and remove each saved account."))
-                        AboutBullet(icon: "sidebar.left", text: language.text("Nhóm tài khoản sẵn sàng/cần đăng nhập, sắp xếp theo quota và hiển thị phần trăm trực tiếp ở sidebar.", "Group ready/needs-sign-in accounts, sort by quota, and show the percentage directly in the sidebar."))
+                        AboutBullet(icon: "sidebar.left", text: language.text("Nhóm sẵn sàng/cần đăng nhập; sắp xếp theo gói, quota, tên hoặc email; sao chép email nhanh.", "Group ready/needs-sign-in accounts; sort by plan, quota, name, or email; copy email quickly."))
                     }
                     AboutFeatureGroup(title: language.text("Quota & chuyển tài khoản", "Quota & switching")) {
                         AboutBullet(icon: "gauge.with.dots.needle.50percent", text: language.text("Theo dõi quota Codex, thời điểm reset và gói ChatGPT; làm mới tài khoản đang dùng mỗi phút hoặc kiểm tra toàn bộ theo yêu cầu.", "Track Codex quota, reset timing, and ChatGPT plan; refresh the active account every minute or check every account on demand."))
-                        AboutBullet(icon: "arrow.left.arrow.right.circle", text: language.text("Chuyển nhanh từ menu bar; tự động chọn tài khoản còn quota khi tài khoản hiện tại hết quota nếu bạn bật công tắc.", "Quick-switch from the menu bar; optionally choose a saved account with usable quota when the active one is exhausted."))
-                        AboutBullet(icon: "arrow.triangle.2.circlepath", text: language.text("Đóng rồi mở lại Codex/ChatGPT sau khi bạn xác nhận chuyển tài khoản; không chuyển vòng lặp khi mọi tài khoản đều hết quota.", "Close and relaunch Codex/ChatGPT after you confirm a switch; never loops when every account is exhausted."))
+                        AboutBullet(icon: "arrow.left.arrow.right.circle", text: language.text("Chuyển nhanh từ menu bar; sắp xếp theo gói ChatGPT (Pro/Plus/Free) và quota còn lại.", "Quick-switch from the menu bar; sort by ChatGPT plan (Pro/Plus/Free) and remaining quota."))
+                        AboutBullet(icon: "arrow.triangle.2.circlepath", text: language.text("Tự động chuyển khi hết quota (tùy chọn): đóng ChatGPT nếu cần, đổi phiên ~/.codex, rồi mở lại Desktop để khớp Roster; không lặp khi mọi tài khoản đều hết quota.", "Optional auto-switch when exhausted: close ChatGPT if needed, switch ~/.codex, then relaunch Desktop to match Roster; never loops when every account is exhausted."))
+                        AboutBullet(icon: "arrow.clockwise.icloud", text: language.text("Nút “Mở lại ChatGPT theo phiên này” đóng rồi mở Desktop để khớp ~/.codex ngay.", "“Relaunch ChatGPT with this session” quits and reopens Desktop to match ~/.codex immediately."))
                     }
                     AboutFeatureGroup(title: language.text("Theo dõi & sao lưu", "Monitoring & backup")) {
                         AboutBullet(icon: "chart.bar.xaxis", text: language.text("Thống kê token cục bộ theo ngày, 7 ngày, 30 ngày và 12 tháng từ session logs.", "Read local session logs for token totals by day, 7 days, 30 days, and 12 months."))
@@ -2664,22 +2770,3 @@ private func copyAccountEmail(_ email: String) {
     NSPasteboard.general.setString(email, forType: .string)
 }
 
-private extension Array where Element == SavedAccount {
-    func sortedByWeeklyQuota() -> [SavedAccount] {
-        sorted { left, right in
-            let leftQuota = left.primaryQuotaWindow?.remainingPercent ?? -1
-            let rightQuota = right.primaryQuotaWindow?.remainingPercent ?? -1
-            if leftQuota != rightQuota { return leftQuota > rightQuota }
-            return left.displayName.localizedCaseInsensitiveCompare(right.displayName) == .orderedAscending
-        }
-    }
-
-    func sortedBySwitchQuota() -> [SavedAccount] {
-        sorted { left, right in
-            if left.switchQuotaScore != right.switchQuotaScore {
-                return left.switchQuotaScore > right.switchQuotaScore
-            }
-            return left.displayName.localizedCaseInsensitiveCompare(right.displayName) == .orderedAscending
-        }
-    }
-}

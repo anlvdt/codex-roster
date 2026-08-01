@@ -55,6 +55,8 @@ public sealed class AutoSwitchOutput
 {
     public bool Enabled { get; init; }
     public string Status { get; init; } = string.Empty;
+    [JsonPropertyName("candidate_account_id")]
+    public Guid? CandidateAccountId { get; init; }
     [JsonPropertyName("candidate_display_name")]
     public string? CandidateDisplayName { get; init; }
     public string? Detail { get; init; }

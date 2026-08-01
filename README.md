@@ -21,7 +21,9 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
 
 `GPT Free`, `GPT Plus`, and `GPT Pro` identify the ChatGPT plan. They do not imply a fixed Codex quota. Codex Roster displays the quota/reset windows returned for the signed-in account.
 
-**Auto-switch when quota is exhausted** is opt-in and shared by the macOS and Windows clients. It refreshes the active account and every candidate, then switches only when the active account is at `0%` and another saved account has usable quota in every reported window. It never chooses cached or stale candidate quota. The switch is deferred while Codex or ChatGPT is still running; automatic mode does not force-quit applications. If every account is exhausted, it leaves the current session untouched.
+**Auto-switch when quota is exhausted** is opt-in and shared by the macOS and Windows clients. It refreshes the active Codex account (`~/.codex`), prefers candidate quota cached within about 15 minutes, and revalidates the chosen candidate on apply (`--account-id`). It switches only when the active account is at `0%` and another saved account has usable quota in every reported window. On macOS, when ChatGPT/Codex Desktop is open, auto-switch closes it, applies the new `~/.codex` session, then relaunches Desktop so the UI matches Roster. Windows Preview still defers while Codex is running and does not relaunch. If every account is exhausted, it leaves the current session untouched.
+
+Account lists can be sorted by ChatGPT plan (Pro → Plus → Free), remaining quota, display name, or email. The menu bar shows up to five quick-switch candidates using the same sort order.
 
 ### Backup and recovery
 
@@ -110,7 +112,9 @@ swift build --package-path macos/NextAccount
 
 `GPT Free`, `GPT Plus`, `GPT Pro` là nhãn gói ChatGPT, không phải quota Codex cố định. Codex Roster hiển thị quota/thời điểm reset thực tế được trả về cho tài khoản đang đăng nhập.
 
-Chế độ **Tự động chuyển khi hết quota** là tùy chọn và dùng chung chính sách trên macOS/Windows. Ứng dụng làm mới tài khoản hiện tại và từng ứng viên, chỉ chuyển khi tài khoản hiện tại còn `0%` và ứng viên còn quota ở mọi cửa sổ được trả về. App không dùng quota cache cũ, không force-close Codex/ChatGPT: nếu app vẫn đang chạy thì tự động chuyển được hoãn để bảo vệ công việc. Nếu mọi tài khoản đều hết quota, phiên hiện tại không bị thay đổi.
+Chế độ **Tự động chuyển khi hết quota** là tùy chọn và dùng chung chính sách trên macOS/Windows. App theo dõi phiên Codex tại `~/.codex` (không đọc cookie đăng nhập riêng trong ChatGPT). Khi hết `0%`, macOS sẽ đóng ChatGPT/Codex nếu cần, chuyển phiên, rồi mở lại Desktop để khớp Roster. Windows Preview vẫn hoãn khi Codex đang chạy và chưa tự mở lại. Nếu mọi tài khoản đều hết quota, phiên hiện tại không bị thay đổi.
+
+Danh sách tài khoản có thể sắp xếp theo gói ChatGPT (Pro → Plus → Free), quota còn lại, tên hiển thị hoặc email. Menu bar hiện tối đa năm ứng viên chuyển nhanh theo cùng thứ tự sắp xếp.
 
 ### Sao lưu và khôi phục
 

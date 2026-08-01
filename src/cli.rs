@@ -114,6 +114,9 @@ enum Command {
         /// Optional candidate chosen by a prior `auto-switch` decision (skips re-fan-out).
         #[arg(long, requires = "apply")]
         account_id: Option<Uuid>,
+        /// Apply even when Codex/ChatGPT processes are still detected (caller must close them).
+        #[arg(long, requires = "apply")]
+        force: bool,
         #[arg(long)]
         status: bool,
         #[arg(long)]
@@ -361,6 +364,7 @@ pub fn run() -> Result<()> {
             disable,
             apply,
             account_id,
+            force,
             status,
             json,
         }) => {
@@ -379,7 +383,7 @@ pub fn run() -> Result<()> {
                     detail: None,
                 }
             } else {
-                app.auto_switch_with_candidate(apply, account_id)?
+                app.auto_switch_with_candidate(apply, account_id, force)?
             };
             if json {
                 print_json(&output)?;

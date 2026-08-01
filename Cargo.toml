@@ -1,11 +1,11 @@
 [package]
 name = "codex-roster"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "Account switching for Codex CLI and IDE"
 license = "MIT"
-repository = "https://github.com/Pimpmuckl/codex-account-switcher"
-homepage = "https://github.com/Pimpmuckl/codex-account-switcher"
+repository = "https://github.com/anlvdt/codex-roster"
+homepage = "https://github.com/anlvdt/codex-roster"
 readme = "README.md"
 keywords = ["codex", "cli", "ide", "accounts"]
 categories = ["command-line-utilities"]

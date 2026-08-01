@@ -32,11 +32,27 @@
 - Made automatic switching defer safely while Codex or ChatGPT is running, with cooldowns and serialized Windows checks.
 - Updated vulnerable Rust dependencies and added regression coverage for backup, rollback, and staging boundaries.
 
-## Unreleased
+## v0.2.2 - 2026-08-01
+
+### Added
+
+- Sort saved accounts by ChatGPT plan (Pro → Plus → Free), remaining quota, display name, or email (macOS sidebar control; Windows list uses plan then quota).
+- Windows Preview restore actions for automatic account-list and full-session backups, next to device login / save current session.
+- Menu bar action to reopen ChatGPT Desktop against the current Roster session when the UI looks out of sync.
+
+### Changed
+
+- Quota toolbar refresh defaults to the active account; “refresh all” remains available from the menu / shortcut.
+- Menu bar quick-switch shows up to five candidates using the selected sort order.
+- Windows auto-switch apply now passes `--account-id` so the decided candidate is revalidated instead of re-ranking a stale cache.
+- Re-login save verifies the live session email before writing, avoiding accidental upserts for the wrong account.
+- macOS auto-switch closes ChatGPT Desktop when needed, switches `~/.codex`, and relaunches so Desktop matches Roster; `--force` is used only after Desktop was quit (a live Codex CLI still defers switching).
+- ChatGPT Desktop lifecycle: soft-quit first, then force-quit; relaunch confirms the app is running; auto-switch status is bilingual step-by-step (closing → switching → relaunching).
 
 ### Notes
 
 - **macOS Keychain prompt:** When Codex Roster (or its bundled `codex-roster` helper, or a local `cargo test` / `cargo run` binary named like `codex_roster-<hash>`) reads the local encryption key, macOS may ask for access to Keychain item **`com.codexroster.app`**. That key only encrypts saved snapshots and automatic backups on this Mac. Choose **Allow** / **Always Allow** if the item name matches; **Deny** leaves those sessions unreadable. This dialog is from macOS and is not an OpenAI password prompt. See the README “macOS Keychain prompt” section.
+- Developer ID notarization is still a manual release step (not automated in the local build script).
 
 ## v0.1.5 - 2026-05-22
 

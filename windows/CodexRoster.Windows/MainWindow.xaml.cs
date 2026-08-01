@@ -54,4 +54,14 @@ public sealed partial class MainWindow : Window
     {
         await ViewModel.SetAutoSwitchWhenExhaustedAsync();
     }
+
+    private async void RestoreAccountList_Click(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.RestoreLatestAccountListBackupAsync();
+    }
+
+    private async void RestoreFullBackup_Click(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.RestoreLatestFullBackupAsync();
+    }
 }

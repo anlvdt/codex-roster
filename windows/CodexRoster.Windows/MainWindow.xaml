@@ -114,6 +114,16 @@
                             </Border>
                             <Border Padding="16" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
                                 <StackPanel Spacing="8">
+                                    <TextBlock Text="Đăng nhập lại / sao lưu" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                    <TextBlock Text="Mở đăng nhập OpenAI, lưu phiên hiện tại, hoặc khôi phục bản sao lưu tự động trên máy này." TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}" Opacity="0.72" />
+                                    <Button Content="Mở đăng nhập OpenAI" Click="AddAccount_Click" HorizontalAlignment="Stretch" />
+                                    <Button Content="Lưu phiên hiện tại" Click="SaveCurrent_Click" HorizontalAlignment="Stretch" />
+                                    <Button Content="Khôi phục danh sách" Click="RestoreAccountList_Click" HorizontalAlignment="Stretch" />
+                                    <Button Content="Khôi phục phiên đầy đủ" Click="RestoreFullBackup_Click" HorizontalAlignment="Stretch" />
+                                </StackPanel>
+                            </Border>
+                            <Border Padding="16" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                                <StackPanel Spacing="8">
                                     <TextBlock Text="Windows Preview" Style="{StaticResource BodyStrongTextBlockStyle}" />
                                     <TextBlock Text="Tự động chuyển sẽ đợi Codex đóng để bảo vệ công việc đang làm. Tự mở lại Codex sẽ được bật sau khi kiểm chứng trên Windows." TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}" Opacity="0.72" />
                                 </StackPanel>

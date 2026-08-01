@@ -16,19 +16,27 @@ enum AppLanguage: String, CaseIterable, Identifiable {
     var locale: Locale {
         Locale(identifier: rawValue)
     }
+
+    fileprivate static let storageKey = "codexRoster.language"
+
+    /// Language currently stored for the app (usable outside `LanguageStore`).
+    static var current: AppLanguage {
+        AppLanguage(rawValue: UserDefaults.standard.string(forKey: storageKey) ?? "") ?? .vietnamese
+    }
+
+    static func text(_ vietnamese: String, _ english: String) -> String {
+        current == .vietnamese ? vietnamese : english
+    }
 }
 
 @MainActor
 final class LanguageStore: ObservableObject {
-    private static let storageKey = "codexRoster.language"
-
     @Published var language: AppLanguage {
-        didSet { UserDefaults.standard.set(language.rawValue, forKey: Self.storageKey) }
+        didSet { UserDefaults.standard.set(language.rawValue, forKey: AppLanguage.storageKey) }
     }
 
     init() {
-        let stored = UserDefaults.standard.string(forKey: Self.storageKey)
-        language = AppLanguage(rawValue: stored ?? "") ?? .vietnamese
+        language = AppLanguage.current
     }
 
     func text(_ vietnamese: String, _ english: String) -> String {

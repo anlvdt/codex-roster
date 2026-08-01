@@ -115,6 +115,26 @@ public sealed class RosterViewModel : INotifyPropertyChanged
         });
     }
 
+    public async Task RestoreLatestFullBackupAsync()
+    {
+        await RunAsync(async () =>
+        {
+            await _cli.RunCommandAsync("restore-full-backup");
+            await RefreshRosterDataAsync();
+            QuotaRefreshStatus = "Đã khôi phục phiên từ bản sao lưu tự động đầy nhất.";
+        });
+    }
+
+    public async Task RestoreLatestAccountListBackupAsync()
+    {
+        await RunAsync(async () =>
+        {
+            await _cli.RunCommandAsync("restore-account-list-backup");
+            await RefreshRosterDataAsync();
+            QuotaRefreshStatus = "Đã khôi phục danh sách từ bản sao lưu metadata gần nhất.";
+        });
+    }
+
     public async Task ActivateAsync(AccountItem account)
     {
         await RunAsync(async () =>
@@ -208,15 +228,21 @@ public sealed class RosterViewModel : INotifyPropertyChanged
                 QuotaRefreshStatus = "Tự động chuyển đang chờ phiên Codex an toàn.";
                 return;
             }
-            var applied = await _cli.ReadAsync<AutoSwitchOutput>("auto-switch", "--apply");
+            var applyArgs = new List<string> { "auto-switch", "--apply" };
+            if (decision.CandidateAccountId is Guid candidateId)
+            {
+                applyArgs.Add("--account-id");
+                applyArgs.Add(candidateId.ToString());
+            }
+            var applied = await _cli.ReadAsync<AutoSwitchOutput>(applyArgs.ToArray());
             if (applied.Status == "switched")
             {
                 await RefreshRosterDataAsync();
-                QuotaRefreshStatus = $"Đã tự động chuyển sang {applied.CandidateDisplayName ?? "tài khoản khác"}. Mở lại Codex để dùng phiên mới.";
+                QuotaRefreshStatus = $"Đã tự động chuyển sang {applied.CandidateDisplayName ?? "tài khoản khác"}. Windows Preview chưa tự mở lại Codex — hãy mở lại app để khớp phiên.";
             }
             else if (applied.Status == "waiting_for_processes")
             {
-                QuotaRefreshStatus = "Đóng Codex trước khi tự động chuyển để bảo vệ công việc đang làm.";
+                QuotaRefreshStatus = "Codex đang chạy — đóng Codex rồi để Roster chuyển (Windows Preview chưa tự đóng/mở lại).";
             }
         }
         catch when (silent)
@@ -242,12 +268,29 @@ public sealed class RosterViewModel : INotifyPropertyChanged
     private void ReplaceAccounts(IEnumerable<AccountDto> accounts)
     {
         Accounts.Clear();
-        foreach (var account in accounts.OrderBy(account => account.Archived).ThenByDescending(account => account.Usage?.Weekly?.RemainingPercent ?? -1))
+        foreach (var account in accounts
+            .OrderBy(account => account.Archived)
+            .ThenBy(account => PlanSortRank(account.PlanLabel))
+            .ThenByDescending(account => account.Usage?.Weekly?.RemainingPercent
+                ?? account.Usage?.FiveHour?.RemainingPercent
+                ?? -1)
+            .ThenBy(account => account.Email, StringComparer.OrdinalIgnoreCase))
         {
             Accounts.Add(new AccountItem(account));
         }
         OnPropertyChanged(nameof(SavedAccountCount));
         OnPropertyChanged(nameof(ReadyAccountCount));
+    }
+
+    private static int PlanSortRank(string? planLabel)
+    {
+        var plan = (planLabel ?? string.Empty).ToLowerInvariant();
+        if (plan.Contains("pro")) return 0;
+        if (plan.Contains("plus")) return 1;
+        if (plan.Contains("team") || plan.Contains("business") || plan.Contains("enterprise")) return 2;
+        if (plan.Contains("free") || plan.Contains("go")) return 3;
+        if (string.IsNullOrWhiteSpace(plan)) return 5;
+        return 4;
     }
 
     private void UpdateQuotaTimer()

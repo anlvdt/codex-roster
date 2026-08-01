@@ -77,19 +77,20 @@ where
     }
 
     pub fn auto_switch(&self, apply: bool) -> Result<AutoSwitchOutput> {
-        self.auto_switch_with_candidate(apply, None)
+        self.auto_switch_with_candidate(apply, None, false)
     }
 
     pub fn auto_switch_with_candidate(
         &self,
         apply: bool,
         preferred_candidate_id: Option<Uuid>,
+        force: bool,
     ) -> Result<AutoSwitchOutput> {
         let enabled = self.auto_switch_enabled()?;
         // Apply reuses the prior decision when possible — avoid a second Keychain/network
         // fan-out that unlocks the keychain and blocks ChatGPT relaunch.
         if apply {
-            return self.apply_auto_switch(enabled, preferred_candidate_id);
+            return self.apply_auto_switch(enabled, preferred_candidate_id, force);
         }
         self.decide_auto_switch(enabled)
     }
@@ -189,6 +190,7 @@ where
         &self,
         enabled: bool,
         preferred_candidate_id: Option<Uuid>,
+        force: bool,
     ) -> Result<AutoSwitchOutput> {
         let accounts = self.list()?.accounts;
         let active = accounts.iter().find(|account| account.is_active);
@@ -265,7 +267,7 @@ where
         };
 
         let warnings = self.activation_preflight_warnings();
-        if !warnings.is_empty() {
+        if !warnings.is_empty() && !force {
             return Ok(auto_switch_output(
                 enabled,
                 "waiting_for_processes",
@@ -275,7 +277,11 @@ where
                 Some("Close Codex and ChatGPT before automatic switching.".to_owned()),
             ));
         }
-        self.activate_if_active_matches(candidate.id, active.id)?;
+        if force {
+            self.activate_with_expected_active(candidate.id, true, Some(active.id))?;
+        } else {
+            self.activate_if_active_matches(candidate.id, active.id)?;
+        }
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         let mut settings = load_settings(&self.env.app_data_dir)?;
         settings.last_auto_switch_at = Some(now);

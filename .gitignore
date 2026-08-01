@@ -1,5 +1,6 @@
 /target
 /build
+/dist
 /macos/NextAccount/.build
 /windows/CodexRoster.Windows/bin
 /windows/CodexRoster.Windows/obj

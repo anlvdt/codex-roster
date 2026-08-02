@@ -2455,7 +2455,7 @@ private struct MenuBarOperationStatus: View {
 
 private enum AppInfo {
     static var shortVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.4"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.5"
     }
 }
 

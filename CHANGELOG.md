@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.5 - 2026-08-02
+
+### Fixed
+
+- Fixed GitHub Release decoding for the browser_download_url asset field, restoring automatic update checks in the macOS menu bar.
+
 ## v0.2.4 - 2026-08-02
 
 ### Added

@@ -122,9 +122,7 @@ final class GitHubUpdater: ObservableObject {
         guard let response = response as? HTTPURLResponse, response.statusCode == 200 else {
             throw UpdaterError("GitHub did not return a latest release.")
         }
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        let release = try decoder.decode(GitHubRelease.self, from: data)
+        let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
         guard !release.draft, !release.prerelease else {
             throw UpdaterError("The latest GitHub release is not a stable release.")
         }
@@ -216,12 +214,25 @@ private struct GitHubRelease: Decodable {
     let draft: Bool
     let prerelease: Bool
     let assets: [GitHubReleaseAsset]
+
+    private enum CodingKeys: String, CodingKey {
+        case tagName = "tag_name"
+        case draft
+        case prerelease
+        case assets
+    }
 }
 
 private struct GitHubReleaseAsset: Decodable {
     let name: String
     let browserDownloadURL: URL
     let digest: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case browserDownloadURL = "browser_download_url"
+        case digest
+    }
 }
 
 private struct UpdaterError: LocalizedError {

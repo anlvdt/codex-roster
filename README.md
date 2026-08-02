@@ -60,7 +60,7 @@ open "build/Codex Roster.app"
 
 ### Windows desktop app
 
-Download **Codex-Roster-Windows-x64.zip** from [Releases](https://github.com/anlvdt/codex-roster/releases), extract it, then start `CodexRoster.Windows.exe`. Do not download the standalone `codex-roster.exe` CLI asset if you want the desktop experience. The bundle is self-contained and includes the .NET/WinUI runtime. Its bundled `codex-roster.exe` also opens the desktop app when launched without a command; use it with a subcommand for automation. The Windows app uses **WinUI 3** and calls the same Rust CLI; see [windows/README.md](windows/README.md). It includes local token activity, OpenAI service/reset information, encrypted backup import/export, and a notification-area companion for quick switching and background monitoring. It can monitor quota and safely auto-switch only after Codex is closed; it does not force-close or relaunch Codex automatically.
+Download **Codex-Roster-Windows-x64.zip** from [Releases](https://github.com/anlvdt/codex-roster/releases), extract the entire ZIP, then start `CodexRoster.Windows.exe`. Do not run an executable directly from the ZIP or copy only one `.exe`: the desktop app needs the bundled WinUI runtime beside it. `CodexRoster.CLI.exe` is reserved for terminal automation. The Windows app uses **WinUI 3** and calls the same Rust CLI; see [windows/README.md](windows/README.md). It includes local token activity, OpenAI service/reset information, encrypted backup import/export, and a notification-area companion for quick switching and background monitoring. It can monitor quota and safely auto-switch only after Codex is closed; it does not force-close or relaunch Codex automatically.
 
 ### CLI
 
@@ -154,7 +154,7 @@ open "build/Codex Roster.app"
 
 ### Ứng dụng Windows
 
-Tải **Codex-Roster-Windows-x64.zip** từ [Releases](https://github.com/anlvdt/codex-roster/releases), giải nén rồi mở `CodexRoster.Windows.exe`. Nếu cần giao diện desktop, không tải asset CLI `codex-roster.exe` đứng riêng. Bundle đã gồm .NET/WinUI runtime. `codex-roster.exe` bên trong bundle cũng sẽ mở app desktop khi chạy không kèm lệnh; dùng nó với subcommand cho automation. Bản Windows native dùng **WinUI 3** và gọi chung Rust CLI; xem [windows/README.md](windows/README.md). App có thống kê token cục bộ, trạng thái OpenAI/dự báo reset, nhập/xuất backup mã hóa và notification area để chuyển nhanh/theo dõi nền. App có thể tự chuyển an toàn sau khi Codex đã đóng, nhưng không force-close hay tự mở lại Codex.
+Tải **Codex-Roster-Windows-x64.zip** từ [Releases](https://github.com/anlvdt/codex-roster/releases), giải nén toàn bộ rồi mở `CodexRoster.Windows.exe`. Không chạy executable trực tiếp trong ZIP hoặc chỉ chép một file `.exe`: app desktop cần WinUI runtime đi kèm trong cùng thư mục. `CodexRoster.CLI.exe` chỉ dành cho automation qua terminal. Bản Windows native dùng **WinUI 3** và gọi chung Rust CLI; xem [windows/README.md](windows/README.md). App có thống kê token cục bộ, trạng thái OpenAI/dự báo reset, nhập/xuất backup mã hóa và notification area để chuyển nhanh/theo dõi nền. App có thể tự chuyển an toàn sau khi Codex đã đóng, nhưng không force-close hay tự mở lại Codex.
 
 ### Riêng tư, trạng thái và ghi nhận
 

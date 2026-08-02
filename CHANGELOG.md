@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.13 - 2026-08-02
+
+### Fixed
+
+- Renamed the bundled Windows CLI helper so it is not mistaken for the desktop app, and added visible startup diagnostics with a local log if WinUI cannot launch.
+
 ## v0.2.12 - 2026-08-02
 
 ### Fixed

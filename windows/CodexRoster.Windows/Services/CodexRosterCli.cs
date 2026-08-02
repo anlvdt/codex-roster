@@ -63,8 +63,10 @@ public sealed class CodexRosterCli
     {
         var overridePath = Environment.GetEnvironmentVariable("CODEX_ROSTER_CLI_PATH");
         if (!string.IsNullOrWhiteSpace(overridePath)) return overridePath;
-        var bundled = Path.Combine(AppContext.BaseDirectory, "codex-roster.exe");
-        return File.Exists(bundled) ? bundled : "codex-roster.exe";
+        var bundled = Path.Combine(AppContext.BaseDirectory, "CodexRoster.CLI.exe");
+        if (File.Exists(bundled)) return bundled;
+        var legacyBundled = Path.Combine(AppContext.BaseDirectory, "codex-roster.exe");
+        return File.Exists(legacyBundled) ? legacyBundled : "codex-roster.exe";
     }
 
     private static string SafeError(string error)

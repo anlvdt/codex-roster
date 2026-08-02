@@ -63,7 +63,7 @@ public sealed class GitHubUpdater
 
             ExtractSafely(archive, stage);
             var executable = Path.Combine(stage, "CodexRoster.Windows.exe");
-            var helperCli = Path.Combine(stage, "codex-roster.exe");
+            var helperCli = Path.Combine(stage, "CodexRoster.CLI.exe");
             if (!File.Exists(executable) || !File.Exists(helperCli))
             {
                 throw new InvalidOperationException("Bundle cập nhật không chứa đầy đủ desktop app.");

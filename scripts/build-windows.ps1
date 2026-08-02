@@ -13,12 +13,12 @@ try {
     cargo build --release
     dotnet publish $project --configuration Release --runtime win-x64 --self-contained true --output $output "-p:Version=$version" "-p:AssemblyVersion=$version.0" "-p:FileVersion=$version.0"
     New-Item -ItemType Directory -Force -Path $output | Out-Null
-    Copy-Item (Join-Path $root "target/release/codex-roster.exe") (Join-Path $output "codex-roster.exe") -Force
+    Copy-Item (Join-Path $root "target/release/codex-roster.exe") (Join-Path $output "CodexRoster.CLI.exe") -Force
     @"
 Codex Roster for Windows
 
 Start CodexRoster.Windows.exe for the desktop app.
-codex-roster.exe remains available for scripting and CLI commands; double-clicking
+CodexRoster.CLI.exe remains available for scripting and CLI commands; double-clicking
 it from this folder also opens the desktop app automatically.
 "@ | Set-Content -Path (Join-Path $output "README.txt") -Encoding utf8
     Write-Host "Built self-contained Windows desktop app: $output"

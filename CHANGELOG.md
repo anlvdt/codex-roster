@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.14 - 2026-08-02
+
+### Fixed
+
+- Fixed the Windows startup diagnostics build so the patched desktop bundle can ship.
+
 ## v0.2.13 - 2026-08-02
 
 ### Fixed

@@ -34,7 +34,7 @@ public partial class App : Application
         }
     }
 
-    private static void App_UnhandledException(object sender, UnhandledExceptionEventArgs args)
+    private static void App_UnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs args)
     {
         StartupDiagnostics.Report("Unhandled UI exception", args.Exception);
         args.Handled = true;

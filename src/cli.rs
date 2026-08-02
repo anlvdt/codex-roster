@@ -144,6 +144,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    #[cfg(windows)]
+    /// Run the lightweight notification-area companion.
+    Tray,
 }
 
 pub fn run() -> Result<()> {
@@ -459,6 +462,13 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
+        #[cfg(windows)]
+        Some(Command::Tray) => {
+            crate::app::spawn_auto_start_usage_windows_worker(app.env().clone());
+            crate::tray::hide_console_window();
+            let _ = crate::tray::run(&app)?;
+            Ok(())
+        }
     }
 }
 
@@ -483,6 +493,11 @@ fn run_interactive_app<S>(app: &App<S>) -> Result<()>
 where
     S: crate::secrets::SecretStore,
 {
+    #[cfg(windows)]
+    if crate::windows_shell::launch_if_bundled() {
+        return Ok(());
+    }
+
     crate::app::spawn_auto_start_usage_windows_worker(app.env().clone());
     #[cfg(windows)]
     {

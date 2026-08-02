@@ -21,3 +21,5 @@ pub mod token_usage;
 #[cfg(windows)]
 pub mod tray;
 pub mod usage;
+#[cfg(windows)]
+mod windows_shell;

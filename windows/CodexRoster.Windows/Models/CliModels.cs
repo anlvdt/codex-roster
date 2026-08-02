@@ -11,6 +11,15 @@ public sealed class StatusResponse
 {
     [JsonPropertyName("current_account")]
     public IdentityDto? CurrentAccount { get; init; }
+    [JsonPropertyName("process_warnings")]
+    public List<RunningProcessDto> ProcessWarnings { get; init; } = [];
+}
+
+public sealed class RunningProcessDto
+{
+    public uint Pid { get; init; }
+    public string Executable { get; init; } = string.Empty;
+    public string Role { get; init; } = string.Empty;
 }
 
 public sealed class IdentityDto
@@ -60,4 +69,40 @@ public sealed class AutoSwitchOutput
     [JsonPropertyName("candidate_display_name")]
     public string? CandidateDisplayName { get; init; }
     public string? Detail { get; init; }
+}
+
+public sealed class TokenUsageSummaryDto
+{
+    public ulong Today { get; init; }
+    [JsonPropertyName("last_7_days")]
+    public ulong Last7Days { get; init; }
+    [JsonPropertyName("last_30_days")]
+    public ulong Last30Days { get; init; }
+    [JsonPropertyName("last_365_days")]
+    public ulong Last365Days { get; init; }
+}
+
+public sealed class ResetOutlookDto
+{
+    [JsonPropertyName("chance_24_hours")]
+    public int Chance24Hours { get; init; }
+    [JsonPropertyName("chance_48_hours")]
+    public int Chance48Hours { get; init; }
+    [JsonPropertyName("window_label")]
+    public string WindowLabel { get; init; } = string.Empty;
+    public string Confidence { get; init; } = string.Empty;
+}
+
+public sealed class OpenAiStatusDto
+{
+    public string Indicator { get; init; } = string.Empty;
+    public string Description { get; init; } = string.Empty;
+    [JsonPropertyName("codex_components")]
+    public List<OpenAiComponentDto> CodexComponents { get; init; } = [];
+}
+
+public sealed class OpenAiComponentDto
+{
+    public string Name { get; init; } = string.Empty;
+    public string Status { get; init; } = string.Empty;
 }

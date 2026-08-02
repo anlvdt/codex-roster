@@ -28,7 +28,7 @@ enum UserEvent {
 enum TrayCommand {
     Activate(Uuid),
     SetAutoStartUsageWindows(bool),
-    ShowTui,
+    ShowDesktop,
     Quit,
 }
 
@@ -168,9 +168,11 @@ where
                     eprintln!("failed to refresh tray menu: {error:#}");
                 }
             }
-            Some(TrayCommand::ShowTui) => {
-                self.exit = TrayExit::ShowTui;
-                event_loop.exit();
+            Some(TrayCommand::ShowDesktop) => {
+                if !crate::windows_shell::launch_if_bundled() {
+                    self.exit = TrayExit::ShowTui;
+                    event_loop.exit();
+                }
             }
             Some(TrayCommand::Quit) => {
                 self.exit = TrayExit::Quit;
@@ -250,7 +252,12 @@ where
             auto_start_enabled,
             TrayCommand::SetAutoStartUsageWindows(!auto_start_enabled),
         )?;
-        self.append_command(&menu, "show-tui", "Show TUI", TrayCommand::ShowTui)?;
+        self.append_command(
+            &menu,
+            "show-desktop",
+            "Open Codex Roster",
+            TrayCommand::ShowDesktop,
+        )?;
         self.append_command(&menu, "quit", "Quit", TrayCommand::Quit)?;
         Ok(menu)
     }

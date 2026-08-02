@@ -1,4 +1,5 @@
 using CodexRoster.Windows.Models;
+using CodexRoster.Windows.Services;
 using CodexRoster.Windows.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -41,7 +42,56 @@ public sealed partial class MainWindow : Window
     {
         if ((sender as FrameworkElement)?.Tag is AccountItem account)
         {
-            await ViewModel.ToggleArchiveAsync(account);
+            var flyout = new MenuFlyout();
+            var rename = new MenuFlyoutItem { Text = "Đổi tên hiển thị" };
+            rename.Click += async (_, _) => await RenameAccountAsync(account);
+            var relogin = new MenuFlyoutItem { Text = "Đăng nhập lại tài khoản này" };
+            relogin.Click += async (_, _) => await ViewModel.StartReloginAsync(account);
+            var archive = new MenuFlyoutItem { Text = account.IsArchived ? "Khôi phục tài khoản" : "Lưu trữ tài khoản" };
+            archive.Click += async (_, _) => await ViewModel.ToggleArchiveAsync(account);
+            var delete = new MenuFlyoutItem { Text = "Xóa khỏi Roster" };
+            delete.Click += async (_, _) => await DeleteAccountAsync(account);
+            flyout.Items.Add(rename);
+            flyout.Items.Add(relogin);
+            flyout.Items.Add(archive);
+            flyout.Items.Add(new MenuFlyoutSeparator());
+            flyout.Items.Add(delete);
+            flyout.ShowAt(sender as FrameworkElement);
+        }
+    }
+
+    private async Task RenameAccountAsync(AccountItem account)
+    {
+        var label = new TextBox { Text = account.DisplayName, PlaceholderText = account.Email };
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Đổi tên hiển thị",
+            Content = label,
+            PrimaryButtonText = "Lưu",
+            CloseButtonText = "Hủy",
+            DefaultButton = ContentDialogButton.Primary,
+        };
+        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        {
+            await ViewModel.SetCustomLabelAsync(account, label.Text);
+        }
+    }
+
+    private async Task DeleteAccountAsync(AccountItem account)
+    {
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Xóa tài khoản đã lưu?",
+            Content = $"{account.Email} sẽ bị xóa khỏi Codex Roster. Phiên Codex đang dùng không bị xóa.",
+            PrimaryButtonText = "Xóa",
+            CloseButtonText = "Hủy",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        {
+            await ViewModel.DeleteAsync(account);
         }
     }
 
@@ -55,6 +105,11 @@ public sealed partial class MainWindow : Window
         await ViewModel.SetAutoSwitchWhenExhaustedAsync();
     }
 
+    private async void LaunchAtLogin_Toggled(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.SetLaunchAtLoginAsync();
+    }
+
     private async void RestoreAccountList_Click(object sender, RoutedEventArgs e)
     {
         await ViewModel.RestoreLatestAccountListBackupAsync();
@@ -63,5 +118,70 @@ public sealed partial class MainWindow : Window
     private async void RestoreFullBackup_Click(object sender, RoutedEventArgs e)
     {
         await ViewModel.RestoreLatestFullBackupAsync();
+    }
+
+    private void AccountSort_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (sender is ComboBox { SelectedIndex: var selectedIndex }) ViewModel.SetAccountSortMode(selectedIndex);
+    }
+
+    private async void RefreshInsights_Click(object sender, RoutedEventArgs e) => await ViewModel.RefreshInsightsAsync();
+
+    private async void Update_Click(object sender, RoutedEventArgs e) => await ViewModel.InstallAvailableUpdateAsync();
+
+    private async void ExportBackup_Click(object sender, RoutedEventArgs e) => await TransferBackupAsync(importing: false);
+
+    private async void ImportBackup_Click(object sender, RoutedEventArgs e) => await TransferBackupAsync(importing: true);
+
+    private async void SendToTray_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            CodexTrayLauncher.Start();
+            Close();
+        }
+        catch
+        {
+            var dialog = new ContentDialog
+            {
+                XamlRoot = Content.XamlRoot,
+                Title = "Không thể mở notification area",
+                Content = "Không thể khởi động companion ở notification area. Hãy thử lại sau.",
+                CloseButtonText = "Đóng",
+            };
+            await dialog.ShowAsync();
+        }
+    }
+
+    private async Task TransferBackupAsync(bool importing)
+    {
+        var path = new TextBox
+        {
+            Header = importing ? "Đường dẫn file .codexroster" : "Nơi lưu file .codexroster",
+            PlaceholderText = importing ? "C:\\Backups\\roster.codexroster" : "C:\\Backups\\roster.codexroster",
+        };
+        var password = new PasswordBox { Header = "Mật khẩu mã hóa" };
+        var content = new StackPanel { Spacing = 12 };
+        content.Children.Add(path);
+        content.Children.Add(password);
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = importing ? "Nhập bản sao lưu mã hóa" : "Xuất bản sao lưu mã hóa",
+            Content = content,
+            PrimaryButtonText = importing ? "Nhập" : "Xuất",
+            CloseButtonText = "Hủy",
+            DefaultButton = ContentDialogButton.Primary,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        if (string.IsNullOrWhiteSpace(path.Text) || string.IsNullOrWhiteSpace(password.Password)) return;
+        if (importing)
+        {
+            await ViewModel.ImportBackupAsync(path.Text.Trim(), password.Password);
+        }
+        else
+        {
+            await ViewModel.ExportBackupAsync(path.Text.Trim(), password.Password);
+        }
     }
 }

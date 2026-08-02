@@ -35,13 +35,13 @@ jobs:
       - name: Build the native Windows Preview
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/build-windows.ps1
+        run: ./scripts/package-windows.ps1
       - name: Upload the Windows Preview
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v6
         with:
           name: Codex-Roster-Windows-Preview-x64
-          path: build/windows/win-x64
+          path: build/windows/Codex-Roster-Windows-x64.zip
           if-no-files-found: error
       - name: Build the native macOS app
         if: runner.os == 'macOS'

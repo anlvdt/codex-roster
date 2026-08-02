@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.10 - 2026-08-02
+
+### Windows
+
+- Promoted the WinUI desktop app to the default bundled entry point and package it as a self-contained release ZIP.
+- Added account-label editing, verified re-login, encrypted backup import/export, account sort choices, local token activity, OpenAI/reset service information, launch-at-login, and a notification-area companion with quick switching.
+- Added Windows CI/release packaging for the native desktop bundle.
+- Added six-hour GitHub Release checks and a verified in-app Windows updater that validates the published SHA-256 digest, stages the ZIP safely, rolls back on installation failure, and relaunches the desktop app.
+
 ## v0.2.9 - 2026-08-02
 
 ### Changed

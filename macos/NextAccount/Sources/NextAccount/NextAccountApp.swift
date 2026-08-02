@@ -53,6 +53,7 @@ private extension View {
 struct CodexRosterApp: App {
     @StateObject private var store = AccountStore()
     @StateObject private var language = LanguageStore()
+    @StateObject private var updater = GitHubUpdater()
 
     init() {
         NSApplication.shared.setActivationPolicy(.accessory)
@@ -63,6 +64,7 @@ struct CodexRosterApp: App {
             ContentView()
                 .environmentObject(store)
                 .environmentObject(language)
+                .environmentObject(updater)
                 .environment(\.locale, language.language.locale)
                 .task {
                     store.refreshTokenUsage(silently: true)
@@ -105,9 +107,11 @@ struct CodexRosterApp: App {
             MenuBarView()
                 .environmentObject(store)
                 .environmentObject(language)
+                .environmentObject(updater)
                 .environment(\.locale, language.language.locale)
                 .task {
                     store.startCoreMonitoring()
+                    updater.startAutomaticChecks(currentVersion: AppInfo.shortVersion)
                 }
         } label: {
             Label(menuBarTitle, systemImage: "person.3.sequence.fill")
@@ -2018,6 +2022,10 @@ private struct MenuBarView: View {
 
             MenuBarServiceHealth()
 
+            MenuBarResetOutlook()
+
+            MenuBarUpdateStatus()
+
             MenuBarCurrentSession(
                 account: activeAccount,
                 email: store.status?.currentAccount?.email,
@@ -2215,6 +2223,156 @@ private struct MenuBarServiceHealth: View {
     }
 }
 
+private struct MenuBarResetOutlook: View {
+    @EnvironmentObject private var store: AccountStore
+    @EnvironmentObject private var language: LanguageStore
+
+    var body: some View {
+        Group {
+            if let outlook = store.resetOutlook {
+                HStack(spacing: 7) {
+                    Image(systemName: "arrow.counterclockwise.circle.fill")
+                        .foregroundStyle(Color.accentColor)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(language.text("Dự đoán reset", "Reset forecast"))
+                            .font(.caption.weight(.semibold))
+                        Text(language.text(
+                            "\(outlook.chance24Hours)% / 24h · \(outlook.chance48Hours)% / 48h · \(outlook.windowLabel)",
+                            "\(outlook.chance24Hours)% / 24h · \(outlook.chance48Hours)% / 48h · \(outlook.windowLabel)"
+                        ))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button { store.refreshResetOutlook(silently: true) } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(3)
+                    .menuBarInteractive()
+                    .disabled(store.isLoadingResetOutlook)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 7)
+                .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
+                .help(language.text(
+                    "Dự báo cộng đồng từ nguồn độc lập; quota từng tài khoản trong app là tín hiệu chính xác nhất.",
+                    "Independent community forecast; each account's quota in the app is the most accurate signal."
+                ))
+            } else if store.isLoadingResetOutlook {
+                HStack(spacing: 7) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(language.text("Đang tải dự đoán reset…", "Loading reset forecast…"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 7)
+            } else {
+                Button { store.refreshResetOutlook(silently: true) } label: {
+                    Label(language.text("Tải dự đoán reset", "Load reset forecast"), systemImage: "arrow.counterclockwise.circle")
+                        .font(.caption.weight(.medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 7)
+                .menuBarInteractive()
+            }
+        }
+    }
+}
+
+private struct MenuBarUpdateStatus: View {
+    @EnvironmentObject private var updater: GitHubUpdater
+    @EnvironmentObject private var language: LanguageStore
+
+    var body: some View {
+        switch updater.state {
+        case .available(let update):
+            HStack(spacing: 7) {
+                Image(systemName: "arrow.down.app.fill")
+                    .foregroundStyle(Color.accentColor)
+                Text(language.text("Có bản \(update.version)", "Version \(update.version) available"))
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Button(language.text("Cập nhật", "Update")) {
+                    updater.installAvailableUpdate()
+                }
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
+
+        case .checking, .downloading, .installing:
+            HStack(spacing: 7) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(statusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+
+        case .failed:
+            HStack(spacing: 7) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text(language.text("Không thể kiểm tra cập nhật", "Could not check for updates"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(language.text("Thử lại", "Retry")) {
+                    updater.checkForUpdates(currentVersion: AppInfo.shortVersion)
+                }
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .background(Color.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
+
+        case .idle, .upToDate:
+            HStack(spacing: 7) {
+                Image(systemName: "checkmark.seal")
+                    .foregroundStyle(.secondary)
+                Text(language.text("Codex Roster \(AppInfo.shortVersion)", "Codex Roster \(AppInfo.shortVersion)"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button { updater.checkForUpdates(currentVersion: AppInfo.shortVersion) } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(3)
+                .menuBarInteractive()
+                .help(language.text("Kiểm tra GitHub Releases", "Check GitHub Releases"))
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+        }
+    }
+
+    private var statusText: String {
+        switch updater.state {
+        case .checking:
+            language.text("Đang kiểm tra cập nhật…", "Checking for updates…")
+        case .downloading:
+            language.text("Đang tải và xác thực cập nhật…", "Downloading and verifying update…")
+        case .installing:
+            language.text("Đang cài đặt và mở lại app…", "Installing and reopening app…")
+        default:
+            ""
+        }
+    }
+}
+
 private struct MenuBarOperationStatus: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
@@ -2297,7 +2455,7 @@ private struct MenuBarOperationStatus: View {
 
 private enum AppInfo {
     static var shortVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.3"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.4"
     }
 }
 

@@ -273,6 +273,7 @@ final class AccountStore: ObservableObject {
         guard !coreBootstrapStarted else { return }
         coreBootstrapStarted = true
         refresh()
+        refreshResetOutlook(silently: true)
         startAutoSwitchMonitoring()
         startQuotaMonitoring()
     }

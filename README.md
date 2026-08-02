@@ -49,6 +49,8 @@ Never share a snapshot file, password, browser cookie, access token, or refresh 
 
 Download the latest macOS ZIP from [Releases](https://github.com/anlvdt/codex-roster/releases), unzip it, and move **Codex Roster.app** to Applications. macOS may require you to approve the first launch because the application is independently distributed.
 
+The menu bar checks stable GitHub Releases at launch and every six hours. When an update is available, select **Update** there; the ZIP's GitHub SHA-256 digest is verified before the app replaces itself and reopens.
+
 Build locally:
 
 ```sh
@@ -139,6 +141,8 @@ Không gửi file snapshot, mật khẩu backup, cookie trình duyệt, access t
 ### Cài đặt và chạy
 
 Tải ZIP macOS mới nhất từ [Releases](https://github.com/anlvdt/codex-roster/releases), giải nén rồi kéo **Codex Roster.app** vào Applications. Lần mở đầu, macOS có thể yêu cầu bạn cho phép vì ứng dụng được phát hành độc lập.
+
+Menu bar tự kiểm tra GitHub Releases ổn định khi khởi động và mỗi sáu giờ. Khi có bản mới, chọn **Cập nhật** tại đó; ứng dụng xác thực SHA-256 do GitHub công bố trước khi tự thay thế và mở lại.
 
 Tự build:
 

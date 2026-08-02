@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.2.4 - 2026-08-02
+
+### Added
+
+- Added GitHub Release update checks in the macOS menu bar at launch and every six hours, with a verified one-click update flow that relaunches the app.
+- Added a compact community reset forecast to the macOS menu bar, including 24-hour and 48-hour likelihoods plus the expected reset window.
+
+### Security
+
+- Verify GitHub's published SHA-256 digest, macOS bundle identifier, and release version before installing a downloaded update.
+
 ## v0.2.3 - 2026-08-02
 
 ### Fixed

@@ -8,7 +8,7 @@ public static class CodexTrayLauncher
     {
         var bundled = Path.Combine(AppContext.BaseDirectory, "codex-roster.exe");
         var executable = File.Exists(bundled) ? bundled : "codex-roster.exe";
-        Process.Start(new ProcessStartInfo
+        _ = Process.Start(new ProcessStartInfo
         {
             FileName = executable,
             UseShellExecute = false,

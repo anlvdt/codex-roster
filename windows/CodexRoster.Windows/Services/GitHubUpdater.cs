@@ -121,7 +121,7 @@ try {
         startInfo.ArgumentList.Add(Environment.ProcessId.ToString());
         startInfo.ArgumentList.Add(installDirectory);
         startInfo.ArgumentList.Add(stageDirectory);
-        Process.Start(startInfo) ?? throw new InvalidOperationException("Không thể mở trình cài đặt cập nhật.");
+        _ = Process.Start(startInfo) ?? throw new InvalidOperationException("Không thể mở trình cài đặt cập nhật.");
     }
 
     private static HttpClient CreateHttpClient()

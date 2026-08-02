@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.11 - 2026-08-02
+
+### Fixed
+
+- Fixed the Windows desktop build so the native bundle can be packaged and attached to the release.
+
 ## v0.2.10 - 2026-08-02
 
 ### Windows

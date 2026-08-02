@@ -234,8 +234,9 @@ final class AccountStore: ObservableObject {
             if force { arguments.append("--force") }
             let activated: ActivateOutput = try await self.cli.decode(ActivateOutput.self, arguments: arguments)
             self.applyActivatedAccount(activated.account)
-            // Auth is restored — bring ChatGPT Desktop back and confirm it opens.
-            await relaunch.launchAndConfirm()
+            // Auth is restored. Reopen and verify Desktop in the background so a
+            // slow LaunchServices response does not hold the switch UI hostage.
+            self.relaunchDesktopInBackground(relaunch)
             let accountID = activated.account.id
             Task {
                 try? await self.reloadAccountsAfterSwitch()
@@ -534,8 +535,8 @@ final class AccountStore: ObservableObject {
                 defer { isSwitching = false }
                 let candidateName = decision.candidateDisplayName
                     ?? AppLanguage.text("tài khoản khác", "another account")
-                // Close Desktop when open, switch ~/.codex, then reopen. Never --force unless
-                // we already quit Desktop — a live Codex CLI must still defer auto-switch.
+                // Close Desktop when open, switch ~/.codex, then reopen. A live
+                // Codex CLI must defer switching even after Desktop has quit.
                 var relaunch = ChatGPTDesktop.RelaunchPlan.preferredDesktop()
                 var didCloseDesktop = false
                 if ChatGPTDesktop.isRunning {
@@ -552,9 +553,12 @@ final class AccountStore: ObservableObject {
                 if applied.status == "waiting_for_processes",
                    didCloseDesktop,
                    !ChatGPTDesktop.isRunning {
-                    // Process-table lag after Desktop quit; force only in that narrow case.
-                    applyArguments.append("--force")
-                    applied = try await cli.decode(AutoSwitchOutput.self, arguments: applyArguments)
+                    // Give process-table lag a short chance to clear, but never
+                    // force through a live Codex CLI process.
+                    for _ in 0..<3 where applied.status == "waiting_for_processes" {
+                        try? await Task.sleep(for: .milliseconds(150))
+                        applied = try await cli.decode(AutoSwitchOutput.self, arguments: applyArguments)
+                    }
                 }
                 guard applied.status == "switched" else {
                     autoSwitchState = applied.status == "waiting_for_processes" ? .waitingForProcesses : .checkFailed
@@ -564,7 +568,7 @@ final class AccountStore: ObservableObject {
                 }
                 try await reloadAccountsAfterSwitch()
                 autoSwitchState = .relaunchingDesktop
-                await relaunch.launchAndConfirm()
+                relaunchDesktopInBackground(relaunch, afterAutoSwitch: true)
                 autoSwitchState = .switched(applied.candidateDisplayName ?? candidateName)
                 autoSwitchAllExhaustedNotified = false
             default:
@@ -631,6 +635,25 @@ final class AccountStore: ObservableObject {
         self.accounts = loadedAccounts.accounts
     }
 
+    private func relaunchDesktopInBackground(
+        _ relaunch: ChatGPTDesktop.RelaunchPlan,
+        afterAutoSwitch: Bool = false
+    ) {
+        Task { [weak self] in
+            guard await relaunch.launchAndConfirm() else {
+                guard let self else { return }
+                if afterAutoSwitch {
+                    self.autoSwitchState = .desktopRelaunchFailed
+                }
+                self.errorMessage = AppLanguage.text(
+                    "Không thể mở lại ChatGPT. Hãy dùng nút Mở lại ChatGPT theo phiên này.",
+                    "Could not relaunch ChatGPT. Use Relaunch ChatGPT with this session."
+                )
+                return
+            }
+        }
+    }
+
     private func applyActivatedAccount(_ account: SavedAccount) {
         accounts = accounts.map { existing in
             if existing.id == account.id {
@@ -665,6 +688,7 @@ enum AutoSwitchState: Equatable {
     case closingDesktop
     case switchingAccount
     case relaunchingDesktop
+    case desktopRelaunchFailed
     case waitingForProcesses
     case switched(String)
     case checkFailed
@@ -835,8 +859,7 @@ private enum ChatGPTDesktop {
         "/Applications/Codex.app",
     ]
     private static let terminatePollInterval: Duration = .milliseconds(50)
-    private static let softTerminateDeadline: Duration = .milliseconds(1500)
-    private static let forceTerminateDeadline: Duration = .milliseconds(1200)
+    private static let forceTerminateDeadline: Duration = .milliseconds(800)
     private static let launchConfirmDeadline: Duration = .seconds(6)
 
     struct RelaunchPlan {
@@ -856,13 +879,6 @@ private enum ChatGPTDesktop {
                 bundleIDs: ids.isEmpty ? ["com.openai.codex"] : ids,
                 appURLs: urls
             )
-        }
-
-        /// Fire-and-forget reopen (manual UI paths that already moved on).
-        func launchNow() {
-            Task.detached(priority: .userInitiated) {
-                await launchAndConfirm()
-            }
         }
 
         /// Open Desktop and wait until it is actually running, with a second attempt.
@@ -959,14 +975,9 @@ private enum ChatGPTDesktop {
             ))
         }
 
-        // Prefer a clean quit first; Electron often needs a short grace period.
+        // A direct switch is explicitly destructive: quit Desktop immediately, but
+        // wait for it to exit before touching the shared Codex auth files.
         for app in runningApps {
-            app.terminate()
-        }
-        if await waitUntilQuit(deadline: softTerminateDeadline) {
-            return relaunch
-        }
-        for app in runningApplications {
             app.forceTerminate()
         }
         if await waitUntilQuit(deadline: forceTerminateDeadline) {
@@ -975,7 +986,7 @@ private enum ChatGPTDesktop {
         for app in runningApplications {
             app.forceTerminate()
         }
-        if await waitUntilQuit(deadline: .milliseconds(800)) {
+        if await waitUntilQuit(deadline: .milliseconds(400)) {
             return relaunch
         }
         throw CLIError(AppLanguage.text(

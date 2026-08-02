@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.2.3 - 2026-08-02
+
+### Fixed
+
+- Made account switching complete immediately after auth restoration while Desktop relaunch and verification continue in the background.
+- Made auto-switch respect its disabled setting, refresh exhausted quota caches once their reset time passes, and fall back to another usable cached account when the chosen candidate changes.
+- Kept auto-switch from forcing an auth swap through a live Codex CLI process; it now performs only a short safe retry for process-table lag.
+- Surface a clear recovery action when ChatGPT Desktop cannot be relaunched after switching.
+
+### Changed
+
+- Removed the macOS switch confirmation dialog and use immediate Desktop termination for explicit direct switches.
+- Reduced local snapshot write latency by avoiding adaptive scrypt calibration for Keychain-protected generated keys; existing snapshots remain readable.
+
 ## v0.2.0 - 2026-07-30
 
 ### Added

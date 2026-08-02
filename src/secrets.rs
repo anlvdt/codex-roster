@@ -14,6 +14,7 @@ use flate2::read::GzDecoder;
 const SNAPSHOT_ENCODING_V1_MAGIC: &[u8] = b"cas-snapshot-v1\n";
 const ENCRYPTED_LOCAL_SNAPSHOT_MAGIC: &[u8] = b"cas-secret-v2\n";
 const MAX_DECRYPTED_SNAPSHOT_BYTES: u64 = 4 * 1024 * 1024;
+const LOCAL_SNAPSHOT_SCRYPT_WORK_FACTOR: u8 = 10;
 
 pub trait SecretStore {
     fn save(&self, key: &str, value: &[u8]) -> Result<()>;
@@ -176,7 +177,14 @@ impl LocalSecretStore {
 
 fn encrypt_local_snapshot(value: &[u8]) -> Result<Vec<u8>> {
     let password = crate::backup::local_snapshot_password_for_write()?;
-    let encryptor = age::Encryptor::with_user_passphrase(SecretString::from(password));
+    // This is a generated, high-entropy key held by the system credential store,
+    // not a human passphrase. A low work factor avoids the adaptive one-second
+    // scrypt calibration on every switch while preserving the age/scrypt format.
+    let mut recipient = age::scrypt::Recipient::new(SecretString::from(password));
+    recipient.set_work_factor(LOCAL_SNAPSHOT_SCRYPT_WORK_FACTOR);
+    let encryptor =
+        age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
+            .context("failed to initialize local snapshot encryption")?;
     let mut writer = encryptor
         .wrap_output(Vec::new())
         .context("failed to initialize local snapshot encryption")?;
@@ -509,8 +517,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        ENCRYPTED_LOCAL_SNAPSHOT_MAGIC, LegacySnapshotStore, LocalSecretStore,
-        MigratingSecretStore, SecretStore,
+        ENCRYPTED_LOCAL_SNAPSHOT_MAGIC, LOCAL_SNAPSHOT_SCRYPT_WORK_FACTOR, LegacySnapshotStore,
+        LocalSecretStore, MigratingSecretStore, SecretStore,
     };
     use crate::model::{SnapshotBlob, SnapshotFile};
 
@@ -627,6 +635,17 @@ mod tests {
                 .windows(payload.len())
                 .any(|window| window == payload)
         );
+    }
+
+    #[test]
+    fn local_snapshot_encryption_uses_the_fast_work_factor() {
+        let encrypted = super::encrypt_local_snapshot(b"snapshot").expect("encrypt");
+        let header = String::from_utf8_lossy(&encrypted);
+
+        assert!(header.lines().any(|line| {
+            line.starts_with("-> scrypt ")
+                && line.ends_with(&format!(" {LOCAL_SNAPSHOT_SCRYPT_WORK_FACTOR}"))
+        }));
     }
 
     #[test]

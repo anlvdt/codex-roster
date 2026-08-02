@@ -142,7 +142,6 @@ struct ContentView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @State private var selection: UUID?
-    @State private var accountForActivation: SavedAccount?
     @State private var accountForDeletion: SavedAccount?
     @State private var accountForEditing: SavedAccount?
     @State private var accountForRelogin: SavedAccount?
@@ -223,27 +222,6 @@ struct ContentView: View {
             Text(store.errorMessage ?? "")
         }
         .confirmationDialog(
-            language.text("Codex vẫn đang chạy", "Codex is still running"),
-            isPresented: Binding(
-                get: { accountForActivation != nil },
-                set: { if !$0 { accountForActivation = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button(language.text("Chuyển & mở lại ChatGPT", "Switch & relaunch ChatGPT"), role: .destructive) {
-                if let accountForActivation {
-                    store.activate(accountForActivation, force: true)
-                }
-                accountForActivation = nil
-            }
-            Button(language.text("Hủy", "Cancel"), role: .cancel) { accountForActivation = nil }
-        } message: {
-            Text(language.text(
-                "Thao tác này sẽ thoát ChatGPT/Codex (thoát nhẹ, rồi force nếu cần), chuyển phiên ~/.codex, rồi mở lại Desktop để khớp tài khoản đã chọn. Hãy lưu công việc trước khi tiếp tục.",
-                "This quits ChatGPT/Codex (soft quit, then force if needed), switches the ~/.codex session, then relaunches Desktop to match the selected account. Save your work before continuing."
-            ))
-        }
-        .confirmationDialog(
             language.text("Xóa tài khoản đã lưu?", "Remove saved account?"),
             isPresented: Binding(
                 get: { accountForDeletion != nil },
@@ -264,11 +242,7 @@ struct ContentView: View {
     }
 
     private func requestActivation(for account: SavedAccount) {
-        if store.hasRunningCodexProcesses {
-            accountForActivation = account
-        } else {
-            store.activate(account)
-        }
+        store.activate(account, force: true)
     }
 
     @ViewBuilder
@@ -577,8 +551,8 @@ private struct DashboardView: View {
                         ))
                         .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
                         Text(language.text(
-                            "Khi tài khoản Codex (~/.codex) còn 0%: tìm tài khoản còn quota → thoát ChatGPT (nhẹ rồi force nếu cần) → chuyển phiên → mở lại Desktop và xác nhận app đã chạy. Nhãn phiên theo ~/.codex, không đọc cookie đăng nhập riêng trong ChatGPT.",
-                            "When the Codex account (~/.codex) hits 0%: find an account with quota → quit ChatGPT (soft, then force if needed) → switch session → relaunch Desktop and confirm it is running. The session label follows ~/.codex and does not read a separate ChatGPT cookie login."
+                            "Khi tài khoản Codex (~/.codex) còn 0%: tìm tài khoản còn quota → force-quit ChatGPT → chuyển phiên → mở lại Desktop. Nhãn phiên theo ~/.codex, không đọc cookie đăng nhập riêng trong ChatGPT.",
+                            "When the Codex account (~/.codex) hits 0%: find an account with quota → force-quit ChatGPT → switch session → relaunch Desktop. The session label follows ~/.codex and does not read a separate ChatGPT cookie login."
                         ))
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -737,6 +711,8 @@ private struct DashboardView: View {
             language.text("Đang chuyển phiên ~/.codex sang tài khoản còn quota…", "Switching the ~/.codex session to an account with quota…")
         case .relaunchingDesktop:
             language.text("Đang mở lại ChatGPT để khớp phiên Codex vừa chuyển…", "Relaunching ChatGPT to match the switched Codex session…")
+        case .desktopRelaunchFailed:
+            language.text("Đã chuyển phiên nhưng không thể mở lại ChatGPT. Hãy thử nút Mở lại ChatGPT.", "The session switched, but ChatGPT could not be relaunched. Try Relaunch ChatGPT.")
         case .waitingForProcesses:
             language.text("Không đóng được ChatGPT/Codex; hãy đóng thủ công rồi bấm Kiểm tra & chuyển.", "Could not quit ChatGPT/Codex; quit it manually, then tap Check & switch.")
         case .switched(let name):
@@ -2006,7 +1982,6 @@ private struct MenuBarView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @Environment(\.openWindow) private var openWindow
-    @State private var accountForActivation: SavedAccount?
 
     private var quickSwitchAccounts: [SavedAccount] {
         Array(
@@ -2131,8 +2106,8 @@ private struct MenuBarView: View {
             .menuBarInteractive()
             .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
             .help(language.text(
-                "Hết quota: đóng ChatGPT (thoát nhẹ rồi force nếu cần), chuyển ~/.codex, rồi mở lại Desktop.",
-                "When exhausted: quit ChatGPT (soft then force if needed), switch ~/.codex, then relaunch Desktop."
+                "Hết quota: force-quit ChatGPT, chuyển ~/.codex, rồi mở lại Desktop.",
+                "When exhausted: force-quit ChatGPT, switch ~/.codex, then relaunch Desktop."
             ))
 
             Divider()
@@ -2169,27 +2144,6 @@ private struct MenuBarView: View {
         }
         .padding(14)
         .frame(width: 356, alignment: .leading)
-        .confirmationDialog(
-            language.text("Codex vẫn đang chạy", "Codex is still running"),
-            isPresented: Binding(
-                get: { accountForActivation != nil },
-                set: { if !$0 { accountForActivation = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button(language.text("Chuyển & mở lại ChatGPT", "Switch & relaunch ChatGPT"), role: .destructive) {
-                if let accountForActivation {
-                    store.activate(accountForActivation, force: true)
-                }
-                accountForActivation = nil
-            }
-            Button(language.text("Hủy", "Cancel"), role: .cancel) { accountForActivation = nil }
-        } message: {
-            Text(language.text(
-                "Thao tác này sẽ thoát ChatGPT/Codex (thoát nhẹ, rồi force nếu cần), chuyển phiên ~/.codex, rồi mở lại Desktop để khớp tài khoản đã chọn. Hãy lưu công việc trước khi tiếp tục.",
-                "This quits ChatGPT/Codex (soft quit, then force if needed), switches the ~/.codex session, then relaunches Desktop to match the selected account. Save your work before continuing."
-            ))
-        }
         .onAppear {
             store.refreshAccountsInBackground()
         }
@@ -2197,11 +2151,7 @@ private struct MenuBarView: View {
 
     private func requestActivation(_ account: SavedAccount) {
         store.noteMenuInteraction()
-        if store.hasRunningCodexProcesses {
-            accountForActivation = account
-        } else {
-            store.activate(account)
-        }
+        store.activate(account, force: true)
     }
 
     private func openDashboard() {
@@ -2294,6 +2244,8 @@ private struct MenuBarOperationStatus: View {
             return language.text("Đang chuyển phiên Codex…", "Switching Codex session…")
         case .relaunchingDesktop:
             return language.text("Đang mở lại ChatGPT…", "Relaunching ChatGPT…")
+        case .desktopRelaunchFailed:
+            return language.text("Đã chuyển phiên, nhưng không mở lại được ChatGPT", "Session switched, but ChatGPT did not relaunch")
         case .waitingForProcesses:
             return language.text("Không đóng được ChatGPT — đóng thủ công", "Could not quit ChatGPT — quit manually")
         case .switched(let name):
@@ -2309,7 +2261,7 @@ private struct MenuBarOperationStatus: View {
         switch store.autoSwitchState {
         case .some(.switched): return .green
         case .some(.closingDesktop), .some(.switchingAccount), .some(.relaunchingDesktop): return .secondary
-        case .some(.waitingForLogin), .some(.allAccountsExhausted), .some(.waitingForProcesses), .some(.checkFailed): return .orange
+        case .some(.waitingForLogin), .some(.allAccountsExhausted), .some(.desktopRelaunchFailed), .some(.waitingForProcesses), .some(.checkFailed): return .orange
         case .none: return .secondary
         }
     }
@@ -2345,7 +2297,7 @@ private struct MenuBarOperationStatus: View {
 
 private enum AppInfo {
     static var shortVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.2"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.3"
     }
 }
 
@@ -2779,4 +2731,3 @@ private func copyAccountEmail(_ email: String) {
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(email, forType: .string)
 }
-

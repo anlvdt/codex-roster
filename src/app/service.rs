@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use std::collections::HashSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::backup::{read_encrypted, write_encrypted};
@@ -87,6 +87,11 @@ where
         force: bool,
     ) -> Result<AutoSwitchOutput> {
         let enabled = self.auto_switch_enabled()?;
+        if !enabled {
+            return Ok(auto_switch_output(
+                false, "disabled", None, None, None, None,
+            ));
+        }
         // Apply reuses the prior decision when possible — avoid a second Keychain/network
         // fan-out that unlocks the keychain and blocks ChatGPT relaunch.
         if apply {
@@ -220,7 +225,7 @@ where
         let now = time::OffsetDateTime::now_utc();
         let candidate = if let Some(preferred_id) = preferred_candidate_id {
             // Revalidate only the decided candidate — never re-rank a stale roster cache.
-            match self.usage(Some(preferred_id)) {
+            let preferred = match self.usage(Some(preferred_id)) {
                 Ok(_) => self
                     .list()?
                     .accounts
@@ -237,22 +242,21 @@ where
                             && !is_in_auto_switch_cooldown(&settings, candidate.id, now)
                     }),
                 Err(_) => None,
-            }
+            };
+            // If the selected candidate changed while revalidating, use the next
+            // usable cached candidate rather than reporting every account exhausted
+            // and waiting for the next monitor tick.
+            preferred.or_else(|| {
+                best_cached_auto_switch_candidate(
+                    &accounts,
+                    active.id,
+                    &settings,
+                    now,
+                    Some(preferred_id),
+                )
+            })
         } else {
-            accounts
-                .iter()
-                .filter(|candidate| {
-                    candidate.id != active.id
-                        && !candidate.archived
-                        && !candidate
-                            .usage_error
-                            .as_deref()
-                            .is_some_and(usage_error_requires_login)
-                        && is_usable_for_switch(candidate.usage.as_ref())
-                        && !is_in_auto_switch_cooldown(&settings, candidate.id, now)
-                })
-                .max_by_key(|candidate| switch_quota_score(candidate.usage.as_ref()))
-                .cloned()
+            best_cached_auto_switch_candidate(&accounts, active.id, &settings, now, None)
         };
 
         let Some(candidate) = candidate else {
@@ -396,8 +400,11 @@ where
         force_running: bool,
         expected_active_id: Option<Uuid>,
     ) -> Result<ActivateOutput> {
+        let started = Instant::now();
         self.refresh_current_saved_account_before_activation();
+        let refreshed_current_at = Instant::now();
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        let acquired_lock_at = Instant::now();
         if let Some(expected_active_id) = expected_active_id {
             let accounts = self.repository.list_accounts(&self.env.kind)?;
             let live = codex::try_read_live_auth_bundle(&self.env)?;
@@ -410,8 +417,10 @@ where
             }
         }
         let warnings = crate::process::detect_running_codex_processes();
+        let scanned_processes_at = Instant::now();
         let (snapshot, snapshot_identity, restore_identity) =
             self.load_activation_target(account_id)?;
+        let loaded_target_at = Instant::now();
         let verify_stable = should_verify_activation_stability(force_running, &warnings);
         let verify_retries = if force_running { 2 } else { 4 };
         let verify_delay = if force_running {
@@ -428,10 +437,34 @@ where
             verify_delay,
         )
         .context("failed to restore the selected account snapshot")?;
+        let restored_snapshot_at = Instant::now();
         let metadata = self
             .repository
             .sync_activated_account(&self.env.kind, account_id, &snapshot_identity)
             .context("activated live auth but failed to update local metadata")?;
+        let synced_metadata_at = Instant::now();
+        if std::env::var_os("CODEX_ROSTER_PROFILE_SWITCH").is_some() {
+            eprintln!(
+                "activation profile: save-current={}ms lock={}ms process-scan={}ms load-target={}ms restore={}ms metadata={}ms total={}ms",
+                refreshed_current_at.duration_since(started).as_millis(),
+                acquired_lock_at
+                    .duration_since(refreshed_current_at)
+                    .as_millis(),
+                scanned_processes_at
+                    .duration_since(acquired_lock_at)
+                    .as_millis(),
+                loaded_target_at
+                    .duration_since(scanned_processes_at)
+                    .as_millis(),
+                restored_snapshot_at
+                    .duration_since(loaded_target_at)
+                    .as_millis(),
+                synced_metadata_at
+                    .duration_since(restored_snapshot_at)
+                    .as_millis(),
+                synced_metadata_at.duration_since(started).as_millis(),
+            );
+        }
         Ok(ActivateOutput {
             account: account_view(metadata, Some(account_id), None, None),
             warnings,
@@ -710,11 +743,39 @@ fn is_in_auto_switch_cooldown(
             .is_some_and(|last_switch| now - last_switch < time::Duration::minutes(5))
 }
 
+fn best_cached_auto_switch_candidate(
+    accounts: &[AccountView],
+    active_id: Uuid,
+    settings: &crate::settings::AppSettings,
+    now: time::OffsetDateTime,
+    excluded_id: Option<Uuid>,
+) -> Option<AccountView> {
+    accounts
+        .iter()
+        .filter(|candidate| {
+            candidate.id != active_id
+                && Some(candidate.id) != excluded_id
+                && !candidate.archived
+                && !candidate
+                    .usage_error
+                    .as_deref()
+                    .is_some_and(usage_error_requires_login)
+                && is_usable_for_switch(candidate.usage.as_ref())
+                && !is_in_auto_switch_cooldown(settings, candidate.id, now)
+        })
+        .max_by_key(|candidate| switch_quota_score(candidate.usage.as_ref()))
+        .cloned()
+}
+
 fn cached_usage_is_fresh(
     usage: Option<&crate::model::AccountUsageView>,
     now: time::OffsetDateTime,
 ) -> bool {
-    usage.is_some_and(|usage| now - usage.fetched_at < time::Duration::minutes(15))
+    usage.is_some_and(|usage| {
+        now - usage.fetched_at < time::Duration::minutes(15)
+            && quota_windows(Some(usage))
+                .all(|window| window.remaining_percent > 0 || window.reset_at > now)
+    })
 }
 
 fn account_display_name(account: &AccountView) -> String {
@@ -799,6 +860,44 @@ mod tests {
 
         assert!(is_exhausted_for_switch(Some(&usage)));
         assert!(!is_usable_for_switch(Some(&usage)));
+    }
+
+    #[test]
+    fn auto_switch_does_nothing_when_disabled() {
+        let temp = tempdir().expect("tempdir");
+        let env = AppEnv {
+            kind: EnvironmentKind::Linux,
+            home_dir: temp.path().to_path_buf(),
+            codex_root: temp.path().join(".codex"),
+            app_data_dir: temp.path().join("app"),
+        };
+        let app = App::new(
+            env.clone(),
+            SnapshotRepository::new(&env.app_data_dir, MemorySecretStore::default()),
+        );
+
+        let output = app.auto_switch(false).expect("disabled auto-switch");
+
+        assert!(!output.enabled);
+        assert_eq!(output.status, "disabled");
+    }
+
+    #[test]
+    fn cached_exhausted_usage_is_stale_once_the_window_resets() {
+        let now = OffsetDateTime::now_utc();
+        let usage = AccountUsageView {
+            source: UsageSource::SavedAccessToken,
+            fetched_at: now,
+            five_hour: Some(UsageWindowView {
+                used_percent: 100,
+                remaining_percent: 0,
+                reset_at: now - time::Duration::minutes(1),
+            }),
+            weekly: None,
+            credits: None,
+        };
+
+        assert!(!cached_usage_is_fresh(Some(&usage), now));
     }
 
     #[test]

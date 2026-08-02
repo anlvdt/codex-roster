@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.12 - 2026-08-02
+
+### Fixed
+
+- Synced macOS bundle metadata with the release version so verified self-updates accept the downloaded app bundle.
+
 ## v0.2.11 - 2026-08-02
 
 ### Fixed

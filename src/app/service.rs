@@ -160,6 +160,7 @@ where
             .into_iter()
             .filter(|candidate| {
                 candidate.id != active.id
+                    && !accounts_represent_same_identity(candidate, &active)
                     && !candidate.archived
                     && !candidate
                         .usage_error
@@ -233,6 +234,7 @@ where
                     .find(|account| account.id == preferred_id)
                     .filter(|candidate| {
                         candidate.id != active.id
+                            && !accounts_represent_same_identity(candidate, active)
                             && !candidate.archived
                             && !candidate
                                 .usage_error
@@ -249,14 +251,14 @@ where
             preferred.or_else(|| {
                 best_cached_auto_switch_candidate(
                     &accounts,
-                    active.id,
+                    active,
                     &settings,
                     now,
                     Some(preferred_id),
                 )
             })
         } else {
-            best_cached_auto_switch_candidate(&accounts, active.id, &settings, now, None)
+            best_cached_auto_switch_candidate(&accounts, active, &settings, now, None)
         };
 
         let Some(candidate) = candidate else {
@@ -745,7 +747,7 @@ fn is_in_auto_switch_cooldown(
 
 fn best_cached_auto_switch_candidate(
     accounts: &[AccountView],
-    active_id: Uuid,
+    active: &AccountView,
     settings: &crate::settings::AppSettings,
     now: time::OffsetDateTime,
     excluded_id: Option<Uuid>,
@@ -753,7 +755,8 @@ fn best_cached_auto_switch_candidate(
     accounts
         .iter()
         .filter(|candidate| {
-            candidate.id != active_id
+            candidate.id != active.id
+                && !accounts_represent_same_identity(candidate, active)
                 && Some(candidate.id) != excluded_id
                 && !candidate.archived
                 && !candidate
@@ -765,6 +768,16 @@ fn best_cached_auto_switch_candidate(
         })
         .max_by_key(|candidate| switch_quota_score(candidate.usage.as_ref()))
         .cloned()
+}
+
+/// A legacy/imported roster can contain duplicate records for one OpenAI
+/// account. A different record ID must never make auto-switch restore the same
+/// exhausted subject/email.
+fn accounts_represent_same_identity(left: &AccountView, right: &AccountView) -> bool {
+    match (&left.subject, &right.subject) {
+        (Some(left_subject), Some(right_subject)) => left_subject == right_subject,
+        _ => left.email.eq_ignore_ascii_case(&right.email),
+    }
 }
 
 fn cached_usage_is_fresh(

@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.8 - 2026-08-02
+
+### Fixed
+
+- Do not treat usage endpoint access-denied responses as an expired login or rotate refresh tokens for them.
+- Prevent auto-switch from selecting duplicate records that represent the same exhausted OpenAI account.
+- Give ChatGPT Desktop a longer graceful termination window, then terminate its process directly before switching.
+
 ## v0.2.7 - 2026-08-02
 
 ### Fixed

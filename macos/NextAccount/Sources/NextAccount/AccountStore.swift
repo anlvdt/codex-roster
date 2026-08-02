@@ -876,7 +876,7 @@ private enum ChatGPTDesktop {
         "/Applications/Codex.app",
     ]
     private static let terminatePollInterval: Duration = .milliseconds(50)
-    private static let forceTerminateDeadline: Duration = .milliseconds(800)
+    private static let forceTerminateDeadline: Duration = .seconds(3)
     private static let launchConfirmDeadline: Duration = .seconds(6)
 
     struct RelaunchPlan {
@@ -996,14 +996,16 @@ private enum ChatGPTDesktop {
         // wait for it to exit before touching the shared Codex auth files.
         for app in runningApps {
             app.forceTerminate()
+            kill(app.processIdentifier, SIGTERM)
         }
         if await waitUntilQuit(deadline: forceTerminateDeadline) {
             return relaunch
         }
         for app in runningApplications {
             app.forceTerminate()
+            kill(app.processIdentifier, SIGKILL)
         }
-        if await waitUntilQuit(deadline: .milliseconds(400)) {
+        if await waitUntilQuit(deadline: .seconds(1)) {
             return relaunch
         }
         throw CLIError(AppLanguage.text(

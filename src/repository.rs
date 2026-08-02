@@ -317,11 +317,13 @@ where
             .position(|account| account.id == account_id && &account.environment == environment)
             .ok_or_else(|| anyhow!("saved account {account_id} not found"))?;
         let account = &mut index.accounts[position];
+        let confirms_usage_access = usage_error.contains("usage access forbidden (403)");
         if account
             .cached_usage_error
             .as_deref()
             .is_some_and(usage_error_requires_login)
             && !usage_error_requires_login(&usage_error)
+            && !confirms_usage_access
         {
             return Ok(account.clone());
         }

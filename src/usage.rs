@@ -243,8 +243,12 @@ fn fetch_usage_response(access_token: &str, account_id: Option<&str>) -> Result<
     }
     let mut response = request.call().context("failed to query Codex usage")?;
     let status = response.status();
-    if status == 401 || status == 403 {
-        bail!("usage authorization failed");
+    if status == 401 {
+        bail!("usage authentication failed (401)");
+    }
+    if status == 403 {
+        let body = response.body_mut().read_to_string().unwrap_or_default();
+        bail!("usage access forbidden (403): {body}");
     }
     if status.as_u16() >= 400 {
         let body = response.body_mut().read_to_string().unwrap_or_default();
@@ -263,9 +267,9 @@ fn should_refresh_after_error(error: &anyhow::Error, auth: &SnapshotAuth) -> boo
     if auth.last_refresh.is_some_and(|last_refresh| {
         OffsetDateTime::now_utc() - last_refresh < *TOKEN_REFRESH_INTERVAL
     }) {
-        return format!("{error:#}").contains("authorization failed");
+        return format!("{error:#}").contains("authentication failed (401)");
     }
-    true
+    format!("{error:#}").contains("authentication failed (401)")
 }
 
 fn refresh_auth(auth: &SnapshotAuth) -> Result<SnapshotAuth> {
@@ -442,5 +446,25 @@ mod tests {
 
         assert_eq!(usage_error_label(&message), "Usage unavailable");
         assert_eq!(message, "Usage unavailable: failed to query Codex usage");
+    }
+
+    #[test]
+    fn forbidden_usage_does_not_require_login_or_refresh() {
+        let error = anyhow!("usage access forbidden (403): account is not eligible");
+        let auth = SnapshotAuth {
+            access_token: "access".to_owned(),
+            refresh_token: Some("refresh".to_owned()),
+            id_token: None,
+            account_id: None,
+            last_refresh: None,
+            changed: false,
+        };
+
+        assert!(!usage_error_requires_login(&format!("{error:#}")));
+        assert!(!should_refresh_after_error(&error, &auth));
+        assert_eq!(
+            usage_error_label(&usage_error_message(&error)),
+            "Usage unavailable"
+        );
     }
 }

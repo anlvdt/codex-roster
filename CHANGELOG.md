@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.6 - 2026-08-02
+
+### Changed
+
+- Shortened the macOS menu bar popup by showing only attention-worthy OpenAI and updater statuses, moving update checks to the footer, and limiting quick switch to three accounts.
+
 ## v0.2.5 - 2026-08-02
 
 ### Fixed

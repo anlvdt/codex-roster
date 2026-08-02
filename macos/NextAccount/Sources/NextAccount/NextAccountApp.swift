@@ -1985,12 +1985,13 @@ private struct UsageCard: View {
 private struct MenuBarView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
+    @EnvironmentObject private var updater: GitHubUpdater
     @Environment(\.openWindow) private var openWindow
 
     private var quickSwitchAccounts: [SavedAccount] {
         Array(
             store.sortedAccounts(switchableAccounts.filter { !$0.isActive && !$0.requiresLogin })
-                .prefix(5)
+                .prefix(3)
         )
     }
 
@@ -2013,7 +2014,7 @@ private struct MenuBarView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             MenuBarHeader(savedCount: store.accounts.count, attentionCount: attentionCount)
 
             if store.isBusyForActions || store.isCheckingAutoSwitch || store.errorMessage != nil || store.autoSwitchState != nil {
@@ -2134,6 +2135,13 @@ private struct MenuBarView: View {
                     .frame(width: 30, height: 28)
                     .menuBarInteractive()
                     .disabled(store.isBusyForActions)
+                    Button { updater.checkForUpdates(currentVersion: AppInfo.shortVersion) } label: {
+                        Image(systemName: "arrow.down.app")
+                    }
+                    .help(language.text("Kiểm tra cập nhật", "Check for updates"))
+                    .frame(width: 30, height: 28)
+                    .menuBarInteractive()
+                    .disabled(updater.state.isBusy)
                     Button { openAbout() } label: {
                         Image(systemName: "info.circle")
                     }
@@ -2196,15 +2204,13 @@ private struct MenuBarServiceHealth: View {
     @EnvironmentObject private var language: LanguageStore
 
     var body: some View {
-        if let status = store.openAIStatus {
+        if let status = store.openAIStatus, !status.isOperational {
             HStack(spacing: 7) {
-                Image(systemName: status.isOperational ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                    .foregroundStyle(status.isOperational ? .green : .orange)
-                Text(status.isOperational
-                    ? language.text("Dịch vụ OpenAI đang ổn định", "OpenAI services are operational")
-                    : status.description)
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text(status.description)
                     .font(.caption.weight(.medium))
-                    .foregroundStyle(status.isOperational ? Color.secondary : Color.orange)
+                    .foregroundStyle(.orange)
                 Spacer()
                 Button { store.refreshOpenAIStatus() } label: {
                     Image(systemName: "arrow.clockwise")
@@ -2218,7 +2224,7 @@ private struct MenuBarServiceHealth: View {
             }
             .padding(.horizontal, 9)
             .padding(.vertical, 7)
-            .background((status.isOperational ? Color.green : Color.orange).opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
+            .background(Color.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
         }
     }
 }
@@ -2337,25 +2343,7 @@ private struct MenuBarUpdateStatus: View {
             .background(Color.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
 
         case .idle, .upToDate:
-            HStack(spacing: 7) {
-                Image(systemName: "checkmark.seal")
-                    .foregroundStyle(.secondary)
-                Text(language.text("Codex Roster \(AppInfo.shortVersion)", "Codex Roster \(AppInfo.shortVersion)"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button { updater.checkForUpdates(currentVersion: AppInfo.shortVersion) } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.plain)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(3)
-                .menuBarInteractive()
-                .help(language.text("Kiểm tra GitHub Releases", "Check GitHub Releases"))
-            }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 7)
+            EmptyView()
         }
     }
 
@@ -2455,7 +2443,7 @@ private struct MenuBarOperationStatus: View {
 
 private enum AppInfo {
     static var shortVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.5"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.6"
     }
 }
 

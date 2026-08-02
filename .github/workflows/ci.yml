@@ -26,7 +26,7 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Run tests
-        run: cargo test
+        run: cargo test --all
       - name: Set up .NET for the Windows Preview
         if: runner.os == 'Windows'
         uses: actions/setup-dotnet@v5

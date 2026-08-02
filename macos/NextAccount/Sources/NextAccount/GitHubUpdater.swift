@@ -32,6 +32,7 @@ final class GitHubUpdater: ObservableObject {
     @Published private(set) var state: State = .idle
 
     private static let latestReleaseURL = URL(string: "https://api.github.com/repos/anlvdt/codex-roster/releases/latest")!
+    private static let maximumArchiveBytes = 128 * 1024 * 1024
     private var automaticCheckTask: Task<Void, Never>?
 
     func startAutomaticChecks(currentVersion: String) {
@@ -89,16 +90,35 @@ final class GitHubUpdater: ObservableObject {
             throw UpdaterError("Codex Roster does not have permission to update \(installedApp.path). Move it to a writable Applications folder and try again.")
         }
 
+        let updateBundle = installDirectory
+            .appendingPathComponent(".Codex Roster.update-\(UUID().uuidString).app")
+        try FileManager.default.copyItem(at: extractedApp, to: updateBundle)
+
         let stagingDirectory = extractedApp.deletingLastPathComponent()
         let helper = stagingDirectory.appendingPathComponent("install-update.sh")
         let appProcessID = ProcessInfo.processInfo.processIdentifier
+        let backupBundle = installDirectory.appendingPathComponent(".Codex Roster.previous.app")
         let script = """
         #!/bin/sh
+        set -eu
+        log_directory="$HOME/Library/Logs/CodexRoster"
+        /bin/mkdir -p "$log_directory"
+        exec >> "$log_directory/updater.log" 2>&1
         while /bin/kill -0 \(appProcessID) 2>/dev/null; do
           sleep 0.1
         done
-        /usr/bin/ditto \(Self.shellQuote(extractedApp.path)) \(Self.shellQuote(installedApp.path))
-        /usr/bin/open \(Self.shellQuote(installedApp.path))
+        /bin/rm -rf \(Self.shellQuote(backupBundle.path))
+        /bin/mv \(Self.shellQuote(installedApp.path)) \(Self.shellQuote(backupBundle.path))
+        if ! /bin/mv \(Self.shellQuote(updateBundle.path)) \(Self.shellQuote(installedApp.path)); then
+          /bin/mv \(Self.shellQuote(backupBundle.path)) \(Self.shellQuote(installedApp.path))
+          exit 1
+        fi
+        if ! /usr/bin/open \(Self.shellQuote(installedApp.path)); then
+          /bin/rm -rf \(Self.shellQuote(installedApp.path))
+          /bin/mv \(Self.shellQuote(backupBundle.path)) \(Self.shellQuote(installedApp.path))
+          /usr/bin/open \(Self.shellQuote(installedApp.path))
+          exit 1
+        fi
         /bin/rm -rf \(Self.shellQuote(stagingDirectory.path))
         """
         try script.write(to: helper, atomically: true, encoding: .utf8)
@@ -116,12 +136,17 @@ final class GitHubUpdater: ObservableObject {
 
     private static func fetchLatestUpdate() async throws -> Update {
         var request = URLRequest(url: latestReleaseURL)
+        request.timeoutInterval = 20
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("codex-roster", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let response = response as? HTTPURLResponse, response.statusCode == 200 else {
             throw UpdaterError("GitHub did not return a latest release.")
         }
+        return try decodeLatestUpdate(data)
+    }
+
+    static func decodeLatestUpdate(_ data: Data) throws -> Update {
         let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
         guard !release.draft, !release.prerelease else {
             throw UpdaterError("The latest GitHub release is not a stable release.")
@@ -140,11 +165,17 @@ final class GitHubUpdater: ObservableObject {
     }
 
     private static func downloadAndExtract(_ update: Update) async throws -> URL {
-        let (data, response) = try await URLSession.shared.data(from: update.assetURL)
+        var request = URLRequest(url: update.assetURL)
+        request.timeoutInterval = 120
+        let (temporaryArchive, response) = try await URLSession.shared.download(for: request)
         guard let response = response as? HTTPURLResponse, response.statusCode == 200 else {
             throw UpdaterError("Could not download the macOS update ZIP.")
         }
-        let actualDigest = "sha256:" + SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let archiveSize = try FileManager.default.attributesOfItem(atPath: temporaryArchive.path)[.size] as? NSNumber
+        guard let archiveSize, archiveSize.intValue <= maximumArchiveBytes else {
+            throw UpdaterError("The macOS update ZIP exceeds the allowed size.")
+        }
+        let actualDigest = try sha256(of: temporaryArchive)
         guard actualDigest.caseInsensitiveCompare(update.digest) == .orderedSame else {
             throw UpdaterError("The downloaded update did not match GitHub's SHA-256 digest.")
         }
@@ -153,7 +184,7 @@ final class GitHubUpdater: ObservableObject {
             .appendingPathComponent("codex-roster-update-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
         let archive = stagingDirectory.appendingPathComponent("update.zip")
-        try data.write(to: archive, options: .atomic)
+        try FileManager.default.copyItem(at: temporaryArchive, to: archive)
         try runTool("/usr/bin/ditto", arguments: ["-x", "-k", archive.path, stagingDirectory.path])
 
         let entries = try FileManager.default.contentsOfDirectory(
@@ -171,6 +202,16 @@ final class GitHubUpdater: ObservableObject {
             throw UpdaterError("The update ZIP version does not match the GitHub release.")
         }
         return app
+    }
+
+    private static func sha256(of file: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return "sha256:" + hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     private static func runTool(_ executable: String, arguments: [String]) throws {

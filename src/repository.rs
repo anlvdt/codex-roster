@@ -395,7 +395,7 @@ where
     ) -> Result<(usize, usize)> {
         let prepared = self.prepare_backup_import(environment, backup, false)?;
         self.apply_backup_import(&prepared)?;
-        let _ = self.maybe_write_automatic_full_backup(environment);
+        self.maybe_write_automatic_full_backup(environment);
         Ok((prepared.created, prepared.updated))
     }
 
@@ -426,7 +426,7 @@ where
         }) {
             let _ = self.secret_store.delete(&removed.secret_key);
         }
-        let _ = self.maybe_write_automatic_full_backup(environment);
+        self.maybe_write_automatic_full_backup(environment);
         Ok(count)
     }
 
@@ -710,7 +710,7 @@ where
             }
             return Err(error);
         }
-        let _ = self.maybe_write_automatic_full_backup(environment);
+        self.maybe_write_automatic_full_backup(environment);
         Ok(())
     }
 

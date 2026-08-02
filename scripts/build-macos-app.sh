@@ -38,4 +38,31 @@ for icon in \
 done
 iconutil -c icns "$iconset" -o "$app_root/Contents/Resources/CodexRoster.icns"
 
+signing_identity="${CODE_SIGN_IDENTITY-}"
+if [[ -z "$signing_identity" ]]; then
+    signing_identity="-"
+fi
+if [[ "$signing_identity" != "-" ]]; then
+    codesign --force --deep --options runtime --sign "$signing_identity" "$app_root"
+else
+    codesign --force --deep --sign - "$app_root"
+fi
+if ! codesign --verify --deep --strict "$app_root"; then
+    # SwiftPM's linker signature can survive the first bundle pass on some
+    # Xcode versions; a second pass seals both nested executables.
+    if [[ "$signing_identity" != "-" ]]; then
+        codesign --force --deep --options runtime --sign "$signing_identity" "$app_root"
+    else
+        codesign --force --deep --sign - "$app_root"
+    fi
+    codesign --verify --deep --strict "$app_root"
+fi
+
+if [[ -n "${NOTARYTOOL_PROFILE-}" ]]; then
+    archive="$root_dir/build/Codex-Roster-notarization.zip"
+    ditto -c -k --sequesterRsrc --keepParent "$app_root" "$archive"
+    xcrun notarytool submit "$archive" --keychain-profile "$NOTARYTOOL_PROFILE" --wait
+    xcrun stapler staple "$app_root"
+fi
+
 echo "Built $app_root"

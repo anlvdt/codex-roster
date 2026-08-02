@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 import ServiceManagement
 
@@ -57,7 +58,6 @@ final class AccountStore: ObservableObject {
     private var legacyArchivedAccountIDs: Set<UUID>
     private let legacyAutoSwitchWhenExhaustedKey = "codexRoster.autoSwitchWhenExhausted"
     private let accountSortModeKey = "codexRoster.accountSortMode"
-    private let activeQuotaPollInterval: Duration = .seconds(60)
     private var autoSwitchTask: Task<Void, Never>?
     private var quotaRefreshTask: Task<Void, Never>?
     private var autoSwitchAllExhaustedNotified = false
@@ -117,6 +117,17 @@ final class AccountStore: ObservableObject {
 
     var hasRunningCodexProcesses: Bool {
         ChatGPTDesktop.isRunning
+    }
+
+    private var quotaPollInterval: Duration {
+        guard let remaining = accounts.first(where: { $0.isActive && !isArchived($0) })?
+            .primaryQuotaWindow?
+            .remainingPercent else {
+            return .seconds(60)
+        }
+        if remaining <= 5 { return .seconds(10) }
+        if remaining <= 20 { return .seconds(30) }
+        return .seconds(60)
     }
 
     /// True while a user-driven roster mutation is in flight (not background quota checks).
@@ -392,7 +403,7 @@ final class AccountStore: ObservableObject {
         autoSwitchTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.checkAutoSwitchWhenExhausted()
-                try? await Task.sleep(for: .seconds(60))
+                try? await Task.sleep(for: self?.quotaPollInterval ?? .seconds(60))
             }
         }
     }
@@ -405,7 +416,7 @@ final class AccountStore: ObservableObject {
                     try? await Task.sleep(for: .milliseconds(250))
                 }
                 await self?.refreshActiveQuotaInBackground()
-                try? await Task.sleep(for: self?.activeQuotaPollInterval ?? .seconds(60))
+                try? await Task.sleep(for: self?.quotaPollInterval ?? .seconds(60))
             }
         }
     }
@@ -768,8 +779,13 @@ private struct AccountHubCLI {
         }
         if completed.wait(timeout: .now() + 120) == .timedOut {
             process.terminate()
-            _ = completed.wait(timeout: .now() + 5)
-            captures.wait()
+            if completed.wait(timeout: .now() + 5) == .timedOut, process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+                _ = completed.wait(timeout: .now() + 1)
+            }
+            output.fileHandleForReading.closeFile()
+            error.fileHandleForReading.closeFile()
+            _ = captures.wait(timeout: .now() + 2)
             throw CLIError("Codex Roster did not finish within two minutes.")
         }
         captures.wait()

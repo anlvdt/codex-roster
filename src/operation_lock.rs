@@ -96,8 +96,12 @@ mod tests {
 
     #[test]
     fn is_lock_contention_detects_would_block() {
-        assert!(is_lock_contention(&io::Error::from(io::ErrorKind::WouldBlock)));
+        assert!(is_lock_contention(&io::Error::from(
+            io::ErrorKind::WouldBlock
+        )));
         assert!(is_lock_contention(&io::Error::from_raw_os_error(35)));
-        assert!(!is_lock_contention(&io::Error::from(io::ErrorKind::PermissionDenied)));
+        assert!(!is_lock_contention(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
     }
 }

@@ -108,9 +108,9 @@ impl MetadataIndexStore {
         fs::read_dir(&directory)
             .ok()
             .map(|entries| {
-                entries
-                    .filter_map(|entry| entry.ok())
-                    .any(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("snapshot"))
+                entries.filter_map(|entry| entry.ok()).any(|entry| {
+                    entry.path().extension().and_then(|ext| ext.to_str()) == Some("snapshot")
+                })
             })
             .unwrap_or(false)
     }

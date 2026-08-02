@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.2.7 - 2026-08-02
+
+### Fixed
+
+- Restored the Rust formatting and clippy release gates with a pinned toolchain.
+- Bounded stalled macOS CLI operations instead of allowing output-pipe waits to hang indefinitely.
+
+### Changed
+
+- Made quota and auto-switch polling adaptive near exhaustion.
+- Hardened macOS self-update downloads and replacement with size limits, staged replacement, rollback, and local updater logs.
+- Added ad-hoc signing by default plus optional Developer ID signing and notarization hooks for distributable builds.
+
 ## v0.2.6 - 2026-08-02
 
 ### Changed

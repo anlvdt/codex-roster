@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.9 - 2026-08-02
+
+### Changed
+
+- Reworked Add Account into a detected-session flow: preserve the current session, wait for the new device-login identity, and save only after it is verified.
+
+### Fixed
+
+- Prevented saving the prior account while device login is still pending, and keep the Add Account sheet open until saving succeeds or fails.
+
 ## v0.2.8 - 2026-08-02
 
 ### Fixed

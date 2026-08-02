@@ -30,6 +30,15 @@ enum QuotaRefreshScope {
     case allSaved
 }
 
+enum NewAccountLoginState: Equatable {
+    case idle
+    case waiting
+    case ready(AccountIdentity)
+    case saving
+    case saved(AccountIdentity)
+    case failed(String)
+}
+
 @MainActor
 final class AccountStore: ObservableObject {
     @Published private(set) var status: StatusOutput?
@@ -51,6 +60,7 @@ final class AccountStore: ObservableObject {
     @Published private(set) var isRefreshingQuotaInBackground = false
     @Published private(set) var lastQuotaRefreshAt: Date?
     @Published private(set) var accountSortMode: AccountSortMode
+    @Published private(set) var newAccountLoginState: NewAccountLoginState = .idle
     @Published var errorMessage: String?
 
     private let cli = AccountHubCLI()
@@ -62,6 +72,7 @@ final class AccountStore: ObservableObject {
     private var quotaRefreshTask: Task<Void, Never>?
     private var autoSwitchAllExhaustedNotified = false
     private var isInteractiveLoginInProgress = false
+    private var newAccountLoginWatchTask: Task<Void, Never>?
     private var coreBootstrapStarted = false
     private var menuInteractionUntil: Date?
     private var isRefreshingAccountsInBackground = false
@@ -178,15 +189,45 @@ final class AccountStore: ObservableObject {
     }
 
     func startNewAccountLogin() {
+        guard !isBusyForActions, newAccountLoginState != .waiting else { return }
         isInteractiveLoginInProgress = true
+        newAccountLoginState = .waiting
         run {
             let liveStatus: StatusOutput = try await self.cli.decode(StatusOutput.self, arguments: ["status"])
             if liveStatus.currentAccount != nil {
                 _ = try await self.cli.data(arguments: ["save", "--json"])
             }
             try CodexLoginLauncher.start()
+            self.watchForNewAccount(after: liveStatus.currentAccount)
+        }
+    }
+
+    func saveDetectedNewAccount() {
+        guard case let .ready(expectedIdentity) = newAccountLoginState, !isBusyForActions else { return }
+        newAccountLoginState = .saving
+        run {
+            let liveStatus: StatusOutput = try await self.cli.decode(StatusOutput.self, arguments: ["status"])
+            guard let liveIdentity = liveStatus.currentAccount,
+                  liveIdentity.matches(expectedIdentity) else {
+                throw CLIError(AppLanguage.text(
+                    "Phiên Codex đã thay đổi. Hãy chờ app nhận diện lại tài khoản mới rồi lưu.",
+                    "The Codex session changed. Wait for the app to detect the new account again before saving."
+                ))
+            }
+            _ = try await self.cli.data(arguments: ["save", "--json"])
+            self.isInteractiveLoginInProgress = false
+            self.newAccountLoginState = .saved(liveIdentity)
             try await self.load()
         }
+    }
+
+    func resetNewAccountLogin() {
+        newAccountLoginWatchTask?.cancel()
+        newAccountLoginWatchTask = nil
+        if case .waiting = newAccountLoginState {
+            isInteractiveLoginInProgress = false
+        }
+        newAccountLoginState = .idle
     }
 
     /// Open device login so the user can refresh an expired saved account.
@@ -200,6 +241,26 @@ final class AccountStore: ObservableObject {
             }
             try CodexLoginLauncher.start()
             try await self.load()
+        }
+    }
+
+    private func watchForNewAccount(after previousIdentity: AccountIdentity?) {
+        newAccountLoginWatchTask?.cancel()
+        newAccountLoginWatchTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled else { return }
+                guard case .waiting = self.newAccountLoginState else { return }
+                guard let status = try? await self.cli.decode(StatusOutput.self, arguments: ["status"]),
+                      let current = status.currentAccount else {
+                    continue
+                }
+                guard previousIdentity.map({ !$0.matches(current) }) ?? true else { continue }
+                self.status = status
+                self.newAccountLoginState = .ready(current)
+                return
+            }
         }
     }
 
@@ -635,6 +696,12 @@ final class AccountStore: ObservableObject {
                 try await operation()
             } catch {
                 errorMessage = error.localizedDescription
+                if case .waiting = newAccountLoginState {
+                    newAccountLoginState = .failed(error.localizedDescription)
+                    isInteractiveLoginInProgress = false
+                } else if case .saving = newAccountLoginState {
+                    newAccountLoginState = .failed(error.localizedDescription)
+                }
             }
         }
     }
@@ -1080,11 +1147,22 @@ struct StatusOutput: Decodable {
     }
 }
 
-struct AccountIdentity: Decodable {
+struct AccountIdentity: Decodable, Equatable {
     let email: String
+    let subject: String?
 
-    init(email: String) {
+    init(email: String, subject: String? = nil) {
         self.email = email
+        self.subject = subject
+    }
+
+    func matches(_ other: AccountIdentity) -> Bool {
+        switch (subject, other.subject) {
+        case let (.some(left), .some(right)):
+            return left == right
+        default:
+            return email.caseInsensitiveCompare(other.email) == .orderedSame
+        }
     }
 }
 

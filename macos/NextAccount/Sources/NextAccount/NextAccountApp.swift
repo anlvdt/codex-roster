@@ -1565,7 +1565,6 @@ private struct AddAccountSheet: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @Environment(\.dismiss) private var dismiss
-    @State private var loginStarted = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -1590,17 +1589,16 @@ private struct AddAccountSheet: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     Button(language.text("Mở đăng nhập OpenAI", "Open OpenAI sign-in")) {
-                        loginStarted = true
                         store.startNewAccountLogin()
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(store.isWorking)
+                    .disabled(store.isWorking || isWaitingForLogin)
 
-                    if loginStarted {
+                    if isWaitingForLogin {
                         Label(language.text(
-                            "Đăng nhập đang chờ trong Terminal. Sau khi Codex báo thành công, hãy lưu phiên ở bước 2.",
-                            "Sign-in is waiting in Terminal. When Codex confirms success, save the session in step 2."
-                        ), systemImage: "checkmark.circle")
+                            "Đang chờ Codex hoàn tất device login trong Terminal… App sẽ tự nhận diện tài khoản mới.",
+                            "Waiting for Codex to finish device login in Terminal… The app will detect the new account automatically."
+                        ), systemImage: "hourglass")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     }
@@ -1611,26 +1609,34 @@ private struct AddAccountSheet: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Label(language.text("2. Lưu vào Codex Roster", "2. Save to Codex Roster"), systemImage: "tray.and.arrow.down.fill")
                         .font(.headline)
-                    Text(store.status?.currentAccount?.email ?? language.text(
-                        "Bạn cũng có thể lưu phiên đang đăng nhập mà không cần mở lại trang đăng nhập.",
-                        "You can also save the current signed-in session without opening the sign-in page again."
-                    ))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    Text(saveStatusText)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                     HStack {
                         Button(language.text("Tải lại trạng thái", "Reload status")) {
                             store.refresh()
                         }
                         .disabled(store.isWorking)
                         Spacer()
-                        Button(language.text("Lưu tài khoản đã đăng nhập", "Save signed-in account")) {
-                            store.saveCurrentAccount()
-                            dismiss()
+                        Button(language.text("Lưu tài khoản mới", "Save new account")) {
+                            store.saveDetectedNewAccount()
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(store.isWorking || (!loginStarted && store.status?.currentAccount == nil))
+                        .disabled(store.isWorking || !canSaveNewAccount)
                     }
                 }
+            }
+
+            if case let .saved(identity) = store.newAccountLoginState {
+                Label(language.text(
+                    "Đã lưu \(identity.email) vào Codex Roster.",
+                    "Saved \(identity.email) to Codex Roster."
+                ), systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+            } else if case let .failed(message) = store.newAccountLoginState {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
             }
 
             Label(language.text(
@@ -1642,11 +1648,44 @@ private struct AddAccountSheet: View {
 
             HStack {
                 Spacer()
-                Button(language.text("Đóng", "Close")) { dismiss() }
+                Button(language.text("Đóng", "Close")) {
+                    store.resetNewAccountLogin()
+                    dismiss()
+                }
             }
         }
         .padding(24)
         .frame(width: 560)
+    }
+
+    private var isWaitingForLogin: Bool {
+        if case .waiting = store.newAccountLoginState { return true }
+        return false
+    }
+
+    private var canSaveNewAccount: Bool {
+        if case .ready = store.newAccountLoginState { return true }
+        return false
+    }
+
+    private var saveStatusText: String {
+        switch store.newAccountLoginState {
+        case .idle:
+            return language.text(
+                "Mở đăng nhập ở bước 1; app sẽ chỉ bật nút Lưu sau khi nhận diện account mới.",
+                "Start step 1; the Save button unlocks only after the new account is detected."
+            )
+        case .waiting:
+            return language.text("Đang chờ account mới…", "Waiting for the new account…")
+        case .ready(let identity):
+            return language.text("Đã nhận diện: \(identity.email)", "Detected: \(identity.email)")
+        case .saving:
+            return language.text("Đang lưu account mới…", "Saving the new account…")
+        case .saved(let identity):
+            return language.text("Đã lưu: \(identity.email)", "Saved: \(identity.email)")
+        case .failed:
+            return language.text("Không thể chuẩn bị login. Hãy thử lại.", "Could not prepare sign-in. Try again.")
+        }
     }
 }
 
@@ -2443,7 +2482,7 @@ private struct MenuBarOperationStatus: View {
 
 private enum AppInfo {
     static var shortVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.8"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.9"
     }
 }
 

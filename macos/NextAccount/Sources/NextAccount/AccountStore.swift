@@ -61,6 +61,7 @@ final class AccountStore: ObservableObject {
     @Published private(set) var lastQuotaRefreshAt: Date?
     @Published private(set) var accountSortMode: AccountSortMode
     @Published private(set) var newAccountLoginState: NewAccountLoginState = .idle
+    @Published private(set) var isPendingLogin = false
     @Published var errorMessage: String?
 
     private let cli = AccountHubCLI()
@@ -72,6 +73,8 @@ final class AccountStore: ObservableObject {
     private var quotaRefreshTask: Task<Void, Never>?
     private var autoSwitchAllExhaustedNotified = false
     private var isInteractiveLoginInProgress = false
+    private var isAddAccountSession = false
+    private var expectedReloginEmail: String?
     private var newAccountLoginWatchTask: Task<Void, Never>?
     private var coreBootstrapStarted = false
     private var menuInteractionUntil: Date?
@@ -183,7 +186,7 @@ final class AccountStore: ObservableObject {
     func saveCurrentAccount() {
         run {
             _ = try await self.cli.data(arguments: ["save", "--json"])
-            self.isInteractiveLoginInProgress = false
+            self.clearPendingLoginFlags()
             try await self.load()
         }
     }
@@ -191,14 +194,10 @@ final class AccountStore: ObservableObject {
     func startNewAccountLogin() {
         guard !isBusyForActions, newAccountLoginState != .waiting else { return }
         isInteractiveLoginInProgress = true
+        isPendingLogin = true
         newAccountLoginState = .waiting
         run {
-            let liveStatus: StatusOutput = try await self.cli.decode(StatusOutput.self, arguments: ["status"])
-            if liveStatus.currentAccount != nil {
-                _ = try await self.cli.data(arguments: ["save", "--json"])
-            }
-            try CodexLoginLauncher.start()
-            self.watchForNewAccount(after: liveStatus.currentAccount)
+            try await self.beginOrResumeAddAccountLogin(expectedEmail: nil)
         }
     }
 
@@ -214,8 +213,9 @@ final class AccountStore: ObservableObject {
                     "The Codex session changed. Wait for the app to detect the new account again before saving."
                 ))
             }
-            _ = try await self.cli.data(arguments: ["save", "--json"])
-            self.isInteractiveLoginInProgress = false
+            let saveCommand = self.isAddAccountSession ? "save-added-account" : "save"
+            _ = try await self.cli.data(arguments: [saveCommand, "--json"])
+            self.clearPendingLoginFlags()
             self.newAccountLoginState = .saved(liveIdentity)
             try await self.load()
         }
@@ -224,24 +224,73 @@ final class AccountStore: ObservableObject {
     func resetNewAccountLogin() {
         newAccountLoginWatchTask?.cancel()
         newAccountLoginWatchTask = nil
-        if case .waiting = newAccountLoginState {
-            isInteractiveLoginInProgress = false
-        }
+        clearPendingLoginFlags()
         newAccountLoginState = .idle
     }
 
-    /// Open device login so the user can refresh an expired saved account.
-    func startRelogin(for _: SavedAccount) {
-        isInteractiveLoginInProgress = true
+    /// Cancel an unfinished add/re-login and restore the previous live Codex session.
+    func cancelPendingLogin() {
         run {
-            let liveStatus: StatusOutput = try await self.cli.decode(StatusOutput.self, arguments: ["status"])
-            // Preserve the currently active session before replacing it with a re-login.
-            if liveStatus.currentAccount != nil {
-                _ = try await self.cli.data(arguments: ["save", "--json"])
-            }
-            try CodexLoginLauncher.start()
+            self.newAccountLoginWatchTask?.cancel()
+            self.newAccountLoginWatchTask = nil
+            _ = try await self.cli.data(arguments: ["cancel-add-account", "--json"])
+            self.clearPendingLoginFlags()
+            self.newAccountLoginState = .idle
             try await self.load()
         }
+    }
+
+    /// Open device login so the user can refresh an expired saved account.
+    func startRelogin(for account: SavedAccount) {
+        isInteractiveLoginInProgress = true
+        isPendingLogin = true
+        newAccountLoginState = .waiting
+        run {
+            try await self.beginOrResumeAddAccountLogin(expectedEmail: account.email)
+        }
+    }
+
+    private func beginOrResumeAddAccountLogin(expectedEmail: String?) async throws {
+        let addStatus = try await cli.decode(AddAccountStatusOutput.self, arguments: ["add-account-status"])
+        if addStatus.active || isAddAccountSession {
+            try await resumePendingLogin(expectedEmail: expectedEmail)
+            return
+        }
+
+        let liveStatus = try await cli.decode(StatusOutput.self, arguments: ["status"])
+        var began = false
+        do {
+            _ = try await cli.data(arguments: ["begin-add-account", "--json"])
+            began = true
+            isAddAccountSession = true
+            expectedReloginEmail = expectedEmail
+            isPendingLogin = true
+            try CodexLoginLauncher.start()
+            watchForNewAccount(after: liveStatus.currentAccount)
+        } catch {
+            if began {
+                _ = try? await cli.data(arguments: ["cancel-add-account", "--json"])
+                clearPendingLoginFlags()
+                newAccountLoginState = .idle
+            }
+            throw error
+        }
+    }
+
+    private func resumePendingLogin(expectedEmail: String?) async throws {
+        isAddAccountSession = true
+        expectedReloginEmail = expectedEmail
+        isInteractiveLoginInProgress = true
+        isPendingLogin = true
+        newAccountLoginState = .waiting
+        let status = try? await cli.decode(StatusOutput.self, arguments: ["status"])
+        if let current = status?.currentAccount,
+           expectedEmail.map({ current.email.caseInsensitiveCompare($0) == .orderedSame }) ?? true {
+            newAccountLoginState = .ready(current)
+            return
+        }
+        try CodexLoginLauncher.start()
+        watchForNewAccount(after: nil)
     }
 
     private func watchForNewAccount(after previousIdentity: AccountIdentity?) {
@@ -254,6 +303,10 @@ final class AccountStore: ObservableObject {
                 guard case .waiting = self.newAccountLoginState else { return }
                 guard let status = try? await self.cli.decode(StatusOutput.self, arguments: ["status"]),
                       let current = status.currentAccount else {
+                    continue
+                }
+                if let expected = self.expectedReloginEmail,
+                   current.email.caseInsensitiveCompare(expected) != .orderedSame {
                     continue
                 }
                 guard previousIdentity.map({ !$0.matches(current) }) ?? true else { continue }
@@ -284,8 +337,10 @@ final class AccountStore: ObservableObject {
                 "The current session is \(currentEmail), not \(account.email). Sign in as that account, then save again."
             ))
         }
-        _ = try await cli.data(arguments: ["save", "--json"])
-        isInteractiveLoginInProgress = false
+        let saveCommand = isAddAccountSession ? "save-added-account" : "save"
+        _ = try await cli.data(arguments: [saveCommand, "--json"])
+        clearPendingLoginFlags()
+        newAccountLoginState = .idle
         try await load()
         _ = try? await cli.data(arguments: ["usage", account.id.uuidString, "--json"])
         try await load()
@@ -295,6 +350,13 @@ final class AccountStore: ObservableObject {
                 "Account \(account.email) still needs sign-in. Finish OpenAI device login, then save again."
             ))
         }
+    }
+
+    private func clearPendingLoginFlags() {
+        isInteractiveLoginInProgress = false
+        isAddAccountSession = false
+        expectedReloginEmail = nil
+        isPendingLogin = false
     }
 
     func activate(_ account: SavedAccount, force: Bool = false) {
@@ -344,10 +406,27 @@ final class AccountStore: ObservableObject {
     func startCoreMonitoring() {
         guard !coreBootstrapStarted else { return }
         coreBootstrapStarted = true
+        Task { await self.resumeAddAccountSessionIfNeeded() }
         refresh()
         refreshResetOutlook(silently: true)
         startAutoSwitchMonitoring()
         startQuotaMonitoring()
+    }
+
+    private func resumeAddAccountSessionIfNeeded() async {
+        guard let addStatus = try? await cli.decode(AddAccountStatusOutput.self, arguments: ["add-account-status"]),
+              addStatus.active else {
+            return
+        }
+        isAddAccountSession = true
+        isInteractiveLoginInProgress = true
+        isPendingLogin = true
+        newAccountLoginState = .waiting
+        if let current = try? await cli.decode(StatusOutput.self, arguments: ["status"]).currentAccount {
+            newAccountLoginState = .ready(current)
+        } else {
+            watchForNewAccount(after: nil)
+        }
     }
 
     func delete(_ account: SavedAccount) {
@@ -584,7 +663,7 @@ final class AccountStore: ObservableObject {
         guard autoSwitchWhenExhausted, !isBusyForActions, !isCheckingAutoSwitch, !shouldDeferBackgroundWork else { return }
         isCheckingAutoSwitch = true
         defer { isCheckingAutoSwitch = false }
-        guard !isInteractiveLoginInProgress else {
+        guard !isInteractiveLoginInProgress, !isPendingLogin else {
             autoSwitchState = .waitingForLogin
             return
         }
@@ -664,6 +743,7 @@ final class AccountStore: ObservableObject {
               !isRefreshingQuotaInBackground,
               !shouldDeferBackgroundWork,
               !isInteractiveLoginInProgress,
+              !isPendingLogin,
               let activeAccount = accounts.first(where: { $0.isActive && !isArchived($0) }) else {
             return
         }
@@ -698,7 +778,7 @@ final class AccountStore: ObservableObject {
                 errorMessage = error.localizedDescription
                 if case .waiting = newAccountLoginState {
                     newAccountLoginState = .failed(error.localizedDescription)
-                    isInteractiveLoginInProgress = false
+                    clearPendingLoginFlags()
                 } else if case .saving = newAccountLoginState {
                     newAccountLoginState = .failed(error.localizedDescription)
                 }
@@ -1436,6 +1516,10 @@ struct RustDate: Decodable {
 
 struct AutoStartUsageWindowsStatus: Decodable {
     let enabled: Bool
+}
+
+struct AddAccountStatusOutput: Decodable {
+    let active: Bool
 }
 
 struct AutoSwitchOutput: Decodable {

@@ -9,6 +9,7 @@
 - Live `~/.codex` sessions are no longer force-logged-out by parallel OAuth refresh while Codex/ChatGPT is running: Roster skips live token rotation when those processes are present, and does not poison saved snapshots when live write-back loses a race.
 - Auto-start usage-window pings skip the active live account (temp-home `codex exec` would rotate the same refresh token).
 - Windows quota parsing accepts Rust `time` array timestamps for `reset_at`; JSON import and auto-switch/auto-quota UI hardening ship in this build.
+- macOS add/re-login now uses `begin-add-account` / `save-added-account` / `cancel-add-account` with restore-on-cancel, resumes pending sessions on launch, and pauses auto-switch/quota while login is in progress. Release attaches `Codex-Roster-*-macos.zip` so in-app update checks succeed.
 
 ## v0.2.19 - 2026-08-03
 

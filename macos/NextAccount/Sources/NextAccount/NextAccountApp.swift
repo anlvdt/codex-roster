@@ -1647,16 +1647,27 @@ private struct AddAccountSheet: View {
             }
 
             Label(language.text(
-                "Phiên Codex hiện tại được lưu trước khi đăng nhập mới. Codex Roster không nhận mật khẩu, mã xác thực hoặc cookie của bạn.",
-                "The current Codex session is saved before a new sign-in. Codex Roster never receives your password, verification code, or browser cookies."
+                "Phiên Codex hiện tại được sao lưu trước khi đăng nhập mới. Hủy sẽ khôi phục phiên trước.",
+                "The current Codex session is backed up before a new sign-in. Cancel restores the previous session."
             ), systemImage: "lock.shield")
             .font(.footnote)
             .foregroundStyle(.secondary)
 
             HStack {
+                if store.isPendingLogin {
+                    Button(language.text("Hủy và khôi phục phiên", "Cancel and restore session")) {
+                        store.cancelPendingLogin()
+                        dismiss()
+                    }
+                    .tint(.orange)
+                }
                 Spacer()
                 Button(language.text("Đóng", "Close")) {
-                    store.resetNewAccountLogin()
+                    if store.isPendingLogin {
+                        store.cancelPendingLogin()
+                    } else {
+                        store.resetNewAccountLogin()
+                    }
                     dismiss()
                 }
             }
@@ -1941,15 +1952,27 @@ private struct ReloginAccountSheet: View {
             }
 
             Label(language.text(
-                "Phiên Codex đang dùng sẽ được lưu trước khi mở đăng nhập mới. Phải đăng nhập đúng \(account.email).",
-                "The current Codex session is saved before the new sign-in. You must sign in as \(account.email)."
+                "Phiên Codex đang dùng được sao lưu trước khi mở đăng nhập mới. Hủy sẽ khôi phục phiên trước. Phải đăng nhập đúng \(account.email).",
+                "The current Codex session is backed up before the new sign-in. Cancel restores it. You must sign in as \(account.email)."
             ), systemImage: "lock.shield")
             .font(.footnote)
             .foregroundStyle(.secondary)
 
             HStack {
+                if store.isPendingLogin || loginStarted {
+                    Button(language.text("Hủy và khôi phục phiên", "Cancel and restore session")) {
+                        store.cancelPendingLogin()
+                        dismiss()
+                    }
+                    .tint(.orange)
+                }
                 Spacer()
-                Button(language.text("Đóng", "Close")) { dismiss() }
+                Button(language.text("Đóng", "Close")) {
+                    if store.isPendingLogin || loginStarted {
+                        store.cancelPendingLogin()
+                    }
+                    dismiss()
+                }
             }
         }
         .padding(24)
@@ -2079,6 +2102,27 @@ private struct MenuBarView: View {
             MenuBarServiceHealth()
 
             MenuBarResetOutlook()
+
+            if store.isPendingLogin {
+                HStack(spacing: 7) {
+                    Image(systemName: "person.badge.plus")
+                        .foregroundStyle(.blue)
+                    Text(language.text(
+                        "Đang thêm/đăng nhập lại tài khoản. Hủy để khôi phục phiên trước.",
+                        "Adding or re-signing an account. Cancel to restore the previous session."
+                    ))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    Spacer()
+                    Button(language.text("Hủy", "Cancel")) {
+                        store.cancelPendingLogin()
+                    }
+                    .controlSize(.small)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 7)
+                .background(Color.blue.opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
+            }
 
             MenuBarUpdateStatus()
 

@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace CodexRoster.Windows.Services;
 
@@ -13,10 +14,11 @@ public static class StartupDiagnostics
             "CodexRoster",
             "logs");
         var logPath = Path.Combine(logDirectory, "startup.log");
+        var details = FormatException(exception);
         try
         {
             Directory.CreateDirectory(logDirectory);
-            File.AppendAllText(logPath, $"[{DateTimeOffset.Now:O}] {stage}{Environment.NewLine}{exception}{Environment.NewLine}{Environment.NewLine}");
+            File.AppendAllText(logPath, $"[{DateTimeOffset.Now:O}] {stage}{Environment.NewLine}{details}{Environment.NewLine}{Environment.NewLine}");
         }
         catch
         {
@@ -24,9 +26,33 @@ public static class StartupDiagnostics
         }
         _ = MessageBox(
             IntPtr.Zero,
-            $"Codex Roster không thể mở giao diện. Chi tiết đã được lưu tại:{Environment.NewLine}{logPath}{Environment.NewLine}{Environment.NewLine}{exception.Message}",
+            $"Codex Roster không thể mở giao diện. Chi tiết đã được lưu tại:{Environment.NewLine}{logPath}{Environment.NewLine}{Environment.NewLine}{RootMessage(exception)}",
             "Codex Roster",
             ErrorIcon);
+    }
+
+    private static string RootMessage(Exception exception)
+    {
+        var current = exception;
+        while (current.InnerException is not null) current = current.InnerException;
+        return current.Message;
+    }
+
+    private static string FormatException(Exception exception)
+    {
+        var builder = new StringBuilder();
+        var current = exception;
+        var depth = 0;
+        while (current is not null)
+        {
+            if (depth > 0) builder.AppendLine("--- inner exception ---");
+            builder.AppendLine($"{current.GetType().FullName}: {current.Message}");
+            if (current.HResult != 0) builder.AppendLine($"HResult: 0x{current.HResult:X8}");
+            if (!string.IsNullOrWhiteSpace(current.StackTrace)) builder.AppendLine(current.StackTrace);
+            current = current.InnerException;
+            depth++;
+        }
+        return builder.ToString().TrimEnd();
     }
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]

@@ -95,7 +95,18 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
             _isAddAccountSession = addAccount.Active;
             if (addAccount.Active)
             {
+                // begin-add-account clears live auth, so any current identity is the
+                // newly signed-in account waiting to be saved.
                 LoginStatus = "Đang chờ hoàn tất đăng nhập tài khoản mới. Lưu phiên mới hoặc hủy để khôi phục phiên trước.";
+                IdentityDto? current = null;
+                try { current = (await _cli.ReadAsync<StatusResponse>("status")).CurrentAccount; }
+                catch { /* watcher below will retry */ }
+                if (current is not null)
+                {
+                    _pendingLoginIdentity = current;
+                    LoginStatus = $"Đã nhận diện {current.Email}. Chọn Lưu phiên hiện tại để thêm vào Roster.";
+                }
+                WatchForNewLoginAsync(previousIdentity: null);
             }
         }
         catch
@@ -224,9 +235,20 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
     {
         await RunAsync(async () =>
         {
-            if (_pendingLoginIdentity is not null)
+            var current = await _cli.ReadAsync<StatusResponse>("status");
+            if (_isAddAccountSession)
             {
-                var current = await _cli.ReadAsync<StatusResponse>("status");
+                if (_pendingLoginIdentity is null || current.CurrentAccount is null)
+                {
+                    throw new InvalidOperationException("Roster chưa nhận diện phiên đăng nhập mới. Hoàn tất đăng nhập OpenAI rồi chờ nhận diện trước khi lưu.");
+                }
+                if (!SameIdentity(current.CurrentAccount, _pendingLoginIdentity))
+                {
+                    throw new InvalidOperationException("Phiên Codex đã thay đổi. Hãy để Roster nhận diện lại tài khoản mới trước khi lưu.");
+                }
+            }
+            else if (_pendingLoginIdentity is not null)
+            {
                 if (current.CurrentAccount is null || !SameIdentity(current.CurrentAccount, _pendingLoginIdentity))
                 {
                     throw new InvalidOperationException("Phiên Codex đã thay đổi. Hãy để Roster nhận diện lại tài khoản mới trước khi lưu.");
@@ -234,7 +256,6 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
             }
             if (_expectedLoginEmail is not null)
             {
-                var current = await _cli.ReadAsync<StatusResponse>("status");
                 if (current.CurrentAccount is null || !string.Equals(current.CurrentAccount.Email, _expectedLoginEmail, StringComparison.OrdinalIgnoreCase))
                 {
                     throw new InvalidOperationException($"Phiên hiện tại không phải {_expectedLoginEmail}. Hãy đăng nhập đúng tài khoản rồi thử lại.");
@@ -391,14 +412,17 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         {
             UpdateStatus = $"Đang tải Codex Roster v{_availableUpdate.Version}…";
             var stage = await _updater.DownloadAndStageAsync(_availableUpdate);
+            UpdateStatus = "Đang dừng companion nền và cài bản cập nhật…";
             _updater.ScheduleInstall(stage);
             UpdateStatus = "Đang cài bản cập nhật và mở lại Codex Roster…";
             Microsoft.UI.Xaml.Application.Current.Exit();
         }
-        catch
+        catch (Exception exception)
         {
             UpdateStatus = "Không thể cài cập nhật. Phiên bản hiện tại vẫn không thay đổi.";
-            ErrorMessage = "Không thể tải hoặc cài bản cập nhật từ GitHub.";
+            ErrorMessage = string.IsNullOrWhiteSpace(exception.Message)
+                ? "Không thể tải hoặc cài bản cập nhật từ GitHub."
+                : exception.Message;
         }
         finally
         {
@@ -435,7 +459,16 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
                 : new CodexDesktopRestartPlan([]);
             try
             {
-                await _cli.RunCommandAsync("activate", account.Id.ToString());
+                // After an explicit Desktop close confirmation, pass --force so
+                // Electron helper processes that linger briefly do not block the swap.
+                if (restartDesktop)
+                {
+                    await _cli.RunCommandAsync("activate", account.Id.ToString(), "--force");
+                }
+                else
+                {
+                    await _cli.RunCommandAsync("activate", account.Id.ToString());
+                }
             }
             finally
             {
@@ -449,6 +482,12 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
     }
 
     public bool IsCodexDesktopRunning() => CodexDesktopLifecycle.IsRunning();
+
+    public async Task<IReadOnlyList<RunningProcessDto>> GetProcessWarningsAsync()
+    {
+        var status = await _cli.ReadAsync<StatusResponse>("status");
+        return status.ProcessWarnings;
+    }
 
     public async Task ToggleArchiveAsync(AccountItem account)
     {
@@ -554,15 +593,43 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
                 applyArgs.Add("--account-id");
                 applyArgs.Add(candidateId.ToString());
             }
-            var applied = await _cli.ReadAsync<AutoSwitchOutput>(applyArgs.ToArray());
+            var relaunch = new CodexDesktopRestartPlan([]);
+            var closedDesktop = false;
+            if (CodexDesktopLifecycle.IsRunning())
+            {
+                QuotaRefreshStatus = "Đang đóng Codex Desktop trước khi tự động chuyển…";
+                relaunch = await CodexDesktopLifecycle.CloseForAccountSwitchAsync();
+                closedDesktop = true;
+            }
+            AutoSwitchOutput applied;
+            try
+            {
+                applied = await _cli.ReadAsync<AutoSwitchOutput>(applyArgs.ToArray());
+                // Mirror macOS: after Desktop close, give process-table lag a short
+                // chance to clear, but never force through a live Codex CLI.
+                if (applied.Status == "waiting_for_processes" && closedDesktop && !CodexDesktopLifecycle.IsRunning())
+                {
+                    for (var attempt = 0; attempt < 3 && applied.Status == "waiting_for_processes"; attempt++)
+                    {
+                        await Task.Delay(150);
+                        applied = await _cli.ReadAsync<AutoSwitchOutput>(applyArgs.ToArray());
+                    }
+                }
+            }
+            finally
+            {
+                relaunch.Restart();
+            }
             if (applied.Status == "switched")
             {
                 await RefreshRosterDataAsync();
-                QuotaRefreshStatus = $"Đã tự động chuyển sang {applied.CandidateDisplayName ?? "tài khoản khác"}. Windows Preview chưa tự mở lại Codex — hãy mở lại app để khớp phiên.";
+                QuotaRefreshStatus = relaunch.HasDesktop
+                    ? $"Đã tự động chuyển sang {applied.CandidateDisplayName ?? "tài khoản khác"} và mở lại Codex Desktop."
+                    : $"Đã tự động chuyển sang {applied.CandidateDisplayName ?? "tài khoản khác"}.";
             }
             else if (applied.Status == "waiting_for_processes")
             {
-                QuotaRefreshStatus = "Codex đang chạy — đóng Codex rồi để Roster chuyển (Windows Preview chưa tự đóng/mở lại).";
+                QuotaRefreshStatus = "Codex CLI đang chạy — đóng tác vụ CLI rồi để Roster chuyển tự động.";
             }
         }
         catch when (silent)
@@ -662,9 +729,11 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         {
             await operation();
         }
-        catch (Exception)
+        catch (Exception exception)
         {
-            ErrorMessage = "Thao tác không hoàn tất. Hãy kiểm tra phiên Codex rồi thử lại.";
+            ErrorMessage = string.IsNullOrWhiteSpace(exception.Message)
+                ? "Thao tác không hoàn tất. Hãy kiểm tra phiên Codex rồi thử lại."
+                : exception.Message;
         }
         finally
         {
@@ -726,10 +795,15 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         }, cancellation.Token);
     }
 
-    private static bool SameIdentity(IdentityDto? left, IdentityDto? right) =>
-        left is not null
-        && right is not null
-        && string.Equals(left.Email, right.Email, StringComparison.OrdinalIgnoreCase);
+    private static bool SameIdentity(IdentityDto? left, IdentityDto? right)
+    {
+        if (left is null || right is null) return false;
+        if (!string.IsNullOrWhiteSpace(left.Subject) && !string.IsNullOrWhiteSpace(right.Subject))
+        {
+            return string.Equals(left.Subject, right.Subject, StringComparison.Ordinal);
+        }
+        return string.Equals(left.Email, right.Email, StringComparison.OrdinalIgnoreCase);
+    }
 
     private static string FormatTokens(ulong value)
     {

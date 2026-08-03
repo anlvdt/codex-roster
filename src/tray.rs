@@ -138,7 +138,14 @@ where
         let command = self.commands.get(event.id.as_ref()).copied();
         match command {
             Some(TrayCommand::Activate(account_id)) => {
-                if let Err(error) = self.app.activate_with_running_policy(account_id, false) {
+                #[cfg(windows)]
+                {
+                    // Close Desktop first so the relaunched app reads the new
+                    // ~/.codex session. Force only after that close attempt.
+                    crate::windows_shell::close_desktop_for_switch();
+                }
+                let force = cfg!(windows);
+                if let Err(error) = self.app.activate_with_running_policy(account_id, force) {
                     eprintln!("failed to activate account from tray: {error:#}");
                 }
                 if let Err(error) = self.update_tray_menu() {

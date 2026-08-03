@@ -17,7 +17,7 @@ public partial class App : Application
         catch (Exception exception)
         {
             StartupDiagnostics.Report("Application initialization", exception);
-            throw;
+            Environment.Exit(1);
         }
     }
 
@@ -31,6 +31,7 @@ public partial class App : Application
         catch (Exception exception)
         {
             StartupDiagnostics.Report("Window launch", exception);
+            Environment.Exit(1);
         }
     }
 
@@ -38,5 +39,6 @@ public partial class App : Application
     {
         StartupDiagnostics.Report("Unhandled UI exception", args.Exception);
         args.Handled = true;
+        Environment.Exit(1);
     }
 }

@@ -14,7 +14,7 @@ This folder contains the native **WinUI 3** Windows desktop app. It is deliberat
 - The dashboard checks stable GitHub Releases at launch and every six hours. Installing an update verifies GitHub's SHA-256 digest before the app replaces its bundle and relaunches.
 - Local Credential Manager, encrypted backup, CLI, quota and snapshot logic remain in Rust.
 
-The Preview intentionally does **not** close/relaunch the Windows Codex desktop app automatically. Auto-switch is therefore deferred until Codex is closed. That integration needs verification against the actual Windows app package and lifecycle before it is safe to enable.
+Manual switch and automatic switch close Codex/ChatGPT Desktop around the auth swap, then reopen Desktop when a launch path is known. Live Codex CLI work still blocks switching so terminal jobs are not interrupted.
 
 ## Build on Windows
 

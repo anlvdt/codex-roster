@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.2.19 - 2026-08-03
+
+### Fixed
+
+- Windows desktop launch no longer crashes with `XamlParseException`: the command-bar "Dịch vụ" button used `Icon="Cloud"`, which is not a valid WinUI `Symbol` enum value. It now uses `Globe`.
+- Startup diagnostics now log the full inner-exception chain and HRESULT so future XAML load failures are actionable; a failed window launch exits instead of leaving a zombie process.
+- Windows unpackaged publish enables MSIX tooling and requires a `.pri` resource index in the release bundle so WinUI can resolve `ms-appx` XAML.
+- Account activation/auto-switch now closes Codex/ChatGPT Desktop helpers (including windowless Electron processes), passes `--force` only after an explicit Desktop close, and relaunches Desktop so the new session is picked up.
+- Device login resolves `codex.cmd` / PATH installs instead of assuming `codex.exe`, refuses add-account save until identity is detected, and re-arms the login watcher after a mid-session restart.
+- In-app updater stops the notification-area CLI companion before replacing the install folder; packaging builds a forced `x86_64` CLI and smokes `status --json`.
+- UI errors surface the real CLI message, identity matching prefers `subject`, and destructive restore/import actions ask for confirmation.
+
 ## v0.2.18 - 2026-08-03
 
 ### Fixed

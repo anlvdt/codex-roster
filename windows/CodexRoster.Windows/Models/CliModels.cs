@@ -39,6 +39,8 @@ public sealed class IdentityDto
 {
     public string Email { get; init; } = string.Empty;
     public string? Name { get; init; }
+    [JsonPropertyName("subject")]
+    public string? Subject { get; init; }
 }
 
 public sealed class AccountDto

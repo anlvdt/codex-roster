@@ -16,7 +16,7 @@
             <AppBarButton Icon="Add" Label="Thêm tài khoản" Click="AddAccount_Click" />
             <AppBarButton Icon="Save" Label="Lưu phiên hiện tại" Click="SaveCurrent_Click" />
             <AppBarButton Icon="Refresh" Label="Quota" Click="RefreshQuota_Click" />
-            <AppBarButton Icon="Cloud" Label="Dịch vụ" Click="RefreshInsights_Click" />
+            <AppBarButton Icon="Globe" Label="Dịch vụ" Click="RefreshInsights_Click" />
             <AppBarButton Icon="Download" Label="Cập nhật" Click="Update_Click" />
             <AppBarButton Icon="Sync" Label="Làm mới" Click="Refresh_Click" />
         </CommandBar>
@@ -164,7 +164,7 @@
                                 <StackPanel Spacing="8">
                                     <TextBlock Text="Notification area" Style="{StaticResource BodyStrongTextBlockStyle}" />
                                     <TextBlock Text="{x:Bind ViewModel.ProcessSafetyStatus, Mode=OneWay}" TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}" Opacity="0.72" />
-                                    <TextBlock Text="Tự động chuyển sẽ đợi Codex đóng để bảo vệ công việc đang làm. Tự mở lại Codex sẽ được bật sau khi kiểm chứng trên Windows." TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.72" />
+                                    <TextBlock Text="Tự động chuyển đóng Codex Desktop khi cần, chuyển phiên, rồi mở lại. Tác vụ Codex CLI đang chạy vẫn được bảo vệ và sẽ hoãn việc chuyển." TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.72" />
                                     <Button Content="Gửi vào notification area" Click="SendToTray_Click" HorizontalAlignment="Stretch" />
                                     <TextBlock Text="{x:Bind ViewModel.UpdateStatus, Mode=OneWay}" TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.72" />
                                     <Button Content="{x:Bind ViewModel.UpdateActionLabel, Mode=OneWay}" Click="Update_Click" HorizontalAlignment="Stretch" />

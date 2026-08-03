@@ -36,19 +36,26 @@ public static class CodexDesktopLifecycle
 
     public static async Task<CodexDesktopRestartPlan> CloseForAccountSwitchAsync()
     {
+        // Include Electron helper processes that have no main window. Rust process
+        // detection still sees those helpers and blocks activate without --force.
         var desktops = DesktopProcessNames
             .SelectMany(Process.GetProcessesByName)
-            .Where(process => !process.HasExited && process.MainWindowHandle != IntPtr.Zero)
+            .Where(process => !process.HasExited && IsDesktopProcess(process))
+            .GroupBy(process => process.Id)
+            .Select(group => group.First())
             .ToList();
         var executables = desktops
             .Select(ExecutablePath)
-            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Where(path => !string.IsNullOrWhiteSpace(path) && LooksLikeDesktopExecutable(path))
             .Cast<string>()
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
         foreach (var process in desktops)
         {
-            try { process.CloseMainWindow(); }
+            try
+            {
+                if (process.MainWindowHandle != IntPtr.Zero) process.CloseMainWindow();
+            }
             catch { }
         }
         await Task.Delay(TimeSpan.FromSeconds(2));
@@ -63,7 +70,28 @@ public static class CodexDesktopLifecycle
 
     public static bool IsRunning() => DesktopProcessNames
         .SelectMany(Process.GetProcessesByName)
-        .Any(process => !process.HasExited && process.MainWindowHandle != IntPtr.Zero);
+        .Any(process => !process.HasExited && IsDesktopProcess(process));
+
+    private static bool IsDesktopProcess(Process process)
+    {
+        var path = ExecutablePath(process);
+        if (!string.IsNullOrWhiteSpace(path) && LooksLikeDesktopExecutable(path)) return true;
+        // ChatGPT Desktop helpers often lack a main window; still treat the brand
+        // process name as desktop. Bare `codex` without a desktop path is likely CLI.
+        var name = process.ProcessName;
+        return name.Equals("chatgpt", StringComparison.OrdinalIgnoreCase)
+            || process.MainWindowHandle != IntPtr.Zero;
+    }
+
+    private static bool LooksLikeDesktopExecutable(string path)
+    {
+        var normalized = path.Replace('/', '\\');
+        return normalized.Contains("ChatGPT", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("OpenAI", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("\\Codex\\", StringComparison.OrdinalIgnoreCase)
+            || normalized.EndsWith("ChatGPT.exe", StringComparison.OrdinalIgnoreCase)
+            || normalized.EndsWith("Codex.exe", StringComparison.OrdinalIgnoreCase);
+    }
 
     private static async Task WaitForExitAsync(Process process)
     {

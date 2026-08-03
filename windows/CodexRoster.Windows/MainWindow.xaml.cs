@@ -41,24 +41,42 @@ public sealed partial class MainWindow : Window
 
     private async void ActivateAccount_Click(object sender, RoutedEventArgs e)
     {
-        if ((sender as FrameworkElement)?.Tag is AccountItem account)
+        if ((sender as FrameworkElement)?.Tag is not AccountItem account) return;
+
+        var desktopRunning = ViewModel.IsCodexDesktopRunning();
+        IReadOnlyList<RunningProcessDto> warnings = [];
+        try { warnings = await ViewModel.GetProcessWarningsAsync(); }
+        catch { /* status probe is advisory before the confirm dialog */ }
+
+        if (!desktopRunning && warnings.Count > 0)
         {
-            var restartDesktop = ViewModel.IsCodexDesktopRunning();
-            if (restartDesktop)
+            var block = new ContentDialog
             {
-                var dialog = new ContentDialog
-                {
-                    XamlRoot = Content.XamlRoot,
-                    Title = "Chuyển tài khoản Codex?",
-                    Content = "Codex Desktop sẽ được đóng, chuyển session, rồi mở lại. Các tác vụ Codex CLI đang chạy phải được đóng trước.",
-                    PrimaryButtonText = "Chuyển và mở lại",
-                    CloseButtonText = "Hủy",
-                    DefaultButton = ContentDialogButton.Primary,
-                };
-                if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
-            }
-            await ViewModel.ActivateAsync(account, restartDesktop);
+                XamlRoot = Content.XamlRoot,
+                Title = "Codex đang chạy",
+                Content = "Hãy đóng các tác vụ Codex CLI đang chạy trước khi chuyển tài khoản để bảo vệ công việc.",
+                CloseButtonText = "Đóng",
+            };
+            await block.ShowAsync();
+            return;
         }
+
+        if (desktopRunning)
+        {
+            var dialog = new ContentDialog
+            {
+                XamlRoot = Content.XamlRoot,
+                Title = "Chuyển tài khoản Codex?",
+                Content = "Codex Desktop sẽ được đóng, chuyển session, rồi mở lại. Các tác vụ Codex CLI đang chạy phải được đóng trước.",
+                PrimaryButtonText = "Chuyển và mở lại",
+                CloseButtonText = "Hủy",
+                DefaultButton = ContentDialogButton.Primary,
+            };
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+            await ViewModel.ActivateAsync(account, restartDesktop: true);
+            return;
+        }
+        await ViewModel.ActivateAsync(account, restartDesktop: false);
     }
 
     private async void AccountActions_Click(object sender, RoutedEventArgs e)
@@ -135,11 +153,31 @@ public sealed partial class MainWindow : Window
 
     private async void RestoreAccountList_Click(object sender, RoutedEventArgs e)
     {
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Khôi phục danh sách tài khoản?",
+            Content = "Danh sách tài khoản đã lưu sẽ được thay bằng bản sao lưu metadata gần nhất. Phiên Codex đang dùng không bị ghi đè.",
+            PrimaryButtonText = "Khôi phục danh sách",
+            CloseButtonText = "Hủy",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
         await ViewModel.RestoreLatestAccountListBackupAsync();
     }
 
     private async void RestoreFullBackup_Click(object sender, RoutedEventArgs e)
     {
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Khôi phục phiên đầy đủ?",
+            Content = "Bản sao lưu tự động đầy đủ gần nhất sẽ ghi đè danh sách và có thể thay phiên Codex hiện tại trên máy này.",
+            PrimaryButtonText = "Khôi phục phiên đầy đủ",
+            CloseButtonText = "Hủy",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
         await ViewModel.RestoreLatestFullBackupAsync();
     }
 
@@ -210,6 +248,16 @@ public sealed partial class MainWindow : Window
         if (string.IsNullOrWhiteSpace(path.Text) || string.IsNullOrWhiteSpace(password.Password)) return;
         if (importing)
         {
+            var confirm = new ContentDialog
+            {
+                XamlRoot = Content.XamlRoot,
+                Title = "Nhập bản sao lưu?",
+                Content = "Tài khoản trong file sao lưu sẽ được nhập vào Roster trên máy này. Phiên hiện tại chỉ đổi khi bạn kích hoạt một tài khoản sau đó.",
+                PrimaryButtonText = "Nhập",
+                CloseButtonText = "Hủy",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            if (await confirm.ShowAsync() != ContentDialogResult.Primary) return;
             await ViewModel.ImportBackupAsync(path.Text.Trim(), password.Password);
         }
         else

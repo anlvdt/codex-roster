@@ -1,5 +1,9 @@
 use std::path::PathBuf;
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
+
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 const SHELL_FILE_NAME: &str = "CodexRoster.Windows.exe";
 
@@ -12,6 +16,41 @@ pub(crate) fn launch_if_bundled() -> bool {
     };
 
     Command::new(shell).spawn().is_ok()
+}
+
+/// Closes ChatGPT / Codex Desktop processes before a tray-driven account swap.
+/// Bare Codex CLI processes are left alone so in-flight terminal work is kept.
+pub(crate) fn close_desktop_for_switch() {
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing()
+            .with_exe(UpdateKind::Always)
+            .without_tasks(),
+    );
+    let current_pid = std::process::id();
+    for (pid, process) in system.processes() {
+        if pid.as_u32() == current_pid {
+            continue;
+        }
+        let name = process.name().to_string_lossy().to_ascii_lowercase();
+        let path = process
+            .exe()
+            .map(|exe| exe.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let path_lower = path.to_ascii_lowercase();
+        let is_chatgpt = name == "chatgpt.exe" || name == "chatgpt";
+        let is_desktop_codex = (name == "codex.exe" || name == "codex")
+            && (path_lower.contains("chatgpt")
+                || path_lower.contains("openai")
+                || path_lower.contains("\\codex\\")
+                || (path_lower.ends_with("codex.exe") && path_lower.contains("\\programs\\")));
+        if is_chatgpt || is_desktop_codex {
+            process.kill();
+        }
+    }
+    thread::sleep(Duration::from_millis(750));
 }
 
 fn shell_path() -> Option<PathBuf> {
@@ -34,5 +73,11 @@ mod tests {
     #[test]
     fn desktop_shell_has_a_stable_bundle_name() {
         assert_eq!(SHELL_FILE_NAME, "CodexRoster.Windows.exe");
+    }
+
+    #[test]
+    fn close_desktop_for_switch_is_available_on_windows_builds() {
+        // Compile-only coverage: the helper must remain callable from tray activate.
+        let _ = close_desktop_for_switch as fn();
     }
 }

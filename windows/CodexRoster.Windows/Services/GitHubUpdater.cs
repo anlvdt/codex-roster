@@ -85,11 +85,33 @@ public sealed class GitHubUpdater
     public void ScheduleInstall(string stageDirectory)
     {
         var installDirectory = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        StopBundledHelpers(installDirectory);
         var helper = Path.Combine(Path.GetTempPath(), $"codex-roster-install-{Guid.NewGuid():N}.ps1");
         File.WriteAllText(helper, """
 param([int]$AppProcessId, [string]$InstallDirectory, [string]$StageDirectory)
 $ErrorActionPreference = 'Stop'
+function Stop-BundledHelpers([string]$Root) {
+  $names = @('CodexRoster.CLI', 'codex-roster')
+  foreach ($name in $names) {
+    Get-Process -Name $name -ErrorAction SilentlyContinue | Where-Object {
+      try { $_.Path -and $_.Path.StartsWith($Root, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false }
+    } | ForEach-Object {
+      try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch {}
+    }
+  }
+  Start-Sleep -Milliseconds 300
+}
 while (Get-Process -Id $AppProcessId -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 150 }
+Stop-BundledHelpers $InstallDirectory
+$deadline = (Get-Date).AddSeconds(10)
+while ((Get-Date) -lt $deadline) {
+  $locked = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+    try { $_.Path -and $_.Path.StartsWith($InstallDirectory, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false }
+  }
+  if (-not $locked) { break }
+  $locked | ForEach-Object { try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch {} }
+  Start-Sleep -Milliseconds 200
+}
 $backupDirectory = "$InstallDirectory.previous"
 Remove-Item -LiteralPath $backupDirectory -Recurse -Force -ErrorAction SilentlyContinue
 Move-Item -LiteralPath $InstallDirectory -Destination $backupDirectory
@@ -123,6 +145,31 @@ try {
         startInfo.ArgumentList.Add(installDirectory);
         startInfo.ArgumentList.Add(stageDirectory);
         _ = Process.Start(startInfo) ?? throw new InvalidOperationException("Không thể mở trình cài đặt cập nhật.");
+    }
+
+    private static void StopBundledHelpers(string installDirectory)
+    {
+        foreach (var name in new[] { "CodexRoster.CLI", "codex-roster" })
+        {
+            foreach (var process in Process.GetProcessesByName(name))
+            {
+                try
+                {
+                    var path = process.MainModule?.FileName;
+                    if (string.IsNullOrWhiteSpace(path)) continue;
+                    if (!path.StartsWith(installDirectory, StringComparison.OrdinalIgnoreCase)) continue;
+                    process.Kill(entireProcessTree: true);
+                }
+                catch
+                {
+                    // Installer script also retries stops before moving the folder.
+                }
+                finally
+                {
+                    process.Dispose();
+                }
+            }
+        }
     }
 
     private static HttpClient CreateHttpClient()

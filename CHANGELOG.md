@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.16 - 2026-08-03
+
+### Fixed
+
+- Ship the Windows WinUI app as explicitly unpackaged and self-contained, including registration-free WinRT initialization, so the bundled desktop executable can load its XAML UI without a separately installed Windows App SDK runtime.
+- Fail the Windows packaging build when the executable, WinUI runtime, or XAML resource bundle is missing.
+- Retry Windows file-lock violations while another account operation is finishing, allowing the Windows release build to complete its test gate.
+
 ## v0.2.14 - 2026-08-02
 
 ### Fixed

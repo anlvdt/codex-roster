@@ -11,7 +11,8 @@ $version = $versionMatch.Matches[0].Groups[1].Value
 Push-Location $root
 try {
     cargo build --release
-    dotnet publish $project --configuration Release --runtime win-x64 --self-contained true --output $output "-p:Version=$version" "-p:AssemblyVersion=$version.0" "-p:FileVersion=$version.0"
+    Remove-Item $output -Recurse -Force -ErrorAction SilentlyContinue
+    dotnet publish $project --configuration Release --runtime win-x64 --self-contained true --output $output "-p:Version=$version" "-p:AssemblyVersion=$version.0" "-p:FileVersion=$version.0" "-p:WindowsPackageType=None" "-p:WindowsAppSDKSelfContained=true" "-p:WindowsAppSdkUndockedRegFreeWinRTInitialize=true"
     New-Item -ItemType Directory -Force -Path $output | Out-Null
     Copy-Item (Join-Path $root "target/release/codex-roster.exe") (Join-Path $output "CodexRoster.CLI.exe") -Force
     @"
@@ -21,6 +22,18 @@ Start CodexRoster.Windows.exe for the desktop app.
 CodexRoster.CLI.exe remains available for scripting and CLI commands; double-clicking
 it from this folder also opens the desktop app automatically.
 "@ | Set-Content -Path (Join-Path $output "README.txt") -Encoding utf8
+    $requiredFiles = @(
+        "CodexRoster.Windows.exe",
+        "CodexRoster.Windows.dll",
+        "CodexRoster.CLI.exe",
+        "Microsoft.UI.Xaml.dll",
+        "resources.pri"
+    )
+    foreach ($file in $requiredFiles) {
+        if (-not (Test-Path (Join-Path $output $file))) {
+            throw "Windows bundle is incomplete: missing $file"
+        }
+    }
     Write-Host "Built self-contained Windows desktop app: $output"
 }
 finally {

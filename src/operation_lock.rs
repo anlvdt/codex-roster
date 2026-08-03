@@ -63,6 +63,7 @@ fn is_lock_contention(error: &io::Error) -> bool {
     ) || error.raw_os_error() == Some(35) // EAGAIN / EWOULDBLOCK on macOS
         || error.raw_os_error() == Some(11) // EAGAIN on Linux
         || error.raw_os_error() == Some(16) // EBUSY on some platforms
+        || error.raw_os_error() == Some(33) // ERROR_LOCK_VIOLATION on Windows
 }
 
 #[cfg(test)]
@@ -100,6 +101,7 @@ mod tests {
             io::ErrorKind::WouldBlock
         )));
         assert!(is_lock_contention(&io::Error::from_raw_os_error(35)));
+        assert!(is_lock_contention(&io::Error::from_raw_os_error(33)));
         assert!(!is_lock_contention(&io::Error::from(
             io::ErrorKind::PermissionDenied
         )));

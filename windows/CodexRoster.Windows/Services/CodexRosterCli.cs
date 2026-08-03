@@ -3,8 +3,9 @@ using System.Text.Json;
 
 namespace CodexRoster.Windows.Services;
 
-public sealed class CodexRosterCli
+public sealed class CodexRosterCli : IDisposable
 {
+    private readonly CancellationTokenSource _shutdown = new();
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -27,7 +28,7 @@ public sealed class CodexRosterCli
         _ = await RunAsync(arguments.Append("--json"), standardInput);
     }
 
-    private static async Task<string> RunAsync(IEnumerable<string> arguments, string? standardInput = null)
+    private async Task<string> RunAsync(IEnumerable<string> arguments, string? standardInput = null)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -37,6 +38,7 @@ public sealed class CodexRosterCli
             RedirectStandardError = true,
             RedirectStandardInput = standardInput is not null,
             CreateNoWindow = true,
+            WorkingDirectory = Path.GetTempPath(),
         };
         foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
 
@@ -49,7 +51,16 @@ public sealed class CodexRosterCli
         }
         var outputTask = process.StandardOutput.ReadToEndAsync();
         var errorTask = process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
+        try
+        {
+            await process.WaitForExitAsync(_shutdown.Token);
+        }
+        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
+        {
+            try { process.Kill(entireProcessTree: true); }
+            catch { }
+            throw;
+        }
         var output = await outputTask;
         var error = await errorTask;
         if (process.ExitCode != 0)
@@ -58,6 +69,8 @@ public sealed class CodexRosterCli
         }
         return output;
     }
+
+    public void Dispose() => _shutdown.Cancel();
 
     private static string ResolveExecutable()
     {

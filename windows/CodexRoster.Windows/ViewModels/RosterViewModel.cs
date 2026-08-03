@@ -8,7 +8,7 @@ using Microsoft.UI.Xaml;
 
 namespace CodexRoster.Windows.ViewModels;
 
-public sealed class RosterViewModel : INotifyPropertyChanged
+public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
 {
     private readonly CodexRosterCli _cli = new();
     private readonly GitHubUpdater _updater = new();
@@ -642,6 +642,15 @@ public sealed class RosterViewModel : INotifyPropertyChanged
         QuotaRefreshStatus = (AutoQuotaRefresh || AutoSwitchWhenExhausted) ? "Tự động kiểm tra mỗi phút" : "Tắt";
         if (_quotaTimer is null) return;
         if (AutoQuotaRefresh || AutoSwitchWhenExhausted) _quotaTimer.Start(); else _quotaTimer.Stop();
+    }
+
+    public void Dispose()
+    {
+        _loginWatchCancellation?.Cancel();
+        CodexLoginLauncher.Stop();
+        _cli.Dispose();
+        _quotaTimer?.Stop();
+        _updateTimer?.Stop();
     }
 
     private async Task RunAsync(Func<Task> operation)

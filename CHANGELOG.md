@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.18 - 2026-08-03
+
+### Fixed
+
+- Windows device login now closes its command shell when complete instead of leaving `cmd.exe` running in the release folder.
+- Closing the Windows dashboard now cancels its device-login shell, stops timers, and terminates any in-flight bundled CLI helper; helper and update processes run from the temporary directory so they do not keep the release folder as their working directory.
+- Made notification-area background monitoring explicit with a confirmation that explains how to quit it before replacing or deleting the app folder.
+
 ## v0.2.17 - 2026-08-03
 
 ### Fixed

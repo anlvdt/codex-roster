@@ -10,7 +10,7 @@ This folder contains the native **WinUI 3** Windows desktop app. It is deliberat
 - Opt-in automatic quota switching through the shared Rust policy, deferred while Codex is running.
 - `CodexRoster.Windows.exe` is the desktop entry point. `CodexRoster.CLI.exe` is the separately named helper for scripts and advanced terminal commands.
 - The release bundle is self-contained: users do not need to install the .NET runtime or the Windows App SDK first.
-- Sending the app to the notification area keeps quota monitoring and quick account switching available; the tray action reopens the WinUI dashboard.
+- Closing the dashboard stops its device-login shell and helper commands. Sending the app to the notification area is the only persistent background mode; it requires confirmation and users must choose **Quit** from its menu before deleting or replacing the bundle.
 - The dashboard checks stable GitHub Releases at launch and every six hours. Installing an update verifies GitHub's SHA-256 digest before the app replaces its bundle and relaunches.
 - Local Credential Manager, encrypted backup, CLI, quota and snapshot logic remain in Rust.
 

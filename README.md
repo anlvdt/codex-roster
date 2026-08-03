@@ -60,7 +60,7 @@ open "build/Codex Roster.app"
 
 ### Windows desktop app
 
-Download **Codex-Roster-Windows-x64.zip** from [Releases](https://github.com/anlvdt/codex-roster/releases), extract the entire ZIP, then start `CodexRoster.Windows.exe`. Do not run an executable directly from the ZIP or copy only one `.exe`: the desktop app needs the bundled WinUI runtime beside it. `CodexRoster.CLI.exe` is reserved for terminal automation. The Windows app uses **WinUI 3** and calls the same Rust CLI; see [windows/README.md](windows/README.md). It includes local token activity, OpenAI service/reset information, encrypted backup import/export, and a notification-area companion for quick switching and background monitoring. When the user confirms a direct switch, the visible Codex/ChatGPT Desktop window is closed and reopened against the selected session; active Codex CLI work remains protected.
+Download **Codex-Roster-Windows-x64.zip** from [Releases](https://github.com/anlvdt/codex-roster/releases), extract the entire ZIP, then start `CodexRoster.Windows.exe`. Do not run an executable directly from the ZIP or copy only one `.exe`: the desktop app needs the bundled WinUI runtime beside it. `CodexRoster.CLI.exe` is reserved for terminal automation. The Windows app uses **WinUI 3** and calls the same Rust CLI; see [windows/README.md](windows/README.md). Closing the dashboard stops its login and helper processes. The only intentional background mode is **Send to notification area**, which asks for confirmation; choose **Quit** from its notification-area menu before deleting or replacing the app folder. When the user confirms a direct switch, the visible Codex/ChatGPT Desktop window is closed and reopened against the selected session; active Codex CLI work remains protected.
 
 ### CLI
 
@@ -154,7 +154,7 @@ open "build/Codex Roster.app"
 
 ### Ứng dụng Windows
 
-Tải **Codex-Roster-Windows-x64.zip** từ [Releases](https://github.com/anlvdt/codex-roster/releases), giải nén toàn bộ rồi mở `CodexRoster.Windows.exe`. Không chạy executable trực tiếp trong ZIP hoặc chỉ chép một file `.exe`: app desktop cần WinUI runtime đi kèm trong cùng thư mục. `CodexRoster.CLI.exe` chỉ dành cho automation qua terminal. Bản Windows native dùng **WinUI 3** và gọi chung Rust CLI; xem [windows/README.md](windows/README.md). App có thống kê token cục bộ, trạng thái OpenAI/dự báo reset, nhập/xuất backup mã hóa và notification area để chuyển nhanh/theo dõi nền. Khi người dùng xác nhận chuyển thủ công, app sẽ đóng/mở lại cửa sổ Codex/ChatGPT Desktop để nạp session đã chọn; tác vụ Codex CLI đang chạy vẫn được bảo vệ.
+Tải **Codex-Roster-Windows-x64.zip** từ [Releases](https://github.com/anlvdt/codex-roster/releases), giải nén toàn bộ rồi mở `CodexRoster.Windows.exe`. Không chạy executable trực tiếp trong ZIP hoặc chỉ chép một file `.exe`: app desktop cần WinUI runtime đi kèm trong cùng thư mục. `CodexRoster.CLI.exe` chỉ dành cho automation qua terminal. Bản Windows native dùng **WinUI 3** và gọi chung Rust CLI; xem [windows/README.md](windows/README.md). Khi đóng dashboard, app sẽ dừng tiến trình đăng nhập và helper của chính nó. Chỉ **Gửi vào notification area** mới là chế độ chạy nền có chủ đích và sẽ hỏi xác nhận; hãy chọn **Quit** trong menu notification area trước khi xóa hay thay thư mục app. Khi người dùng xác nhận chuyển thủ công, app sẽ đóng/mở lại cửa sổ Codex/ChatGPT Desktop để nạp session đã chọn; tác vụ Codex CLI đang chạy vẫn được bảo vệ.
 
 ### Riêng tư, trạng thái và ghi nhận
 

@@ -14,12 +14,19 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         Activated += MainWindow_Activated;
+        Closed += MainWindow_Closed;
     }
 
     private async void MainWindow_Activated(object sender, WindowActivatedEventArgs args)
     {
         Activated -= MainWindow_Activated;
         await ViewModel.InitializeAsync();
+    }
+
+    private void MainWindow_Closed(object sender, WindowEventArgs args)
+    {
+        ViewModel.Dispose();
+        Application.Current.Exit();
     }
 
     private async void Refresh_Click(object sender, RoutedEventArgs e) => await ViewModel.RefreshAsync();
@@ -153,6 +160,16 @@ public sealed partial class MainWindow : Window
     {
         try
         {
+            var dialog = new ContentDialog
+            {
+                XamlRoot = Content.XamlRoot,
+                Title = "Gửi xuống notification area?",
+                Content = "Codex Roster sẽ tiếp tục chạy nền để theo dõi quota. Chọn Quit trong menu notification area trước khi xóa hoặc thay thư mục ứng dụng.",
+                PrimaryButtonText = "Gửi xuống notification area",
+                CloseButtonText = "Hủy",
+                DefaultButton = ContentDialogButton.Primary,
+            };
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
             CodexTrayLauncher.Start();
             Close();
         }

@@ -112,6 +112,7 @@ try {
             FileName = "powershell.exe",
             UseShellExecute = false,
             CreateNoWindow = true,
+            WorkingDirectory = Path.GetTempPath(),
         };
         startInfo.ArgumentList.Add("-NoProfile");
         startInfo.ArgumentList.Add("-ExecutionPolicy");

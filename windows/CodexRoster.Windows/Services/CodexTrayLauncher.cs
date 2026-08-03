@@ -16,6 +16,7 @@ public static class CodexTrayLauncher
             FileName = executable,
             UseShellExecute = false,
             CreateNoWindow = true,
+            WorkingDirectory = Path.GetTempPath(),
             ArgumentList = { "tray" },
         }) ?? throw new InvalidOperationException("Unable to start the Codex Roster notification-area companion.");
     }

@@ -18,22 +18,10 @@ pub fn detect() -> Result<AppEnv> {
     let base_dirs = BaseDirs::new().context("could not resolve home directory")?;
     let project_dirs = ProjectDirs::from("com", "codexroster", "codex-roster")
         .context("could not resolve app data directory")?;
-    let account_hub_project_dirs = ProjectDirs::from("com", "accounthub", "account-hub")
-        .context("could not resolve Account Hub app data directory")?;
-    let next_account_project_dirs = ProjectDirs::from("com", "nextaccount", "next-account")
-        .context("could not resolve Next Account app data directory")?;
-    let legacy_project_dirs = ProjectDirs::from("com", "nextide", "codex-account-switcher")
-        .context("could not resolve legacy app data directory")?;
     let home_dir = base_dirs.home_dir().to_path_buf();
     let kind = detect_environment_kind()?;
-    let app_data_dir = migrate_legacy_data_dir(
-        project_dirs.data_local_dir(),
-        &[
-            account_hub_project_dirs.data_local_dir(),
-            next_account_project_dirs.data_local_dir(),
-            legacy_project_dirs.data_local_dir(),
-        ],
-    )?;
+    let legacy_data_dirs = legacy_data_dirs()?;
+    let app_data_dir = migrate_legacy_data_dir(project_dirs.data_local_dir(), &legacy_data_dirs)?;
     Ok(AppEnv {
         kind,
         codex_root: home_dir.join(".codex"),
@@ -42,7 +30,26 @@ pub fn detect() -> Result<AppEnv> {
     })
 }
 
-fn migrate_legacy_data_dir(current: &Path, legacy_candidates: &[&Path]) -> Result<PathBuf> {
+/// Previous product names used separate app-data locations. Keep these visible
+/// after the first new launch so each platform can import old snapshots safely.
+pub fn legacy_data_dirs() -> Result<Vec<PathBuf>> {
+    Ok(vec![
+        ProjectDirs::from("com", "accounthub", "account-hub")
+            .context("could not resolve Account Hub app data directory")?
+            .data_local_dir()
+            .to_path_buf(),
+        ProjectDirs::from("com", "nextaccount", "next-account")
+            .context("could not resolve Next Account app data directory")?
+            .data_local_dir()
+            .to_path_buf(),
+        ProjectDirs::from("com", "nextide", "codex-account-switcher")
+            .context("could not resolve legacy app data directory")?
+            .data_local_dir()
+            .to_path_buf(),
+    ])
+}
+
+fn migrate_legacy_data_dir(current: &Path, legacy_candidates: &[PathBuf]) -> Result<PathBuf> {
     if current.exists() {
         return Ok(current.to_path_buf());
     }
@@ -110,7 +117,8 @@ mod tests {
         fs::create_dir_all(&legacy).expect("legacy dir");
         fs::write(legacy.join("metadata.json"), "saved").expect("metadata");
 
-        let migrated = migrate_legacy_data_dir(&current, &[&legacy]).expect("migrate");
+        let migrated =
+            migrate_legacy_data_dir(&current, std::slice::from_ref(&legacy)).expect("migrate");
 
         assert_eq!(migrated, current);
         assert!(current.join("metadata.json").exists());

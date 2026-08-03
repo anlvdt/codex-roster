@@ -305,13 +305,20 @@ where
 
     pub fn recover_legacy_snapshots(&self) -> Result<LegacyRecoveryOutput> {
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
-        let legacy_data_dir = self
-            .env
-            .home_dir
-            .join("Library/Application Support/com.nextide.account-switcher");
-        let (recovered_accounts, imported_accounts, skipped_accounts) = self
-            .repository
-            .recover_legacy_snapshots(&self.env.kind, &legacy_data_dir)?;
+        let mut recovered_accounts = 0;
+        let mut imported_accounts = 0;
+        let mut skipped_accounts = 0;
+        for legacy_data_dir in crate::env::legacy_data_dirs()? {
+            if legacy_data_dir == self.env.app_data_dir || !legacy_data_dir.exists() {
+                continue;
+            }
+            let (recovered, imported, skipped) = self
+                .repository
+                .recover_legacy_snapshots(&self.env.kind, &legacy_data_dir)?;
+            recovered_accounts += recovered;
+            imported_accounts += imported;
+            skipped_accounts += skipped;
+        }
         Ok(LegacyRecoveryOutput {
             recovered_accounts,
             imported_accounts,
@@ -337,6 +344,32 @@ where
 
     pub fn save_current(&self) -> Result<SaveOutput> {
         self.save_current_inner(true)
+    }
+
+    /// Save the live session first, then clear only the live auth files so
+    /// `codex login --device-auth` asks for another account.
+    pub fn begin_add_account_session(&self) -> Result<()> {
+        if codex::try_read_live_auth_bundle(&self.env)?.is_some() {
+            self.save_current()?;
+        }
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        codex::begin_add_account_session(&self.env)
+    }
+
+    pub fn save_added_account_session(&self) -> Result<SaveOutput> {
+        let output = self.save_current_inner(true)?;
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        codex::finish_add_account_session(&self.env)?;
+        Ok(output)
+    }
+
+    pub fn cancel_add_account_session(&self) -> Result<()> {
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        codex::cancel_add_account_session(&self.env)
+    }
+
+    pub fn add_account_session_active(&self) -> bool {
+        codex::add_account_session_active(&self.env)
     }
 
     fn save_current_for_activation(&self) -> Result<SaveOutput> {

@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.17 - 2026-08-03
+
+### Fixed
+
+- Restored the legacy add-account flow: the current session is saved and backed up before device login, can be cancelled back to the prior session, and accepts Codex installations without `cap_sid`.
+- Import saved OpenAI/Codex snapshots from all prior product data locations on every platform, including Windows after the new app directory already exists.
+- On Windows, direct switching now offers to close and restart a visible Codex/ChatGPT Desktop window around the auth swap; running Codex CLI work remains a blocking safety check.
+
 ## v0.2.16 - 2026-08-03
 
 ### Fixed

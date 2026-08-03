@@ -28,6 +28,8 @@ public sealed class RosterViewModel : INotifyPropertyChanged
     private CancellationTokenSource? _loginWatchCancellation;
     private IdentityDto? _pendingLoginIdentity;
     private string? _expectedLoginEmail;
+    private bool _isAddAccountSession;
+    private CodexDesktopRestartPlan? _loginRelaunch;
     private string _errorMessage = string.Empty;
     private string _currentAccountLabel = "Chưa đăng nhập";
     private string _quotaRefreshStatus = "Tắt";
@@ -87,6 +89,29 @@ public sealed class RosterViewModel : INotifyPropertyChanged
 
     public async Task InitializeAsync()
     {
+        try
+        {
+            var addAccount = await _cli.ReadAsync<AddAccountStatusResponse>("add-account-status");
+            _isAddAccountSession = addAccount.Active;
+            if (addAccount.Active)
+            {
+                LoginStatus = "Đang chờ hoàn tất đăng nhập tài khoản mới. Lưu phiên mới hoặc hủy để khôi phục phiên trước.";
+            }
+        }
+        catch
+        {
+            // The session-state check is advisory; do not block startup if unavailable.
+        }
+        try
+        {
+            var recovery = await _cli.ReadAsync<LegacyRecoveryResponse>("recover-legacy-snapshots");
+            var restored = recovery.RecoveredAccounts + recovery.ImportedAccounts;
+            if (restored > 0) QuotaRefreshStatus = $"Đã nhập {restored} phiên từ bản legacy.";
+        }
+        catch
+        {
+            // Legacy data is optional; current sessions remain usable without it.
+        }
         await RefreshAsync();
         try
         {
@@ -167,19 +192,31 @@ public sealed class RosterViewModel : INotifyPropertyChanged
     {
         await RunAsync(async () =>
         {
-            var status = await _cli.ReadAsync<StatusResponse>("status");
-            if (status.CurrentAccount is not null)
+            var relaunch = await CodexDesktopLifecycle.CloseForAccountSwitchAsync();
+            try
             {
-                await _cli.RunCommandAsync("save");
+                var status = await _cli.ReadAsync<StatusResponse>("status");
+                if (status.ProcessWarnings.Count > 0)
+                {
+                    throw new InvalidOperationException("Hãy đóng các tác vụ Codex CLI đang chạy trước khi thêm hoặc đăng nhập lại tài khoản.");
+                }
+                await _cli.RunCommandAsync("begin-add-account");
+                CodexLoginLauncher.Start();
+                _loginRelaunch = relaunch;
+                _isAddAccountSession = true;
+                _pendingLoginIdentity = null;
+                _expectedLoginEmail = expectedEmail;
+                OnPropertyChanged(nameof(CanSaveDetectedLogin));
+                LoginStatus = expectedEmail is null
+                    ? "Phiên cũ đã được bảo toàn. Hoàn tất đăng nhập tài khoản mới; Roster sẽ tự nhận diện phiên mới."
+                    : $"Phiên cũ đã được bảo toàn. Đăng nhập lại đúng tài khoản {expectedEmail}; Roster sẽ xác minh trước khi lưu.";
+                WatchForNewLoginAsync(status.CurrentAccount);
             }
-            CodexLoginLauncher.Start();
-            _pendingLoginIdentity = null;
-            _expectedLoginEmail = expectedEmail;
-            OnPropertyChanged(nameof(CanSaveDetectedLogin));
-            LoginStatus = expectedEmail is null
-                ? "Hoàn tất đăng nhập trong cửa sổ Codex đang mở. Roster sẽ tự nhận diện phiên mới."
-                : $"Đăng nhập lại đúng tài khoản {expectedEmail}. Roster sẽ xác minh trước khi lưu.";
-            WatchForNewLoginAsync(status.CurrentAccount);
+            catch
+            {
+                relaunch.Restart();
+                throw;
+            }
         });
     }
 
@@ -203,12 +240,38 @@ public sealed class RosterViewModel : INotifyPropertyChanged
                     throw new InvalidOperationException($"Phiên hiện tại không phải {_expectedLoginEmail}. Hãy đăng nhập đúng tài khoản rồi thử lại.");
                 }
             }
-            await _cli.RunCommandAsync("save");
+            await _cli.RunCommandAsync(_isAddAccountSession ? "save-added-account" : "save");
+            if (_isAddAccountSession)
+            {
+                _loginRelaunch?.Restart();
+                _loginRelaunch = null;
+                _isAddAccountSession = false;
+            }
             _pendingLoginIdentity = null;
             _expectedLoginEmail = null;
             _loginWatchCancellation?.Cancel();
             OnPropertyChanged(nameof(CanSaveDetectedLogin));
             LoginStatus = "Đã lưu phiên Codex hiện tại.";
+            await RefreshRosterDataAsync();
+        });
+    }
+
+    public async Task CancelPendingLoginAsync()
+    {
+        await RunAsync(async () =>
+        {
+            await _cli.RunCommandAsync("cancel-add-account");
+            if (_isAddAccountSession)
+            {
+                _loginRelaunch?.Restart();
+                _loginRelaunch = null;
+                _isAddAccountSession = false;
+            }
+            _pendingLoginIdentity = null;
+            _expectedLoginEmail = null;
+            _loginWatchCancellation?.Cancel();
+            OnPropertyChanged(nameof(CanSaveDetectedLogin));
+            LoginStatus = "Đã khôi phục phiên Codex trước khi thêm tài khoản.";
             await RefreshRosterDataAsync();
         });
     }
@@ -363,15 +426,29 @@ public sealed class RosterViewModel : INotifyPropertyChanged
         });
     }
 
-    public async Task ActivateAsync(AccountItem account)
+    public async Task ActivateAsync(AccountItem account, bool restartDesktop)
     {
         await RunAsync(async () =>
         {
-            await _cli.RunCommandAsync("activate", account.Id.ToString());
+            var relaunch = restartDesktop
+                ? await CodexDesktopLifecycle.CloseForAccountSwitchAsync()
+                : new CodexDesktopRestartPlan([]);
+            try
+            {
+                await _cli.RunCommandAsync("activate", account.Id.ToString());
+            }
+            finally
+            {
+                relaunch.Restart();
+            }
             await RefreshRosterDataAsync();
-            QuotaRefreshStatus = "Đã chuyển phiên. Windows Preview chưa tự khởi động lại app Codex.";
+            QuotaRefreshStatus = relaunch.HasDesktop
+                ? "Đã chuyển phiên và mở lại Codex Desktop với session mới."
+                : "Đã chuyển phiên Codex.";
         });
     }
+
+    public bool IsCodexDesktopRunning() => CodexDesktopLifecycle.IsRunning();
 
     public async Task ToggleArchiveAsync(AccountItem account)
     {

@@ -44,6 +44,22 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    BeginAddAccount {
+        #[arg(long)]
+        json: bool,
+    },
+    SaveAddedAccount {
+        #[arg(long)]
+        json: bool,
+    },
+    CancelAddAccount {
+        #[arg(long)]
+        json: bool,
+    },
+    AddAccountStatus {
+        #[arg(long)]
+        json: bool,
+    },
     Usage {
         account_id: Option<Uuid>,
         #[arg(long)]
@@ -196,6 +212,44 @@ pub fn run() -> Result<()> {
                 print_json(&output)?;
             } else {
                 println!("Saved {} ({})", output.account.email, output.account.id);
+            }
+            Ok(())
+        }
+        Some(Command::BeginAddAccount { json }) => {
+            app.begin_add_account_session()?;
+            if json {
+                print_json(&serde_json::json!({ "status": "ready_for_login" }))?;
+            } else {
+                println!(
+                    "Current session is saved. Complete Codex device login for the new account."
+                );
+            }
+            Ok(())
+        }
+        Some(Command::SaveAddedAccount { json }) => {
+            let output = app.save_added_account_session()?;
+            if json {
+                print_json(&output)?;
+            } else {
+                println!("Saved {} ({})", output.account.email, output.account.id);
+            }
+            Ok(())
+        }
+        Some(Command::CancelAddAccount { json }) => {
+            app.cancel_add_account_session()?;
+            if json {
+                print_json(&serde_json::json!({ "status": "cancelled" }))?;
+            } else {
+                println!("Restored the previous Codex session.");
+            }
+            Ok(())
+        }
+        Some(Command::AddAccountStatus { json }) => {
+            let output = serde_json::json!({ "active": app.add_account_session_active() });
+            if json {
+                print_json(&output)?;
+            } else {
+                println!("Add account session: {}", output["active"]);
             }
             Ok(())
         }

@@ -122,6 +122,7 @@
                                     <TextBlock Text="Mở đăng nhập OpenAI, lưu phiên hiện tại, hoặc khôi phục bản sao lưu tự động trên máy này." TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}" Opacity="0.72" />
                                     <Button Content="Mở đăng nhập OpenAI" Click="AddAccount_Click" HorizontalAlignment="Stretch" />
                                     <Button Content="Lưu phiên hiện tại" Click="SaveCurrent_Click" HorizontalAlignment="Stretch" />
+                                    <Button Content="Hủy thêm tài khoản và khôi phục phiên trước" Click="CancelPendingLogin_Click" HorizontalAlignment="Stretch" />
                                     <TextBlock Text="{x:Bind ViewModel.LoginStatus, Mode=OneWay}" TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.72" />
                                     <Button Content="Xuất bản sao lưu mã hóa" Click="ExportBackup_Click" HorizontalAlignment="Stretch" />
                                     <Button Content="Nhập bản sao lưu mã hóa" Click="ImportBackup_Click" HorizontalAlignment="Stretch" />

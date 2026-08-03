@@ -21,7 +21,7 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
 
 `GPT Free`, `GPT Plus`, and `GPT Pro` identify the ChatGPT plan. They do not imply a fixed Codex quota. Codex Roster displays the quota/reset windows returned for the signed-in account.
 
-**Auto-switch when quota is exhausted** is opt-in and shared by the macOS and Windows clients. It refreshes the active Codex account (`~/.codex`), prefers candidate quota cached within about 15 minutes, and revalidates the chosen candidate on apply (`--account-id`). It switches only when the active account is at `0%` and another saved account has usable quota in every reported window. On macOS, when ChatGPT/Codex Desktop is open, auto-switch closes it, applies the new `~/.codex` session, then relaunches Desktop so the UI matches Roster. Windows Preview still defers while Codex is running and does not relaunch. If every account is exhausted, it leaves the current session untouched.
+**Auto-switch when quota is exhausted** is opt-in and shared by the macOS and Windows clients. It refreshes the active Codex account (`~/.codex`), prefers candidate quota cached within about 15 minutes, and revalidates the chosen candidate on apply (`--account-id`). It switches only when the active account is at `0%` and another saved account has usable quota in every reported window. On macOS, when ChatGPT/Codex Desktop is open, auto-switch closes it, applies the new `~/.codex` session, then relaunches Desktop so the UI matches Roster. On Windows, a direct switch offers to close and relaunch the visible Codex/ChatGPT Desktop window; automatic switching still defers while Codex processes are running. If every account is exhausted, it leaves the current session untouched.
 
 Account lists can be sorted by ChatGPT plan (Pro → Plus → Free), remaining quota, display name, or email. The menu bar shows up to five quick-switch candidates using the same sort order.
 
@@ -60,7 +60,7 @@ open "build/Codex Roster.app"
 
 ### Windows desktop app
 
-Download **Codex-Roster-Windows-x64.zip** from [Releases](https://github.com/anlvdt/codex-roster/releases), extract the entire ZIP, then start `CodexRoster.Windows.exe`. Do not run an executable directly from the ZIP or copy only one `.exe`: the desktop app needs the bundled WinUI runtime beside it. `CodexRoster.CLI.exe` is reserved for terminal automation. The Windows app uses **WinUI 3** and calls the same Rust CLI; see [windows/README.md](windows/README.md). It includes local token activity, OpenAI service/reset information, encrypted backup import/export, and a notification-area companion for quick switching and background monitoring. It can monitor quota and safely auto-switch only after Codex is closed; it does not force-close or relaunch Codex automatically.
+Download **Codex-Roster-Windows-x64.zip** from [Releases](https://github.com/anlvdt/codex-roster/releases), extract the entire ZIP, then start `CodexRoster.Windows.exe`. Do not run an executable directly from the ZIP or copy only one `.exe`: the desktop app needs the bundled WinUI runtime beside it. `CodexRoster.CLI.exe` is reserved for terminal automation. The Windows app uses **WinUI 3** and calls the same Rust CLI; see [windows/README.md](windows/README.md). It includes local token activity, OpenAI service/reset information, encrypted backup import/export, and a notification-area companion for quick switching and background monitoring. When the user confirms a direct switch, the visible Codex/ChatGPT Desktop window is closed and reopened against the selected session; active Codex CLI work remains protected.
 
 ### CLI
 
@@ -115,7 +115,7 @@ swift build --package-path macos/NextAccount
 
 `GPT Free`, `GPT Plus`, `GPT Pro` là nhãn gói ChatGPT, không phải quota Codex cố định. Codex Roster hiển thị quota/thời điểm reset thực tế được trả về cho tài khoản đang đăng nhập.
 
-Chế độ **Tự động chuyển khi hết quota** là tùy chọn và dùng chung chính sách trên macOS/Windows. App theo dõi phiên Codex tại `~/.codex` (không đọc cookie đăng nhập riêng trong ChatGPT). Khi hết `0%`, macOS sẽ đóng ChatGPT/Codex nếu cần, chuyển phiên, rồi mở lại Desktop để khớp Roster. Windows Preview vẫn hoãn khi Codex đang chạy và chưa tự mở lại. Nếu mọi tài khoản đều hết quota, phiên hiện tại không bị thay đổi.
+Chế độ **Tự động chuyển khi hết quota** là tùy chọn và dùng chung chính sách trên macOS/Windows. App theo dõi phiên Codex tại `~/.codex` (không đọc cookie đăng nhập riêng trong ChatGPT). Khi hết `0%`, macOS sẽ đóng ChatGPT/Codex nếu cần, chuyển phiên, rồi mở lại Desktop để khớp Roster. Trên Windows, thao tác chuyển thủ công sẽ đề nghị đóng/mở lại cửa sổ Codex/ChatGPT Desktop đang hiện; tự chuyển vẫn hoãn khi tiến trình Codex còn chạy. Nếu mọi tài khoản đều hết quota, phiên hiện tại không bị thay đổi.
 
 Danh sách tài khoản có thể sắp xếp theo gói ChatGPT (Pro → Plus → Free), quota còn lại, tên hiển thị hoặc email. Menu bar hiện tối đa năm ứng viên chuyển nhanh theo cùng thứ tự sắp xếp.
 
@@ -154,7 +154,7 @@ open "build/Codex Roster.app"
 
 ### Ứng dụng Windows
 
-Tải **Codex-Roster-Windows-x64.zip** từ [Releases](https://github.com/anlvdt/codex-roster/releases), giải nén toàn bộ rồi mở `CodexRoster.Windows.exe`. Không chạy executable trực tiếp trong ZIP hoặc chỉ chép một file `.exe`: app desktop cần WinUI runtime đi kèm trong cùng thư mục. `CodexRoster.CLI.exe` chỉ dành cho automation qua terminal. Bản Windows native dùng **WinUI 3** và gọi chung Rust CLI; xem [windows/README.md](windows/README.md). App có thống kê token cục bộ, trạng thái OpenAI/dự báo reset, nhập/xuất backup mã hóa và notification area để chuyển nhanh/theo dõi nền. App có thể tự chuyển an toàn sau khi Codex đã đóng, nhưng không force-close hay tự mở lại Codex.
+Tải **Codex-Roster-Windows-x64.zip** từ [Releases](https://github.com/anlvdt/codex-roster/releases), giải nén toàn bộ rồi mở `CodexRoster.Windows.exe`. Không chạy executable trực tiếp trong ZIP hoặc chỉ chép một file `.exe`: app desktop cần WinUI runtime đi kèm trong cùng thư mục. `CodexRoster.CLI.exe` chỉ dành cho automation qua terminal. Bản Windows native dùng **WinUI 3** và gọi chung Rust CLI; xem [windows/README.md](windows/README.md). App có thống kê token cục bộ, trạng thái OpenAI/dự báo reset, nhập/xuất backup mã hóa và notification area để chuyển nhanh/theo dõi nền. Khi người dùng xác nhận chuyển thủ công, app sẽ đóng/mở lại cửa sổ Codex/ChatGPT Desktop để nạp session đã chọn; tác vụ Codex CLI đang chạy vẫn được bảo vệ.
 
 ### Riêng tư, trạng thái và ghi nhận
 

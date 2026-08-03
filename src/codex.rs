@@ -37,8 +37,20 @@ pub fn read_live_auth_bundle(env: &AppEnv) -> Result<LiveAuthBundle> {
     let mut auth_json_bytes = None;
     for file_name in AUTH_FILES {
         let path = env.codex_root.join(file_name);
-        let bytes =
-            fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            // Newer Codex installs can use auth.json without a cap_sid file. Keep
+            // a stable, restorable snapshot by representing the optional file as
+            // empty; restore will recreate it when needed.
+            Err(error)
+                if file_name == "cap_sid" && error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Vec::new()
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to read {}", path.display()));
+            }
+        };
         if file_name == "auth.json" {
             auth_json_bytes = Some(bytes.clone());
         }
@@ -56,6 +68,123 @@ pub fn read_live_auth_bundle(env: &AppEnv) -> Result<LiveAuthBundle> {
             files,
         },
     })
+}
+
+const ADD_ACCOUNT_AUTH_BACKUP: &str = "auth.json.roster-add-bak";
+const ADD_ACCOUNT_CAP_BACKUP: &str = "cap_sid.roster-add-bak";
+const ADD_ACCOUNT_MARKER: &str = ".roster-add-account";
+
+pub fn add_account_session_active(env: &AppEnv) -> bool {
+    env.codex_root.join(ADD_ACCOUNT_MARKER).exists()
+}
+
+/// Preserve the current session, then clear the live Codex auth files so device
+/// login actually requests another account instead of reusing the current one.
+pub fn begin_add_account_session(env: &AppEnv) -> Result<()> {
+    if add_account_session_active(env) {
+        bail!("an add-account session is already in progress; save it or cancel it first");
+    }
+    fs::create_dir_all(&env.codex_root)
+        .with_context(|| format!("failed to create {}", env.codex_root.display()))?;
+    let auth = env.codex_root.join("auth.json");
+    let cap_sid = env.codex_root.join("cap_sid");
+    let backup_auth = env.codex_root.join(ADD_ACCOUNT_AUTH_BACKUP);
+    let backup_sid = env.codex_root.join(ADD_ACCOUNT_CAP_BACKUP);
+    if auth.exists() {
+        fs::copy(&auth, &backup_auth).with_context(|| {
+            format!(
+                "failed to back up {} to {}",
+                auth.display(),
+                backup_auth.display()
+            )
+        })?;
+        if cap_sid.exists() {
+            fs::copy(&cap_sid, &backup_sid).with_context(|| {
+                format!(
+                    "failed to back up {} to {}",
+                    cap_sid.display(),
+                    backup_sid.display()
+                )
+            })?;
+        }
+        remove_file_if_exists(&auth)?;
+        remove_file_if_exists(&cap_sid)?;
+    }
+    fs::write(env.codex_root.join(ADD_ACCOUNT_MARKER), b"pending").with_context(|| {
+        format!(
+            "failed to start add-account session in {}",
+            env.codex_root.display()
+        )
+    })?;
+    Ok(())
+}
+
+pub fn finish_add_account_session(env: &AppEnv) -> Result<()> {
+    if !add_account_session_active(env) {
+        bail!("no add-account session is in progress");
+    }
+    ensure_cap_sid_exists(env)?;
+    clear_add_account_artifacts(env);
+    Ok(())
+}
+
+/// Cancel an unfinished login and put the previous live Codex session back.
+pub fn cancel_add_account_session(env: &AppEnv) -> Result<()> {
+    if !add_account_session_active(env) {
+        return Ok(());
+    }
+    let auth = env.codex_root.join("auth.json");
+    let cap_sid = env.codex_root.join("cap_sid");
+    let backup_auth = env.codex_root.join(ADD_ACCOUNT_AUTH_BACKUP);
+    let backup_sid = env.codex_root.join(ADD_ACCOUNT_CAP_BACKUP);
+    if backup_auth.exists() {
+        fs::copy(&backup_auth, &auth).with_context(|| {
+            format!(
+                "failed to restore {} from {}",
+                auth.display(),
+                backup_auth.display()
+            )
+        })?;
+        if backup_sid.exists() {
+            fs::copy(&backup_sid, &cap_sid).with_context(|| {
+                format!(
+                    "failed to restore {} from {}",
+                    cap_sid.display(),
+                    backup_sid.display()
+                )
+            })?;
+        } else {
+            remove_file_if_exists(&cap_sid)?;
+        }
+    }
+    clear_add_account_artifacts(env);
+    Ok(())
+}
+
+fn ensure_cap_sid_exists(env: &AppEnv) -> Result<()> {
+    let path = env.codex_root.join("cap_sid");
+    if !path.exists() {
+        fs::write(&path, b"").with_context(|| format!("failed to create {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn clear_add_account_artifacts(env: &AppEnv) {
+    for file_name in [
+        ADD_ACCOUNT_AUTH_BACKUP,
+        ADD_ACCOUNT_CAP_BACKUP,
+        ADD_ACCOUNT_MARKER,
+    ] {
+        let _ = fs::remove_file(env.codex_root.join(file_name));
+    }
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to remove {}", path.display())),
+    }
 }
 
 pub fn identity_from_snapshot(snapshot: &SnapshotBlob) -> Result<DisplayIdentity> {
@@ -430,6 +559,69 @@ mod tests {
         restore_snapshot(&env, &bundle.snapshot, &bundle.identity, false)?;
         let restored = read_live_auth_bundle(&env)?;
         assert_eq!(restored.identity.email, "person@example.com");
+        Ok(())
+    }
+
+    #[test]
+    fn reads_bundle_when_cap_sid_is_absent() -> Result<()> {
+        let temp = tempdir()?;
+        let codex_root = temp.path().join(".codex");
+        fs::create_dir_all(&codex_root)?;
+        fs::write(
+            codex_root.join("auth.json"),
+            auth_json_fixture("person@example.com", "sub-1", Some("pro")),
+        )?;
+        let env = AppEnv {
+            kind: EnvironmentKind::Linux,
+            home_dir: temp.path().to_path_buf(),
+            codex_root,
+            app_data_dir: temp.path().join("data"),
+        };
+
+        let bundle = read_live_auth_bundle(&env)?;
+
+        assert_eq!(bundle.identity.email, "person@example.com");
+        let empty_cap_sid = STANDARD.encode(b"");
+        assert_eq!(
+            snapshot_files(&bundle.snapshot, "cap_sid"),
+            vec![empty_cap_sid.as_str()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cancelling_add_account_restores_the_previous_live_session() -> Result<()> {
+        let temp = tempdir()?;
+        let codex_root = temp.path().join(".codex");
+        fs::create_dir_all(&codex_root)?;
+        let original_auth = auth_json_fixture("original@example.com", "sub-original", Some("pro"));
+        fs::write(codex_root.join("auth.json"), &original_auth)?;
+        fs::write(codex_root.join("cap_sid"), "sid-original")?;
+        let env = AppEnv {
+            kind: EnvironmentKind::Linux,
+            home_dir: temp.path().to_path_buf(),
+            codex_root: codex_root.clone(),
+            app_data_dir: temp.path().join("data"),
+        };
+
+        begin_add_account_session(&env)?;
+        assert!(!codex_root.join("auth.json").exists());
+        assert!(add_account_session_active(&env));
+        fs::write(
+            codex_root.join("auth.json"),
+            auth_json_fixture("new@example.com", "sub-new", Some("plus")),
+        )?;
+        cancel_add_account_session(&env)?;
+
+        assert_eq!(
+            fs::read_to_string(codex_root.join("auth.json"))?,
+            original_auth
+        );
+        assert_eq!(
+            fs::read_to_string(codex_root.join("cap_sid"))?,
+            "sid-original"
+        );
+        assert!(!add_account_session_active(&env));
         Ok(())
     }
 

@@ -15,6 +15,19 @@ public sealed class StatusResponse
     public List<RunningProcessDto> ProcessWarnings { get; init; } = [];
 }
 
+public sealed class LegacyRecoveryResponse
+{
+    [JsonPropertyName("recovered_accounts")]
+    public int RecoveredAccounts { get; init; }
+    [JsonPropertyName("imported_accounts")]
+    public int ImportedAccounts { get; init; }
+}
+
+public sealed class AddAccountStatusResponse
+{
+    public bool Active { get; init; }
+}
+
 public sealed class RunningProcessDto
 {
     public uint Pid { get; init; }

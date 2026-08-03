@@ -16,7 +16,8 @@ use crate::repository::SnapshotRepository;
 use crate::secrets::SecretStore;
 use crate::settings::{load_settings, save_settings};
 use crate::usage::{
-    fetch_usage, usage_error_message, usage_error_requires_login, usage_target_from_snapshot,
+    FetchUsageError, fetch_usage, usage_error_message, usage_error_requires_login,
+    usage_target_from_snapshot,
 };
 
 use super::{
@@ -372,6 +373,103 @@ where
         codex::add_account_session_active(&self.env)
     }
 
+    /// Import one or more accounts from a JSON file.
+    ///
+    /// Supported formats:
+    /// - Codex `auth.json` (single account)
+    /// - Roster `SnapshotBlob` JSON (single account)
+    /// - Plaintext Roster `BackupBundle` JSON (one or more accounts)
+    pub fn import_accounts_from_json(
+        &self,
+        path: &std::path::Path,
+        custom_label: Option<String>,
+    ) -> Result<crate::model::ImportJsonOutput> {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .with_context(|| format!("failed to parse JSON from {}", path.display()))?;
+
+        if looks_like_auth_json(&value) {
+            let (identity, snapshot) = codex::snapshot_from_auth_json(&bytes)?;
+            let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+            let (metadata, created) =
+                self.repository
+                    .save_snapshot(&self.env.kind, &identity, &snapshot)?;
+            let metadata = if let Some(label) = custom_label.filter(|value| !value.trim().is_empty())
+            {
+                self.repository
+                    .set_custom_label(&self.env.kind, metadata.id, Some(label.trim().to_owned()))?
+            } else {
+                metadata
+            };
+            return Ok(crate::model::ImportJsonOutput {
+                format: "auth_json".to_owned(),
+                created: usize::from(created),
+                updated: usize::from(!created),
+                accounts: vec![account_view(metadata, None, None, None)],
+            });
+        }
+
+        if let Ok(snapshot) = serde_json::from_value::<SnapshotBlob>(value.clone()) {
+            codex::validate_snapshot(&snapshot)?;
+            let identity = codex::identity_from_snapshot(&snapshot)?;
+            let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+            let (metadata, created) =
+                self.repository
+                    .save_snapshot(&self.env.kind, &identity, &snapshot)?;
+            let metadata = if let Some(label) = custom_label.filter(|value| !value.trim().is_empty())
+            {
+                self.repository
+                    .set_custom_label(&self.env.kind, metadata.id, Some(label.trim().to_owned()))?
+            } else {
+                metadata
+            };
+            return Ok(crate::model::ImportJsonOutput {
+                format: "snapshot".to_owned(),
+                created: usize::from(created),
+                updated: usize::from(!created),
+                accounts: vec![account_view(metadata, None, None, None)],
+            });
+        }
+
+        if let Ok(bundle) = serde_json::from_value::<crate::backup::BackupBundle>(value) {
+            if custom_label.is_some() {
+                anyhow::bail!(
+                    "custom labels are only supported when importing a single auth.json or snapshot"
+                );
+            }
+            let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+            let before = self.repository.list_accounts(&self.env.kind)?;
+            let (created, updated) = self.repository.import_backup(&self.env.kind, bundle)?;
+            let after = self.repository.list_accounts(&self.env.kind)?;
+            let changed_ids = after
+                .iter()
+                .filter(|account| {
+                    before.iter().all(|previous| previous.id != account.id)
+                        || before.iter().any(|previous| {
+                            previous.id == account.id && previous.updated_at != account.updated_at
+                        })
+                })
+                .map(|account| account.id)
+                .collect::<HashSet<_>>();
+            let accounts = after
+                .into_iter()
+                .filter(|account| changed_ids.contains(&account.id))
+                .map(|account| account_view(account, None, None, None))
+                .collect();
+            return Ok(crate::model::ImportJsonOutput {
+                format: "backup_bundle".to_owned(),
+                created,
+                updated,
+                accounts,
+            });
+        }
+
+        anyhow::bail!(
+            "unrecognized JSON format; expected Codex auth.json, a Roster snapshot, or a plaintext Roster backup bundle"
+        )
+    }
+
     fn save_current_for_activation(&self) -> Result<SaveOutput> {
         self.save_current_inner(false)
     }
@@ -621,27 +719,29 @@ where
                     UsageSource::SavedAccessToken,
                     true,
                 )?;
-                let (output, refreshed_snapshot) = match fetch_usage(target) {
-                    Ok(result) => result,
+                match fetch_usage(target) {
+                    Ok((output, refreshed_snapshot)) => {
+                        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+                        self.repository.replace_snapshot_without_backup(
+                            &self.env.kind,
+                            account_id,
+                            &output.account,
+                            &refreshed_snapshot,
+                            Some(output.usage.clone()),
+                        )?;
+                        Ok(output)
+                    }
                     Err(error) => {
+                        self.persist_rotated_saved_auth(account_id, &error)?;
                         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
                         let _ = self.repository.record_usage_error(
                             &self.env.kind,
                             account_id,
-                            usage_error_message(&error),
+                            usage_error_message(error.error()),
                         );
-                        return Err(error);
+                        Err(error.into_error())
                     }
-                };
-                let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
-                self.repository.replace_snapshot_without_backup(
-                    &self.env.kind,
-                    account_id,
-                    &output.account,
-                    &refreshed_snapshot,
-                    Some(output.usage.clone()),
-                )?;
-                Ok(output)
+                }
             }
             None => {
                 let live = codex::read_live_auth_bundle(&self.env).with_context(|| {
@@ -652,39 +752,156 @@ where
                 })?;
                 let live_identity = live.identity.clone();
                 let live_snapshot = live.snapshot.clone();
+                // Refresh tokens are single-use. Codex Desktop/CLI also refresh
+                // `~/.codex/auth.json`. A parallel Roster rotation invalidates
+                // their token and forces an unexpected logout.
+                let allow_refresh = crate::process::detect_running_codex_processes().is_empty()
+                    && !codex::add_account_session_active(&self.env);
                 let target = usage_target_from_snapshot(
                     self.env.kind.clone(),
                     live.snapshot,
                     UsageSource::LiveAccessToken,
-                    true,
+                    allow_refresh,
                 )?;
-                let (output, refreshed_snapshot) = match fetch_usage(target) {
-                    Ok(result) => result,
-                    Err(error) => {
+                match fetch_usage(target) {
+                    Ok((output, refreshed_snapshot)) => {
                         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
-                        self.record_usage_error_for_identity(&live_identity, &error);
-                        return Err(error);
+                        let persisted = self.write_back_live_auth_if_unchanged(
+                            &live_snapshot,
+                            &refreshed_snapshot,
+                            &output.account,
+                        )?;
+                        if let Some(account_id) =
+                            self.saved_account_id_for_identity(&live_identity)
+                        {
+                            let snapshot_for_repo = self.snapshot_safe_for_saved_live_copy(
+                                &live_snapshot,
+                                &refreshed_snapshot,
+                                persisted,
+                            );
+                            self.repository.replace_snapshot_without_backup(
+                                &self.env.kind,
+                                account_id,
+                                &output.account,
+                                &snapshot_for_repo,
+                                Some(output.usage.clone()),
+                            )?;
+                        }
+                        Ok(output)
                     }
-                };
-                let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
-                if refreshed_snapshot != live_snapshot
-                    && live_bundle_still_matches_snapshot(&self.env, &live_snapshot)
-                {
-                    codex::restore_snapshot(&self.env, &refreshed_snapshot, &output.account, false)
-                        .context("refreshed live auth but failed to update local auth files")?;
+                    Err(error) => {
+                        self.persist_rotated_live_auth(
+                            &live_identity,
+                            &live_snapshot,
+                            &error,
+                        )?;
+                        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+                        self.record_usage_error_for_identity(&live_identity, error.error());
+                        Err(error.into_error())
+                    }
                 }
-                if let Some(account_id) = self.saved_account_id_for_identity(&live_identity) {
-                    self.repository.replace_snapshot_without_backup(
-                        &self.env.kind,
-                        account_id,
-                        &output.account,
-                        &refreshed_snapshot,
-                        Some(output.usage.clone()),
-                    )?;
-                }
-                Ok(output)
             }
         }
+    }
+
+    fn persist_rotated_saved_auth(
+        &self,
+        account_id: Uuid,
+        error: &FetchUsageError,
+    ) -> Result<()> {
+        let Some(refreshed_snapshot) = &error.refreshed_snapshot else {
+            return Ok(());
+        };
+        let (current_metadata, _) = self.repository.load_snapshot(&self.env.kind, account_id)?;
+        let identity = codex::identity_from_snapshot(refreshed_snapshot)?;
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        self.repository.replace_snapshot_without_backup(
+            &self.env.kind,
+            account_id,
+            &identity,
+            refreshed_snapshot,
+            current_metadata.cached_usage,
+        )?;
+        Ok(())
+    }
+
+    fn persist_rotated_live_auth(
+        &self,
+        live_identity: &DisplayIdentity,
+        previous_live_snapshot: &SnapshotBlob,
+        error: &FetchUsageError,
+    ) -> Result<()> {
+        let Some(refreshed_snapshot) = &error.refreshed_snapshot else {
+            return Ok(());
+        };
+        let identity = codex::identity_from_snapshot(refreshed_snapshot).unwrap_or_else(|_| {
+            live_identity.clone()
+        });
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        let persisted = self.write_back_live_auth_if_unchanged(
+            previous_live_snapshot,
+            refreshed_snapshot,
+            &identity,
+        )?;
+        if let Some(account_id) = self.saved_account_id_for_identity(live_identity) {
+            let cached_usage = self
+                .repository
+                .list_accounts(&self.env.kind)
+                .ok()
+                .and_then(|accounts| {
+                    accounts
+                        .into_iter()
+                        .find(|account| account.id == account_id)
+                        .and_then(|account| account.cached_usage)
+                });
+            let snapshot_for_repo = self.snapshot_safe_for_saved_live_copy(
+                previous_live_snapshot,
+                refreshed_snapshot,
+                persisted,
+            );
+            self.repository.replace_snapshot_without_backup(
+                &self.env.kind,
+                account_id,
+                &identity,
+                &snapshot_for_repo,
+                cached_usage,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Prefer tokens that actually landed in `~/.codex`. Never keep a Roster-only
+    /// rotated refresh token when Desktop already moved the live session.
+    fn snapshot_safe_for_saved_live_copy(
+        &self,
+        previous_live_snapshot: &SnapshotBlob,
+        refreshed_snapshot: &SnapshotBlob,
+        persisted_to_live: bool,
+    ) -> SnapshotBlob {
+        if persisted_to_live || refreshed_snapshot == previous_live_snapshot {
+            return refreshed_snapshot.clone();
+        }
+        match codex::try_read_live_auth_bundle(&self.env) {
+            Ok(Some(live)) => live.snapshot,
+            _ => previous_live_snapshot.clone(),
+        }
+    }
+
+    fn write_back_live_auth_if_unchanged(
+        &self,
+        previous_live_snapshot: &SnapshotBlob,
+        refreshed_snapshot: &SnapshotBlob,
+        identity: &DisplayIdentity,
+    ) -> Result<bool> {
+        if refreshed_snapshot == previous_live_snapshot {
+            return Ok(true);
+        }
+        if live_bundle_still_matches_snapshot(&self.env, previous_live_snapshot) {
+            codex::restore_snapshot(&self.env, refreshed_snapshot, identity, false)
+                .context("refreshed live auth but failed to update local auth files")?;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     fn saved_account_id_for_identity(&self, identity: &DisplayIdentity) -> Option<Uuid> {
@@ -694,7 +911,7 @@ where
             .and_then(|accounts| match_saved_account(&accounts, identity).map(|account| account.id))
     }
 
-    fn is_live_saved_account(&self, account_id: Uuid) -> Result<bool> {
+    pub(crate) fn is_live_saved_account(&self, account_id: Uuid) -> Result<bool> {
         let Some(live) = codex::try_read_live_auth_bundle(&self.env)? else {
             return Ok(false);
         };
@@ -737,6 +954,14 @@ fn live_bundle_still_matches_snapshot(env: &AppEnv, snapshot: &SnapshotBlob) -> 
         }
     }
     false
+}
+
+fn looks_like_auth_json(value: &serde_json::Value) -> bool {
+    value
+        .get("tokens")
+        .and_then(|tokens| tokens.get("access_token"))
+        .and_then(|token| token.as_str())
+        .is_some_and(|token| !token.is_empty())
 }
 
 fn auto_switch_output(
@@ -947,6 +1172,45 @@ mod tests {
 
         assert!(!output.enabled);
         assert_eq!(output.status, "disabled");
+    }
+
+    #[test]
+    fn imports_account_from_auth_json_file() {
+        let temp = tempdir().expect("tempdir");
+        let env = AppEnv {
+            kind: EnvironmentKind::Linux,
+            home_dir: temp.path().to_path_buf(),
+            codex_root: temp.path().join(".codex"),
+            app_data_dir: temp.path().join("app"),
+        };
+        let auth_path = temp.path().join("import-auth.json");
+        std::fs::write(
+            &auth_path,
+            auth_json_fixture("json-import@example.com", "sub-json", Some("plus")),
+        )
+        .expect("write auth json");
+        let app = App::new(
+            env.clone(),
+            SnapshotRepository::new(&env.app_data_dir, MemorySecretStore::default()),
+        );
+
+        let output = app
+            .import_accounts_from_json(&auth_path, Some("Từ JSON".to_owned()))
+            .expect("import");
+
+        assert_eq!(output.format, "auth_json");
+        assert_eq!(output.created, 1);
+        assert_eq!(output.updated, 0);
+        assert_eq!(output.accounts.len(), 1);
+        assert_eq!(output.accounts[0].email, "json-import@example.com");
+        assert_eq!(output.accounts[0].custom_label.as_deref(), Some("Từ JSON"));
+
+        let again = app
+            .import_accounts_from_json(&auth_path, None)
+            .expect("reimport");
+        assert_eq!(again.created, 0);
+        assert_eq!(again.updated, 1);
+        assert_eq!(app.list().expect("list").accounts.len(), 1);
     }
 
     #[test]

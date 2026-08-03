@@ -1,9 +1,10 @@
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
-use serde::{Deserialize, Serialize};
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use serde::Deserialize;
+use serde_json::{Map, Value};
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
@@ -16,7 +17,13 @@ use crate::model::{
 static CHATGPT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 static USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
 static REFRESH_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
+/// Matches Codex CLI: treat ChatGPT-managed sessions as stale after ~8 days.
 static TOKEN_REFRESH_INTERVAL: LazyLock<Duration> = LazyLock::new(|| Duration::days(8));
+/// Matches ChatGPT web / Codex CLI: refresh access tokens inside the 5-minute near-expiry window.
+static ACCESS_TOKEN_REFRESH_SKEW: LazyLock<Duration> = LazyLock::new(|| Duration::minutes(5));
+/// Serialize OAuth refresh calls process-wide. Refresh tokens are single-use; concurrent
+/// refreshes of the same session invalidate each other and force re-login.
+static TOKEN_REFRESH_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug)]
 pub struct UsageTarget {
@@ -27,32 +34,111 @@ pub struct UsageTarget {
     pub allow_refresh: bool,
 }
 
-pub fn fetch_usage(target: UsageTarget) -> Result<(UsageOutput, SnapshotBlob)> {
-    let mut auth = snapshot_auth(&target.snapshot)?;
+/// Usage failed, but OAuth tokens may already have been rotated and must be persisted.
+#[derive(Debug)]
+pub struct FetchUsageError {
+    error: anyhow::Error,
+    pub refreshed_snapshot: Option<SnapshotBlob>,
+}
+
+impl FetchUsageError {
+    fn new(error: anyhow::Error, refreshed_snapshot: Option<SnapshotBlob>) -> Self {
+        Self {
+            error,
+            refreshed_snapshot,
+        }
+    }
+
+    pub fn error(&self) -> &anyhow::Error {
+        &self.error
+    }
+
+    pub fn into_error(self) -> anyhow::Error {
+        self.error
+    }
+}
+
+impl std::fmt::Display for FetchUsageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.error)
+    }
+}
+
+impl std::error::Error for FetchUsageError {}
+
+pub fn fetch_usage(target: UsageTarget) -> Result<(UsageOutput, SnapshotBlob), FetchUsageError> {
+    let mut auth = snapshot_auth(&target.snapshot).map_err(|error| FetchUsageError::new(error, None))?;
     let mut source = target.source;
+
+    if target.allow_refresh && needs_proactive_refresh(&auth) {
+        match refresh_auth(&auth) {
+            Ok(refreshed) => {
+                auth = refreshed;
+                source = refresh_source(source);
+            }
+            Err(error) if is_transient_refresh_error(&error) => {
+                // Keep the existing access token; a later 401 path can still retry.
+            }
+            Err(error) => {
+                return Err(FetchUsageError::new(error, None));
+            }
+        }
+    }
 
     let response = match fetch_usage_response(&auth.access_token, auth.account_id.as_deref()) {
         Ok(response) => response,
-        Err(error) if target.allow_refresh && should_refresh_after_error(&error, &auth) => {
-            auth = refresh_auth(&auth)?;
+        Err(error)
+            if target.allow_refresh
+                && should_refresh_after_error(&error, &auth)
+                && !auth.changed =>
+        {
+            auth = match refresh_auth(&auth) {
+                Ok(refreshed) => refreshed,
+                Err(refresh_error) => {
+                    return Err(FetchUsageError::new(refresh_error, None));
+                }
+            };
             source = refresh_source(source);
-            fetch_usage_response(&auth.access_token, auth.account_id.as_deref())?
+            match fetch_usage_response(&auth.access_token, auth.account_id.as_deref()) {
+                Ok(response) => response,
+                Err(retry_error) => {
+                    let snapshot = update_snapshot_auth(&target.snapshot, &auth)
+                        .map_err(|error| FetchUsageError::new(error, None))?;
+                    return Err(FetchUsageError::new(retry_error, Some(snapshot)));
+                }
+            }
         }
-        Err(error) => return Err(error),
+        Err(error) => {
+            let snapshot = if auth.changed {
+                Some(
+                    update_snapshot_auth(&target.snapshot, &auth)
+                        .map_err(|update_error| FetchUsageError::new(update_error, None))?,
+                )
+            } else {
+                None
+            };
+            return Err(FetchUsageError::new(error, snapshot));
+        }
     };
 
     let snapshot = if auth.changed {
-        update_snapshot_auth(&target.snapshot, &auth)?
+        update_snapshot_auth(&target.snapshot, &auth)
+            .map_err(|error| FetchUsageError::new(error, None))?
     } else {
         target.snapshot
     };
 
-    let fetched_identity = merge_identity(&target.identity, response.identity()?);
+    let fetched_identity = merge_identity(&target.identity, response.identity().map_err(|error| {
+        FetchUsageError::new(error, if auth.changed { Some(snapshot.clone()) } else { None })
+    })?);
+    let usage = response.into_view(source).map_err(|error| {
+        FetchUsageError::new(error, if auth.changed { Some(snapshot.clone()) } else { None })
+    })?;
     Ok((
         UsageOutput {
             environment: target.environment,
             account: fetched_identity,
-            usage: response.into_view(source)?,
+            usage,
         },
         snapshot,
     ))
@@ -88,21 +174,6 @@ pub fn usage_error_requires_login(error: &str) -> bool {
                 || error.contains("refresh token")
                 || error.contains("log out")
                 || error.contains("sign in")))
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct StoredAuth {
-    tokens: StoredTokens,
-    #[serde(default)]
-    last_refresh: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct StoredTokens {
-    access_token: String,
-    refresh_token: Option<String>,
-    id_token: Option<String>,
-    account_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -195,18 +266,41 @@ fn snapshot_auth(snapshot: &SnapshotBlob) -> Result<SnapshotAuth> {
     let auth_json = STANDARD
         .decode(&auth_file.bytes_base64)
         .context("failed to decode snapshot auth.json")?;
-    let stored: StoredAuth =
+    let root: Value =
         serde_json::from_slice(&auth_json).context("failed to parse snapshot auth.json")?;
+    let tokens = root
+        .get("tokens")
+        .and_then(Value::as_object)
+        .context("auth.json did not contain tokens")?;
+    let access_token = tokens
+        .get("access_token")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("auth.json did not contain tokens.access_token")?
+        .to_owned();
     Ok(SnapshotAuth {
-        access_token: stored.tokens.access_token,
-        refresh_token: stored.tokens.refresh_token,
-        id_token: stored.tokens.id_token,
-        account_id: stored.tokens.account_id,
-        last_refresh: parse_last_refresh(stored.last_refresh.as_deref())?,
+        access_token,
+        refresh_token: tokens
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        id_token: tokens
+            .get("id_token")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        account_id: tokens
+            .get("account_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        last_refresh: parse_last_refresh(root.get("last_refresh").and_then(Value::as_str))?,
         changed: false,
     })
 }
 
+/// Patch tokens/last_refresh in place so Codex fields like `auth_mode` survive write-back.
 fn update_snapshot_auth(snapshot: &SnapshotBlob, auth: &SnapshotAuth) -> Result<SnapshotBlob> {
     let mut updated = snapshot.clone();
     let auth_index = updated
@@ -217,15 +311,42 @@ fn update_snapshot_auth(snapshot: &SnapshotBlob, auth: &SnapshotAuth) -> Result<
     let auth_json = STANDARD
         .decode(&updated.files[auth_index].bytes_base64)
         .context("failed to decode snapshot auth.json")?;
-    let mut stored: StoredAuth =
+    let mut root: Value =
         serde_json::from_slice(&auth_json).context("failed to parse snapshot auth.json")?;
-    stored.tokens.access_token = auth.access_token.clone();
-    stored.tokens.refresh_token = auth.refresh_token.clone();
-    stored.tokens.id_token = auth.id_token.clone();
-    stored.tokens.account_id = auth.account_id.clone();
-    stored.last_refresh = auth.last_refresh.map(format_last_refresh);
+    let tokens = root
+        .as_object_mut()
+        .context("auth.json root must be an object")?
+        .entry("tokens")
+        .or_insert_with(|| Value::Object(Map::new()));
+    let tokens = tokens
+        .as_object_mut()
+        .context("auth.json tokens must be an object")?;
+    tokens.insert(
+        "access_token".to_owned(),
+        Value::String(auth.access_token.clone()),
+    );
+    if let Some(refresh_token) = &auth.refresh_token {
+        tokens.insert(
+            "refresh_token".to_owned(),
+            Value::String(refresh_token.clone()),
+        );
+    }
+    if let Some(id_token) = &auth.id_token {
+        tokens.insert("id_token".to_owned(), Value::String(id_token.clone()));
+    }
+    if let Some(account_id) = &auth.account_id {
+        tokens.insert("account_id".to_owned(), Value::String(account_id.clone()));
+    }
+    if let Some(last_refresh) = auth.last_refresh {
+        root.as_object_mut()
+            .context("auth.json root must be an object")?
+            .insert(
+                "last_refresh".to_owned(),
+                Value::String(format_last_refresh(last_refresh)),
+            );
+    }
     updated.files[auth_index].bytes_base64 = STANDARD.encode(
-        serde_json::to_vec_pretty(&stored).context("failed to encode refreshed auth.json")?,
+        serde_json::to_vec_pretty(&root).context("failed to encode refreshed auth.json")?,
     );
     Ok(updated)
 }
@@ -260,19 +381,45 @@ fn fetch_usage_response(access_token: &str, account_id: Option<&str>) -> Result<
         .context("failed to decode Codex usage response")
 }
 
+fn needs_proactive_refresh(auth: &SnapshotAuth) -> bool {
+    if auth.refresh_token.as_deref().is_none_or(str::is_empty) {
+        return false;
+    }
+    let now = OffsetDateTime::now_utc();
+    if let Some(expires_at) = access_token_expires_at(&auth.access_token) {
+        return expires_at <= now + *ACCESS_TOKEN_REFRESH_SKEW;
+    }
+    match auth.last_refresh {
+        Some(last_refresh) => now - last_refresh >= *TOKEN_REFRESH_INTERVAL,
+        // Mirror Codex: without JWT exp and without last_refresh, do not force a refresh.
+        None => false,
+    }
+}
+
 fn should_refresh_after_error(error: &anyhow::Error, auth: &SnapshotAuth) -> bool {
     if auth.refresh_token.as_deref().is_none_or(str::is_empty) {
         return false;
     }
-    if auth.last_refresh.is_some_and(|last_refresh| {
-        OffsetDateTime::now_utc() - last_refresh < *TOKEN_REFRESH_INTERVAL
-    }) {
-        return format!("{error:#}").contains("authentication failed (401)");
-    }
     format!("{error:#}").contains("authentication failed (401)")
 }
 
+fn is_transient_refresh_error(error: &anyhow::Error) -> bool {
+    let rendered = format!("{error:#}").to_ascii_lowercase();
+    !usage_error_requires_login(&rendered)
+        && (rendered.contains("timed out")
+            || rendered.contains("timeout")
+            || rendered.contains("connection")
+            || rendered.contains("dns")
+            || rendered.contains("temporarily")
+            || rendered.contains("503")
+            || rendered.contains("502")
+            || rendered.contains("429"))
+}
+
 fn refresh_auth(auth: &SnapshotAuth) -> Result<SnapshotAuth> {
+    let _guard = TOKEN_REFRESH_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let refresh_token = auth
         .refresh_token
         .as_deref()
@@ -324,6 +471,22 @@ fn refresh_source(source: UsageSource) -> UsageSource {
             UsageSource::SavedRefreshToken
         }
     }
+}
+
+fn access_token_expires_at(access_token: &str) -> Option<OffsetDateTime> {
+    let mut parts = access_token.split('.');
+    let _header = parts.next()?;
+    let payload = parts.next()?;
+    if payload.is_empty() {
+        return None;
+    }
+    let payload_bytes = URL_SAFE_NO_PAD.decode(payload).or_else(|_| {
+        let padding = "=".repeat((4 - payload.len() % 4) % 4);
+        URL_SAFE_NO_PAD.decode(format!("{payload}{padding}"))
+    }).ok()?;
+    let claims: Value = serde_json::from_slice(&payload_bytes).ok()?;
+    let exp = claims.get("exp")?.as_i64()?;
+    OffsetDateTime::from_unix_timestamp(exp).ok()
 }
 
 fn window_view(window: &UsageWindow) -> Result<UsageWindowView> {
@@ -412,8 +575,27 @@ pub fn usage_target_from_snapshot(
 #[cfg(test)]
 mod tests {
     use anyhow::anyhow;
+    use base64::engine::general_purpose::STANDARD;
+    use serde_json::json;
 
     use super::*;
+    use crate::model::{SNAPSHOT_SCHEMA_VERSION, SnapshotFile};
+
+    fn jwt_with_exp(exp: i64) -> String {
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{exp}}}"#));
+        format!("{header}.{payload}.")
+    }
+
+    fn auth_snapshot(auth: Value) -> SnapshotBlob {
+        SnapshotBlob {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            files: vec![SnapshotFile {
+                name: "auth.json".to_owned(),
+                bytes_base64: STANDARD.encode(auth.to_string()),
+            }],
+        }
+    }
 
     #[test]
     fn reused_refresh_token_error_is_login_required() {
@@ -466,5 +648,88 @@ mod tests {
             usage_error_label(&usage_error_message(&error)),
             "Usage unavailable"
         );
+    }
+
+    #[test]
+    fn refresh_write_back_preserves_auth_mode_and_extra_fields() {
+        let snapshot = auth_snapshot(json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "id",
+                "access_token": "old-access",
+                "refresh_token": "old-refresh",
+                "account_id": "acct"
+            },
+            "last_refresh": "2026-01-01T00:00:00Z",
+            "custom_extension": {"keep": true}
+        }));
+        let updated = update_snapshot_auth(
+            &snapshot,
+            &SnapshotAuth {
+                access_token: "new-access".to_owned(),
+                refresh_token: Some("new-refresh".to_owned()),
+                id_token: Some("new-id".to_owned()),
+                account_id: Some("acct".to_owned()),
+                last_refresh: Some(OffsetDateTime::UNIX_EPOCH),
+                changed: true,
+            },
+        )
+        .expect("update");
+        let auth_json = STANDARD
+            .decode(
+                &updated
+                    .files
+                    .iter()
+                    .find(|file| file.name == "auth.json")
+                    .expect("auth")
+                    .bytes_base64,
+            )
+            .expect("decode");
+        let root: Value = serde_json::from_slice(&auth_json).expect("json");
+        assert_eq!(root["auth_mode"], "chatgpt");
+        assert_eq!(root["custom_extension"]["keep"], true);
+        assert_eq!(root["tokens"]["access_token"], "new-access");
+        assert_eq!(root["tokens"]["refresh_token"], "new-refresh");
+        assert_eq!(root["tokens"]["id_token"], "new-id");
+    }
+
+    #[test]
+    fn proactive_refresh_uses_access_token_near_expiry_window() {
+        let soon = OffsetDateTime::now_utc() + Duration::minutes(2);
+        let auth = SnapshotAuth {
+            access_token: jwt_with_exp(soon.unix_timestamp()),
+            refresh_token: Some("refresh".to_owned()),
+            id_token: None,
+            account_id: None,
+            last_refresh: Some(OffsetDateTime::now_utc()),
+            changed: false,
+        };
+        assert!(needs_proactive_refresh(&auth));
+    }
+
+    #[test]
+    fn proactive_refresh_uses_eight_day_stale_last_refresh() {
+        let auth = SnapshotAuth {
+            access_token: "not-a-jwt".to_owned(),
+            refresh_token: Some("refresh".to_owned()),
+            id_token: None,
+            account_id: None,
+            last_refresh: Some(OffsetDateTime::now_utc() - Duration::days(9)),
+            changed: false,
+        };
+        assert!(needs_proactive_refresh(&auth));
+    }
+
+    #[test]
+    fn fresh_session_without_jwt_exp_skips_proactive_refresh() {
+        let auth = SnapshotAuth {
+            access_token: "not-a-jwt".to_owned(),
+            refresh_token: Some("refresh".to_owned()),
+            id_token: None,
+            account_id: None,
+            last_refresh: Some(OffsetDateTime::now_utc() - Duration::days(1)),
+            changed: false,
+        };
+        assert!(!needs_proactive_refresh(&auth));
     }
 }

@@ -77,10 +77,9 @@ public static class CodexDesktopLifecycle
         var path = ExecutablePath(process);
         if (!string.IsNullOrWhiteSpace(path) && LooksLikeDesktopExecutable(path)) return true;
         // ChatGPT Desktop helpers often lack a main window; still treat the brand
-        // process name as desktop. Bare `codex` without a desktop path is likely CLI.
-        var name = process.ProcessName;
-        return name.Equals("chatgpt", StringComparison.OrdinalIgnoreCase)
-            || process.MainWindowHandle != IntPtr.Zero;
+        // process name as desktop. Bare `codex` without a desktop path is CLI —
+        // do not kill it just because a console window is open (e.g. device login).
+        return process.ProcessName.Equals("chatgpt", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool LooksLikeDesktopExecutable(string path)

@@ -33,11 +33,57 @@ public sealed partial class MainWindow : Window
 
     private async void RefreshQuota_Click(object sender, RoutedEventArgs e) => await ViewModel.RefreshAllQuotaAsync();
 
+    private void ErrorInfoBar_CloseClick(InfoBar sender, object args) => ViewModel.ClearError();
+
     private async void AddAccount_Click(object sender, RoutedEventArgs e) => await ViewModel.StartDeviceLoginAsync();
+
+    private async void ImportJson_Click(object sender, RoutedEventArgs e) => await ImportJsonAccountAsync();
 
     private async void SaveCurrent_Click(object sender, RoutedEventArgs e) => await ViewModel.SaveCurrentAccountAsync();
 
+    private async Task ImportJsonAccountAsync()
+    {
+        var path = new TextBox
+        {
+            Header = "Đường dẫn file JSON",
+            PlaceholderText = "C:\\Users\\you\\.codex\\auth.json",
+        };
+        var label = new TextBox
+        {
+            Header = "Tên hiển thị (tuỳ chọn, chỉ khi nhập 1 tài khoản)",
+            PlaceholderText = "Ví dụ: Plus công ty",
+        };
+        var hint = new TextBlock
+        {
+            Text = "Hỗ trợ: auth.json của Codex, snapshot Roster, hoặc backup Roster dạng JSON (không mã hóa).",
+            TextWrapping = TextWrapping.Wrap,
+            Opacity = 0.72,
+        };
+        var content = new StackPanel { Spacing = 12 };
+        content.Children.Add(hint);
+        content.Children.Add(path);
+        content.Children.Add(label);
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Thêm tài khoản từ JSON",
+            Content = content,
+            PrimaryButtonText = "Nhập",
+            CloseButtonText = "Hủy",
+            DefaultButton = ContentDialogButton.Primary,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        if (string.IsNullOrWhiteSpace(path.Text)) return;
+        await ViewModel.ImportAccountsFromJsonAsync(path.Text.Trim(), label.Text);
+    }
+
     private async void CancelPendingLogin_Click(object sender, RoutedEventArgs e) => await ViewModel.CancelPendingLoginAsync();
+
+    private async void ReloginAccount_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is not AccountItem account) return;
+        await ViewModel.StartReloginAsync(account);
+    }
 
     private async void ActivateAccount_Click(object sender, RoutedEventArgs e)
     {
@@ -146,6 +192,11 @@ public sealed partial class MainWindow : Window
         await ViewModel.SetAutoSwitchWhenExhaustedAsync();
     }
 
+    private async void RunAutoSwitchCheck_Click(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.RunAutoSwitchCheckAsync();
+    }
+
     private async void LaunchAtLogin_Toggled(object sender, RoutedEventArgs e)
     {
         await ViewModel.SetLaunchAtLoginAsync();
@@ -201,9 +252,9 @@ public sealed partial class MainWindow : Window
             var dialog = new ContentDialog
             {
                 XamlRoot = Content.XamlRoot,
-                Title = "Gửi xuống notification area?",
-                Content = "Codex Roster sẽ tiếp tục chạy nền để theo dõi quota. Chọn Quit trong menu notification area trước khi xóa hoặc thay thư mục ứng dụng.",
-                PrimaryButtonText = "Gửi xuống notification area",
+                Title = "Gửi xuống khay thông báo?",
+                Content = "Codex Roster sẽ tiếp tục chạy nền để theo dõi quota. Chọn Quit trong menu khay thông báo trước khi xóa hoặc thay thư mục ứng dụng.",
+                PrimaryButtonText = "Gửi xuống khay thông báo",
                 CloseButtonText = "Hủy",
                 DefaultButton = ContentDialogButton.Primary,
             };
@@ -216,8 +267,8 @@ public sealed partial class MainWindow : Window
             var dialog = new ContentDialog
             {
                 XamlRoot = Content.XamlRoot,
-                Title = "Không thể mở notification area",
-                Content = "Không thể khởi động companion ở notification area. Hãy thử lại sau.",
+                Title = "Không thể mở khay thông báo",
+                Content = "Không thể khởi động companion ở khay thông báo. Hãy thử lại sau.",
                 CloseButtonText = "Đóng",
             };
             await dialog.ShowAsync();

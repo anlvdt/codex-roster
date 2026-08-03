@@ -98,6 +98,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Import account(s) from Codex auth.json, a Roster snapshot JSON, or a plaintext backup bundle.
+    ImportJson {
+        input: PathBuf,
+        /// Optional display label (single-account auth.json / snapshot only).
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     RestoreAccountListBackup {
         #[arg(long)]
         json: bool,
@@ -362,6 +371,21 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::ImportJson { input, label, json }) => {
+            let output = app.import_accounts_from_json(&input, label)?;
+            if json {
+                print_json(&output)?;
+            } else {
+                println!(
+                    "Imported {} ({}/{} created/updated) from {}",
+                    output.format, output.created, output.updated, input.display()
+                );
+                for account in &output.accounts {
+                    println!("  {} <{}>", account.email, account.id);
+                }
+            }
+            Ok(())
+        }
         Some(Command::RestoreAccountListBackup { json }) => {
             let accounts = app.restore_latest_account_list_backup()?;
             if json {
@@ -519,6 +543,7 @@ pub fn run() -> Result<()> {
         #[cfg(windows)]
         Some(Command::Tray) => {
             crate::app::spawn_auto_start_usage_windows_worker(app.env().clone());
+            crate::app::spawn_auto_switch_worker(app.env().clone());
             crate::tray::hide_console_window();
             let _ = crate::tray::run(&app)?;
             Ok(())
@@ -553,6 +578,7 @@ where
     }
 
     crate::app::spawn_auto_start_usage_windows_worker(app.env().clone());
+    crate::app::spawn_auto_switch_worker(app.env().clone());
     #[cfg(windows)]
     {
         loop {

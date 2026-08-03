@@ -96,6 +96,21 @@ where
         }
 
         for (account_id, email) in due_accounts {
+            if self.is_live_saved_account(account_id)? {
+                // Temp-home `codex exec` can rotate the same refresh token that still
+                // lives in ~/.codex. Never ping the active live account that way.
+                let _ = self.usage(None);
+                output.pinged_accounts.push(AutoStartUsageWindowAccountResult {
+                    account_id,
+                    email,
+                    status: "skipped_live".to_owned(),
+                    detail: Some(
+                        "active live session is refreshed via usage only; temp-home ping would race refresh tokens"
+                            .to_owned(),
+                    ),
+                });
+                continue;
+            }
             let result = match self.ping_usage_window_account(account_id, &email) {
                 Ok(result) => result,
                 Err(error) => AutoStartUsageWindowAccountResult {

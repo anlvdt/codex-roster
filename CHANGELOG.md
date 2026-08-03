@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.20 - 2026-08-03
+
+### Fixed
+
+- Windows add-account no longer closes Codex/ChatGPT Desktop (which looked like the app “turning off”); a second Add resumes the pending session instead of failing with “already in progress”, and failed begins roll back via cancel-add-account.
+- Pending add-account shows a top InfoBar with **Hủy và khôi phục phiên**; console `codex login` is no longer treated as Desktop and killed.
+- Live `~/.codex` sessions are no longer force-logged-out by parallel OAuth refresh while Codex/ChatGPT is running: Roster skips live token rotation when those processes are present, and does not poison saved snapshots when live write-back loses a race.
+- Auto-start usage-window pings skip the active live account (temp-home `codex exec` would rotate the same refresh token).
+- Windows quota parsing accepts Rust `time` array timestamps for `reset_at`; JSON import and auto-switch/auto-quota UI hardening ship in this build.
+
 ## v0.2.19 - 2026-08-03
 
 ### Fixed

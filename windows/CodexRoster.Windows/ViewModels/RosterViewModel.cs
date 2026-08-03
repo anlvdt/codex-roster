@@ -22,6 +22,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
     private bool _autoSwitchWhenExhausted;
     private bool _launchAtLogin;
     private bool _isCheckingAutoSwitch;
+    private bool _autoSwitchAllExhaustedNotified;
     private bool _isRefreshingInsights;
     private bool _isCheckingUpdate;
     private bool _settingsLoaded;
@@ -31,8 +32,11 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
     private bool _isAddAccountSession;
     private CodexDesktopRestartPlan? _loginRelaunch;
     private string _errorMessage = string.Empty;
+    private string _errorTitle = "Không thể hoàn tất";
     private string _currentAccountLabel = "Chưa đăng nhập";
+    private string _currentAccountDetail = "quota và reset được cập nhật qua OpenAI";
     private string _quotaRefreshStatus = "Tắt";
+    private string _autoSwitchStatus = "Tắt";
     private string _loginStatus = "Đăng nhập một tài khoản mới, rồi Roster sẽ nhận diện phiên để bạn lưu an toàn.";
     private string _processSafetyStatus = "Sẵn sàng chuyển tài khoản";
     private string _tokenUsageToday = "—";
@@ -47,17 +51,37 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
     public ObservableCollection<AccountItem> Accounts { get; } = [];
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    public int SavedAccountCount => Accounts.Count;
-    public int ReadyAccountCount => Accounts.Count(account => !account.IsArchived && account.QuotaPercent > 0 && account.ResetLabel != "Hãy đăng nhập lại");
+    public int SavedAccountCount => Accounts.Count(account => !account.IsArchived);
+    public int ReadyAccountCount => Accounts.Count(account => account.IsReady);
     public string CurrentAccountLabel { get => _currentAccountLabel; private set => Set(ref _currentAccountLabel, value); }
+    public string CurrentAccountDetail { get => _currentAccountDetail; private set => Set(ref _currentAccountDetail, value); }
+    public string ErrorTitle { get => _errorTitle; private set => Set(ref _errorTitle, value); }
     public string ErrorMessage { get => _errorMessage; private set { Set(ref _errorMessage, value); OnPropertyChanged(nameof(HasError)); } }
     public bool HasError => !string.IsNullOrWhiteSpace(ErrorMessage);
-    public bool IsBusy { get => _isBusy; private set { Set(ref _isBusy, value); OnPropertyChanged(nameof(BusyVisibility)); } }
+    public bool IsBusy { get => _isBusy; private set { Set(ref _isBusy, value); OnPropertyChanged(nameof(BusyVisibility)); OnPropertyChanged(nameof(CanChangeAutoSwitch)); } }
     public Visibility BusyVisibility => IsBusy ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility EmptyAccountsVisibility => Accounts.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility AccountsListVisibility => Accounts.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+    public bool IsPendingLogin => _isAddAccountSession;
+    public Visibility PendingLoginVisibility => _isAddAccountSession ? Visibility.Visible : Visibility.Collapsed;
     public bool AutoQuotaRefresh { get => _autoQuotaRefresh; set => Set(ref _autoQuotaRefresh, value); }
-    public bool AutoSwitchWhenExhausted { get => _autoSwitchWhenExhausted; set => Set(ref _autoSwitchWhenExhausted, value); }
+    public bool AutoSwitchWhenExhausted
+    {
+        get => _autoSwitchWhenExhausted;
+        set
+        {
+            if (_autoSwitchWhenExhausted == value) return;
+            _autoSwitchWhenExhausted = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(AutoSwitchActionsVisibility));
+            OnPropertyChanged(nameof(CanChangeAutoSwitch));
+        }
+    }
     public bool LaunchAtLogin { get => _launchAtLogin; set => Set(ref _launchAtLogin, value); }
     public string QuotaRefreshStatus { get => _quotaRefreshStatus; private set => Set(ref _quotaRefreshStatus, value); }
+    public string AutoSwitchStatus { get => _autoSwitchStatus; private set => Set(ref _autoSwitchStatus, value); }
+    public Visibility AutoSwitchActionsVisibility => AutoSwitchWhenExhausted ? Visibility.Visible : Visibility.Collapsed;
+    public bool CanChangeAutoSwitch => _settingsLoaded && !IsBusy && !_isCheckingAutoSwitch;
     public string LoginStatus { get => _loginStatus; private set { Set(ref _loginStatus, value); OnPropertyChanged(nameof(CanSaveDetectedLogin)); } }
     public bool CanSaveDetectedLogin => _pendingLoginIdentity is not null;
     public string ProcessSafetyStatus { get => _processSafetyStatus; private set => Set(ref _processSafetyStatus, value); }
@@ -93,6 +117,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         {
             var addAccount = await _cli.ReadAsync<AddAccountStatusResponse>("add-account-status");
             _isAddAccountSession = addAccount.Active;
+            NotifyPendingLoginChanged();
             if (addAccount.Active)
             {
                 // begin-add-account clears live auth, so any current identity is the
@@ -105,6 +130,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
                 {
                     _pendingLoginIdentity = current;
                     LoginStatus = $"Đã nhận diện {current.Email}. Chọn Lưu phiên hiện tại để thêm vào Roster.";
+                    NotifyPendingLoginChanged();
                 }
                 WatchForNewLoginAsync(previousIdentity: null);
             }
@@ -131,9 +157,14 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
             AutoQuotaRefresh = settings.Enabled;
             AutoSwitchWhenExhausted = autoSwitch.Enabled;
             LaunchAtLogin = WindowsStartup.IsEnabled;
+            AutoSwitchStatus = autoSwitch.Enabled
+                ? "Đã bật — Roster sẽ chuyển khi tài khoản hiện tại hết quota."
+                : "Tắt";
             UpdateQuotaTimer();
             _settingsLoaded = true;
+            OnPropertyChanged(nameof(CanChangeAutoSwitch));
             if (AutoQuotaRefresh) await RefreshActiveQuotaAsync(silent: true);
+            if (AutoSwitchWhenExhausted) await CheckAutoSwitchAsync(silent: true);
         }
         catch
         {
@@ -166,20 +197,46 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
     {
         await RunAsync(async () =>
         {
-            foreach (var account in Accounts.Where(account => !account.IsArchived))
+            var targets = Accounts.Where(account => !account.IsArchived).ToList();
+            var failures = 0;
+            foreach (var account in targets)
             {
-                if (account.IsActive)
+                try
                 {
-                    await _cli.RunCommandAsync("usage");
+                    if (account.IsActive)
+                    {
+                        await _cli.RunCommandAsync("usage");
+                    }
+                    else
+                    {
+                        await _cli.RunCommandAsync("usage", account.Id.ToString());
+                    }
                 }
-                else
+                catch
                 {
-                    await _cli.RunCommandAsync("usage", account.Id.ToString());
+                    failures++;
                 }
             }
+
             await RefreshRosterDataAsync();
-            QuotaRefreshStatus = $"Đã kiểm tra toàn bộ lúc {DateTime.Now:t}";
+            if (failures == 0)
+            {
+                QuotaRefreshStatus = $"Đã kiểm tra toàn bộ lúc {DateTime.Now:t}";
+                return;
+            }
+
+            ErrorTitle = "Quota chưa đủ";
+            ErrorMessage = failures == targets.Count
+                ? "Không thể xác minh quota cho bất kỳ tài khoản nào. Hãy đăng nhập lại các phiên hết hạn."
+                : $"Đã cập nhật một phần: {targets.Count - failures}/{targets.Count} tài khoản. Các phiên còn lại có thể cần đăng nhập lại.";
+            QuotaRefreshStatus = $"Đã kiểm tra một phần lúc {DateTime.Now:t}";
         });
+    }
+
+    public void ClearError()
+    {
+        ErrorMessage = string.Empty;
+        ErrorTitle = "Không thể hoàn tất";
     }
 
     public void SetAccountSortMode(int selectedIndex)
@@ -203,32 +260,62 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
     {
         await RunAsync(async () =>
         {
-            var relaunch = await CodexDesktopLifecycle.CloseForAccountSwitchAsync();
+            // Do not close ChatGPT/Codex Desktop here. Killing Desktop looks like the app
+            // "turned off", and device login does not need a Desktop restart (macOS leaves it alone).
+            var addStatus = await _cli.ReadAsync<AddAccountStatusResponse>("add-account-status");
+            if (addStatus.Active || _isAddAccountSession)
+            {
+                await ResumePendingLoginAsync(expectedEmail);
+                return;
+            }
+
+            var status = await _cli.ReadAsync<StatusResponse>("status");
+            var began = false;
             try
             {
-                var status = await _cli.ReadAsync<StatusResponse>("status");
-                if (status.ProcessWarnings.Count > 0)
-                {
-                    throw new InvalidOperationException("Hãy đóng các tác vụ Codex CLI đang chạy trước khi thêm hoặc đăng nhập lại tài khoản.");
-                }
                 await _cli.RunCommandAsync("begin-add-account");
+                began = true;
                 CodexLoginLauncher.Start();
-                _loginRelaunch = relaunch;
+                _loginRelaunch = null;
                 _isAddAccountSession = true;
                 _pendingLoginIdentity = null;
                 _expectedLoginEmail = expectedEmail;
-                OnPropertyChanged(nameof(CanSaveDetectedLogin));
+                NotifyPendingLoginChanged();
                 LoginStatus = expectedEmail is null
-                    ? "Phiên cũ đã được bảo toàn. Hoàn tất đăng nhập tài khoản mới; Roster sẽ tự nhận diện phiên mới."
+                    ? "Phiên cũ đã được bảo toàn. Hoàn tất đăng nhập trên trình duyệt/Terminal; Roster sẽ tự nhận diện phiên mới."
                     : $"Phiên cũ đã được bảo toàn. Đăng nhập lại đúng tài khoản {expectedEmail}; Roster sẽ xác minh trước khi lưu.";
                 WatchForNewLoginAsync(status.CurrentAccount);
             }
             catch
             {
-                relaunch.Restart();
+                if (began)
+                {
+                    try { await _cli.RunCommandAsync("cancel-add-account"); }
+                    catch { /* best-effort rollback so the next Add is not stuck */ }
+                    _isAddAccountSession = false;
+                    _pendingLoginIdentity = null;
+                    _expectedLoginEmail = null;
+                    _loginWatchCancellation?.Cancel();
+                    NotifyPendingLoginChanged();
+                }
                 throw;
             }
         });
+    }
+
+    private async Task ResumePendingLoginAsync(string? expectedEmail)
+    {
+        IdentityDto? previous = null;
+        try { previous = (await _cli.ReadAsync<StatusResponse>("status")).CurrentAccount; }
+        catch { /* watcher will retry */ }
+        CodexLoginLauncher.Start();
+        _isAddAccountSession = true;
+        _expectedLoginEmail = expectedEmail;
+        NotifyPendingLoginChanged();
+        LoginStatus = expectedEmail is null
+            ? "Phiên thêm tài khoản vẫn đang mở. Hoàn tất đăng nhập, hoặc chọn Hủy để khôi phục phiên trước."
+            : $"Phiên đăng nhập lại vẫn đang mở. Đăng nhập đúng {expectedEmail}, hoặc chọn Hủy để khôi phục phiên trước.";
+        WatchForNewLoginAsync(previous);
     }
 
     public async Task SaveCurrentAccountAsync()
@@ -264,6 +351,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
             await _cli.RunCommandAsync(_isAddAccountSession ? "save-added-account" : "save");
             if (_isAddAccountSession)
             {
+                CodexLoginLauncher.Stop();
                 _loginRelaunch?.Restart();
                 _loginRelaunch = null;
                 _isAddAccountSession = false;
@@ -271,7 +359,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
             _pendingLoginIdentity = null;
             _expectedLoginEmail = null;
             _loginWatchCancellation?.Cancel();
-            OnPropertyChanged(nameof(CanSaveDetectedLogin));
+            NotifyPendingLoginChanged();
             LoginStatus = "Đã lưu phiên Codex hiện tại.";
             await RefreshRosterDataAsync();
         });
@@ -281,17 +369,15 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
     {
         await RunAsync(async () =>
         {
+            CodexLoginLauncher.Stop();
             await _cli.RunCommandAsync("cancel-add-account");
-            if (_isAddAccountSession)
-            {
-                _loginRelaunch?.Restart();
-                _loginRelaunch = null;
-                _isAddAccountSession = false;
-            }
+            _loginRelaunch?.Restart();
+            _loginRelaunch = null;
+            _isAddAccountSession = false;
             _pendingLoginIdentity = null;
             _expectedLoginEmail = null;
             _loginWatchCancellation?.Cancel();
-            OnPropertyChanged(nameof(CanSaveDetectedLogin));
+            NotifyPendingLoginChanged();
             LoginStatus = "Đã khôi phục phiên Codex trước khi thêm tài khoản.";
             await RefreshRosterDataAsync();
         });
@@ -321,6 +407,24 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         {
             await _cli.RunCommandWithInputAsync(password + Environment.NewLine, "export", path, "--password-stdin");
             QuotaRefreshStatus = "Đã xuất bản sao lưu mã hóa.";
+        });
+    }
+
+    public async Task ImportAccountsFromJsonAsync(string path, string? label)
+    {
+        await RunAsync(async () =>
+        {
+            var args = new List<string> { "import-json", path };
+            if (!string.IsNullOrWhiteSpace(label))
+            {
+                args.Add("--label");
+                args.Add(label.Trim());
+            }
+            var result = await _cli.ReadAsync<ImportJsonResponse>(args.ToArray());
+            await RefreshRosterDataAsync();
+            QuotaRefreshStatus = result.Created + result.Updated == 1
+                ? $"Đã nhập {result.Accounts.FirstOrDefault()?.Email ?? "tài khoản"} từ JSON ({result.Format})."
+                : $"Đã nhập {result.Created + result.Updated} tài khoản từ JSON ({result.Format}).";
         });
     }
 
@@ -522,8 +626,24 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         await RunAsync(async () =>
         {
             await _cli.RunCommandAsync("auto-switch", AutoSwitchWhenExhausted ? "--enable" : "--disable");
+            _autoSwitchAllExhaustedNotified = false;
             UpdateQuotaTimer();
+            if (AutoSwitchWhenExhausted)
+            {
+                AutoSwitchStatus = "Đã bật — đang kiểm tra điều kiện chuyển…";
+                await CheckAutoSwitchAsync(silent: true);
+            }
+            else
+            {
+                AutoSwitchStatus = "Tắt";
+            }
         });
+    }
+
+    public async Task RunAutoSwitchCheckAsync()
+    {
+        if (!AutoSwitchWhenExhausted || !_settingsLoaded) return;
+        await CheckAutoSwitchAsync(silent: false);
     }
 
     public async Task SetLaunchAtLoginAsync()
@@ -543,7 +663,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
 
     private async Task RefreshActiveQuotaAsync(bool silent)
     {
-        if (!AutoQuotaRefresh || IsBusy) return;
+        if (!AutoQuotaRefresh || IsBusy || _isAddAccountSession) return;
         var active = Accounts.FirstOrDefault(account => account.IsActive && !account.IsArchived);
         if (active is null) return;
         try
@@ -572,41 +692,74 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
     private async Task CheckAutoSwitchAsync(bool silent)
     {
         if (!AutoSwitchWhenExhausted || IsBusy || _isCheckingAutoSwitch) return;
+        if (_isAddAccountSession)
+        {
+            AutoSwitchStatus = "Đang chờ hoàn tất đăng nhập — tạm hoãn tự động chuyển.";
+            return;
+        }
+
         _isCheckingAutoSwitch = true;
+        OnPropertyChanged(nameof(CanChangeAutoSwitch));
         try
         {
             var decision = await _cli.ReadAsync<AutoSwitchOutput>("auto-switch");
-            if (decision.Status == "active_has_quota") return;
+            if (decision.Status == "active_has_quota")
+            {
+                _autoSwitchAllExhaustedNotified = false;
+                AutoSwitchStatus = "Tài khoản hiện tại còn quota — chưa cần chuyển.";
+                return;
+            }
+            if (decision.Status == "waiting_for_login")
+            {
+                AutoSwitchStatus = "Chưa có phiên Codex đang đăng nhập để tự động chuyển.";
+                return;
+            }
             if (decision.Status == "all_accounts_exhausted")
             {
-                QuotaRefreshStatus = "Tất cả tài khoản đã hết quota.";
+                if (!_autoSwitchAllExhaustedNotified || !silent)
+                {
+                    AutoSwitchStatus = "Tất cả tài khoản đã hết quota; tự động chuyển sẽ thử lại sau.";
+                    _autoSwitchAllExhaustedNotified = true;
+                }
+                return;
+            }
+            if (decision.Status == "disabled")
+            {
+                AutoSwitchWhenExhausted = false;
+                AutoSwitchStatus = "Tắt";
+                UpdateQuotaTimer();
                 return;
             }
             if (decision.Status != "ready")
             {
-                QuotaRefreshStatus = "Tự động chuyển đang chờ phiên Codex an toàn.";
+                AutoSwitchStatus = "Tự động chuyển đang chờ phiên Codex an toàn.";
                 return;
             }
+
             var applyArgs = new List<string> { "auto-switch", "--apply" };
             if (decision.CandidateAccountId is Guid candidateId)
             {
                 applyArgs.Add("--account-id");
                 applyArgs.Add(candidateId.ToString());
             }
+
             var relaunch = new CodexDesktopRestartPlan([]);
             var closedDesktop = false;
             if (CodexDesktopLifecycle.IsRunning())
             {
-                QuotaRefreshStatus = "Đang đóng Codex Desktop trước khi tự động chuyển…";
+                AutoSwitchStatus = "Đang đóng Codex Desktop trước khi tự động chuyển…";
                 relaunch = await CodexDesktopLifecycle.CloseForAccountSwitchAsync();
                 closedDesktop = true;
+                // Match tray activate: after an explicit Desktop close, helpers that
+                // linger in the process table must not block the swap forever.
+                applyArgs.Add("--force");
             }
+
             AutoSwitchOutput applied;
             try
             {
+                AutoSwitchStatus = $"Đang chuyển sang {decision.CandidateDisplayName ?? "tài khoản khác"}…";
                 applied = await _cli.ReadAsync<AutoSwitchOutput>(applyArgs.ToArray());
-                // Mirror macOS: after Desktop close, give process-table lag a short
-                // chance to clear, but never force through a live Codex CLI.
                 if (applied.Status == "waiting_for_processes" && closedDesktop && !CodexDesktopLifecycle.IsRunning())
                 {
                     for (var attempt = 0; attempt < 3 && applied.Status == "waiting_for_processes"; attempt++)
@@ -620,29 +773,45 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
             {
                 relaunch.Restart();
             }
+
             if (applied.Status == "switched")
             {
                 await RefreshRosterDataAsync();
-                QuotaRefreshStatus = relaunch.HasDesktop
+                _autoSwitchAllExhaustedNotified = false;
+                AutoSwitchStatus = relaunch.HasDesktop
                     ? $"Đã tự động chuyển sang {applied.CandidateDisplayName ?? "tài khoản khác"} và mở lại Codex Desktop."
                     : $"Đã tự động chuyển sang {applied.CandidateDisplayName ?? "tài khoản khác"}.";
+                QuotaRefreshStatus = AutoSwitchStatus;
             }
             else if (applied.Status == "waiting_for_processes")
             {
-                QuotaRefreshStatus = "Codex CLI đang chạy — đóng tác vụ CLI rồi để Roster chuyển tự động.";
+                AutoSwitchStatus = "Codex CLI đang chạy — đóng tác vụ CLI rồi để Roster chuyển tự động.";
+            }
+            else if (applied.Status == "active_has_quota")
+            {
+                AutoSwitchStatus = "Tài khoản hiện tại đã có lại quota trước khi chuyển.";
+            }
+            else
+            {
+                AutoSwitchStatus = "Không thể tự động chuyển lúc này — sẽ thử lại theo chu kỳ.";
             }
         }
         catch when (silent)
         {
-            QuotaRefreshStatus = "Tự động chuyển sẽ thử lại sau.";
+            AutoSwitchStatus = "Tự động chuyển sẽ thử lại sau.";
         }
-        catch
+        catch (Exception exception)
         {
-            ErrorMessage = "Không thể kiểm tra điều kiện tự động chuyển tài khoản.";
+            AutoSwitchStatus = "Kiểm tra tự động chuyển chưa hoàn tất.";
+            ErrorTitle = "Tự động chuyển";
+            ErrorMessage = string.IsNullOrWhiteSpace(exception.Message)
+                ? "Không thể kiểm tra điều kiện tự động chuyển tài khoản."
+                : exception.Message;
         }
         finally
         {
             _isCheckingAutoSwitch = false;
+            OnPropertyChanged(nameof(CanChangeAutoSwitch));
         }
     }
 
@@ -684,6 +853,36 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         }
         OnPropertyChanged(nameof(SavedAccountCount));
         OnPropertyChanged(nameof(ReadyAccountCount));
+        OnPropertyChanged(nameof(EmptyAccountsVisibility));
+        OnPropertyChanged(nameof(AccountsListVisibility));
+        UpdateCurrentAccountDetail();
+        ApplyQuotaTimerInterval();
+    }
+
+    private void UpdateCurrentAccountDetail()
+    {
+        var active = Accounts.FirstOrDefault(account => account.IsActive && !account.IsArchived);
+        if (active is null)
+        {
+            CurrentAccountDetail = "chưa có phiên Codex đang gắn với Roster";
+            return;
+        }
+
+        if (active.NeedsRelogin)
+        {
+            CurrentAccountDetail = "cần đăng nhập lại để xác minh quota";
+            return;
+        }
+
+        if (!active.HasQuota)
+        {
+            CurrentAccountDetail = "chưa có quota đã xác minh — bấm Quota để kiểm tra";
+            return;
+        }
+
+        CurrentAccountDetail = string.IsNullOrWhiteSpace(active.SecondaryQuotaLabel)
+            ? $"còn {active.QuotaPercent}% · {active.ResetLabel}"
+            : $"còn {active.QuotaPercent}% · {active.SecondaryQuotaLabel} · {active.ResetLabel}";
     }
 
     private static int PlanSortRank(string? planLabel)
@@ -706,9 +905,60 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
 
     private void UpdateQuotaTimer()
     {
-        QuotaRefreshStatus = (AutoQuotaRefresh || AutoSwitchWhenExhausted) ? "Tự động kiểm tra mỗi phút" : "Tắt";
         if (_quotaTimer is null) return;
-        if (AutoQuotaRefresh || AutoSwitchWhenExhausted) _quotaTimer.Start(); else _quotaTimer.Stop();
+        if (AutoQuotaRefresh || AutoSwitchWhenExhausted)
+        {
+            ApplyQuotaTimerInterval();
+            _quotaTimer.Start();
+            QuotaRefreshStatus = DescribeQuotaTimerStatus();
+            if (AutoSwitchWhenExhausted && AutoSwitchStatus is "Tắt" or "")
+            {
+                AutoSwitchStatus = "Đã bật — Roster sẽ chuyển khi tài khoản hiện tại hết quota.";
+            }
+        }
+        else
+        {
+            _quotaTimer.Stop();
+            QuotaRefreshStatus = "Tắt";
+        }
+    }
+
+    private void ApplyQuotaTimerInterval()
+    {
+        if (_quotaTimer is null || (!AutoQuotaRefresh && !AutoSwitchWhenExhausted)) return;
+        var active = _lastAccounts.FirstOrDefault(account => account.IsActive && !account.Archived);
+        var remaining = active?.Usage?.Weekly?.RemainingPercent
+            ?? active?.Usage?.FiveHour?.RemainingPercent;
+        _quotaTimer.Interval = remaining switch
+        {
+            null => TimeSpan.FromMinutes(1),
+            <= 5 => TimeSpan.FromSeconds(10),
+            <= 20 => TimeSpan.FromSeconds(30),
+            _ => TimeSpan.FromMinutes(1),
+        };
+    }
+
+    private string DescribeQuotaTimerStatus()
+    {
+        if (!AutoQuotaRefresh && AutoSwitchWhenExhausted) return "Theo dõi hết quota theo chu kỳ thích ứng";
+        if (!AutoQuotaRefresh) return "Tắt";
+        var active = _lastAccounts.FirstOrDefault(account => account.IsActive && !account.Archived);
+        var remaining = active?.Usage?.Weekly?.RemainingPercent
+            ?? active?.Usage?.FiveHour?.RemainingPercent;
+        return remaining switch
+        {
+            null => "Tự động kiểm tra mỗi phút",
+            <= 5 => "Quota thấp — kiểm tra mỗi 10 giây",
+            <= 20 => "Quota đang giảm — kiểm tra mỗi 30 giây",
+            _ => "Tự động kiểm tra mỗi phút",
+        };
+    }
+
+    private void NotifyPendingLoginChanged()
+    {
+        OnPropertyChanged(nameof(IsPendingLogin));
+        OnPropertyChanged(nameof(PendingLoginVisibility));
+        OnPropertyChanged(nameof(CanSaveDetectedLogin));
     }
 
     public void Dispose()
@@ -725,12 +975,14 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         if (IsBusy) return;
         IsBusy = true;
         ErrorMessage = string.Empty;
+        ErrorTitle = "Không thể hoàn tất";
         try
         {
             await operation();
         }
         catch (Exception exception)
         {
+            ErrorTitle = "Không thể hoàn tất";
             ErrorMessage = string.IsNullOrWhiteSpace(exception.Message)
                 ? "Thao tác không hoàn tất. Hãy kiểm tra phiên Codex rồi thử lại."
                 : exception.Message;
@@ -780,6 +1032,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
                         if (cancellation.IsCancellationRequested) return;
                         _pendingLoginIdentity = detectedIdentity;
                         LoginStatus = $"Đã nhận diện {detectedIdentity.Email}. Chọn Lưu phiên hiện tại để thêm vào Roster.";
+                        NotifyPendingLoginChanged();
                     });
                     return;
                 }

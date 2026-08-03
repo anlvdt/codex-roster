@@ -46,6 +46,31 @@ pub fn detect_running_codex_processes() -> Vec<RunningCodexProcess> {
     processes
 }
 
+/// ChatGPT / Codex Desktop owns `~/.codex/auth.json` refresh while running.
+/// Roster must not rotate the same refresh token or Desktop will force a logout.
+pub fn codex_desktop_likely_running() -> bool {
+    detect_running_codex_processes()
+        .iter()
+        .any(is_desktop_like_process)
+}
+
+fn is_desktop_like_process(process: &RunningCodexProcess) -> bool {
+    let exe = process.executable.to_ascii_lowercase();
+    if exe.contains("chatgpt") {
+        return true;
+    }
+    let is_codex_named = exe == "codex"
+        || exe == "codex.exe"
+        || exe.ends_with("\\codex.exe")
+        || exe.ends_with("/codex")
+        || exe.contains("codex");
+    is_codex_named
+        && matches!(
+            process.role.as_str(),
+            "renderer" | "gpu-process" | "utility" | "zygote" | "gpu" | "broker"
+        )
+}
+
 pub fn format_process_table(processes: &[RunningCodexProcess]) -> Vec<String> {
     let mut lines = Vec::with_capacity(processes.len() + 1);
     lines.push(format!(
@@ -249,7 +274,7 @@ fn truncate_cell(value: &str, width: usize) -> String {
 mod tests {
     use super::{
         classify_process, clean_token, detect_flag_value, format_process_table,
-        matches_codex_process, truncate_summary,
+        is_desktop_like_process, matches_codex_process, truncate_summary,
     };
     use crate::model::RunningCodexProcess;
 
@@ -267,8 +292,25 @@ mod tests {
     }
 
     #[test]
-    fn matches_codex_process_detects_chatgpt_desktop() {
-        assert!(matches_codex_process("ChatGPT", &["ChatGPT".to_owned()]));
+    fn desktop_like_process_detects_chatgpt_and_electron_helpers() {
+        assert!(is_desktop_like_process(&RunningCodexProcess {
+            pid: 1,
+            executable: "chatgpt.exe".to_owned(),
+            role: "process".to_owned(),
+            summary: None,
+        }));
+        assert!(is_desktop_like_process(&RunningCodexProcess {
+            pid: 2,
+            executable: "codex.exe".to_owned(),
+            role: "renderer".to_owned(),
+            summary: Some("app.asar".to_owned()),
+        }));
+        assert!(!is_desktop_like_process(&RunningCodexProcess {
+            pid: 3,
+            executable: "codex.exe".to_owned(),
+            role: "login".to_owned(),
+            summary: Some("--device-auth".to_owned()),
+        }));
     }
 
     #[test]

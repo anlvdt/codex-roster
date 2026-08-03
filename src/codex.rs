@@ -200,6 +200,46 @@ pub fn identity_from_snapshot(snapshot: &SnapshotBlob) -> Result<DisplayIdentity
     parse_identity_from_auth_json(&auth_json_bytes)
 }
 
+/// Build a managed snapshot from a Codex `auth.json` document (plus empty `cap_sid`).
+pub fn snapshot_from_auth_json(auth_json_bytes: &[u8]) -> Result<(DisplayIdentity, SnapshotBlob)> {
+    let root: serde_json::Value =
+        serde_json::from_slice(auth_json_bytes).context("failed to parse auth.json")?;
+    let tokens = root
+        .get("tokens")
+        .and_then(|value| value.as_object())
+        .context("auth.json must contain a tokens object")?;
+    if tokens
+        .get("access_token")
+        .and_then(|value| value.as_str())
+        .is_none_or(str::is_empty)
+    {
+        bail!("auth.json is missing tokens.access_token");
+    }
+    if tokens
+        .get("refresh_token")
+        .and_then(|value| value.as_str())
+        .is_none_or(str::is_empty)
+    {
+        bail!("auth.json is missing tokens.refresh_token");
+    }
+    let identity = parse_identity_from_auth_json(auth_json_bytes)?;
+    let snapshot = SnapshotBlob {
+        schema_version: SNAPSHOT_SCHEMA_VERSION,
+        files: vec![
+            SnapshotFile {
+                name: "auth.json".to_owned(),
+                bytes_base64: STANDARD.encode(auth_json_bytes),
+            },
+            SnapshotFile {
+                name: "cap_sid".to_owned(),
+                bytes_base64: STANDARD.encode([]),
+            },
+        ],
+    };
+    validate_snapshot(&snapshot)?;
+    Ok((identity, snapshot))
+}
+
 pub fn restore_snapshot(
     env: &AppEnv,
     snapshot: &SnapshotBlob,
@@ -587,6 +627,24 @@ mod tests {
             vec![empty_cap_sid.as_str()]
         );
         Ok(())
+    }
+
+    #[test]
+    fn snapshot_from_auth_json_builds_a_valid_managed_snapshot() -> Result<()> {
+        let auth = auth_json_fixture("import@example.com", "sub-import", Some("plus"));
+        let (identity, snapshot) = snapshot_from_auth_json(auth.as_bytes())?;
+        assert_eq!(identity.email, "import@example.com");
+        assert_eq!(identity.subject.as_deref(), Some("sub-import"));
+        validate_snapshot(&snapshot)?;
+        assert_eq!(identity_from_snapshot(&snapshot)?.email, "import@example.com");
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_from_auth_json_requires_refresh_token() {
+        let auth = r#"{"tokens":{"id_token":"x.y.z","access_token":"access","account_id":"acct"},"auth_mode":"chatgpt"}"#;
+        let error = snapshot_from_auth_json(auth.as_bytes()).expect_err("missing refresh");
+        assert!(format!("{error:#}").contains("refresh_token"));
     }
 
     #[test]

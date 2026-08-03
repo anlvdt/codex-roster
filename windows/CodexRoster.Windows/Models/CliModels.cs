@@ -72,7 +72,16 @@ public sealed class UsageWindowDto
     [JsonPropertyName("remaining_percent")]
     public int RemainingPercent { get; init; }
     [JsonPropertyName("reset_at")]
+    [JsonConverter(typeof(RustDateTimeOffsetConverter))]
     public DateTimeOffset ResetAt { get; init; }
+}
+
+public sealed class ImportJsonResponse
+{
+    public string Format { get; init; } = string.Empty;
+    public int Created { get; init; }
+    public int Updated { get; init; }
+    public List<AccountDto> Accounts { get; init; } = [];
 }
 
 public sealed class AutoSwitchOutput

@@ -20,7 +20,8 @@ pub(crate) fn launch_if_bundled() -> bool {
 
 /// Closes ChatGPT / Codex Desktop processes before a tray-driven account swap.
 /// Bare Codex CLI processes are left alone so in-flight terminal work is kept.
-pub(crate) fn close_desktop_for_switch() {
+/// Returns executable paths that should be relaunched after the swap.
+pub(crate) fn close_desktop_for_switch() -> Vec<PathBuf> {
     let mut system = System::new();
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
@@ -30,6 +31,7 @@ pub(crate) fn close_desktop_for_switch() {
             .without_tasks(),
     );
     let current_pid = std::process::id();
+    let mut relaunch = Vec::new();
     for (pid, process) in system.processes() {
         if pid.as_u32() == current_pid {
             continue;
@@ -37,9 +39,9 @@ pub(crate) fn close_desktop_for_switch() {
         let name = process.name().to_string_lossy().to_ascii_lowercase();
         let path = process
             .exe()
-            .map(|exe| exe.to_string_lossy().into_owned())
+            .map(|exe| exe.to_path_buf())
             .unwrap_or_default();
-        let path_lower = path.to_ascii_lowercase();
+        let path_lower = path.to_string_lossy().to_ascii_lowercase();
         let is_chatgpt = name == "chatgpt.exe" || name == "chatgpt";
         let is_desktop_codex = (name == "codex.exe" || name == "codex")
             && (path_lower.contains("chatgpt")
@@ -47,10 +49,20 @@ pub(crate) fn close_desktop_for_switch() {
                 || path_lower.contains("\\codex\\")
                 || (path_lower.ends_with("codex.exe") && path_lower.contains("\\programs\\")));
         if is_chatgpt || is_desktop_codex {
+            if path.is_file() && !relaunch.iter().any(|existing: &PathBuf| existing == &path) {
+                relaunch.push(path.clone());
+            }
             process.kill();
         }
     }
     thread::sleep(Duration::from_millis(750));
+    relaunch
+}
+
+pub(crate) fn relaunch_desktop(executables: &[PathBuf]) {
+    for executable in executables {
+        let _ = Command::new(executable).spawn();
+    }
 }
 
 fn shell_path() -> Option<PathBuf> {
@@ -68,7 +80,7 @@ fn shell_path() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::SHELL_FILE_NAME;
+    use super::{SHELL_FILE_NAME, close_desktop_for_switch, relaunch_desktop};
 
     #[test]
     fn desktop_shell_has_a_stable_bundle_name() {
@@ -78,6 +90,7 @@ mod tests {
     #[test]
     fn close_desktop_for_switch_is_available_on_windows_builds() {
         // Compile-only coverage: the helper must remain callable from tray activate.
-        let _ = close_desktop_for_switch as fn();
+        let _ = close_desktop_for_switch as fn() -> Vec<std::path::PathBuf>;
+        let _ = relaunch_desktop as fn(&[std::path::PathBuf]);
     }
 }

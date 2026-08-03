@@ -1,15 +1,23 @@
 using System.Diagnostics;
 using System.Text.Json;
+using CodexRoster.Windows.Models;
 
 namespace CodexRoster.Windows.Services;
 
 public sealed class CodexRosterCli : IDisposable
 {
     private readonly CancellationTokenSource _shutdown = new();
-    private static readonly JsonSerializerOptions JsonOptions = new()
+    private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
+
+    private static JsonSerializerOptions CreateJsonOptions()
     {
-        PropertyNameCaseInsensitive = true,
-    };
+        var options = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true,
+        };
+        options.Converters.Add(new RustDateTimeOffsetConverter());
+        return options;
+    }
 
     public async Task<T> ReadAsync<T>(params string[] arguments)
     {
@@ -85,11 +93,20 @@ public sealed class CodexRosterCli : IDisposable
     private static string SafeError(string error)
     {
         if (string.IsNullOrWhiteSpace(error)) return "Codex Roster could not complete this operation.";
-        if (error.Contains("token", StringComparison.OrdinalIgnoreCase) || error.Contains("auth", StringComparison.OrdinalIgnoreCase))
+        var firstLine = error.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()
+            ?? "Codex Roster could not complete this operation.";
+        // Keep add-account session errors actionable instead of rewriting them as generic auth failures.
+        if (firstLine.Contains("add-account session", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Phiên thêm tài khoản vẫn đang mở. Bấm Thêm tài khoản để tiếp tục, hoặc Hủy để khôi phục phiên trước.";
+        }
+        if (firstLine.Contains("token", StringComparison.OrdinalIgnoreCase)
+            || firstLine.Contains("auth.json", StringComparison.OrdinalIgnoreCase)
+            || firstLine.Contains("authentication", StringComparison.OrdinalIgnoreCase)
+            || firstLine.Contains("unauthorized", StringComparison.OrdinalIgnoreCase))
         {
             return "Codex session needs attention. Sign in again, then save the account.";
         }
-        return error.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()
-            ?? "Codex Roster could not complete this operation.";
+        return firstLine;
     }
 }

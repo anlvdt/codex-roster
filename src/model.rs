@@ -242,6 +242,14 @@ pub enum SaveAction {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct ImportJsonOutput {
+    pub format: String,
+    pub created: usize,
+    pub updated: usize,
+    pub accounts: Vec<AccountView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct ActivateOutput {
     pub account: AccountView,
     pub warnings: Vec<RunningCodexProcess>,

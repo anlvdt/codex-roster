@@ -26,8 +26,7 @@ it from this folder also opens the desktop app automatically.
         "CodexRoster.Windows.exe",
         "CodexRoster.Windows.dll",
         "CodexRoster.CLI.exe",
-        "Microsoft.UI.Xaml.dll",
-        "resources.pri"
+        "Microsoft.UI.Xaml.dll"
     )
     foreach ($file in $requiredFiles) {
         if (-not (Test-Path (Join-Path $output $file))) {

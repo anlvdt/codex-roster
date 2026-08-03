@@ -254,6 +254,7 @@ struct ContentView: View {
         if let selected = selectedAccount {
             AccountDetail(
                 account: selected,
+                home: { selection = nil },
                 activate: { requestActivation(for: selected) },
                 edit: { accountForEditing = selected },
                 archive: {
@@ -292,6 +293,12 @@ private struct AccountSidebar: View {
 
     var body: some View {
         List(selection: $selection) {
+            Section {
+                Button { selection = nil } label: {
+                    Label(language.text("Tổng quan", "Overview"), systemImage: "house")
+                }
+                .buttonStyle(.plain)
+            }
             providerSection(.openAI)
             archivedSection
         }
@@ -1693,6 +1700,7 @@ private struct AccountDetail: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     let account: SavedAccount
+    let home: () -> Void
     let activate: () -> Void
     let edit: () -> Void
     let archive: () -> Void
@@ -1824,6 +1832,14 @@ private struct AccountDetail: View {
             .padding(32)
         }
         .navigationTitle(account.email)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button(action: home) {
+                    Label(language.text("Tổng quan", "Overview"), systemImage: "house")
+                }
+                .help(language.text("Quay về trang tổng quan", "Return to overview"))
+            }
+        }
     }
 }
 

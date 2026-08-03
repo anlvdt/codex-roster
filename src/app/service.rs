@@ -575,6 +575,12 @@ where
         // not blocked by a background quota refresh.
         match account_id {
             Some(account_id) => {
+                // OAuth refresh tokens rotate. Refreshing a copy of the active
+                // account would invalidate the token still present in Codex's
+                // live auth.json, so always update the live bundle instead.
+                if self.is_live_saved_account(account_id)? {
+                    return self.usage(None);
+                }
                 let (snapshot, _, _) = self.load_activation_target(account_id)?;
                 let target = usage_target_from_snapshot(
                     self.env.kind.clone(),
@@ -653,6 +659,15 @@ where
             .list_accounts(&self.env.kind)
             .ok()
             .and_then(|accounts| match_saved_account(&accounts, identity).map(|account| account.id))
+    }
+
+    fn is_live_saved_account(&self, account_id: Uuid) -> Result<bool> {
+        let Some(live) = codex::try_read_live_auth_bundle(&self.env)? else {
+            return Ok(false);
+        };
+        let accounts = self.repository.list_accounts(&self.env.kind)?;
+        Ok(match_saved_account(&accounts, &live.identity)
+            .is_some_and(|account| account.id == account_id))
     }
 
     fn record_usage_error_for_identity(&self, identity: &DisplayIdentity, error: &anyhow::Error) {
@@ -833,24 +848,30 @@ mod tests {
         .expect("auth");
         std::fs::write(env.codex_root.join("cap_sid"), "sid").expect("cap");
         let repo = SnapshotRepository::new(&env.app_data_dir, MemorySecretStore::default());
-        repo.save_snapshot(
-            &env.kind,
-            &DisplayIdentity {
-                email: "active@example.com".to_owned(),
-                subject: Some("sub-1".to_owned()),
-                name: None,
-                plan_label: Some("Pro".to_owned()),
-            },
-            &SnapshotBlob {
-                schema_version: 1,
-                files: vec![],
-            },
-        )
-        .expect("save");
+        let saved = repo
+            .save_snapshot(
+                &env.kind,
+                &DisplayIdentity {
+                    email: "active@example.com".to_owned(),
+                    subject: Some("sub-1".to_owned()),
+                    name: None,
+                    plan_label: Some("Pro".to_owned()),
+                },
+                &SnapshotBlob {
+                    schema_version: 1,
+                    files: vec![],
+                },
+            )
+            .expect("save")
+            .0;
         let app = App::new(env, repo);
         let output = app.list().expect("list");
         assert_eq!(output.accounts.len(), 1);
         assert!(output.accounts[0].is_active);
+        assert!(
+            app.is_live_saved_account(saved.id)
+                .expect("active account check")
+        );
     }
 
     #[test]

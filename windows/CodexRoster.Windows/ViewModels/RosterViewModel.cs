@@ -132,7 +132,14 @@ public sealed class RosterViewModel : INotifyPropertyChanged
         {
             foreach (var account in Accounts.Where(account => !account.IsArchived))
             {
-                await _cli.RunCommandAsync("usage", account.Id.ToString());
+                if (account.IsActive)
+                {
+                    await _cli.RunCommandAsync("usage");
+                }
+                else
+                {
+                    await _cli.RunCommandAsync("usage", account.Id.ToString());
+                }
             }
             await RefreshRosterDataAsync();
             QuotaRefreshStatus = $"Đã kiểm tra toàn bộ lúc {DateTime.Now:t}";
@@ -425,7 +432,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged
         if (active is null) return;
         try
         {
-            await _cli.RunCommandAsync("usage", active.Id.ToString());
+            await _cli.RunCommandAsync("usage");
             await RefreshRosterDataAsync();
             QuotaRefreshStatus = $"Đã cập nhật lúc {DateTime.Now:t}";
         }

@@ -555,8 +555,7 @@ final class AccountStore: ObservableObject {
         async let settings: AutoStartUsageWindowsStatus = cli.decode(AutoStartUsageWindowsStatus.self, arguments: ["auto-start-usage-windows"])
         async let autoSwitch: AutoSwitchOutput = cli.decode(AutoSwitchOutput.self, arguments: ["auto-switch", "--status"])
         let (loadedStatus, loadedAccounts, loadedSettings, loadedAutoSwitch) = try await (status, accounts, settings, autoSwitch)
-        self.status = loadedStatus
-        self.accounts = loadedAccounts.accounts
+        applyRoster(status: loadedStatus, accounts: loadedAccounts.accounts)
         let pendingLegacyArchives = legacyArchivedAccountIDs.intersection(Set(loadedAccounts.accounts.map(\.id)))
         if !pendingLegacyArchives.isEmpty {
             for accountID in pendingLegacyArchives {
@@ -566,7 +565,8 @@ final class AccountStore: ObservableObject {
             for key in archivedAccountsMigrationKeys {
                 UserDefaults.standard.removeObject(forKey: key)
             }
-            self.accounts = try await cli.decode(AccountListOutput.self, arguments: ["list"]).accounts
+            let refreshedAccounts = try await cli.decode(AccountListOutput.self, arguments: ["list"])
+            applyRoster(status: loadedStatus, accounts: refreshedAccounts.accounts)
         }
         self.autoStartUsageWindows = loadedSettings.enabled
         if !loadedAutoSwitch.enabled,
@@ -710,8 +710,7 @@ final class AccountStore: ObservableObject {
         async let status: StatusOutput = cli.decode(StatusOutput.self, arguments: ["status"])
         async let accounts: AccountListOutput = cli.decode(AccountListOutput.self, arguments: ["list"])
         let (loadedStatus, loadedAccounts) = try await (status, accounts)
-        self.status = loadedStatus
-        self.accounts = loadedAccounts.accounts
+        applyRoster(status: loadedStatus, accounts: loadedAccounts.accounts)
     }
 
     private func relaunchDesktopInBackground(
@@ -745,8 +744,16 @@ final class AccountStore: ObservableObject {
         }
         status = StatusOutput(
             currentAccount: AccountIdentity(email: account.email),
+            currentAccountSavedId: account.id,
             processWarnings: status?.processWarnings ?? []
         )
+    }
+
+    private func applyRoster(status: StatusOutput, accounts: [SavedAccount]) {
+        self.status = status
+        self.accounts = accounts.map { account in
+            account.withActiveState(account.id == status.currentAccountSavedId)
+        }
     }
 
     private func refreshUsageAfterSwitch(accountID: UUID) {
@@ -1139,10 +1146,16 @@ private enum LaunchAtLogin {
 
 struct StatusOutput: Decodable {
     let currentAccount: AccountIdentity?
+    let currentAccountSavedId: UUID?
     let processWarnings: [RunningProcess]
 
-    init(currentAccount: AccountIdentity?, processWarnings: [RunningProcess]) {
+    init(
+        currentAccount: AccountIdentity?,
+        currentAccountSavedId: UUID? = nil,
+        processWarnings: [RunningProcess]
+    ) {
         self.currentAccount = currentAccount
+        self.currentAccountSavedId = currentAccountSavedId
         self.processWarnings = processWarnings
     }
 }

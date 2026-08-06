@@ -1146,14 +1146,23 @@ private struct SidebarQuotaMeter: View {
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.orange)
         } else if let window = account.primaryQuotaWindow {
-            HStack(spacing: 6) {
-                ProgressView(value: Double(window.remainingPercent), total: 100)
-                    .tint(tint(for: window.remainingPercent))
-                    .frame(minWidth: 52, maxWidth: .infinity)
-                Text("\(window.remainingPercent)%")
-                    .font(.caption.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(tint(for: window.remainingPercent))
-                    .fixedSize(horizontal: true, vertical: false)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    ProgressView(value: Double(window.remainingPercent), total: 100)
+                        .tint(tint(for: window.remainingPercent))
+                        .frame(minWidth: 52, maxWidth: .infinity)
+                    Text("\(window.remainingPercent)%")
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(tint(for: window.remainingPercent))
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+                Text(language.text(
+                    "Đặt lại \(window.resetAt.value.formatted(date: .abbreviated, time: .shortened))",
+                    "Resets \(window.resetAt.value.formatted(date: .abbreviated, time: .shortened))"
+                ))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
             }
             .accessibilityLabel(language.text("Quota còn \(window.remainingPercent) phần trăm, \(compactReset(window, language: language.language))", "\(window.remainingPercent) percent quota remaining, \(compactReset(window, language: language.language))"))
         } else {

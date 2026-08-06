@@ -78,8 +78,11 @@ pub fn add_account_session_active(env: &AppEnv) -> bool {
     env.codex_root.join(ADD_ACCOUNT_MARKER).exists()
 }
 
-/// Preserve the current session, then clear the live Codex auth files so device
-/// login actually requests another account instead of reusing the current one.
+/// Preserve the current session before starting a new device login.
+///
+/// Keep the live files in place while the login starts, matching the legacy
+/// behavior. This lets Codex/OpenAI reuse a trusted local session when it can,
+/// while the backups below still make cancelling safe if the login replaces it.
 pub fn begin_add_account_session(env: &AppEnv) -> Result<()> {
     if add_account_session_active(env) {
         bail!("an add-account session is already in progress; save it or cancel it first");
@@ -107,8 +110,6 @@ pub fn begin_add_account_session(env: &AppEnv) -> Result<()> {
                 )
             })?;
         }
-        remove_file_if_exists(&auth)?;
-        remove_file_if_exists(&cap_sid)?;
     }
     fs::write(env.codex_root.join(ADD_ACCOUNT_MARKER), b"pending").with_context(|| {
         format!(
@@ -663,7 +664,8 @@ mod tests {
         };
 
         begin_add_account_session(&env)?;
-        assert!(!codex_root.join("auth.json").exists());
+        assert_eq!(fs::read_to_string(codex_root.join("auth.json"))?, original_auth);
+        assert_eq!(fs::read_to_string(codex_root.join("cap_sid"))?, "sid-original");
         assert!(add_account_session_active(&env));
         fs::write(
             codex_root.join("auth.json"),

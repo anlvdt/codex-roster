@@ -347,8 +347,10 @@ where
         self.save_current_inner(true)
     }
 
-    /// Save the live session first, then clear only the live auth files so
-    /// `codex login --device-auth` asks for another account.
+    /// Save and back up the live session before starting device login.
+    ///
+    /// The existing live auth remains available for Codex to reuse a trusted
+    /// session, and cancel still restores the backed-up session if login changes it.
     pub fn begin_add_account_session(&self) -> Result<()> {
         if codex::try_read_live_auth_bundle(&self.env)?.is_some() {
             self.save_current()?;

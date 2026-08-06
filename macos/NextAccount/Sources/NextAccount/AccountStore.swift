@@ -214,10 +214,14 @@ final class AccountStore: ObservableObject {
                 ))
             }
             let saveCommand = self.isAddAccountSession ? "save-added-account" : "save"
-            _ = try await self.cli.data(arguments: [saveCommand, "--json"])
+            let saved: SaveOutput = try await self.cli.decode(SaveOutput.self, arguments: [saveCommand])
             self.clearPendingLoginFlags()
             self.newAccountLoginState = .saved(liveIdentity)
+            // A new account starts without cached quota. Fetch it immediately so
+            // its reset time is available in the roster as soon as it is saved.
+            _ = try? await self.cli.data(arguments: ["usage", saved.account.id.uuidString, "--json"])
             try await self.load()
+            self.lastQuotaRefreshAt = .now
         }
     }
 
@@ -1238,6 +1242,10 @@ struct StatusOutput: Decodable {
         self.currentAccountSavedId = currentAccountSavedId
         self.processWarnings = processWarnings
     }
+}
+
+private struct SaveOutput: Decodable {
+    let account: SavedAccount
 }
 
 struct AccountIdentity: Decodable, Equatable {

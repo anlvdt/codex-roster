@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.21 - 2026-08-07
+
+### Fixed
+
+- Restored legacy-compatible add-account behavior: retain the trusted local Codex session while device login begins, while keeping backup and cancel-to-restore protection.
+- Show each saved account's expected quota reset time in the macOS sidebar.
+- Refresh quota immediately after saving a newly added macOS account so its quota/reset state appears without a separate manual refresh.
+
 ## v0.2.20 - 2026-08-03
 
 ### Fixed

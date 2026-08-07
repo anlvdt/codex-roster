@@ -8,13 +8,13 @@
             <ResourceDictionary.MergedDictionaries>
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
             </ResourceDictionary.MergedDictionaries>
-            <SolidColorBrush x:Key="RosterPageBrush" Color="#F7F8FC" />
-            <SolidColorBrush x:Key="RosterInkBrush" Color="#171A24" />
-            <SolidColorBrush x:Key="RosterMutedBrush" Color="#646B7A" />
-            <SolidColorBrush x:Key="RosterAccentBrush" Color="#5B5CE2" />
-            <SolidColorBrush x:Key="RosterAccentSoftBrush" Color="#EEEDFF" />
+            <SolidColorBrush x:Key="RosterPageBrush" Color="#F4F6FB" />
+            <SolidColorBrush x:Key="RosterInkBrush" Color="#1C2434" />
+            <SolidColorBrush x:Key="RosterMutedBrush" Color="#586477" />
+            <SolidColorBrush x:Key="RosterAccentBrush" Color="#5046E5" />
+            <SolidColorBrush x:Key="RosterAccentSoftBrush" Color="#E9E7FF" />
             <SolidColorBrush x:Key="RosterPanelBrush" Color="#FFFFFF" />
-            <SolidColorBrush x:Key="RosterPanelStrokeBrush" Color="#E7E9F1" />
+            <SolidColorBrush x:Key="RosterPanelStrokeBrush" Color="#DCE2ED" />
 
             <Style x:Key="RosterSurfaceCardStyle" TargetType="Border">
                 <Setter Property="Background" Value="{StaticResource RosterPanelBrush}" />
@@ -29,7 +29,7 @@
                 <Setter Property="CornerRadius" Value="9" />
             </Style>
             <Style x:Key="RosterSecondaryButtonStyle" TargetType="Button">
-                <Setter Property="Background" Value="Transparent" />
+                <Setter Property="Background" Value="#FFFFFF" />
                 <Setter Property="BorderBrush" Value="{StaticResource RosterPanelStrokeBrush}" />
                 <Setter Property="BorderThickness" Value="1" />
                 <Setter Property="Padding" Value="14,9" />

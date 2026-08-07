@@ -52,7 +52,7 @@
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
 
-            <Border Background="{StaticResource RosterPanelBrush}" BorderBrush="{StaticResource RosterPanelStrokeBrush}" BorderThickness="0,0,1,0">
+            <Border Background="#FBFCFF" BorderBrush="{StaticResource RosterPanelStrokeBrush}" BorderThickness="0,0,1,0">
                 <Grid Padding="18,22">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
@@ -114,7 +114,7 @@
                 </Grid>
             </Border>
 
-            <Grid Grid.Column="1" Margin="30,24,30,26" RowSpacing="16">
+            <Grid Grid.Column="1" Margin="26,22,28,24" RowSpacing="14">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
@@ -147,8 +147,8 @@
                     Message="Ba tài khoản minh họa chỉ phục vụ kiểm thử UI. Làm mới hoặc nhập dữ liệu thật để quay về roster trên máy." />
                 </StackPanel>
 
-                <Border Grid.Row="1" Style="{StaticResource RosterSurfaceCardStyle}" Padding="20">
-                    <Grid ColumnSpacing="22">
+                <Border Grid.Row="1" Background="#FBFAFF" BorderBrush="#D9D6FF" BorderThickness="1" CornerRadius="16" Padding="20">
+                    <Grid ColumnSpacing="20">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="2*" />
                             <ColumnDefinition Width="*" />
@@ -157,7 +157,7 @@
                         <StackPanel Spacing="6">
                             <TextBlock Text="TÀI KHOẢN ĐANG DÙNG" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
                             <TextBlock Text="{x:Bind ViewModel.CurrentAccountLabel, Mode=OneWay}" FontSize="21" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" TextTrimming="CharacterEllipsis" />
-                            <TextBlock Text="{x:Bind ViewModel.CurrentAccountDetail, Mode=OneWay}" TextWrapping="Wrap" Foreground="{StaticResource RosterMutedBrush}" />
+                            <TextBlock Text="{x:Bind ViewModel.CurrentAccountDetail, Mode=OneWay}" TextWrapping="Wrap" Foreground="{StaticResource RosterMutedBrush}" Style="{StaticResource CaptionTextBlockStyle}" />
                         </StackPanel>
                         <Border Grid.Column="1" Padding="18,0,0,0" BorderBrush="{StaticResource RosterPanelStrokeBrush}" BorderThickness="1,0,0,0">
                             <StackPanel Spacing="5">
@@ -182,7 +182,7 @@
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
 
-                    <Grid RowSpacing="12">
+                    <Grid RowSpacing="10">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="*" />
@@ -190,11 +190,11 @@
                         <Grid>
                             <StackPanel Spacing="4">
                                 <TextBlock Text="Tài khoản" FontSize="22" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" />
-                                <TextBlock Text="Quota, thời điểm reset và thao tác chuyển phiên." Foreground="{StaticResource RosterMutedBrush}" />
+                                <TextBlock Text="Quota, thời điểm reset và thao tác chuyển phiên." Foreground="{StaticResource RosterMutedBrush}" Style="{StaticResource CaptionTextBlockStyle}" />
                             </StackPanel>
                         </Grid>
 
-                        <Border Grid.Row="1" Style="{StaticResource RosterSurfaceCardStyle}" Padding="24" Visibility="{x:Bind ViewModel.EmptyAccountsVisibility, Mode=OneWay}">
+                        <Border Grid.Row="1" Style="{StaticResource RosterSurfaceCardStyle}" Padding="22" Visibility="{x:Bind ViewModel.EmptyAccountsVisibility, Mode=OneWay}">
                             <StackPanel Spacing="10" HorizontalAlignment="Left">
                                 <Border Width="42" Height="42" CornerRadius="12" Background="{StaticResource RosterAccentSoftBrush}">
                                     <SymbolIcon Symbol="Contact" Foreground="{StaticResource RosterAccentBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
@@ -224,11 +224,11 @@
                             </ListView.ItemContainerStyle>
                             <ListView.ItemTemplate>
                                 <DataTemplate x:DataType="models:AccountItem">
-                                    <Border Style="{StaticResource RosterSurfaceCardStyle}" Margin="0,0,0,10" Padding="18" Opacity="{x:Bind RowOpacity}">
-                                        <Grid ColumnSpacing="18">
+                                    <Border Style="{StaticResource RosterSurfaceCardStyle}" Margin="0,0,0,8" Padding="16" Opacity="{x:Bind RowOpacity}">
+                                        <Grid ColumnSpacing="16">
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="190" />
+                                                <ColumnDefinition Width="176" />
                                                 <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
                                             <StackPanel Spacing="5">
@@ -244,7 +244,7 @@
                                                 <TextBlock Text="{x:Bind Email}" Style="{StaticResource BodyTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" TextTrimming="CharacterEllipsis" />
                                                 <TextBlock Text="{x:Bind PlanLabel}" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
                                             </StackPanel>
-                                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="5">
+                                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="4">
                                                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="6">
                                                     <TextBlock Text="{x:Bind QuotaLabel}" FontSize="17" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" />
                                                     <TextBlock Text="quota" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
@@ -268,7 +268,8 @@
                         </ListView>
                     </Grid>
 
-                    <StackPanel Grid.Column="1" Spacing="10" VerticalAlignment="Top">
+                    <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Spacing="10">
                         <Border Style="{StaticResource RosterSurfaceCardStyle}" Padding="18">
                             <StackPanel Spacing="9">
                                 <StackPanel Spacing="3">
@@ -317,6 +318,7 @@
                             </Expander>
                         </Border>
                     </StackPanel>
+                    </ScrollViewer>
                 </Grid>
             </Grid>
         </Grid>

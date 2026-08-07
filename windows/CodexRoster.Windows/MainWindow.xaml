@@ -2,230 +2,246 @@
     x:Class="CodexRoster.Windows.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:local="using:CodexRoster.Windows"
     xmlns:models="using:CodexRoster.Windows.Models"
     Title="Codex Roster">
-    <Grid>
+    <Grid Background="{StaticResource RosterPageBrush}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <CommandBar DefaultLabelPosition="Right" IsOpen="False">
-            <AppBarButton Icon="Add" Label="Thêm tài khoản" Click="AddAccount_Click" />
-            <AppBarButton Icon="OpenFile" Label="JSON" Click="ImportJson_Click" />
-            <AppBarButton Icon="Save" Label="Lưu phiên hiện tại" Click="SaveCurrent_Click" />
-            <AppBarButton Icon="Refresh" Label="Quota" Click="RefreshQuota_Click" />
-            <AppBarButton Icon="Globe" Label="Dịch vụ" Click="RefreshInsights_Click" />
-            <AppBarButton Icon="Download" Label="Cập nhật" Click="Update_Click" />
-            <AppBarButton Icon="Sync" Label="Làm mới" Click="Refresh_Click" />
-        </CommandBar>
-
-        <NavigationView Grid.Row="1" PaneDisplayMode="LeftMinimal" IsBackButtonVisible="Collapsed" PaneTitle="Codex Roster">
-            <NavigationView.PaneFooter>
-                <StackPanel Spacing="4" Padding="12">
-                    <TextBlock Text="Windows Preview" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                    <TextBlock Text="OpenAI / Codex · local-first" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" />
+        <Border Background="{StaticResource RosterPanelBrush}" BorderBrush="{StaticResource RosterPanelStrokeBrush}" BorderThickness="0,0,0,1">
+            <Grid MaxWidth="1440" Margin="32,16" ColumnSpacing="18">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+                    <Border Width="38" Height="38" CornerRadius="12" Background="{StaticResource RosterAccentBrush}">
+                        <FontIcon Glyph="&#xE77B;" FontSize="19" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <StackPanel Spacing="1">
+                        <TextBlock Text="Codex Roster" FontSize="20" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" />
+                        <TextBlock Text="Quản lý phiên Codex trên thiết bị này" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                    </StackPanel>
                 </StackPanel>
-            </NavigationView.PaneFooter>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <Button Style="{StaticResource RosterSecondaryButtonStyle}" Click="RefreshQuota_Click">
+                        <StackPanel Orientation="Horizontal" Spacing="7">
+                            <SymbolIcon Symbol="Refresh" />
+                            <TextBlock Text="Cập nhật quota" />
+                        </StackPanel>
+                    </Button>
+                    <Button Style="{StaticResource RosterPrimaryButtonStyle}" Click="AddAccount_Click">
+                        <StackPanel Orientation="Horizontal" Spacing="7">
+                            <SymbolIcon Symbol="Add" />
+                            <TextBlock Text="Thêm tài khoản" />
+                        </StackPanel>
+                    </Button>
+                    <Button Style="{StaticResource RosterSecondaryButtonStyle}" Click="AccountMenu_Click" ToolTipService.ToolTip="Tác vụ khác">
+                        <SymbolIcon Symbol="More" />
+                    </Button>
+                </StackPanel>
+            </Grid>
+        </Border>
 
-            <ScrollViewer>
-                <StackPanel Spacing="20" Padding="28" MaxWidth="1320">
-                    <Grid ColumnSpacing="16">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="*" />
-                        </Grid.ColumnDefinitions>
-                        <Border Padding="18" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-                            <StackPanel Spacing="6">
-                                <TextBlock Text="Tài khoản đã lưu" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                                <TextBlock Text="{x:Bind ViewModel.SavedAccountCount, Mode=OneWay}" Style="{StaticResource TitleTextBlockStyle}" />
-                                <TextBlock Text="phiên Codex chưa lưu trữ" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" />
-                            </StackPanel>
-                        </Border>
-                        <Border Grid.Column="1" Padding="18" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-                            <StackPanel Spacing="6">
-                                <TextBlock Text="Sẵn sàng chuyển" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                                <TextBlock Text="{x:Bind ViewModel.ReadyAccountCount, Mode=OneWay}" Style="{StaticResource TitleTextBlockStyle}" />
-                                <TextBlock Text="có quota đã xác minh &gt; 0%" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" />
-                            </StackPanel>
-                        </Border>
-                        <Border Grid.Column="2" Padding="18" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-                            <StackPanel Spacing="6">
-                                <TextBlock Text="Tài khoản hiện tại" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                                <TextBlock Text="{x:Bind ViewModel.CurrentAccountLabel, Mode=OneWay}" TextTrimming="CharacterEllipsis" Style="{StaticResource SubtitleTextBlockStyle}" />
-                                <TextBlock Text="{x:Bind ViewModel.CurrentAccountDetail, Mode=OneWay}" TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" />
-                            </StackPanel>
-                        </Border>
-                    </Grid>
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel MaxWidth="1440" Margin="32,28,32,36" Spacing="22">
+                <InfoBar
+                    IsOpen="{x:Bind ViewModel.HasError, Mode=OneWay}"
+                    Severity="Warning"
+                    Title="{x:Bind ViewModel.ErrorTitle, Mode=OneWay}"
+                    Message="{x:Bind ViewModel.ErrorMessage, Mode=OneWay}"
+                    IsClosable="True"
+                    CloseButtonClick="ErrorInfoBar_CloseClick" />
 
-                    <InfoBar
-                        IsOpen="{x:Bind ViewModel.HasError, Mode=OneWay}"
-                        Severity="Warning"
-                        Title="{x:Bind ViewModel.ErrorTitle, Mode=OneWay}"
-                        Message="{x:Bind ViewModel.ErrorMessage, Mode=OneWay}"
-                        IsClosable="True"
-                        CloseButtonClick="ErrorInfoBar_CloseClick" />
+                <InfoBar
+                    IsOpen="{x:Bind ViewModel.IsPendingLogin, Mode=OneWay}"
+                    Severity="Informational"
+                    Title="Đang thêm tài khoản"
+                    Message="{x:Bind ViewModel.LoginStatus, Mode=OneWay}"
+                    IsClosable="False">
+                    <InfoBar.ActionButton>
+                        <Button Content="Hủy và khôi phục phiên" Click="CancelPendingLogin_Click" />
+                    </InfoBar.ActionButton>
+                </InfoBar>
 
-                    <InfoBar
-                        IsOpen="{x:Bind ViewModel.IsPendingLogin, Mode=OneWay}"
-                        Severity="Informational"
-                        Title="Đang thêm tài khoản"
-                        Message="{x:Bind ViewModel.LoginStatus, Mode=OneWay}"
-                        IsClosable="False">
-                        <InfoBar.ActionButton>
-                            <Button Content="Hủy và khôi phục phiên" Click="CancelPendingLogin_Click" />
-                        </InfoBar.ActionButton>
-                    </InfoBar>
-
-                    <Grid ColumnSpacing="20">
+                <Border Style="{StaticResource RosterSurfaceCardStyle}" Padding="24">
+                    <Grid ColumnSpacing="28">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="2*" />
                             <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
-                        <StackPanel Spacing="10">
-                            <TextBlock Text="Tài khoản OpenAI / Codex" Style="{StaticResource TitleTextBlockStyle}" />
-                            <TextBlock Text="Quota tuần/5 giờ, gói ChatGPT và thời điểm reset của phiên đã lưu." Style="{StaticResource BodyTextBlockStyle}" Opacity="0.7" />
-                            <ComboBox Header="Sắp xếp" SelectedIndex="0" SelectionChanged="AccountSort_SelectionChanged" HorizontalAlignment="Left" MinWidth="180">
+                        <StackPanel Spacing="6">
+                            <TextBlock Text="TÀI KHOẢN ĐANG DÙNG" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                            <TextBlock Text="{x:Bind ViewModel.CurrentAccountLabel, Mode=OneWay}" FontSize="24" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" TextTrimming="CharacterEllipsis" />
+                            <TextBlock Text="{x:Bind ViewModel.CurrentAccountDetail, Mode=OneWay}" TextWrapping="Wrap" Foreground="{StaticResource RosterMutedBrush}" />
+                        </StackPanel>
+                        <Border Grid.Column="1" Padding="22,0,0,0" BorderBrush="{StaticResource RosterPanelStrokeBrush}" BorderThickness="1,0,0,0">
+                            <StackPanel Spacing="5">
+                                <TextBlock Text="ĐÃ LƯU" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                                <TextBlock Text="{x:Bind ViewModel.SavedAccountCount, Mode=OneWay}" FontSize="28" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" />
+                                <TextBlock Text="phiên sẵn sàng quản lý" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                            </StackPanel>
+                        </Border>
+                        <Border Grid.Column="2" Padding="22,0,0,0" BorderBrush="{StaticResource RosterPanelStrokeBrush}" BorderThickness="1,0,0,0">
+                            <StackPanel Spacing="5">
+                                <TextBlock Text="CÓ THỂ CHUYỂN" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                                <TextBlock Text="{x:Bind ViewModel.ReadyAccountCount, Mode=OneWay}" FontSize="28" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" />
+                                <TextBlock Text="quota còn hiệu lực" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </Border>
+
+                <Grid ColumnSpacing="22">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="2*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel Spacing="14">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="Tài khoản" FontSize="26" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" />
+                                <TextBlock Text="Quota, thời điểm reset và thao tác chuyển phiên." Foreground="{StaticResource RosterMutedBrush}" />
+                            </StackPanel>
+                            <ComboBox Grid.Column="1" SelectedIndex="0" SelectionChanged="AccountSort_SelectionChanged" MinWidth="156" VerticalAlignment="Center">
                                 <ComboBoxItem Content="Gói → quota" />
                                 <ComboBoxItem Content="Quota → gói" />
                                 <ComboBoxItem Content="Tên hiển thị" />
                                 <ComboBoxItem Content="Email" />
                             </ComboBox>
-                            <Border
-                                Padding="18"
-                                CornerRadius="12"
-                                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                                Visibility="{x:Bind ViewModel.EmptyAccountsVisibility, Mode=OneWay}">
-                                <StackPanel Spacing="8">
-                                    <TextBlock Text="Chưa có tài khoản đã lưu" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                                    <TextBlock Text="Thêm tài khoản OpenAI, hoàn tất đăng nhập, rồi chọn Lưu phiên hiện tại để Roster quản lý quota và chuyển phiên." TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}" Opacity="0.72" />
-                                    <Button Content="Thêm tài khoản" Click="AddAccount_Click" HorizontalAlignment="Left" />
-                                </StackPanel>
-                            </Border>
-                            <ListView ItemsSource="{x:Bind ViewModel.Accounts, Mode=OneWay}" SelectionMode="None" IsItemClickEnabled="False" Visibility="{x:Bind ViewModel.AccountsListVisibility, Mode=OneWay}">
-                                <ListView.ItemTemplate>
-                                    <DataTemplate x:DataType="models:AccountItem">
-                                        <Grid Padding="12" ColumnSpacing="12" Opacity="{x:Bind RowOpacity}">
+                        </Grid>
+
+                        <Border Style="{StaticResource RosterSurfaceCardStyle}" Padding="26" Visibility="{x:Bind ViewModel.EmptyAccountsVisibility, Mode=OneWay}">
+                            <StackPanel Spacing="10" HorizontalAlignment="Left">
+                                <Border Width="42" Height="42" CornerRadius="12" Background="{StaticResource RosterAccentSoftBrush}">
+                                    <SymbolIcon Symbol="Contact" Foreground="{StaticResource RosterAccentBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                </Border>
+                                <TextBlock Text="Chưa có tài khoản nào" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" />
+                                <TextBlock Text="Bắt đầu bằng cách đăng nhập một tài khoản OpenAI. Roster sẽ bảo toàn phiên cũ và chỉ lưu phiên mới sau khi bạn xác nhận." TextWrapping="Wrap" MaxWidth="520" Foreground="{StaticResource RosterMutedBrush}" />
+                                <Button Style="{StaticResource RosterPrimaryButtonStyle}" Click="AddAccount_Click" HorizontalAlignment="Left">
+                                    <StackPanel Orientation="Horizontal" Spacing="7">
+                                        <SymbolIcon Symbol="Add" />
+                                        <TextBlock Text="Thêm tài khoản đầu tiên" />
+                                    </StackPanel>
+                                </Button>
+                            </StackPanel>
+                        </Border>
+
+                        <ListView ItemsSource="{x:Bind ViewModel.Accounts, Mode=OneWay}" SelectionMode="None" IsItemClickEnabled="False" Visibility="{x:Bind ViewModel.AccountsListVisibility, Mode=OneWay}" BorderThickness="0" Background="Transparent">
+                            <ListView.ItemContainerStyle>
+                                <Style TargetType="ListViewItem">
+                                    <Setter Property="Padding" Value="0" />
+                                    <Setter Property="Margin" Value="0" />
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                </Style>
+                            </ListView.ItemContainerStyle>
+                            <ListView.ItemTemplate>
+                                <DataTemplate x:DataType="models:AccountItem">
+                                    <Border Style="{StaticResource RosterSurfaceCardStyle}" Margin="0,0,0,10" Padding="18" Opacity="{x:Bind RowOpacity}">
+                                        <Grid ColumnSpacing="18">
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="150" />
+                                                <ColumnDefinition Width="190" />
                                                 <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
-                                            <StackPanel Spacing="4">
+                                            <StackPanel Spacing="5">
                                                 <StackPanel Orientation="Horizontal" Spacing="8">
-                                                    <TextBlock Text="{x:Bind DisplayName}" Style="{StaticResource BodyStrongTextBlockStyle}" VerticalAlignment="Center" />
-                                                    <Border
-                                                        Padding="6,2"
-                                                        CornerRadius="6"
-                                                        Background="{ThemeResource AccentFillColorDefaultBrush}"
-                                                        Visibility="{x:Bind ActiveBadgeVisibility}">
-                                                        <TextBlock Text="Đang dùng" Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}" Style="{StaticResource CaptionTextBlockStyle}" />
+                                                    <TextBlock Text="{x:Bind DisplayName}" Style="{StaticResource BodyStrongTextBlockStyle}" FontSize="16" VerticalAlignment="Center" />
+                                                    <Border Padding="7,3" CornerRadius="7" Background="{StaticResource RosterAccentBrush}" Visibility="{x:Bind ActiveBadgeVisibility}">
+                                                        <TextBlock Text="Đang dùng" Foreground="White" Style="{StaticResource CaptionTextBlockStyle}" />
                                                     </Border>
-                                                    <Border
-                                                        Padding="6,2"
-                                                        CornerRadius="6"
-                                                        Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                                                        Visibility="{x:Bind ArchivedBadgeVisibility}">
-                                                        <TextBlock Text="Đã lưu trữ" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.8" />
+                                                    <Border Padding="7,3" CornerRadius="7" Background="{StaticResource RosterAccentSoftBrush}" Visibility="{x:Bind ArchivedBadgeVisibility}">
+                                                        <TextBlock Text="Đã lưu trữ" Foreground="{StaticResource RosterAccentBrush}" Style="{StaticResource CaptionTextBlockStyle}" />
                                                     </Border>
                                                 </StackPanel>
-                                                <TextBlock Text="{x:Bind Email}" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.72" TextTrimming="CharacterEllipsis" />
-                                                <TextBlock Text="{x:Bind PlanLabel}" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.62" />
+                                                <TextBlock Text="{x:Bind Email}" Style="{StaticResource BodyTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" TextTrimming="CharacterEllipsis" />
+                                                <TextBlock Text="{x:Bind PlanLabel}" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
                                             </StackPanel>
-                                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="4">
-                                                <TextBlock Text="{x:Bind QuotaLabel}" HorizontalAlignment="Right" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                                                <ProgressBar Value="{x:Bind QuotaPercent}" Maximum="100" Visibility="{x:Bind QuotaMeterVisibility}" />
-                                                <TextBlock Text="{x:Bind SecondaryQuotaLabel}" HorizontalAlignment="Right" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" Visibility="{x:Bind SecondaryQuotaVisibility}" />
-                                                <TextBlock Text="{x:Bind ResetLabel}" HorizontalAlignment="Right" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" />
+                                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="5">
+                                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="6">
+                                                    <TextBlock Text="{x:Bind QuotaLabel}" FontSize="17" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" />
+                                                    <TextBlock Text="quota" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                                                </StackPanel>
+                                                <ProgressBar Value="{x:Bind QuotaPercent}" Maximum="100" Visibility="{x:Bind QuotaMeterVisibility}" Height="5" />
+                                                <TextBlock Text="{x:Bind SecondaryQuotaLabel}" HorizontalAlignment="Right" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" Visibility="{x:Bind SecondaryQuotaVisibility}" />
+                                                <TextBlock Text="{x:Bind ResetLabel}" HorizontalAlignment="Right" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
                                             </StackPanel>
-                                            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
-                                                <Button Content="Đang dùng" IsEnabled="False" Visibility="{x:Bind ActiveStateVisibility}" />
-                                                <Button Content="Chuyển" Tag="{x:Bind}" Click="ActivateAccount_Click" Visibility="{x:Bind SwitchVisibility}" />
-                                                <Button Content="Đăng nhập lại" Tag="{x:Bind}" Click="ReloginAccount_Click" Visibility="{x:Bind ReloginVisibility}" />
-                                                <Button Content="⋯" Tag="{x:Bind}" Click="AccountActions_Click" ToolTipService.ToolTip="Tùy chọn tài khoản" />
+                                            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                                <Button Content="Đang dùng" Style="{StaticResource RosterSecondaryButtonStyle}" IsEnabled="False" Visibility="{x:Bind ActiveStateVisibility}" />
+                                                <Button Content="Chuyển" Style="{StaticResource RosterPrimaryButtonStyle}" Tag="{x:Bind}" Click="ActivateAccount_Click" Visibility="{x:Bind SwitchVisibility}" />
+                                                <Button Content="Đăng nhập lại" Style="{StaticResource RosterSecondaryButtonStyle}" Tag="{x:Bind}" Click="ReloginAccount_Click" Visibility="{x:Bind ReloginVisibility}" />
+                                                <Button Style="{StaticResource RosterSecondaryButtonStyle}" Tag="{x:Bind}" Click="AccountActions_Click" ToolTipService.ToolTip="Tùy chọn tài khoản">
+                                                    <SymbolIcon Symbol="More" />
+                                                </Button>
                                             </StackPanel>
                                         </Grid>
-                                    </DataTemplate>
-                                </ListView.ItemTemplate>
-                            </ListView>
-                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+                    </StackPanel>
 
-                        <StackPanel Grid.Column="1" Spacing="12">
-                            <Border Padding="16" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-                                <StackPanel Spacing="8">
-                                    <TextBlock Text="Cập nhật quota &amp; tự động chuyển" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                                    <TextBlock Text="Khi tài khoản Codex (~/.codex) còn 0%: tìm tài khoản còn quota → đóng Codex Desktop nếu cần → chuyển phiên → mở lại Desktop." TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}" Opacity="0.72" />
-                                    <ToggleSwitch Header="Tự động làm mới quota" IsOn="{x:Bind ViewModel.AutoQuotaRefresh, Mode=TwoWay}" Toggled="AutoQuotaRefresh_Toggled" />
-                                    <ToggleSwitch Header="Tự động chuyển khi hết quota" IsOn="{x:Bind ViewModel.AutoSwitchWhenExhausted, Mode=TwoWay}" Toggled="AutoSwitchWhenExhausted_Toggled" IsEnabled="{x:Bind ViewModel.CanChangeAutoSwitch, Mode=OneWay}" />
-                                    <TextBlock Text="{x:Bind ViewModel.AutoSwitchStatus, Mode=OneWay}" TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.72" />
-                                    <Button Content="Kiểm tra &amp; chuyển ngay" Click="RunAutoSwitchCheck_Click" HorizontalAlignment="Stretch" Visibility="{x:Bind ViewModel.AutoSwitchActionsVisibility, Mode=OneWay}" IsEnabled="{x:Bind ViewModel.CanChangeAutoSwitch, Mode=OneWay}" />
-                                    <ToggleSwitch Header="Mở Roster khi đăng nhập Windows" IsOn="{x:Bind ViewModel.LaunchAtLogin, Mode=TwoWay}" Toggled="LaunchAtLogin_Toggled" />
-                                    <TextBlock Text="{x:Bind ViewModel.QuotaRefreshStatus, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.72" />
+                    <StackPanel Grid.Column="1" Spacing="12">
+                        <Border Style="{StaticResource RosterSurfaceCardStyle}" Padding="20">
+                            <StackPanel Spacing="12">
+                                <StackPanel Spacing="3">
+                                    <TextBlock Text="Tự động chuyển" FontSize="17" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" />
+                                    <TextBlock Text="Chỉ chuyển khi mọi quota đã được xác minh; tác vụ Codex đang chạy luôn được bảo vệ." TextWrapping="Wrap" Foreground="{StaticResource RosterMutedBrush}" />
                                 </StackPanel>
-                            </Border>
-                            <Border Padding="16" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-                                <StackPanel Spacing="8">
-                                    <TextBlock Text="Đăng nhập lại / sao lưu" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                                    <TextBlock Text="Mở đăng nhập OpenAI, lưu phiên hiện tại, hoặc khôi phục bản sao lưu tự động trên máy này." TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}" Opacity="0.72" />
-                                    <Button Content="Mở đăng nhập OpenAI" Click="AddAccount_Click" HorizontalAlignment="Stretch" />
-                                    <Button Content="Thêm từ file JSON…" Click="ImportJson_Click" HorizontalAlignment="Stretch" />
-                                    <Button Content="Lưu phiên hiện tại" Click="SaveCurrent_Click" HorizontalAlignment="Stretch" />
-                                    <Button Content="Hủy thêm tài khoản và khôi phục phiên trước" Click="CancelPendingLogin_Click" HorizontalAlignment="Stretch" Visibility="{x:Bind ViewModel.PendingLoginVisibility, Mode=OneWay}" />
-                                    <TextBlock Text="{x:Bind ViewModel.LoginStatus, Mode=OneWay}" TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.72" />
-                                    <Button Content="Xuất bản sao lưu mã hóa" Click="ExportBackup_Click" HorizontalAlignment="Stretch" />
-                                    <Button Content="Nhập bản sao lưu mã hóa" Click="ImportBackup_Click" HorizontalAlignment="Stretch" />
-                                    <Button Content="Khôi phục danh sách" Click="RestoreAccountList_Click" HorizontalAlignment="Stretch" />
-                                    <Button Content="Khôi phục phiên đầy đủ" Click="RestoreFullBackup_Click" HorizontalAlignment="Stretch" />
-                                </StackPanel>
-                            </Border>
-                            <Border Padding="16" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-                                <StackPanel Spacing="8">
-                                    <TextBlock Text="Hoạt động &amp; dịch vụ" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                                    <Grid ColumnSpacing="10">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*" />
-                                            <ColumnDefinition Width="*" />
-                                        </Grid.ColumnDefinitions>
-                                        <StackPanel Spacing="2">
-                                            <TextBlock Text="Hôm nay" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.72" />
-                                            <TextBlock Text="{x:Bind ViewModel.TokenUsageToday, Mode=OneWay}" Style="{StaticResource SubtitleTextBlockStyle}" />
-                                        </StackPanel>
-                                        <StackPanel Grid.Column="1" Spacing="2">
-                                            <TextBlock Text="7 ngày" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.72" />
-                                            <TextBlock Text="{x:Bind ViewModel.TokenUsageLast7Days, Mode=OneWay}" Style="{StaticResource SubtitleTextBlockStyle}" />
-                                        </StackPanel>
-                                    </Grid>
-                                    <StackPanel Orientation="Horizontal" Spacing="5">
-                                        <TextBlock Text="30 ngày:" Style="{StaticResource CaptionTextBlockStyle}" />
-                                        <TextBlock Text="{x:Bind ViewModel.TokenUsageLast30Days, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}" />
+                                <ToggleSwitch Header="Tự động làm mới quota" IsOn="{x:Bind ViewModel.AutoQuotaRefresh, Mode=TwoWay}" Toggled="AutoQuotaRefresh_Toggled" />
+                                <ToggleSwitch Header="Tự động chuyển khi hết quota" IsOn="{x:Bind ViewModel.AutoSwitchWhenExhausted, Mode=TwoWay}" Toggled="AutoSwitchWhenExhausted_Toggled" IsEnabled="{x:Bind ViewModel.CanChangeAutoSwitch, Mode=OneWay}" />
+                                <TextBlock Text="{x:Bind ViewModel.AutoSwitchStatus, Mode=OneWay}" TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                                <Button Content="Kiểm tra ngay" Style="{StaticResource RosterSecondaryButtonStyle}" Click="RunAutoSwitchCheck_Click" HorizontalAlignment="Stretch" Visibility="{x:Bind ViewModel.AutoSwitchActionsVisibility, Mode=OneWay}" IsEnabled="{x:Bind ViewModel.CanChangeAutoSwitch, Mode=OneWay}" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource RosterSurfaceCardStyle}" Padding="20">
+                            <StackPanel Spacing="10">
+                                <TextBlock Text="Phiên &amp; sao lưu" FontSize="17" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" />
+                                <TextBlock Text="Nhập phiên cũ hoặc di chuyển roster sang máy khác bằng bản sao lưu mã hóa." TextWrapping="Wrap" Foreground="{StaticResource RosterMutedBrush}" />
+                                <Button Content="Nhập từ file JSON…" Style="{StaticResource RosterSecondaryButtonStyle}" Click="ImportJson_Click" HorizontalAlignment="Stretch" />
+                                <Button Content="Lưu phiên hiện tại" Style="{StaticResource RosterSecondaryButtonStyle}" Click="SaveCurrent_Click" HorizontalAlignment="Stretch" />
+                                <Button Content="Xuất bản sao lưu mã hóa" Style="{StaticResource RosterSecondaryButtonStyle}" Click="ExportBackup_Click" HorizontalAlignment="Stretch" />
+                                <Button Content="Nhập bản sao lưu mã hóa" Style="{StaticResource RosterSecondaryButtonStyle}" Click="ImportBackup_Click" HorizontalAlignment="Stretch" />
+                                <Button Content="Hủy thêm tài khoản" Style="{StaticResource RosterSecondaryButtonStyle}" Click="CancelPendingLogin_Click" HorizontalAlignment="Stretch" Visibility="{x:Bind ViewModel.PendingLoginVisibility, Mode=OneWay}" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource RosterSurfaceCardStyle}" Padding="20">
+                            <StackPanel Spacing="10">
+                                <TextBlock Text="Hoạt động" FontSize="17" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" />
+                                <Grid ColumnSpacing="16">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Spacing="2">
+                                        <TextBlock Text="Hôm nay" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                                        <TextBlock Text="{x:Bind ViewModel.TokenUsageToday, Mode=OneWay}" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" />
                                     </StackPanel>
-                                    <StackPanel Orientation="Horizontal" Spacing="5">
-                                        <TextBlock Text="12 tháng:" Style="{StaticResource CaptionTextBlockStyle}" />
-                                        <TextBlock Text="{x:Bind ViewModel.TokenUsageLast365Days, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}" />
+                                    <StackPanel Grid.Column="1" Spacing="2">
+                                        <TextBlock Text="7 ngày" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                                        <TextBlock Text="{x:Bind ViewModel.TokenUsageLast7Days, Mode=OneWay}" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" />
                                     </StackPanel>
-                                    <TextBlock Text="{x:Bind ViewModel.OpenAiStatusSummary, Mode=OneWay}" TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.72" />
-                                    <TextBlock Text="{x:Bind ViewModel.ResetOutlookSummary, Mode=OneWay}" TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.72" />
-                                    <Button Content="Cập nhật hoạt động &amp; dịch vụ" Click="RefreshInsights_Click" HorizontalAlignment="Stretch" />
-                                </StackPanel>
-                            </Border>
-                            <Border Padding="16" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-                                <StackPanel Spacing="8">
-                                    <TextBlock Text="Khay thông báo Windows" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                                    <TextBlock Text="{x:Bind ViewModel.ProcessSafetyStatus, Mode=OneWay}" TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}" Opacity="0.72" />
-                                    <TextBlock Text="Tự động chuyển đóng Codex Desktop khi cần, chuyển phiên, rồi mở lại. Tác vụ Codex CLI đang chạy vẫn được bảo vệ và sẽ hoãn việc chuyển." TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.72" />
-                                    <Button Content="Gửi xuống khay thông báo" Click="SendToTray_Click" HorizontalAlignment="Stretch" />
-                                    <TextBlock Text="{x:Bind ViewModel.UpdateStatus, Mode=OneWay}" TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.72" />
-                                    <Button Content="{x:Bind ViewModel.UpdateActionLabel, Mode=OneWay}" Click="Update_Click" HorizontalAlignment="Stretch" />
-                                </StackPanel>
-                            </Border>
-                        </StackPanel>
-                    </Grid>
-                </StackPanel>
-            </ScrollViewer>
-        </NavigationView>
+                                </Grid>
+                                <TextBlock Text="{x:Bind ViewModel.OpenAiStatusSummary, Mode=OneWay}" TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                                <TextBlock Text="{x:Bind ViewModel.ResetOutlookSummary, Mode=OneWay}" TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                                <Button Content="Cập nhật hoạt động &amp; dịch vụ" Style="{StaticResource RosterSecondaryButtonStyle}" Click="RefreshInsights_Click" HorizontalAlignment="Stretch" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </Grid>
+            </StackPanel>
+        </ScrollViewer>
 
         <ProgressBar Grid.Row="2" IsIndeterminate="True" Visibility="{x:Bind ViewModel.BusyVisibility, Mode=OneWay}" />
     </Grid>

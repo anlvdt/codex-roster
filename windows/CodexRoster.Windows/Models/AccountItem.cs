@@ -65,11 +65,18 @@ public sealed class AccountItem(AccountDto account)
         if (quota is null) return "Chưa kiểm tra";
         var span = quota.ResetAt - DateTimeOffset.Now;
         if (span <= TimeSpan.Zero) return "Đang chờ reset";
-        if (span.TotalDays >= 2) return $"Reset sau {(int)Math.Ceiling(span.TotalDays)} ngày";
-        if (span.TotalDays >= 1) return "Reset sau khoảng 1 ngày";
-        if (span.TotalHours >= 2) return $"Reset sau {(int)Math.Ceiling(span.TotalHours)} giờ";
-        if (span.TotalHours >= 1) return "Reset sau khoảng 1 giờ";
-        if (span.TotalMinutes >= 1) return $"Reset sau {(int)Math.Ceiling(span.TotalMinutes)} phút";
-        return "Reset trong ít hơn 1 phút";
+        var resetAt = quota.ResetAt.ToLocalTime().ToString("HH:mm · dd/MM");
+        var remaining = span.TotalDays >= 2
+            ? $"{(int)Math.Ceiling(span.TotalDays)} ngày"
+            : span.TotalDays >= 1
+                ? "khoảng 1 ngày"
+                : span.TotalHours >= 2
+                    ? $"{(int)Math.Ceiling(span.TotalHours)} giờ"
+                    : span.TotalHours >= 1
+                        ? "khoảng 1 giờ"
+                        : span.TotalMinutes >= 1
+                            ? $"{(int)Math.Ceiling(span.TotalMinutes)} phút"
+                            : "ít hơn 1 phút";
+        return $"Reset {resetAt} · còn {remaining}";
     }
 }

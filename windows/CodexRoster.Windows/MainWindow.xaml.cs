@@ -33,6 +33,25 @@ public sealed partial class MainWindow : Window
 
     private async void RefreshQuota_Click(object sender, RoutedEventArgs e) => await ViewModel.RefreshAllQuotaAsync();
 
+    private void AccountMenu_Click(object sender, RoutedEventArgs e)
+    {
+        var flyout = new MenuFlyout();
+        var refresh = new MenuFlyoutItem { Text = "Làm mới dữ liệu" };
+        refresh.Click += async (_, _) => await ViewModel.RefreshAsync();
+        var insights = new MenuFlyoutItem { Text = "Cập nhật hoạt động & dịch vụ" };
+        insights.Click += async (_, _) => await ViewModel.RefreshInsightsAsync();
+        var update = new MenuFlyoutItem { Text = ViewModel.UpdateActionLabel };
+        update.Click += async (_, _) => await ViewModel.InstallAvailableUpdateAsync();
+        var tray = new MenuFlyoutItem { Text = "Gửi xuống khay thông báo" };
+        tray.Click += SendToTray_Click;
+        flyout.Items.Add(refresh);
+        flyout.Items.Add(insights);
+        flyout.Items.Add(update);
+        flyout.Items.Add(new MenuFlyoutSeparator());
+        flyout.Items.Add(tray);
+        flyout.ShowAt(sender as FrameworkElement);
+    }
+
     private void ErrorInfoBar_CloseClick(InfoBar sender, object args) => ViewModel.ClearError();
 
     private async void AddAccount_Click(object sender, RoutedEventArgs e) => await ViewModel.StartDeviceLoginAsync();

@@ -2230,6 +2230,14 @@ private struct MenuBarView: View {
             Divider()
                 .padding(.top, 4)
             HStack(spacing: 10) {
+                Button { openAddAccountFlow() } label: {
+                    Label(language.text("Thêm tài khoản", "Add account"), systemImage: "person.crop.circle.badge.plus")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .menuBarInteractive()
+                .disabled(store.isWorking || store.isPendingLogin)
+                .help(language.text("Đăng nhập và lưu một tài khoản Codex mới.", "Sign in and save a new Codex account."))
                 Button(language.text("Mở Codex Roster", "Open Codex Roster")) { openDashboard() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
@@ -2293,6 +2301,13 @@ private struct MenuBarView: View {
         openDashboard()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             NotificationCenter.default.post(name: .showReloginAccount, object: accountID?.uuidString)
+        }
+    }
+
+    private func openAddAccountFlow() {
+        openDashboard()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            NotificationCenter.default.post(name: .showAddAccount, object: nil)
         }
     }
 

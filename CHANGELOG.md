@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.22 - 2026-08-07
+
+### Added
+
+- Added an **Add account** button to the macOS menu-bar popup. It opens the dashboard directly to the existing protected add-account flow.
+
 ## v0.2.21 - 2026-08-07
 
 ### Fixed

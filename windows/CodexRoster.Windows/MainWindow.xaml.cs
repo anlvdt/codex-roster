@@ -33,6 +33,8 @@ public sealed partial class MainWindow : Window
 
     private async void RefreshQuota_Click(object sender, RoutedEventArgs e) => await ViewModel.RefreshAllQuotaAsync();
 
+    private void LoadDemoData_Click(object sender, RoutedEventArgs e) => ViewModel.LoadDemoData();
+
     private void AccountMenu_Click(object sender, RoutedEventArgs e)
     {
         var flyout = new MenuFlyout();

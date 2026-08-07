@@ -22,6 +22,7 @@ public sealed class AccountItem(AccountDto account)
     public string QuotaLabel { get; } = FormatQuota(account);
     public string ResetLabel { get; } = FormatReset(account.Usage?.Weekly ?? account.Usage?.FiveHour, account.UsageError);
     public string SecondaryQuotaLabel { get; } = FormatSecondaryQuota(account);
+    public string SidebarStatus { get; } = FormatSidebarStatus(account);
     public double RowOpacity { get; } = account.Archived ? 0.55 : 1;
     public bool CanActivate { get; } = !account.IsActive && !account.Archived && string.IsNullOrWhiteSpace(account.UsageError);
     public bool CanRelogin { get; } = !account.Archived && !string.IsNullOrWhiteSpace(account.UsageError);
@@ -78,5 +79,17 @@ public sealed class AccountItem(AccountDto account)
                             ? $"{(int)Math.Ceiling(span.TotalMinutes)} phút"
                             : "ít hơn 1 phút";
         return $"Reset {resetAt} · còn {remaining}";
+    }
+
+    private static string FormatSidebarStatus(AccountDto account)
+    {
+        if (!string.IsNullOrWhiteSpace(account.UsageError)) return "Cần đăng nhập lại";
+        var quota = account.Usage?.Weekly ?? account.Usage?.FiveHour;
+        if (quota is null) return "Chưa kiểm tra quota";
+        var remaining = quota.ResetAt - DateTimeOffset.Now;
+        if (remaining <= TimeSpan.Zero) return $"{quota.RemainingPercent}% · đang reset";
+        if (remaining.TotalDays >= 1) return $"{quota.RemainingPercent}% · reset {quota.ResetAt.ToLocalTime():dd/MM}";
+        if (remaining.TotalHours >= 1) return $"{quota.RemainingPercent}% · reset {quota.ResetAt.ToLocalTime():HH:mm}";
+        return $"{quota.RemainingPercent}% · reset sớm";
     }
 }

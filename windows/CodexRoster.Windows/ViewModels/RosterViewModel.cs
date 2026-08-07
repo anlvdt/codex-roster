@@ -25,6 +25,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
     private bool _autoSwitchAllExhaustedNotified;
     private bool _isRefreshingInsights;
     private bool _isCheckingUpdate;
+    private bool _isShowingDemoData;
     private bool _settingsLoaded;
     private CancellationTokenSource? _loginWatchCancellation;
     private IdentityDto? _pendingLoginIdentity;
@@ -93,6 +94,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
     public string ResetOutlookSummary { get => _resetOutlookSummary; private set => Set(ref _resetOutlookSummary, value); }
     public string UpdateStatus { get => _updateStatus; private set => Set(ref _updateStatus, value); }
     public string UpdateActionLabel => _availableUpdate is null ? "Kiểm tra cập nhật" : $"Cài v{_availableUpdate.Version}";
+    public bool IsShowingDemoData { get => _isShowingDemoData; private set => Set(ref _isShowingDemoData, value); }
 
     public RosterViewModel()
     {
@@ -178,6 +180,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
 
     public async Task RefreshAsync()
     {
+        IsShowingDemoData = false;
         await RunAsync(async () =>
         {
             var listTask = _cli.ReadAsync<AccountListResponse>("list");
@@ -244,6 +247,52 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         if (selectedIndex is < 0 or > 3 || _accountSortMode == selectedIndex) return;
         _accountSortMode = selectedIndex;
         ReplaceAccounts(_lastAccounts);
+    }
+
+    public void LoadDemoData()
+    {
+        var now = DateTimeOffset.Now;
+        ReplaceAccounts([
+            new AccountDto
+            {
+                Id = Guid.Parse("91ed4457-534e-4da7-b6a0-573aaea78902"),
+                Email = "mai.nguyen@example.com",
+                Name = "Mai Nguyen",
+                CustomLabel = "Pro · cá nhân",
+                PlanLabel = "Pro",
+                IsActive = true,
+                Usage = new AccountUsageDto
+                {
+                    FiveHour = new UsageWindowDto { RemainingPercent = 72, ResetAt = now.AddHours(2.5) },
+                    Weekly = new UsageWindowDto { RemainingPercent = 64, ResetAt = now.AddDays(3).AddHours(4) },
+                },
+            },
+            new AccountDto
+            {
+                Id = Guid.Parse("98dc73c1-821c-498e-a113-1ba51c36b137"),
+                Email = "team@example.com",
+                Name = "OpenAI Team",
+                CustomLabel = "Plus · công việc",
+                PlanLabel = "Plus",
+                Usage = new AccountUsageDto
+                {
+                    FiveHour = new UsageWindowDto { RemainingPercent = 38, ResetAt = now.AddHours(4) },
+                    Weekly = new UsageWindowDto { RemainingPercent = 41, ResetAt = now.AddDays(2).AddHours(8) },
+                },
+            },
+            new AccountDto
+            {
+                Id = Guid.Parse("4aef9af1-bcf1-4a3e-aa39-724f2d2a29ce"),
+                Email = "archive@example.com",
+                Name = "Tài khoản cần xử lý",
+                PlanLabel = "Free",
+                UsageError = "Session expired",
+            },
+        ]);
+        CurrentAccountLabel = "mai.nguyen@example.com";
+        CurrentAccountDetail = "Dữ liệu mẫu · 64% quota theo chu kỳ, reset lúc " + now.AddDays(3).AddHours(4).ToLocalTime().ToString("HH:mm · dd/MM");
+        ProcessSafetyStatus = "Dữ liệu mẫu chỉ dùng để xem giao diện";
+        IsShowingDemoData = true;
     }
 
     public async Task StartDeviceLoginAsync()
@@ -817,6 +866,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
 
     private async Task RefreshRosterDataAsync()
     {
+        IsShowingDemoData = false;
         var listTask = _cli.ReadAsync<AccountListResponse>("list");
         var statusTask = _cli.ReadAsync<StatusResponse>("status");
         await Task.WhenAll(listTask, statusTask);

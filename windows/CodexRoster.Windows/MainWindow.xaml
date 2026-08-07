@@ -46,8 +46,73 @@
             </Grid>
         </Border>
 
-        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-            <StackPanel MaxWidth="1440" Margin="32,28,32,36" Spacing="22">
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="286" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Border Background="{StaticResource RosterPanelBrush}" BorderBrush="{StaticResource RosterPanelStrokeBrush}" BorderThickness="0,0,1,0">
+                <Grid Padding="18,22">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <StackPanel Spacing="3">
+                        <TextBlock Text="Không gian làm việc" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                        <TextBlock Text="Tổng quan" FontSize="20" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" />
+                    </StackPanel>
+                    <ComboBox Grid.Row="1" Margin="0,18,0,12" SelectedIndex="0" SelectionChanged="AccountSort_SelectionChanged">
+                        <ComboBoxItem Content="Gói → quota" />
+                        <ComboBoxItem Content="Quota → gói" />
+                        <ComboBoxItem Content="Tên hiển thị" />
+                        <ComboBoxItem Content="Email" />
+                    </ComboBox>
+                    <StackPanel Grid.Row="2" Spacing="10">
+                        <StackPanel Orientation="Horizontal" Spacing="7">
+                            <Ellipse Width="7" Height="7" Fill="#22A06B" VerticalAlignment="Center" />
+                            <TextBlock Text="Tài khoản đã lưu" Style="{StaticResource BodyStrongTextBlockStyle}" Foreground="{StaticResource RosterInkBrush}" />
+                        </StackPanel>
+                        <ListView ItemsSource="{x:Bind ViewModel.Accounts, Mode=OneWay}" SelectionMode="None" BorderThickness="0" Background="Transparent">
+                            <ListView.ItemContainerStyle>
+                                <Style TargetType="ListViewItem">
+                                    <Setter Property="Padding" Value="0" />
+                                    <Setter Property="Margin" Value="0,0,0,4" />
+                                </Style>
+                            </ListView.ItemContainerStyle>
+                            <ListView.ItemTemplate>
+                                <DataTemplate x:DataType="models:AccountItem">
+                                    <Border Padding="10" CornerRadius="10" Background="{StaticResource RosterPageBrush}">
+                                        <Grid ColumnSpacing="8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Spacing="3">
+                                                <TextBlock Text="{x:Bind DisplayName}" Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis" Foreground="{StaticResource RosterInkBrush}" />
+                                                <TextBlock Text="{x:Bind SidebarStatus}" Style="{StaticResource CaptionTextBlockStyle}" TextTrimming="CharacterEllipsis" Foreground="{StaticResource RosterMutedBrush}" />
+                                            </StackPanel>
+                                            <Button Grid.Column="1" Style="{StaticResource RosterSecondaryButtonStyle}" Padding="7" Tag="{x:Bind}" Click="AccountActions_Click" ToolTipService.ToolTip="Tác vụ tài khoản">
+                                                <SymbolIcon Symbol="More" />
+                                            </Button>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+                        <TextBlock Text="Chưa có account. Thêm tài khoản hoặc dùng dữ liệu mẫu để kiểm thử giao diện." TextWrapping="Wrap" Foreground="{StaticResource RosterMutedBrush}" Style="{StaticResource CaptionTextBlockStyle}" Visibility="{x:Bind ViewModel.EmptyAccountsVisibility, Mode=OneWay}" />
+                    </StackPanel>
+                    <StackPanel Grid.Row="3" Spacing="8">
+                        <Button Content="Thêm tài khoản" Style="{StaticResource RosterPrimaryButtonStyle}" Click="AddAccount_Click" HorizontalAlignment="Stretch" />
+                        <Button Content="Dùng dữ liệu mẫu" Style="{StaticResource RosterSecondaryButtonStyle}" Click="LoadDemoData_Click" HorizontalAlignment="Stretch" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel MaxWidth="1180" Margin="32,28,32,36" Spacing="22">
                 <InfoBar
                     IsOpen="{x:Bind ViewModel.HasError, Mode=OneWay}"
                     Severity="Warning"
@@ -66,6 +131,12 @@
                         <Button Content="Hủy và khôi phục phiên" Click="CancelPendingLogin_Click" />
                     </InfoBar.ActionButton>
                 </InfoBar>
+
+                <InfoBar
+                    IsOpen="{x:Bind ViewModel.IsShowingDemoData, Mode=OneWay}"
+                    Severity="Informational"
+                    Title="Đang xem dữ liệu mẫu"
+                    Message="Ba tài khoản minh họa chỉ phục vụ kiểm thử UI. Làm mới hoặc nhập dữ liệu thật để quay về roster trên máy." />
 
                 <Border Style="{StaticResource RosterSurfaceCardStyle}" Padding="24">
                     <Grid ColumnSpacing="28">
@@ -125,14 +196,18 @@
                                 <Border Width="42" Height="42" CornerRadius="12" Background="{StaticResource RosterAccentSoftBrush}">
                                     <SymbolIcon Symbol="Contact" Foreground="{StaticResource RosterAccentBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
                                 </Border>
-                                <TextBlock Text="Chưa có tài khoản nào" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" />
-                                <TextBlock Text="Bắt đầu bằng cách đăng nhập một tài khoản OpenAI. Roster sẽ bảo toàn phiên cũ và chỉ lưu phiên mới sau khi bạn xác nhận." TextWrapping="Wrap" MaxWidth="520" Foreground="{StaticResource RosterMutedBrush}" />
-                                <Button Style="{StaticResource RosterPrimaryButtonStyle}" Click="AddAccount_Click" HorizontalAlignment="Left">
-                                    <StackPanel Orientation="Horizontal" Spacing="7">
-                                        <SymbolIcon Symbol="Add" />
-                                        <TextBlock Text="Thêm tài khoản đầu tiên" />
+                                    <TextBlock Text="Chưa có tài khoản nào" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" />
+                                    <TextBlock Text="Bắt đầu bằng cách đăng nhập một tài khoản OpenAI. Roster sẽ bảo toàn phiên cũ và chỉ lưu phiên mới sau khi bạn xác nhận." TextWrapping="Wrap" MaxWidth="520" Foreground="{StaticResource RosterMutedBrush}" />
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <Button Style="{StaticResource RosterPrimaryButtonStyle}" Click="AddAccount_Click">
+                                            <StackPanel Orientation="Horizontal" Spacing="7">
+                                                <SymbolIcon Symbol="Add" />
+                                                <TextBlock Text="Thêm tài khoản đầu tiên" />
+                                            </StackPanel>
+                                        </Button>
+                                        <Button Content="Dùng dữ liệu mẫu" Style="{StaticResource RosterSecondaryButtonStyle}" Click="LoadDemoData_Click" />
                                     </StackPanel>
-                                </Button>
+                                    <TextBlock Text="Dữ liệu mẫu chỉ hiển thị trong cửa sổ này và không lưu vào Codex." Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
                             </StackPanel>
                         </Border>
 
@@ -241,7 +316,8 @@
                     </StackPanel>
                 </Grid>
             </StackPanel>
-        </ScrollViewer>
+            </ScrollViewer>
+        </Grid>
 
         <ProgressBar Grid.Row="2" IsIndeterminate="True" Visibility="{x:Bind ViewModel.BusyVisibility, Mode=OneWay}" />
     </Grid>

@@ -30,6 +30,12 @@ public sealed partial class MainWindow : Window
         AppWindow.GetFromWindowId(windowId).SetIcon(iconPath);
     }
 
+    private void ContentScrollViewer_SizeChanged(object sender, SizeChangedEventArgs args)
+    {
+        ContentLayout.Width = Math.Max(args.NewSize.Width - 54, 960);
+        ContentLayout.Height = Math.Max(args.NewSize.Height - 46, 640);
+    }
+
     private async void MainWindow_Activated(object sender, WindowActivatedEventArgs args)
     {
         Activated -= MainWindow_Activated;

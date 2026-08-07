@@ -114,7 +114,8 @@
                 </Grid>
             </Border>
 
-            <Grid Grid.Column="1" Margin="26,22,28,24" RowSpacing="14">
+            <ScrollViewer Grid.Column="1" x:Name="ContentScrollViewer" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" SizeChanged="ContentScrollViewer_SizeChanged">
+            <Grid x:Name="ContentLayout" Margin="26,22,28,24" MinWidth="960" MinHeight="640" RowSpacing="14">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
@@ -321,6 +322,7 @@
                     </ScrollViewer>
                 </Grid>
             </Grid>
+            </ScrollViewer>
         </Grid>
 
         <ProgressBar Grid.Row="2" IsIndeterminate="True" Visibility="{x:Bind ViewModel.BusyVisibility, Mode=OneWay}" />

@@ -3,6 +3,8 @@ using CodexRoster.Windows.Services;
 using CodexRoster.Windows.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Windowing;
+using WinRT.Interop;
 
 namespace CodexRoster.Windows;
 
@@ -13,8 +15,18 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        SetWindowIcon();
         Activated += MainWindow_Activated;
         Closed += MainWindow_Closed;
+    }
+
+    private void SetWindowIcon()
+    {
+        var iconPath = Path.Combine(AppContext.BaseDirectory, "assets", "codex-roster.ico");
+        if (!File.Exists(iconPath)) return;
+
+        var windowId = Win32Interop.GetWindowIdFromWindow(WindowNative.GetWindowHandle(this));
+        AppWindow.GetFromWindowId(windowId).SetIcon(iconPath);
     }
 
     private async void MainWindow_Activated(object sender, WindowActivatedEventArgs args)

@@ -594,11 +594,41 @@ where
                 anyhow::bail!("automatic switch was superseded because the active account changed");
             }
         }
-        let (snapshot, snapshot_identity, restore_identity) =
+        let (mut snapshot, snapshot_identity, restore_identity) =
             self.load_activation_target(account_id)?;
-        // Preserve the legacy ownership model: restore the saved auth document
-        // unchanged and let Codex's official auth manager refresh it in place.
-        // Roster must never consume an inactive account's rotating refresh token.
+        // Prepare an inactive snapshot before it replaces the current live
+        // session. AuthLock serializes this rotation, the current account was
+        // already preserved above, and a refresh failure aborts without
+        // touching ~/.codex. Restoring an expired access token and hoping the
+        // Desktop refreshes it is what causes the recurring login prompt.
+        if !self.is_live_saved_account(account_id)? {
+            match crate::usage::refresh_snapshot_if_access_token_stale(&snapshot) {
+                Ok(Some(refreshed)) => {
+                    let cached_usage = self
+                        .repository
+                        .load_snapshot(&self.env.kind, account_id)
+                        .ok()
+                        .and_then(|(metadata, _)| metadata.cached_usage);
+                    self.repository.replace_snapshot_without_backup(
+                        &self.env.kind,
+                        account_id,
+                        &snapshot_identity,
+                        &refreshed,
+                        cached_usage,
+                    )?;
+                    snapshot = refreshed;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = self.repository.record_usage_error(
+                        &self.env.kind,
+                        account_id,
+                        usage_error_message(&error),
+                    );
+                    return Err(error);
+                }
+            }
+        }
         let loaded_target_at = Instant::now();
         let verify_stable = should_verify_activation_stability(force_running, &warnings);
         let verify_retries = 4;

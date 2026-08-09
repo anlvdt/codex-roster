@@ -39,11 +39,22 @@ if grep -E -n 'closeDesktopForLoginIfNeeded|loginDesktopRelaunch|_loginRelaunch'
   exit 1
 fi
 
-if grep -F -n 'refresh_snapshot_if_access_token_stale(&snapshot)' \
-  "$root_dir/src/app/service.rs"; then
-  echo "Unsafe inactive snapshot refresh detected during activation." >&2
-  exit 1
-fi
+activation_block="$(sed -n \
+  '/fn activate_with_expected_active/,/fn refresh_current_saved_account_before_activation/p' \
+  "$root_dir/src/app/service.rs")"
+
+for invariant in \
+  'let _auth_lock = AuthLock::acquire' \
+  'if !self.is_live_saved_account(account_id)?' \
+  'refresh_snapshot_if_access_token_stale(&snapshot)' \
+  'replace_snapshot_without_backup' \
+  'return Err(error);'
+do
+  if ! grep -F -q "$invariant" <<<"$activation_block"; then
+    echo "Activation refresh safety invariant missing: $invariant" >&2
+    exit 1
+  fi
+done
 
 if grep -F -A 2 'UsageSource::SavedAccessToken,' \
   "$root_dir/src/app/service.rs" | grep -F -q 'true'; then

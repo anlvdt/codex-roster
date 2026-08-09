@@ -619,10 +619,10 @@ fn format_last_refresh(value: OffsetDateTime) -> String {
 /// instead of running its own refresh, which can loop on `refresh_token_reused`
 /// and force a login.
 ///
-/// Returns `Ok(Some(refreshed))` only when a rotation happened, `Ok(None)` when
-/// the snapshot is already fresh, has no refresh token, or a transient refresh
-/// error occurred. A hard authentication failure aborts activation so a dead
-/// snapshot can never replace the currently working live session.
+/// Returns `Ok(Some(refreshed))` only when a rotation happened and `Ok(None)`
+/// when the snapshot is already fresh or has no refresh token. Any attempted
+/// refresh failure aborts activation so neither a dead token nor a stale token
+/// after a transient network failure can replace the working live session.
 /// Never call this for the account that is currently live in `~/.codex`: Codex
 /// owns that refresh token, and rotating it out from under a running session is
 /// exactly the desync that forces re-login.
@@ -645,7 +645,6 @@ where
     }
     match refresh(&auth) {
         Ok(refreshed) => Ok(Some(update_snapshot_auth(snapshot, &refreshed)?)),
-        Err(error) if is_transient_refresh_error(&error) => Ok(None),
         Err(error) => Err(error).context(
             "selected account could not be refreshed safely; the current session was left unchanged",
         ),
@@ -907,7 +906,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_on_restore_tolerates_transient_network_error() {
+    fn refresh_on_restore_aborts_on_transient_network_error() {
         let soon = OffsetDateTime::now_utc() + Duration::minutes(1);
         let snapshot = auth_snapshot(json!({
             "tokens": {
@@ -916,12 +915,12 @@ mod tests {
             }
         }));
 
-        let refreshed = refresh_snapshot_if_access_token_stale_with(&snapshot, |_| {
+        let error = refresh_snapshot_if_access_token_stale_with(&snapshot, |_| {
             Err(anyhow!("connection timed out while refreshing tokens"))
         })
-        .expect("transient error");
+        .expect_err("a stale token must never be restored after refresh failure");
 
-        assert!(refreshed.is_none());
+        assert!(format!("{error:#}").contains("current session was left unchanged"));
     }
 
     #[test]

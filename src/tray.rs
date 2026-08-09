@@ -23,6 +23,7 @@ enum UserEvent {
     Menu(MenuEvent),
     AutoStartUsageWindowsChecked,
     AutoSwitchChecked,
+    UsageRefreshChecked,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +72,7 @@ where
     }));
     spawn_auto_start_usage_windows_menu_refresh(proxy.clone());
     spawn_auto_switch_menu_refresh(proxy.clone());
+    spawn_usage_refresh_menu_refresh(proxy.clone());
 
     let mut state = TrayState {
         app,
@@ -114,6 +116,19 @@ fn spawn_auto_switch_menu_refresh(proxy: EventLoopProxy<UserEvent>) {
         });
 }
 
+fn spawn_usage_refresh_menu_refresh(proxy: EventLoopProxy<UserEvent>) {
+    let receiver = crate::app::subscribe_usage_refresh_checks();
+    let _ = thread::Builder::new()
+        .name("tray-usage-refresh-menu-refresh".to_owned())
+        .spawn(move || {
+            while receiver.recv().is_ok() {
+                if proxy.send_event(UserEvent::UsageRefreshChecked).is_err() {
+                    break;
+                }
+            }
+        });
+}
+
 impl<S> ApplicationHandler<UserEvent> for TrayState<'_, S>
 where
     S: SecretStore,
@@ -146,7 +161,9 @@ where
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::AutoStartUsageWindowsChecked | UserEvent::AutoSwitchChecked => {
+            UserEvent::AutoStartUsageWindowsChecked
+            | UserEvent::AutoSwitchChecked
+            | UserEvent::UsageRefreshChecked => {
                 if let Err(error) = self.update_tray_menu() {
                     eprintln!("failed to refresh tray menu: {error:#}");
                 }

@@ -544,6 +544,7 @@ pub fn run() -> Result<()> {
         Some(Command::Tray) => {
             crate::app::spawn_auto_start_usage_windows_worker(app.env().clone());
             crate::app::spawn_auto_switch_worker(app.env().clone());
+            crate::app::spawn_usage_refresh_worker(app.env().clone());
             crate::tray::hide_console_window();
             let _ = crate::tray::run(&app)?;
             Ok(())
@@ -579,6 +580,7 @@ where
 
     crate::app::spawn_auto_start_usage_windows_worker(app.env().clone());
     crate::app::spawn_auto_switch_worker(app.env().clone());
+    crate::app::spawn_usage_refresh_worker(app.env().clone());
     #[cfg(windows)]
     {
         loop {

@@ -693,15 +693,37 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
             var relaunch = restartDesktop
                 ? await CodexDesktopLifecycle.CloseForAccountSwitchAsync()
                 : new CodexDesktopRestartPlan([]);
+            ActivateOutput activated;
             try
             {
                 // Never force through a surviving Desktop helper or independent
                 // Codex CLI process. Core preflight leaves the current auth intact.
-                await _cli.RunCommandAsync("activate", account.Id.ToString());
+                activated = await _cli.ReadAsync<ActivateOutput>("activate", account.Id.ToString());
             }
-            finally
+            catch
             {
                 relaunch.Restart();
+                throw;
+            }
+            relaunch.Restart();
+            if (relaunch.HasDesktop && !await WaitForDesktopAcceptanceAsync(account.Id))
+            {
+                try
+                {
+                    await RollbackRejectedTargetAsync(
+                        account.Id,
+                        activated.PreviousAccountId,
+                        relaunch);
+                    await RefreshRosterDataAsync();
+                }
+                catch (Exception rollbackError)
+                {
+                    throw new InvalidOperationException(
+                        $"Codex Desktop từ chối tài khoản đích và không thể tự khôi phục phiên trước: {rollbackError.Message}",
+                        rollbackError);
+                }
+                throw new InvalidOperationException(
+                    "Codex Desktop từ chối tài khoản đích; phiên trước đã được khôi phục an toàn.");
             }
             await RefreshRosterDataAsync();
             QuotaRefreshStatus = relaunch.HasDesktop
@@ -961,13 +983,41 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
                     }
                 }
             }
-            finally
+            catch
             {
                 relaunch.Restart();
+                throw;
             }
 
             if (applied.Status == "switched")
             {
+                relaunch.Restart();
+                var accepted = !relaunch.HasDesktop;
+                if (relaunch.HasDesktop && applied.CandidateAccountId is Guid switchedAccountId)
+                {
+                    accepted = await WaitForDesktopAcceptanceAsync(switchedAccountId);
+                }
+                if (!accepted)
+                {
+                    try
+                    {
+                        await RollbackRejectedTargetAsync(
+                            applied.CandidateAccountId,
+                            applied.ActiveAccountId ?? decision.ActiveAccountId,
+                            relaunch);
+                        await RefreshRosterDataAsync();
+                        AutoSwitchStatus = "Codex Desktop từ chối tài khoản tự động chọn; phiên trước đã được khôi phục.";
+                        ErrorTitle = "Tự động chuyển";
+                        ErrorMessage = AutoSwitchStatus;
+                    }
+                    catch (Exception rollbackError)
+                    {
+                        AutoSwitchStatus = "Tài khoản đích bị từ chối và rollback thất bại.";
+                        ErrorTitle = "Tự động chuyển";
+                        ErrorMessage = $"{AutoSwitchStatus} {rollbackError.Message}";
+                    }
+                    return;
+                }
                 await RefreshRosterDataAsync();
                 _autoSwitchAllExhaustedNotified = false;
                 AutoSwitchStatus = relaunch.HasDesktop
@@ -977,14 +1027,17 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
             }
             else if (applied.Status == "waiting_for_processes")
             {
+                relaunch.Restart();
                 AutoSwitchStatus = "Codex CLI đang chạy — đóng tác vụ CLI rồi để Roster chuyển tự động.";
             }
             else if (applied.Status == "active_has_quota")
             {
+                relaunch.Restart();
                 AutoSwitchStatus = "Tài khoản hiện tại đã có lại quota trước khi chuyển.";
             }
             else
             {
+                relaunch.Restart();
                 AutoSwitchStatus = "Không thể tự động chuyển lúc này — sẽ thử lại theo chu kỳ.";
             }
         }
@@ -1005,6 +1058,50 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
             _isCheckingAutoSwitch = false;
             OnPropertyChanged(nameof(CanChangeAutoSwitch));
         }
+    }
+
+    private async Task<bool> WaitForDesktopAcceptanceAsync(Guid accountId)
+    {
+        var launchDeadline = DateTimeOffset.UtcNow.AddSeconds(6);
+        while (!CodexDesktopLifecycle.IsRunning() && DateTimeOffset.UtcNow < launchDeadline)
+        {
+            await Task.Delay(250);
+        }
+        if (!CodexDesktopLifecycle.IsRunning()) return false;
+
+        // Let the official Desktop auth manager own refresh first. Roster only
+        // probes the current access token and never rotates the refresh token.
+        await Task.Delay(TimeSpan.FromSeconds(2));
+        var acceptanceDeadline = DateTimeOffset.UtcNow.AddSeconds(12);
+        while (DateTimeOffset.UtcNow < acceptanceDeadline)
+        {
+            try
+            {
+                await _cli.RunCommandAsync("usage", accountId.ToString());
+                return true;
+            }
+            catch
+            {
+                await Task.Delay(500);
+            }
+        }
+        return false;
+    }
+
+    private async Task RollbackRejectedTargetAsync(
+        Guid? rejectedAccountId,
+        Guid? previousAccountId,
+        CodexDesktopRestartPlan fallbackRelaunch)
+    {
+        if (previousAccountId is not Guid previousId || previousId == rejectedAccountId)
+        {
+            throw new InvalidOperationException("Không tìm thấy điểm khôi phục của phiên trước.");
+        }
+        var relaunch = CodexDesktopLifecycle.IsRunning()
+            ? await CodexDesktopLifecycle.CloseForAccountSwitchAsync()
+            : fallbackRelaunch;
+        await _cli.RunCommandAsync("activate", previousId.ToString());
+        relaunch.Restart();
     }
 
     private async Task RefreshRosterDataAsync()

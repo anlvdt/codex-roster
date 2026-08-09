@@ -252,6 +252,7 @@ pub struct ImportJsonOutput {
 #[derive(Clone, Debug, Serialize)]
 pub struct ActivateOutput {
     pub account: AccountView,
+    pub previous_account_id: Option<Uuid>,
     pub warnings: Vec<RunningCodexProcess>,
 }
 

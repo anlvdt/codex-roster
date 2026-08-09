@@ -45,16 +45,20 @@ activation_block="$(sed -n \
 
 for invariant in \
   'let _auth_lock = AuthLock::acquire' \
-  'if !self.is_live_saved_account(account_id)?' \
-  'refresh_snapshot_if_access_token_stale(&snapshot)' \
-  'replace_snapshot_without_backup' \
-  'return Err(error);'
+  'self.refresh_current_saved_account_before_activation()?' \
+  'self.load_activation_target(account_id)?' \
+  'restore_snapshot_with_retry'
 do
   if ! grep -F -q "$invariant" <<<"$activation_block"; then
     echo "Activation refresh safety invariant missing: $invariant" >&2
     exit 1
   fi
 done
+
+if grep -F -q 'refresh_snapshot_if_access_token_stale(&snapshot)' <<<"$activation_block"; then
+  echo "Activation must leave OAuth refresh-token ownership to official Codex." >&2
+  exit 1
+fi
 
 if grep -F -A 2 'UsageSource::SavedAccessToken,' \
   "$root_dir/src/app/service.rs" | grep -F -q 'true'; then

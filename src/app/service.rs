@@ -16,8 +16,8 @@ use crate::repository::SnapshotRepository;
 use crate::secrets::SecretStore;
 use crate::settings::{load_settings, save_settings};
 use crate::usage::{
-    FetchUsageError, fetch_usage, usage_error_blocks_activation, usage_error_message,
-    usage_target_from_snapshot,
+    FetchUsageError, fetch_usage, usage_error_blocks_activation,
+    usage_error_is_deferred_access_token_refresh, usage_error_message, usage_target_from_snapshot,
 };
 
 const ALLOW_LIVE_TOKEN_REFRESH: bool = false;
@@ -576,7 +576,7 @@ where
         let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
         let initial_warnings = activation_process_warnings();
         ensure_activation_processes_stopped(&initial_warnings)?;
-        self.refresh_current_saved_account_before_activation()?;
+        let previous_account_id = self.refresh_current_saved_account_before_activation()?;
         let refreshed_current_at = Instant::now();
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         let acquired_lock_at = Instant::now();
@@ -594,41 +594,12 @@ where
                 anyhow::bail!("automatic switch was superseded because the active account changed");
             }
         }
-        let (mut snapshot, snapshot_identity, restore_identity) =
+        let (snapshot, snapshot_identity, restore_identity) =
             self.load_activation_target(account_id)?;
-        // Prepare an inactive snapshot before it replaces the current live
-        // session. AuthLock serializes this rotation, the current account was
-        // already preserved above, and a refresh failure aborts without
-        // touching ~/.codex. Restoring an expired access token and hoping the
-        // Desktop refreshes it is what causes the recurring login prompt.
-        if !self.is_live_saved_account(account_id)? {
-            match crate::usage::refresh_snapshot_if_access_token_stale(&snapshot) {
-                Ok(Some(refreshed)) => {
-                    let cached_usage = self
-                        .repository
-                        .load_snapshot(&self.env.kind, account_id)
-                        .ok()
-                        .and_then(|(metadata, _)| metadata.cached_usage);
-                    self.repository.replace_snapshot_without_backup(
-                        &self.env.kind,
-                        account_id,
-                        &snapshot_identity,
-                        &refreshed,
-                        cached_usage,
-                    )?;
-                    snapshot = refreshed;
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    let _ = self.repository.record_usage_error(
-                        &self.env.kind,
-                        account_id,
-                        usage_error_message(&error),
-                    );
-                    return Err(error);
-                }
-            }
-        }
+        // Preserve the legacy ownership model: Roster copies the complete
+        // saved auth document unchanged, then the official Codex/ChatGPT auth
+        // manager refreshes it after launch. Roster must never consume an
+        // inactive account's rotating refresh token during activation.
         let loaded_target_at = Instant::now();
         let verify_stable = should_verify_activation_stability(force_running, &warnings);
         let verify_retries = 4;
@@ -672,21 +643,21 @@ where
         }
         Ok(ActivateOutput {
             account: account_view(metadata, Some(account_id), None, None),
+            previous_account_id,
             warnings,
         })
     }
 
-    fn refresh_current_saved_account_before_activation(&self) -> Result<()> {
-        let saved_accounts = self.repository.list_accounts(&self.env.kind)?;
-        let Some(live) = codex::try_read_live_auth_bundle(&self.env)? else {
-            return Ok(());
-        };
-        let Some(_current_saved) = match_saved_account(&saved_accounts, &live.identity) else {
-            return Ok(());
-        };
-        self.save_current_for_activation()
+    fn refresh_current_saved_account_before_activation(&self) -> Result<Option<Uuid>> {
+        if codex::try_read_live_auth_bundle(&self.env)?.is_none() {
+            return Ok(None);
+        }
+        // Always preserve the current live session before replacing ~/.codex.
+        // If it was not in the roster yet, saving it creates the rollback point.
+        let saved = self
+            .save_current_for_activation()
             .context("could not preserve the active Codex session before switching accounts")?;
-        Ok(())
+        Ok(Some(saved.account.id))
     }
 
     fn load_activation_target(
@@ -832,6 +803,17 @@ where
                 // live auth.json, so always update the live bundle instead.
                 if self.is_live_saved_account(account_id)? {
                     return self.usage_with_auth_lock(None);
+                }
+                if self
+                    .repository
+                    .get_account(&self.env.kind, account_id)?
+                    .and_then(|account| account.cached_usage_error)
+                    .as_deref()
+                    .is_some_and(usage_error_is_deferred_access_token_refresh)
+                {
+                    anyhow::bail!(
+                        "saved access-token check is deferred until this account is activated"
+                    );
                 }
                 // A snapshot that no longer decrypts must surface as an error on
                 // the account, not silently keep stale quota forever. Record it
@@ -1294,6 +1276,59 @@ mod tests {
         assert!(
             app.is_live_saved_account(saved.id)
                 .expect("active account check")
+        );
+    }
+
+    #[test]
+    fn inactive_unauthorized_access_token_is_not_probed_again() {
+        let temp = tempdir().expect("tempdir");
+        let env = AppEnv {
+            kind: EnvironmentKind::Linux,
+            home_dir: temp.path().to_path_buf(),
+            codex_root: temp.path().join(".codex"),
+            app_data_dir: temp.path().join("app"),
+        };
+        std::fs::create_dir_all(&env.codex_root).expect("codex root");
+        let repo = SnapshotRepository::new(&env.app_data_dir, MemorySecretStore::default());
+        let saved = repo
+            .save_snapshot(
+                &env.kind,
+                &DisplayIdentity {
+                    email: "inactive@example.com".to_owned(),
+                    subject: Some("sub-inactive".to_owned()),
+                    name: None,
+                    plan_label: Some("Plus".to_owned()),
+                },
+                &SnapshotBlob {
+                    schema_version: 1,
+                    files: vec![],
+                },
+            )
+            .expect("save")
+            .0;
+        repo.record_usage_error(
+            &env.kind,
+            saved.id,
+            "Usage unavailable [access_token_unauthorized]: deferred".to_owned(),
+        )
+        .expect("record usage error");
+        let app = App::new(env, repo);
+
+        let error = app
+            .usage(Some(saved.id))
+            .expect_err("probe must be deferred");
+
+        assert!(format!("{error:#}").contains("deferred until this account is activated"));
+        let account = app
+            .repository
+            .get_account(&app.env.kind, saved.id)
+            .expect("load account")
+            .expect("saved account");
+        assert!(
+            account
+                .cached_usage_error
+                .as_deref()
+                .is_some_and(usage_error_is_deferred_access_token_refresh)
         );
     }
 
@@ -1770,6 +1805,60 @@ mod tests {
             .load_snapshot(&env.kind, current_id)
             .expect("load preserved current");
         assert_eq!(preserved_current, latest_live.snapshot);
+    }
+
+    #[test]
+    fn activate_saves_unsaved_current_session_and_restores_target_unchanged() {
+        let temp = tempdir().expect("tempdir");
+        let env = AppEnv {
+            kind: EnvironmentKind::Linux,
+            home_dir: temp.path().to_path_buf(),
+            codex_root: temp.path().join(".codex"),
+            app_data_dir: temp.path().join("app"),
+        };
+        std::fs::create_dir_all(&env.codex_root).expect("codex root");
+        std::fs::write(
+            env.codex_root.join("auth.json"),
+            auth_json_fixture("unsaved@example.com", "sub-unsaved", Some("pro")),
+        )
+        .expect("auth");
+        std::fs::write(env.codex_root.join("cap_sid"), "sid-unsaved").expect("cap");
+
+        let app = App::new(
+            env.clone(),
+            SnapshotRepository::new(&env.app_data_dir, MemorySecretStore::default()),
+        );
+        let unsaved_live = crate::codex::read_live_auth_bundle(&env).expect("unsaved live");
+
+        let mut target_auth: serde_json::Value = serde_json::from_str(&auth_json_fixture(
+            "target@example.com",
+            "sub-target",
+            Some("plus"),
+        ))
+        .expect("fixture json");
+        target_auth["tokens"]["refresh_token"] = serde_json::json!("official-owner-token");
+        let target_bytes = serde_json::to_vec(&target_auth).expect("serialize target auth");
+        let (target_identity, target_snapshot) =
+            crate::codex::snapshot_from_auth_json(&target_bytes).expect("target snapshot");
+        let target_id = app
+            .repository
+            .save_snapshot(&env.kind, &target_identity, &target_snapshot)
+            .expect("save target")
+            .0
+            .id;
+
+        let output = app.activate(target_id).expect("activate target");
+        let previous_id = output
+            .previous_account_id
+            .expect("unsaved current session must become a rollback point");
+        let (_, preserved_previous) = app
+            .repository
+            .load_snapshot(&env.kind, previous_id)
+            .expect("load rollback point");
+        let live_after_switch = crate::codex::read_live_auth_bundle(&env).expect("target live");
+
+        assert_eq!(preserved_previous, unsaved_live.snapshot);
+        assert_eq!(live_after_switch.snapshot, target_snapshot);
     }
 
     #[test]

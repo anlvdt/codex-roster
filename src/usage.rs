@@ -217,6 +217,13 @@ pub fn usage_error_blocks_activation(error: &str) -> bool {
     usage_error_requires_login(error) || usage_error_requires_local_recovery(error)
 }
 
+pub fn usage_error_is_deferred_access_token_refresh(error: &str) -> bool {
+    error
+        .to_ascii_lowercase()
+        .contains("[access_token_unauthorized]")
+        || usage_error_reason_code(error) == "access_token_unauthorized"
+}
+
 fn usage_error_reason_code(error: &str) -> &'static str {
     let error = error.to_ascii_lowercase();
     if error.contains("refresh_token_invalidated") || error.contains("your session has ended") {
@@ -735,6 +742,7 @@ mod tests {
         assert_eq!(usage_error_label(&message), "Usage unavailable");
         assert!(message.contains("[access_token_unauthorized]"));
         assert!(!usage_error_blocks_activation(&message));
+        assert!(usage_error_is_deferred_access_token_refresh(&message));
     }
 
     #[test]

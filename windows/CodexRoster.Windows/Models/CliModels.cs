@@ -103,11 +103,20 @@ public sealed class AutoSwitchOutput
 {
     public bool Enabled { get; init; }
     public string Status { get; init; } = string.Empty;
+    [JsonPropertyName("active_account_id")]
+    public Guid? ActiveAccountId { get; init; }
     [JsonPropertyName("candidate_account_id")]
     public Guid? CandidateAccountId { get; init; }
     [JsonPropertyName("candidate_display_name")]
     public string? CandidateDisplayName { get; init; }
     public string? Detail { get; init; }
+}
+
+public sealed class ActivateOutput
+{
+    public AccountDto Account { get; init; } = new();
+    [JsonPropertyName("previous_account_id")]
+    public Guid? PreviousAccountId { get; init; }
 }
 
 public sealed class TokenUsageSummaryDto

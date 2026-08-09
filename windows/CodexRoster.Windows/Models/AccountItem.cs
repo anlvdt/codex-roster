@@ -12,16 +12,19 @@ public sealed class AccountItem(AccountDto account)
     public string PlanLabel { get; } = account.PlanLabel ?? "ChatGPT";
     public bool NeedsRelogin { get; } = RequiresLogin(account.UsageError);
     public bool NeedsLocalRecovery { get; } = RequiresLocalRecovery(account.UsageError);
+    public bool DeferredAccessTokenRefresh { get; } = IsDeferredAccessTokenRefresh(account.UsageError);
     public bool HasTransientUsageError { get; } = !string.IsNullOrWhiteSpace(account.UsageError)
         && !RequiresLogin(account.UsageError)
-        && !RequiresLocalRecovery(account.UsageError);
+        && !RequiresLocalRecovery(account.UsageError)
+        && !IsDeferredAccessTokenRefresh(account.UsageError);
     public bool HasQuota { get; } = account.Usage?.Weekly is not null || account.Usage?.FiveHour is not null;
     public int QuotaPercent { get; } = account.Usage?.Weekly?.RemainingPercent
         ?? account.Usage?.FiveHour?.RemainingPercent
         ?? 0;
     public bool IsUsableForSwitch { get; } = IsUsable(account);
     public bool IsReady { get; } = !account.Archived
-        && string.IsNullOrWhiteSpace(account.UsageError)
+        && (string.IsNullOrWhiteSpace(account.UsageError)
+            || IsDeferredAccessTokenRefresh(account.UsageError))
         && IsUsable(account);
     public string QuotaLabel { get; } = FormatQuota(account);
     public string ResetLabel { get; } = FormatReset(account.Usage?.Weekly ?? account.Usage?.FiveHour, account.UsageError);
@@ -73,6 +76,7 @@ public sealed class AccountItem(AccountDto account)
         if (IsServerRevoked(error)) return "OpenAI đã thu hồi phiên";
         if (RequiresLogin(error)) return "Hãy đăng nhập lại";
         if (RequiresLocalRecovery(error)) return "Khôi phục snapshot local";
+        if (IsDeferredAccessTokenRefresh(error) && quota is null) return "Làm mới khi chuyển";
         if (quota is null) return "Chưa kiểm tra";
         var span = quota.ResetAt - DateTimeOffset.Now;
         if (span <= TimeSpan.Zero) return "Đang chờ reset";
@@ -95,6 +99,7 @@ public sealed class AccountItem(AccountDto account)
     {
         if (RequiresLogin(account.UsageError)) return "Cần đăng nhập lại";
         if (RequiresLocalRecovery(account.UsageError)) return "Cần khôi phục local";
+        if (IsDeferredAccessTokenRefresh(account.UsageError) && account.Usage is null) return "Chờ làm mới khi chuyển";
         if (!string.IsNullOrWhiteSpace(account.UsageError) && account.Usage is null) return "Quota tạm thời lỗi";
         var quota = account.Usage?.Weekly ?? account.Usage?.FiveHour;
         if (quota is null) return "Chưa kiểm tra quota";
@@ -111,6 +116,7 @@ public sealed class AccountItem(AccountDto account)
         if (IsServerRevoked(account.UsageError)) return "OpenAI đã thu hồi phiên";
         if (RequiresLogin(account.UsageError)) return "Cần đăng nhập";
         if (RequiresLocalRecovery(account.UsageError)) return "Cần khôi phục local";
+        if (IsDeferredAccessTokenRefresh(account.UsageError)) return "Sẽ làm mới khi chuyển";
         if (!string.IsNullOrWhiteSpace(account.UsageError)) return "Tạm thời không khả dụng";
         return "Phiên khỏe";
     }
@@ -127,6 +133,9 @@ public sealed class AccountItem(AccountDto account)
 
     private static bool RequiresLocalRecovery(string? error) =>
         error?.Contains("local recovery required", StringComparison.OrdinalIgnoreCase) == true;
+
+    private static bool IsDeferredAccessTokenRefresh(string? error) =>
+        error?.Contains("[access_token_unauthorized]", StringComparison.OrdinalIgnoreCase) == true;
 
     private static bool IsServerRevoked(string? error) =>
         error?.Contains("[server_session_revoked]", StringComparison.OrdinalIgnoreCase) == true;

@@ -461,14 +461,36 @@ final class AccountStore: ObservableObject {
                 }
                 throw error
             }
+            let launched = await relaunch.launchAndConfirm()
+            let accepted: Bool
+            if launched {
+                accepted = await self.waitForDesktopAcceptance(accountID: activated.account.id)
+            } else {
+                accepted = false
+            }
+            guard accepted else {
+                do {
+                    try await self.rollbackRejectedTarget(
+                        rejectedAccountID: activated.account.id,
+                        previousAccountID: activated.previousAccountId,
+                        fallbackRelaunch: relaunch
+                    )
+                    try? await self.reloadAccountsAfterSwitch()
+                } catch {
+                    throw CLIError(AppLanguage.text(
+                        "ChatGPT không chấp nhận tài khoản đích và không thể tự khôi phục phiên trước: \(error.localizedDescription)",
+                        "ChatGPT rejected the target account and the previous session could not be restored automatically: \(error.localizedDescription)"
+                    ))
+                }
+                throw CLIError(AppLanguage.text(
+                    "ChatGPT không chấp nhận tài khoản đích; phiên trước đã được khôi phục an toàn.",
+                    "ChatGPT rejected the target account; the previous session was restored safely."
+                ))
+            }
             self.applyActivatedAccount(activated.account)
-            // Auth is restored. Reopen and verify Desktop in the background so a
-            // slow LaunchServices response does not hold the switch UI hostage.
-            self.relaunchDesktopInBackground(relaunch)
-            let accountID = activated.account.id
-            Task {
-                try? await self.reloadAccountsAfterSwitch()
-                self.refreshUsageAfterSwitch(accountID: accountID)
+            try await self.reloadAccountsAfterSwitch()
+            if self.accounts.contains(where: { $0.id == activated.account.id && $0.isActive }) {
+                self.lastQuotaRefreshAt = .now
             }
         }
     }
@@ -868,6 +890,7 @@ final class AccountStore: ObservableObject {
                 guard !isBusyForActions else { return }
                 isSwitching = true
                 defer { isSwitching = false }
+                let previousAccountID = decision.activeAccountId
                 let candidateName = decision.candidateDisplayName
                     ?? AppLanguage.text("tài khoản khác", "another account")
                 // Close Desktop when open, switch ~/.codex, then reopen. A live
@@ -901,9 +924,36 @@ final class AccountStore: ObservableObject {
                     await relaunch.launchAndConfirm()
                     return
                 }
-                try await reloadAccountsAfterSwitch()
                 autoSwitchState = .relaunchingDesktop
-                relaunchDesktopInBackground(relaunch, afterAutoSwitch: true)
+                let launched = await relaunch.launchAndConfirm()
+                let accepted: Bool
+                if launched, let candidateID = applied.candidateAccountId {
+                    accepted = await waitForDesktopAcceptance(accountID: candidateID)
+                } else {
+                    accepted = false
+                }
+                guard accepted else {
+                    do {
+                        try await rollbackRejectedTarget(
+                            rejectedAccountID: applied.candidateAccountId,
+                            previousAccountID: applied.activeAccountId ?? previousAccountID,
+                            fallbackRelaunch: relaunch
+                        )
+                        try? await reloadAccountsAfterSwitch()
+                        errorMessage = AppLanguage.text(
+                            "ChatGPT không chấp nhận tài khoản tự động chọn; phiên trước đã được khôi phục.",
+                            "ChatGPT rejected the automatically selected account; the previous session was restored."
+                        )
+                    } catch {
+                        errorMessage = AppLanguage.text(
+                            "Tài khoản đích bị từ chối và rollback thất bại: \(error.localizedDescription)",
+                            "The target account was rejected and rollback failed: \(error.localizedDescription)"
+                        )
+                    }
+                    autoSwitchState = .checkFailed
+                    return
+                }
+                try await reloadAccountsAfterSwitch()
                 autoSwitchState = .switched(applied.candidateDisplayName ?? candidateName)
                 autoSwitchAllExhaustedNotified = false
             default:
@@ -1000,22 +1050,42 @@ final class AccountStore: ObservableObject {
         applyRoster(status: loadedStatus, accounts: loadedAccounts.accounts)
     }
 
-    private func relaunchDesktopInBackground(
-        _ relaunch: ChatGPTDesktop.RelaunchPlan,
-        afterAutoSwitch: Bool = false
-    ) {
-        Task { [weak self] in
-            guard await relaunch.launchAndConfirm() else {
-                guard let self else { return }
-                if afterAutoSwitch {
-                    self.autoSwitchState = .desktopRelaunchFailed
-                }
-                self.errorMessage = AppLanguage.text(
-                    "Không thể mở lại ChatGPT. Hãy dùng nút Mở lại ChatGPT theo phiên này.",
-                    "Could not relaunch ChatGPT. Use Relaunch ChatGPT with this session."
-                )
-                return
+    private func waitForDesktopAcceptance(accountID: UUID) async -> Bool {
+        // Give the official Desktop auth manager first ownership of the restored
+        // refresh token before Roster performs a read-only access-token probe.
+        try? await Task.sleep(for: .seconds(2))
+        let started = ContinuousClock.now
+        while ContinuousClock.now - started < .seconds(12) {
+            if (try? await cli.data(arguments: [
+                "usage", accountID.uuidString, "--json",
+            ])) != nil {
+                return true
             }
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+        return false
+    }
+
+    private func rollbackRejectedTarget(
+        rejectedAccountID: UUID?,
+        previousAccountID: UUID?,
+        fallbackRelaunch: ChatGPTDesktop.RelaunchPlan
+    ) async throws {
+        guard let previousAccountID, previousAccountID != rejectedAccountID else {
+            throw CLIError(AppLanguage.text(
+                "Không tìm thấy điểm khôi phục của phiên trước.",
+                "The previous session rollback point is unavailable."
+            ))
+        }
+        let relaunch = ChatGPTDesktop.isRunning
+            ? try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
+            : fallbackRelaunch
+        _ = try await activateAfterProcessesDrain(accountID: previousAccountID, waitForDrain: true)
+        guard await relaunch.launchAndConfirm() else {
+            throw CLIError(AppLanguage.text(
+                "Đã phục hồi dữ liệu phiên trước nhưng không thể mở lại ChatGPT.",
+                "The previous session data was restored, but ChatGPT could not be relaunched."
+            ))
         }
     }
 
@@ -1043,16 +1113,6 @@ final class AccountStore: ObservableObject {
         }
     }
 
-    private func refreshUsageAfterSwitch(accountID: UUID) {
-        Task {
-            _ = try? await cli.data(arguments: ["usage", accountID.uuidString, "--json"])
-            guard !isBusyForActions else { return }
-            try? await reloadAccountsAfterSwitch()
-            if accounts.contains(where: { $0.id == accountID && $0.isActive }) {
-                lastQuotaRefreshAt = .now
-            }
-        }
-    }
 }
 
 enum AutoSwitchState: Equatable {
@@ -1481,6 +1541,7 @@ struct AccountListOutput: Decodable {
 
 struct ActivateOutput: Decodable {
     let account: SavedAccount
+    let previousAccountId: UUID?
 }
 
 struct TokenUsageSummary: Decodable {
@@ -1668,6 +1729,11 @@ struct SavedAccount: Identifiable, Decodable {
     }
 
     func usageStatus(in language: AppLanguage) -> String {
+        if hasDeferredAccessTokenRefresh {
+            return language == .vietnamese
+                ? "Access token sẽ được làm mới an toàn khi chuyển tài khoản"
+                : "Access token will refresh safely on the next switch"
+        }
         if let usageError { return usageError }
         if let quota = primaryQuotaWindow {
             return language == .vietnamese
@@ -1685,8 +1751,15 @@ struct SavedAccount: Identifiable, Decodable {
         usageError?.localizedCaseInsensitiveContains("local recovery required") == true
     }
 
+    var hasDeferredAccessTokenRefresh: Bool {
+        usageError?.localizedCaseInsensitiveContains("[access_token_unauthorized]") == true
+    }
+
     var hasTransientUsageError: Bool {
-        usageError != nil && !requiresLogin && !requiresLocalRecovery
+        usageError != nil
+            && !requiresLogin
+            && !requiresLocalRecovery
+            && !hasDeferredAccessTokenRefresh
     }
 
     var lastVerifiedAt: Date? {
@@ -1834,6 +1907,7 @@ struct AddAccountStatusOutput: Decodable {
 struct AutoSwitchOutput: Decodable {
     let enabled: Bool
     let status: String
+    let activeAccountId: UUID?
     let candidateAccountId: UUID?
     let candidateDisplayName: String?
 }

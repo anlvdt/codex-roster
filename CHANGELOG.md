@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.2.32 - 2026-08-09
+
+### Added
+
+- Enforce one Codex Roster process per user session on macOS and Windows, so launching a second app copy exits immediately instead of creating a duplicate menu-bar or notification-area instance.
+
+### Fixed
+
+- Refresh an inactive account's stale access token and persist the rotated snapshot before any manual or automatic switch; abort safely without changing the current session when refresh fails.
+- Add a compact comparison dashboard, health summary, contextual recovery actions, and master-detail session diagnostics for managing large rosters quickly.
+
 ## v0.2.31 - 2026-08-09
 
 ### Fixed

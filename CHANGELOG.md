@@ -5,6 +5,7 @@
 ### Fixed
 
 - Keep ChatGPT/Codex Desktop running throughout add-account and re-login; these flows pause automatic switching and quota work without masquerading as an account switch or restarting Desktop.
+- Streamline the native dashboards and menu bar around switching: direct access to every available account, compact session controls, collapsible bulk management, fewer duplicate panels, and overflow menus for secondary actions.
 
 ## v0.2.30 - 2026-08-09
 

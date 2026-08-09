@@ -623,7 +623,6 @@ private struct DashboardView: View {
     let setupPasskeys: () -> Void
     @State private var automationExpanded = false
     @State private var confirmingFullBackupRestore = false
-    @State private var selectedAttentionAccountIDs: Set<UUID> = []
 
     private var readyAccounts: [SavedAccount] {
         store.sortedAccounts(store.accounts.filter {
@@ -643,10 +642,6 @@ private struct DashboardView: View {
         attentionAccounts.filter(\.requiresLogin)
     }
 
-    private var selectedAttentionAccounts: [SavedAccount] {
-        attentionAccounts.filter { selectedAttentionAccountIDs.contains($0.id) }
-    }
-
     var body: some View {
         GeometryReader { geometry in
             ScrollView {
@@ -662,8 +657,6 @@ private struct DashboardView: View {
                     passkeyPendingCount: passkeyPendingCount,
                     setupPasskeys: setupPasskeys
                 )
-
-                ProviderOverview(selection: $selection)
 
                 BulkAccountManager(reloginAll: reloginAll)
 
@@ -798,102 +791,6 @@ private struct DashboardView: View {
                     Text(language.text("Danh sách hiện tại sẽ được thay bằng bản sao tự động gần nhất trên máy này.", "The current account list will be replaced by this Mac's most recent automatic backup."))
                 }
 
-                if !reloginAccounts.isEmpty {
-                    GroupBox {
-                        VStack(spacing: 0) {
-                            HStack(spacing: 10) {
-                                Button(selectedAttentionAccountIDs.count == reloginAccounts.count
-                                    ? language.text("Bỏ chọn tất cả", "Clear selection")
-                                    : language.text("Chọn tất cả", "Select all")) {
-                                    if selectedAttentionAccountIDs.count == reloginAccounts.count {
-                                        selectedAttentionAccountIDs.removeAll()
-                                    } else {
-                                        selectedAttentionAccountIDs = Set(reloginAccounts.map(\.id))
-                                    }
-                                }
-                                .buttonStyle(.borderless)
-                                Spacer()
-                                Button(language.text("Sao chép email", "Copy emails")) {
-                                    copyAccountEmails(selectedAttentionAccounts.map(\.email))
-                                }
-                                .disabled(selectedAttentionAccounts.isEmpty)
-                                Button(language.text(
-                                    "Đăng nhập lại \(selectedAttentionAccounts.count) tài khoản…",
-                                    "Sign in to \(selectedAttentionAccounts.count) accounts…"
-                                )) {
-                                    reloginAll(selectedAttentionAccounts)
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .tint(.orange)
-                                .disabled(selectedAttentionAccounts.isEmpty)
-                            }
-                            .controlSize(.small)
-                            .padding(.bottom, 8)
-
-                            Divider()
-
-                            ForEach(reloginAccounts) { account in
-                                HStack(spacing: 12) {
-                                    Toggle(isOn: Binding(
-                                        get: { selectedAttentionAccountIDs.contains(account.id) },
-                                        set: { selected in
-                                            if selected { selectedAttentionAccountIDs.insert(account.id) }
-                                            else { selectedAttentionAccountIDs.remove(account.id) }
-                                        }
-                                    )) { EmptyView() }
-                                    .toggleStyle(.checkbox)
-                                    .labelsHidden()
-                                    Image(systemName: "exclamationmark.triangle.fill")
-                                        .foregroundStyle(.orange)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(account.displayName)
-                                        Text(account.email)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .textSelection(.enabled)
-                                    }
-                                    Spacer()
-                                    Button {
-                                        copyAccountEmail(account.email)
-                                    } label: {
-                                        Image(systemName: "doc.on.doc")
-                                    }
-                                    .buttonStyle(.borderless)
-                                    .help(language.text("Sao chép email", "Copy email"))
-                                    Button(language.text("Xem", "Review")) { selection = account.id }
-                                        .buttonStyle(.borderless)
-                                }
-                                .contextMenu {
-                                    Button(language.text("Sao chép email", "Copy email")) {
-                                        copyAccountEmail(account.email)
-                                    }
-                                }
-                                .padding(.vertical, 9)
-                                if account.id != reloginAccounts.last?.id {
-                                    Divider()
-                                }
-                            }
-                        }
-                    } label: {
-                        HStack {
-                            Label(language.text("Trung tâm khôi phục", "Recovery center"), systemImage: "person.2.badge.gearshape")
-                            Spacer()
-                            Text(language.text(
-                                "\(reloginAccounts.count) cần đăng nhập lại",
-                                "\(reloginAccounts.count) need sign-in"
-                            ))
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.orange)
-                        }
-                    }
-                    .onAppear {
-                        selectedAttentionAccountIDs = Set(reloginAccounts.map(\.id))
-                    }
-                    .onChange(of: reloginAccounts.map(\.id)) { _, accountIDs in
-                        selectedAttentionAccountIDs.formIntersection(accountIDs)
-                    }
-                }
-
                 GroupBox(language.text("An toàn phiên Codex", "Codex session safety")) {
                     VStack(alignment: .leading, spacing: 9) {
                         Label(language.text(
@@ -969,6 +866,7 @@ private struct BulkAccountManager: View {
     @State private var filter: BulkAccountFilter = .all
     @State private var selectedAccountIDs: Set<UUID> = []
     @State private var confirmingDelete = false
+    @State private var isExpanded = false
 
     private var visibleAccounts: [SavedAccount] {
         store.sortedAccounts(store.accounts.filter { account in
@@ -1014,7 +912,7 @@ private struct BulkAccountManager: View {
     }
 
     var body: some View {
-        GroupBox {
+        DisclosureGroup(isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 10) {
                 Picker("", selection: $filter) {
                     ForEach(BulkAccountFilter.allCases) { item in
@@ -1042,22 +940,10 @@ private struct BulkAccountManager: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
                     Spacer()
-                    Button(language.text("Copy email", "Copy emails")) {
-                        copyAccountEmails(selectedAccounts.map(\.email))
-                    }
-                    .disabled(selectedAccounts.isEmpty)
                     Button(language.text("Quota", "Refresh")) {
                         store.refreshUsage(for: refreshableAccounts)
                     }
                     .disabled(refreshableAccounts.isEmpty || store.isBusyForActions)
-                    Button(language.text("Lưu trữ", "Archive")) {
-                        store.setArchived(archivableAccounts, archived: true)
-                    }
-                    .disabled(archivableAccounts.isEmpty || store.isBusyForActions)
-                    Button(language.text("Khôi phục", "Restore")) {
-                        store.setArchived(restorableAccounts, archived: false)
-                    }
-                    .disabled(restorableAccounts.isEmpty || store.isBusyForActions)
                     if !reloginAccounts.isEmpty {
                         Button(language.text(
                             "Login lại \(reloginAccounts.count)",
@@ -1067,10 +953,27 @@ private struct BulkAccountManager: View {
                         }
                         .tint(.orange)
                     }
-                    Button(language.text("Xóa", "Remove"), role: .destructive) {
-                        confirmingDelete = true
+                    Menu {
+                        Button(language.text("Sao chép email", "Copy emails")) {
+                            copyAccountEmails(selectedAccounts.map(\.email))
+                        }
+                        .disabled(selectedAccounts.isEmpty)
+                        Button(language.text("Lưu trữ", "Archive")) {
+                            store.setArchived(archivableAccounts, archived: true)
+                        }
+                        .disabled(archivableAccounts.isEmpty || store.isBusyForActions)
+                        Button(language.text("Khôi phục", "Restore")) {
+                            store.setArchived(restorableAccounts, archived: false)
+                        }
+                        .disabled(restorableAccounts.isEmpty || store.isBusyForActions)
+                        Divider()
+                        Button(language.text("Xóa", "Remove"), role: .destructive) {
+                            confirmingDelete = true
+                        }
+                        .disabled(deletableAccounts.isEmpty || store.isBusyForActions)
+                    } label: {
+                        Label(language.text("Khác", "More"), systemImage: "ellipsis.circle")
                     }
-                    .disabled(deletableAccounts.isEmpty || store.isBusyForActions)
                 }
                 .controlSize(.small)
 
@@ -1129,6 +1032,7 @@ private struct BulkAccountManager: View {
                     }
                 }
             }
+            .padding(.top, 10)
         } label: {
             HStack {
                 Label(language.text("Quản lý hàng loạt", "Bulk account manager"), systemImage: "checklist")
@@ -1138,6 +1042,8 @@ private struct BulkAccountManager: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .padding(14)
+        .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: 13))
         .onChange(of: store.accounts.map(\.id)) { _, accountIDs in
             selectedAccountIDs.formIntersection(accountIDs)
         }
@@ -1253,7 +1159,7 @@ private struct DashboardHero: View {
                     .font(.body.weight(.semibold))
                     .lineLimit(2)
                     .textSelection(.enabled)
-                Text(language.text("Theo ~/.codex · khớp ChatGPT sau khi mở lại", "From ~/.codex · matches ChatGPT after relaunch"))
+                Text(language.text("Theo ~/.codex · không khởi động lại khi đăng nhập", "From ~/.codex · no restart during sign-in"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 if let firstAttention = reloginAccounts.first {
@@ -1262,8 +1168,7 @@ private struct DashboardHero: View {
                         reloginAll()
                     }
                     .controlSize(.small)
-                }
-                if passkeyPendingCount > 0 {
+                } else if passkeyPendingCount > 0 {
                     Button(language.text(
                         "Thiết lập passkey cho \(passkeyPendingCount) tài khoản",
                         "Set up passkeys for \(passkeyPendingCount) accounts"
@@ -2752,10 +2657,15 @@ private struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
 
     private var quickSwitchAccounts: [SavedAccount] {
-        Array(
-            store.sortedAccounts(switchableAccounts.filter { !$0.isActive && !$0.requiresLogin })
-                .prefix(3)
-        )
+        Array(switchTargets.prefix(3))
+    }
+
+    private var remainingSwitchAccounts: [SavedAccount] {
+        Array(switchTargets.dropFirst(3))
+    }
+
+    private var switchTargets: [SavedAccount] {
+        store.sortedAccounts(switchableAccounts.filter { !$0.isActive })
     }
 
     private var switchableAccounts: [SavedAccount] {
@@ -2765,7 +2675,7 @@ private struct MenuBarView: View {
     }
 
     private var hiddenQuickSwitchCount: Int {
-        max(0, switchableAccounts.filter { !$0.isActive }.count - quickSwitchAccounts.count)
+        remainingSwitchAccounts.count
     }
 
     private var attentionCount: Int {
@@ -2822,7 +2732,7 @@ private struct MenuBarView: View {
                     Text(language.text("Chuyển nhanh", "Quick switch"))
                         .font(.subheadline.weight(.semibold))
                     Spacer()
-                    Text(language.text("\(switchableAccounts.filter { !$0.isActive }.count) có quota", "\(switchableAccounts.filter { !$0.isActive }.count) with quota"))
+                    Text(language.text("\(switchTargets.count) có quota", "\(switchTargets.count) with quota"))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
@@ -2848,20 +2758,27 @@ private struct MenuBarView: View {
             }
 
             if hiddenQuickSwitchCount > 0 {
-                Button {
-                    openDashboard()
+                Menu {
+                    ForEach(remainingSwitchAccounts) { account in
+                        Button {
+                            requestActivation(account)
+                        } label: {
+                            Text(account.displayName)
+                        }
+                    }
                 } label: {
                     Label(
-                        language.text("Xem thêm \(hiddenQuickSwitchCount) tài khoản", "View \(hiddenQuickSwitchCount) more accounts"),
-                        systemImage: "arrow.right"
+                        language.text("Chuyển sang \(hiddenQuickSwitchCount) tài khoản khác", "Switch to \(hiddenQuickSwitchCount) more accounts"),
+                        systemImage: "ellipsis.circle"
                     )
                     .font(.caption.weight(.medium))
                     .padding(.horizontal, 5)
                     .padding(.vertical, 4)
                 }
-                .buttonStyle(.plain)
+                .menuStyle(.borderlessButton)
                 .foregroundStyle(rosterActionBlue)
                 .menuBarInteractive()
+                .disabled(store.isBusyForActions)
             }
 
             if attentionCount > 0 {
@@ -3293,80 +3210,53 @@ private struct MenuBarCurrentSession: View {
     let chatGPTRunning: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                Image(systemName: account == nil ? "person.crop.circle.badge.questionmark" : "checkmark.circle.fill")
-                    .font(.title3)
-                    .foregroundStyle(account == nil ? Color.secondary : Color.green)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(language.text("Phiên Codex (~/.codex)", "Codex session (~/.codex)"))
-                        .font(.caption.weight(.semibold))
+        HStack(spacing: 9) {
+            Image(systemName: account == nil ? "person.crop.circle.badge.questionmark" : "checkmark.circle.fill")
+                .font(.title3)
+                .foregroundStyle(account == nil ? Color.secondary : Color.green)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(language.text("Phiên Codex", "Codex session"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(account?.displayName ?? email ?? language.text("Chưa đăng nhập", "Not signed in"))
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                if let account, account.displayName != account.email {
+                    Text(account.email)
+                        .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text(account?.displayName ?? email ?? language.text("Chưa đăng nhập", "Not signed in"))
-                        .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
-                    if let account, account.displayName != account.email {
-                        Text(account.email)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
-                Spacer(minLength: 4)
-                if let emailToCopy = account?.email ?? email {
-                    Button {
-                        copyAccountEmail(emailToCopy)
-                    } label: {
-                        Image(systemName: "doc.on.doc")
-                    }
-                    .buttonStyle(.plain)
-                    .help(language.text("Sao chép email", "Copy email"))
-                    .menuBarInteractive()
-                }
-                if let quota = account?.primaryQuotaWindow {
-                    MenuBarQuota(window: quota)
                 }
             }
-            if chatGPTRunning {
+            Spacer(minLength: 2)
+            if let emailToCopy = account?.email ?? email {
                 Button {
-                    store.resyncChatGPTDesktop()
+                    copyAccountEmail(emailToCopy)
                 } label: {
-                    Label(
-                        language.text("Mở lại ChatGPT theo phiên này", "Relaunch ChatGPT with this session"),
-                        systemImage: "arrow.triangle.2.circlepath"
-                    )
-                    .font(.caption.weight(.semibold))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(rosterActionBlue.opacity(0.14), in: RoundedRectangle(cornerRadius: 8))
+                    Image(systemName: "doc.on.doc")
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(rosterActionBlue)
-                .disabled(store.isBusyForActions)
-                .menuBarInteractive(cornerRadius: 8)
-                .help(language.text(
-                    "Đóng rồi mở lại ChatGPT để giao diện khớp phiên Codex hiện tại.",
-                    "Quit and reopen ChatGPT so the UI matches the current Codex session."
-                ))
-            } else {
-                Button {
-                    store.resyncChatGPTDesktop()
-                } label: {
-                    Label(
-                        language.text("Mở ChatGPT theo phiên này", "Open ChatGPT with this session"),
-                        systemImage: "play.fill"
-                    )
-                    .font(.caption.weight(.semibold))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(rosterActionBlue)
-                .disabled(store.isBusyForActions)
+                .help(language.text("Sao chép email", "Copy email"))
                 .menuBarInteractive()
             }
+            Button {
+                store.resyncChatGPTDesktop()
+            } label: {
+                Image(systemName: chatGPTRunning ? "arrow.triangle.2.circlepath" : "play.fill")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(rosterActionBlue)
+            .disabled(store.isBusyForActions)
+            .menuBarInteractive()
+            .help(chatGPTRunning
+                ? language.text("Đồng bộ lại ChatGPT theo phiên này", "Resync ChatGPT with this session")
+                : language.text("Mở ChatGPT theo phiên này", "Open ChatGPT with this session"))
+            if let quota = account?.primaryQuotaWindow {
+                MenuBarQuota(window: quota)
+            }
         }
-        .padding(11)
-        .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 12))
+        .padding(10)
+        .background(Color.accentColor.opacity(0.09), in: RoundedRectangle(cornerRadius: 11))
         .contextMenu {
             if let emailToCopy = account?.email ?? email {
                 Button(language.text("Sao chép email", "Copy email")) {

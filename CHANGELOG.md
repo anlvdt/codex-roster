@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.24 - 2026-08-09
+
+### Fixed
+
+- **Quota now refreshes for the whole roster, not just the active account.** The macOS and Windows apps run short-lived CLI calls and never hosted the background worker added in 0.2.23, so saved accounts never picked up an off-schedule ChatGPT reset. The periodic quota poll now calls a new `refresh-usage` command that re-queries the active account plus every stale saved account. On macOS this runs regardless of the usage-window setting.
+
+### Added
+
+- `refresh-usage` CLI command: staleness-aware refresh of the active account and any stale saved accounts, for GUI frontends to poll.
+
 ## v0.2.23 - 2026-08-09
 
 ### Added

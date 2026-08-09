@@ -731,10 +731,31 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
+    private async Task RefreshRosterQuotaAsync(bool silent)
+    {
+        if (IsBusy || _isAddAccountSession) return;
+        try
+        {
+            // Re-query the active account plus any stale saved account so an
+            // off-schedule ChatGPT reset surfaces across the whole roster.
+            await _cli.RunCommandAsync("refresh-usage");
+            await RefreshRosterDataAsync();
+            QuotaRefreshStatus = $"Đã cập nhật lúc {DateTime.Now:t}";
+        }
+        catch when (silent)
+        {
+            QuotaRefreshStatus = "Đang giữ quota đã xác minh gần nhất.";
+        }
+        catch
+        {
+            ErrorMessage = "Không thể cập nhật quota.";
+        }
+    }
+
     private async Task RunQuotaTimerAsync()
     {
         if (IsBusy) return;
-        if (AutoQuotaRefresh) await RefreshActiveQuotaAsync(silent: true);
+        if (AutoQuotaRefresh) await RefreshRosterQuotaAsync(silent: true);
         if (AutoSwitchWhenExhausted) await CheckAutoSwitchAsync(silent: true);
     }
 

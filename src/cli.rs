@@ -65,6 +65,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Re-query the active account plus any stale saved accounts (staleness-aware).
+    RefreshUsage {
+        #[arg(long)]
+        json: bool,
+    },
     Activate {
         account_id: Option<Uuid>,
         #[arg(long)]
@@ -268,6 +273,15 @@ pub fn run() -> Result<()> {
                 print_json(&output)?;
             } else {
                 print_usage_output(&output);
+            }
+            Ok(())
+        }
+        Some(Command::RefreshUsage { json }) => {
+            app.refresh_usage_for_display()?;
+            if json {
+                print_json(&serde_json::json!({ "status": "refreshed" }))?;
+            } else {
+                println!("Refreshed active and stale saved account usage.");
             }
             Ok(())
         }

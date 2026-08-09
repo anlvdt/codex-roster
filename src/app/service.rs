@@ -705,6 +705,16 @@ where
         Ok(())
     }
 
+    /// Refresh usage for the roster the way a GUI poll needs it: always re-query
+    /// the live/active account so its own reset shows promptly, then sweep every
+    /// stale saved account so an off-schedule ChatGPT reset surfaces across the
+    /// whole list. GUI frontends (macOS/Windows) call short-lived CLI processes
+    /// and never host the background worker, so this gives them one entry point.
+    pub fn refresh_usage_for_display(&self) -> Result<()> {
+        let _ = self.usage(None);
+        self.refresh_stale_saved_usage()
+    }
+
     pub fn token_usage_summary(&self) -> Result<TokenUsageSummaryOutput> {
         crate::token_usage::summarize_session_tokens(
             &self.env.codex_root.join("sessions"),

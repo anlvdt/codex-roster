@@ -559,7 +559,7 @@ final class AccountStore: ObservableObject {
                 while (self?.isBusyForActions == true || self?.shouldDeferBackgroundWork == true) && !Task.isCancelled {
                     try? await Task.sleep(for: .milliseconds(250))
                 }
-                await self?.refreshActiveQuotaInBackground()
+                await self?.refreshRosterQuotaInBackground()
                 try? await Task.sleep(for: self?.quotaPollInterval ?? .seconds(60))
             }
         }
@@ -737,6 +737,30 @@ final class AccountStore: ObservableObject {
             } else {
                 autoSwitchState = .checkFailed
             }
+        }
+    }
+
+    /// Background poll refresh for the whole roster: re-query the active account
+    /// plus any stale saved account so an off-schedule ChatGPT reset surfaces
+    /// across the list. Not gated on the usage-window setting — quota freshness
+    /// should not depend on it.
+    private func refreshRosterQuotaInBackground() async {
+        guard !isBusyForActions,
+              !isCheckingAutoSwitch,
+              !isRefreshingQuotaInBackground,
+              !shouldDeferBackgroundWork,
+              !isInteractiveLoginInProgress,
+              !isPendingLogin else {
+            return
+        }
+        isRefreshingQuotaInBackground = true
+        defer { isRefreshingQuotaInBackground = false }
+        do {
+            _ = try await cli.data(arguments: ["refresh-usage", "--json"])
+            try await reloadAccountsAfterSwitch()
+            lastQuotaRefreshAt = .now
+        } catch {
+            // The last verified quota stays visible; manual refresh can surface the error.
         }
     }
 

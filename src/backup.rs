@@ -155,21 +155,35 @@ fn cached_keyring_password(account: &str, key_name: &str, allow_create: bool) ->
 }
 
 fn keyring_password(account: &str, key_name: &str, allow_create: bool) -> Result<String> {
+    // File-first. A key file in the app data directory survives app updates,
+    // unlike a Keychain item whose access is bound to the app's (ad-hoc) code
+    // signature — a changed signature silently orphaned older snapshots. The
+    // Keychain remains a migration source and a redundant copy.
+    if let Some(password) = read_key_file(account) {
+        return Ok(password);
+    }
     let entry = keyring::Entry::new(AUTOMATIC_BACKUP_KEY_SERVICE, account)
         .with_context(|| format!("failed to access the {key_name} key"))?;
     match entry.get_password() {
-        Ok(password) if !password.is_empty() => Ok(password),
+        Ok(password) if !password.is_empty() => {
+            // Migrate the working key to a file so future updates keep decrypting.
+            let _ = write_key_file(account, &password);
+            Ok(password)
+        }
         Ok(_) | Err(keyring::Error::NoEntry) if allow_create => {
             let password = format!(
                 "{}{}",
                 uuid::Uuid::new_v4().simple(),
                 uuid::Uuid::new_v4().simple()
             );
-            entry.set_password(&password).with_context(|| {
-                format!("failed to store the {key_name} key in the system credential store")
-            })?;
+            // The file is now the source of truth; keep a best-effort Keychain copy.
+            write_key_file(account, &password)?;
+            let _ = entry.set_password(&password);
             Ok(password)
         }
+        // Missing key (NoEntry / empty) with no permission to create, or an access
+        // error: never mint a replacement here — that would brick existing
+        // ciphertext. Surface the same recoverable error as before.
         Ok(_) | Err(keyring::Error::NoEntry) => Err(anyhow!(
             "the {key_name} key is missing from the system credential store; existing encrypted sessions cannot be opened until that key is restored"
         )),
@@ -177,6 +191,40 @@ fn keyring_password(account: &str, key_name: &str, allow_create: bool) -> Result
             format!("failed to read the {key_name} key from the system credential store")
         }),
     }
+}
+
+fn key_file_path(account: &str) -> Option<std::path::PathBuf> {
+    directories::ProjectDirs::from("com", "codexroster", "codex-roster")
+        .map(|dirs| dirs.data_local_dir().join("keys").join(format!("{account}.key")))
+}
+
+fn read_key_file(account: &str) -> Option<String> {
+    let path = key_file_path(account)?;
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+fn write_key_file(account: &str, password: &str) -> Result<()> {
+    let Some(path) = key_file_path(account) else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    std::fs::write(&path, password)
+        .with_context(|| format!("failed to store the key file {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 pub fn newest_automatic_backup(directory: &Path) -> Result<std::path::PathBuf> {

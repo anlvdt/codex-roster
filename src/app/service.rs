@@ -776,7 +776,22 @@ where
                 if self.is_live_saved_account(account_id)? {
                     return self.usage(None);
                 }
-                let (snapshot, _, _) = self.load_activation_target(account_id)?;
+                // A snapshot that no longer decrypts must surface as an error on
+                // the account, not silently keep stale quota forever. Record it
+                // (usage_error_requires_login treats decrypt failures as
+                // login-required) so the roster flags it for re-login.
+                let (snapshot, _, _) = match self.load_activation_target(account_id) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+                        let _ = self.repository.record_usage_error(
+                            &self.env.kind,
+                            account_id,
+                            usage_error_message(&error),
+                        );
+                        return Err(error);
+                    }
+                };
                 let target = usage_target_from_snapshot(
                     self.env.kind.clone(),
                     snapshot,

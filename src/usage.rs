@@ -169,6 +169,11 @@ pub fn usage_error_requires_login(error: &str) -> bool {
         || error.contains("snapshot refresh token missing")
         || error.contains("refresh_token_invalidated")
         || error.contains("your session has ended")
+        // A snapshot that no longer decrypts (e.g. the local key changed after an
+        // app update) can only be recovered by signing in again — surface it as
+        // login-required instead of a silent, permanently stale quota.
+        || error.contains("decrypt")
+        || error.contains("credential key")
         || (error.contains("token refresh failed")
             && (error.contains("invalid_grant")
                 || error.contains("refresh token")
@@ -645,6 +650,19 @@ mod tests {
         let error = anyhow!(
             "{}",
             r#"token refresh failed with 401 Unauthorized: {"error":{"message":"Your session has ended. Please log in again.","code":"refresh_token_invalidated"}}"#
+        );
+
+        assert!(usage_error_requires_login(&format!("{error:#}")));
+        assert_eq!(
+            usage_error_label(&usage_error_message(&error)),
+            "Login required"
+        );
+    }
+
+    #[test]
+    fn undecryptable_snapshot_is_login_required() {
+        let error = anyhow!(
+            "failed to decrypt snapshot /x/y.snapshot: could not decrypt local snapshot: Decryption failed"
         );
 
         assert!(usage_error_requires_login(&format!("{error:#}")));

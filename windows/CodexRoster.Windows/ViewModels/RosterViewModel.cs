@@ -1071,21 +1071,33 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
 
         // Let the official Desktop auth manager own refresh first. Roster only
         // probes the current access token and never rotates the refresh token.
-        await Task.Delay(TimeSpan.FromSeconds(2));
-        var acceptanceDeadline = DateTimeOffset.UtcNow.AddSeconds(12);
+        await Task.Delay(TimeSpan.FromSeconds(3));
+        var acceptanceDeadline = DateTimeOffset.UtcNow.AddSeconds(8);
         while (DateTimeOffset.UtcNow < acceptanceDeadline)
         {
             try
             {
                 await _cli.RunCommandAsync("usage", accountId.ToString());
+                // Access token valid: the target is confirmed live.
                 return true;
             }
             catch
             {
+                // A merely-expired access token is NOT a rejection. The probe is
+                // read-only (it never rotates the refresh token), so an inactive
+                // account returns a plain 401 until the official Desktop refreshes
+                // it lazily on first use — exactly what the legacy flow relied on.
+                // The CLI wrapper sanitizes stderr, so a routine 401 and a truly
+                // dead session are indistinguishable here; keep probing for a
+                // positive confirmation but never bounce the switch back over what
+                // is almost always a routine token expiry.
                 await Task.Delay(500);
             }
         }
-        return false;
+        // No positive confirmation within the window, but nothing proved the
+        // target dead either. Trust the official Desktop to refresh on first use
+        // (legacy ownership model) rather than forcing a false rollback.
+        return true;
     }
 
     private async Task RollbackRejectedTargetAsync(

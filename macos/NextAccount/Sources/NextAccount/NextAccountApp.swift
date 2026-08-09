@@ -916,8 +916,8 @@ private struct BulkAccountManager: View {
     @State private var confirmingDelete = false
     @State private var isExpanded = true
 
-    private var visibleAccounts: [SavedAccount] {
-        store.sortedAccounts(store.accounts.filter { account in
+    private func accounts(matching filter: BulkAccountFilter) -> [SavedAccount] {
+        store.accounts.filter { account in
             switch filter {
             case .all:
                 true
@@ -930,7 +930,15 @@ private struct BulkAccountManager: View {
             case .archived:
                 account.archived
             }
-        })
+        }
+    }
+
+    private func count(for filter: BulkAccountFilter) -> Int {
+        accounts(matching: filter).count
+    }
+
+    private var visibleAccounts: [SavedAccount] {
+        store.sortedAccounts(accounts(matching: filter))
     }
 
     private var selectedAccounts: [SavedAccount] {
@@ -964,7 +972,7 @@ private struct BulkAccountManager: View {
             VStack(alignment: .leading, spacing: 10) {
                 Picker("", selection: $filter) {
                     ForEach(BulkAccountFilter.allCases) { item in
-                        Text(filterLabel(item)).tag(item)
+                        Text(verbatim: "\(filterLabel(item)) · \(count(for: item))").tag(item)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -1029,12 +1037,26 @@ private struct BulkAccountManager: View {
                 Divider()
 
                 if visibleAccounts.isEmpty {
-                    Text(language.text(
-                        "Không có tài khoản trong nhóm này.",
-                        "No accounts in this group."
-                    ))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(language.text(
+                            "Nhóm “\(filterLabel(filter))” chưa có tài khoản nào.",
+                            "No accounts in the “\(filterLabel(filter))” group."
+                        ))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        if filter != .all && !store.accounts.isEmpty {
+                            Button {
+                                filter = .all
+                            } label: {
+                                Label(language.text(
+                                    "Xem tất cả \(store.accounts.count) tài khoản",
+                                    "Show all \(store.accounts.count) accounts"
+                                ), systemImage: "rectangle.stack")
+                            }
+                            .buttonStyle(.link)
+                            .controlSize(.small)
+                        }
+                    }
                     .padding(.vertical, 8)
                 } else {
                     ForEach(visibleAccounts) { account in
@@ -3129,48 +3151,68 @@ private struct MenuBarView: View {
 
             Divider()
                 .padding(.top, 4)
-            HStack(spacing: 10) {
-                Button { openAddAccountFlow() } label: {
-                    Label(language.text("Thêm tài khoản", "Add account"), systemImage: "person.crop.circle.badge.plus")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .menuBarInteractive()
-                .disabled(store.isWorking || store.isPendingLogin)
-                .help(language.text("Đăng nhập và lưu một tài khoản Codex mới.", "Sign in and save a new Codex account."))
-                Button(language.text("Mở Codex Roster", "Open Codex Roster")) { openDashboard() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
+            VStack(spacing: 8) {
+                // Primary actions share the full row width so neither label
+                // truncates on the 356pt menu bar popover.
+                HStack(spacing: 10) {
+                    Button { openAddAccountFlow() } label: {
+                        Label(language.text("Thêm tài khoản", "Add account"), systemImage: "person.crop.circle.badge.plus")
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
                     .menuBarInteractive()
-                Spacer(minLength: 14)
+                    .disabled(store.isWorking || store.isPendingLogin)
+                    .help(language.text("Đăng nhập và lưu một tài khoản Codex mới.", "Sign in and save a new Codex account."))
+                    Button { openDashboard() } label: {
+                        Label(language.text("Mở Codex Roster", "Open Codex Roster"), systemImage: "square.grid.2x2")
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .menuBarInteractive()
+                    .help(language.text("Mở bảng điều khiển đầy đủ.", "Open the full dashboard."))
+                }
+
+                // Secondary utilities on their own row; the destructive Quit is
+                // pushed to the far edge to avoid accidental taps.
                 HStack(spacing: 8) {
                     Button { store.refresh() } label: {
                         Image(systemName: "arrow.clockwise")
+                            .frame(maxWidth: .infinity)
                     }
                     .help(language.text("Làm mới", "Refresh"))
-                    .frame(width: 30, height: 28)
+                    .frame(height: 26)
                     .menuBarInteractive()
                     .disabled(store.isBusyForActions)
                     Button { updater.checkForUpdates(currentVersion: AppInfo.shortVersion) } label: {
                         Image(systemName: "arrow.down.app")
+                            .frame(maxWidth: .infinity)
                     }
                     .help(language.text("Kiểm tra cập nhật", "Check for updates"))
-                    .frame(width: 30, height: 28)
+                    .frame(height: 26)
                     .menuBarInteractive()
                     .disabled(updater.state.isBusy)
                     Button { openAbout() } label: {
                         Image(systemName: "info.circle")
+                            .frame(maxWidth: .infinity)
                     }
                     .help(language.text("Giới thiệu", "About"))
-                    .frame(width: 30, height: 28)
+                    .frame(height: 26)
                     .menuBarInteractive()
                     Button { NSApplication.shared.terminate(nil) } label: {
                         Image(systemName: "power")
+                            .frame(maxWidth: .infinity)
                     }
                     .help(language.text("Thoát Codex Roster", "Quit Codex Roster"))
-                    .frame(width: 30, height: 28)
+                    .tint(.red)
+                    .frame(height: 26)
                     .menuBarInteractive()
                 }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
             .padding(.vertical, 2)
         }

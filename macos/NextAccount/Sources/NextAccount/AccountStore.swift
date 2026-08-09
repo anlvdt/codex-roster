@@ -90,6 +90,7 @@ final class AccountStore: ObservableObject {
     private var isInteractiveLoginInProgress = false
     private var isAddAccountSession = false
     private var expectedReloginEmail: String?
+    private var loginDesktopRelaunch: ChatGPTDesktop.RelaunchPlan?
     private var newAccountLoginWatchTask: Task<Void, Never>?
     private var resetNotificationTask: Task<Void, Never>?
     private var coreBootstrapStarted = false
@@ -225,8 +226,13 @@ final class AccountStore: ObservableObject {
 
     func saveCurrentAccount() {
         run {
+            guard !self.isAddAccountSession else {
+                throw CLIError(AppLanguage.text(
+                    "Đăng nhập đang diễn ra. Hãy hoàn tất bước xác minh trong cửa sổ đăng nhập thay vì lưu phiên thủ công.",
+                    "A login is in progress. Finish verification in the login window instead of saving the session manually."
+                ))
+            }
             _ = try await self.cli.data(arguments: ["save", "--json"])
-            self.clearPendingLoginFlags()
             try await self.load()
         }
     }
@@ -255,11 +261,20 @@ final class AccountStore: ObservableObject {
             }
             let saveCommand = self.isAddAccountSession ? "save-added-account" : "save"
             let saved: SaveOutput = try await self.cli.decode(SaveOutput.self, arguments: [saveCommand])
+            do {
+                // Saving is only local evidence. Do not report success until
+                // OpenAI accepts the freshly persisted access token.
+                _ = try await self.cli.data(arguments: ["usage", saved.account.id.uuidString, "--json"])
+            } catch {
+                self.clearPendingLoginFlags()
+                try? await self.load()
+                throw CLIError(AppLanguage.text(
+                    "OpenAI chưa chấp nhận credential mới. Tài khoản đã được giữ lại nhưng chưa được đánh dấu đăng nhập thành công.",
+                    "OpenAI did not accept the new credential. The account was preserved but sign-in was not marked successful."
+                ))
+            }
             self.clearPendingLoginFlags()
             self.newAccountLoginState = .saved(liveIdentity)
-            // A new account starts without cached quota. Fetch it immediately so
-            // its reset time is available in the roster as soon as it is saved.
-            _ = try? await self.cli.data(arguments: ["usage", saved.account.id.uuidString, "--json"])
             try await self.load()
             self.lastQuotaRefreshAt = .now
         }
@@ -305,7 +320,8 @@ final class AccountStore: ObservableObject {
         let liveStatus = try await cli.decode(StatusOutput.self, arguments: ["status"])
         var began = false
         do {
-            _ = try await cli.data(arguments: ["begin-add-account", "--json"])
+            try await closeDesktopForLoginIfNeeded()
+            try await beginAddAccountAfterProcessesDrain()
             began = true
             isAddAccountSession = true
             expectedReloginEmail = expectedEmail
@@ -318,6 +334,8 @@ final class AccountStore: ObservableObject {
                 _ = try? await cli.data(arguments: ["cancel-add-account", "--json"])
                 clearPendingLoginFlags()
                 newAccountLoginState = .idle
+            } else {
+                relaunchLoginDesktopIfNeeded()
             }
             throw error
         }
@@ -329,17 +347,32 @@ final class AccountStore: ObservableObject {
         isInteractiveLoginInProgress = true
         isPendingLogin = true
         newAccountLoginState = .waiting
-        let status = try? await cli.decode(StatusOutput.self, arguments: ["status"])
-        if let current = status?.currentAccount,
-           expectedEmail.map({ current.email.caseInsensitiveCompare($0) == .orderedSame }) ?? true {
-            newAccountLoginState = .ready(current)
-            return
+        do {
+            try await closeDesktopForLoginIfNeeded()
+            let addStatus = try await cli.decode(AddAccountStatusOutput.self, arguments: ["add-account-status"])
+            let status = try? await cli.decode(StatusOutput.self, arguments: ["status"])
+            if let current = status?.currentAccount,
+               addStatus.authChanged,
+               expectedEmail.map({ current.email.caseInsensitiveCompare($0) == .orderedSame }) ?? true {
+                newAccountLoginState = .ready(current)
+                return
+            }
+            try CodexLoginLauncher.start()
+            watchForNewAccount(after: nil)
+        } catch {
+            CodexLoginLauncher.stop()
+            _ = try? await cli.data(arguments: ["cancel-add-account", "--json"])
+            isAddAccountSession = false
+            expectedReloginEmail = nil
+            isInteractiveLoginInProgress = false
+            isPendingLogin = false
+            newAccountLoginState = .idle
+            relaunchLoginDesktopIfNeeded()
+            throw error
         }
-        try CodexLoginLauncher.start()
-        watchForNewAccount(after: nil)
     }
 
-    private func watchForNewAccount(after previousIdentity: AccountIdentity?) {
+    private func watchForNewAccount(after _: AccountIdentity?) {
         newAccountLoginWatchTask?.cancel()
         newAccountLoginWatchTask = Task { [weak self] in
             guard let self else { return }
@@ -347,7 +380,10 @@ final class AccountStore: ObservableObject {
                 try? await Task.sleep(for: .seconds(1))
                 guard !Task.isCancelled else { return }
                 guard case .waiting = self.newAccountLoginState else { return }
-                guard let status = try? await self.cli.decode(StatusOutput.self, arguments: ["status"]),
+                guard let addStatus = try? await self.cli.decode(AddAccountStatusOutput.self, arguments: ["add-account-status"]),
+                      addStatus.active,
+                      addStatus.authChanged,
+                      let status = try? await self.cli.decode(StatusOutput.self, arguments: ["status"]),
                       let current = status.currentAccount else {
                     continue
                 }
@@ -355,7 +391,6 @@ final class AccountStore: ObservableObject {
                    current.email.caseInsensitiveCompare(expected) != .orderedSame {
                     continue
                 }
-                guard previousIdentity.map({ !$0.matches(current) }) ?? true else { continue }
                 self.status = status
                 self.newAccountLoginState = .ready(current)
                 return
@@ -385,17 +420,19 @@ final class AccountStore: ObservableObject {
         }
         let saveCommand = isAddAccountSession ? "save-added-account" : "save"
         _ = try await cli.data(arguments: [saveCommand, "--json"])
+        do {
+            _ = try await cli.data(arguments: ["usage", account.id.uuidString, "--json"])
+        } catch {
+            clearPendingLoginFlags()
+            try? await load()
+            throw CLIError(AppLanguage.text(
+                "OpenAI chưa chấp nhận credential mới của \(account.email). Tài khoản vẫn được giữ nguyên và hàng đợi sẽ không chuyển tiếp.",
+                "OpenAI did not accept the new credential for \(account.email). The account was preserved and the queue will not advance."
+            ))
+        }
         clearPendingLoginFlags()
         newAccountLoginState = .idle
         try await load()
-        _ = try? await cli.data(arguments: ["usage", account.id.uuidString, "--json"])
-        try await load()
-        if accounts.first(where: { $0.id == account.id })?.requiresLogin == true {
-            throw CLIError(AppLanguage.text(
-                "Tài khoản \(account.email) vẫn cần đăng nhập. Hãy hoàn tất đăng nhập OpenAI trên trình duyệt rồi thử lưu lại.",
-                "Account \(account.email) still needs sign-in. Finish the OpenAI browser sign-in, then save again."
-            ))
-        }
     }
 
     private func clearPendingLoginFlags() {
@@ -404,6 +441,33 @@ final class AccountStore: ObservableObject {
         isAddAccountSession = false
         expectedReloginEmail = nil
         isPendingLogin = false
+        relaunchLoginDesktopIfNeeded()
+    }
+
+    private func closeDesktopForLoginIfNeeded() async throws {
+        guard ChatGPTDesktop.isRunning else { return }
+        loginDesktopRelaunch = try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
+    }
+
+    private func beginAddAccountAfterProcessesDrain() async throws {
+        for attempt in 0..<AccountActivationSafety.processDrainAttempts {
+            do {
+                _ = try await cli.data(arguments: ["begin-add-account", "--json"])
+                return
+            } catch {
+                guard AccountActivationSafety.isProcessSafetyBlock(error),
+                      attempt + 1 < AccountActivationSafety.processDrainAttempts else {
+                    throw error
+                }
+                try? await Task.sleep(for: .milliseconds(150))
+            }
+        }
+    }
+
+    private func relaunchLoginDesktopIfNeeded() {
+        guard let relaunch = loginDesktopRelaunch else { return }
+        loginDesktopRelaunch = nil
+        relaunchDesktopInBackground(relaunch)
     }
 
     func activate(_ account: SavedAccount, force: Bool = false) {
@@ -522,7 +586,8 @@ final class AccountStore: ObservableObject {
         isInteractiveLoginInProgress = true
         isPendingLogin = true
         newAccountLoginState = .waiting
-        if let current = try? await cli.decode(StatusOutput.self, arguments: ["status"]).currentAccount {
+        if addStatus.authChanged,
+           let current = try? await cli.decode(StatusOutput.self, arguments: ["status"]).currentAccount {
             newAccountLoginState = .ready(current)
         } else {
             watchForNewAccount(after: nil)
@@ -1159,10 +1224,10 @@ private enum CodexLoginLauncher {
         let login = Process()
         if let executable = resolvedCodexExecutable() {
             login.executableURL = URL(fileURLWithPath: executable)
-            login.arguments = ["login"]
+            login.arguments = ["-c", "cli_auth_credentials_store=\"file\"", "login"]
         } else {
             login.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            login.arguments = ["codex", "login"]
+            login.arguments = ["codex", "-c", "cli_auth_credentials_store=\"file\"", "login"]
         }
         login.currentDirectoryURL = FileManager.default.temporaryDirectory
         login.standardOutput = FileHandle.nullDevice
@@ -1792,6 +1857,7 @@ struct AutoStartUsageWindowsStatus: Decodable {
 
 struct AddAccountStatusOutput: Decodable {
     let active: Bool
+    let authChanged: Bool
 }
 
 struct AutoSwitchOutput: Decodable {

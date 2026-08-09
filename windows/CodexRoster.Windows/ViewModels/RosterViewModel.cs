@@ -131,19 +131,17 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
             NotifyPendingLoginChanged();
             if (addAccount.Active)
             {
-                // begin-add-account clears live auth, so any current identity is the
-                // newly signed-in account waiting to be saved.
-                LoginStatus = "Đang chờ hoàn tất đăng nhập tài khoản mới. Lưu phiên mới hoặc hủy để khôi phục phiên trước.";
+                LoginStatus = "Đang chờ Codex ghi credential mới. Hoàn tất đăng nhập hoặc hủy để khôi phục phiên trước.";
                 IdentityDto? current = null;
                 try { current = (await _cli.ReadAsync<StatusResponse>("status")).CurrentAccount; }
                 catch { /* watcher below will retry */ }
-                if (current is not null)
+                if (addAccount.AuthChanged && current is not null)
                 {
                     _pendingLoginIdentity = current;
                     LoginStatus = $"Đã nhận diện {current.Email}. Roster đang tự động lưu phiên.";
                     NotifyPendingLoginChanged();
                 }
-                WatchForNewLoginAsync(previousIdentity: null);
+                WatchForNewLoginAsync(null);
             }
         }
         catch
@@ -325,8 +323,8 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
     {
         await RunAsync(async () =>
         {
-            // Do not close ChatGPT/Codex Desktop here. Killing Desktop looks like the app
-            // "turned off", and device login does not need a Desktop restart (macOS leaves it alone).
+            // Login writes the shared auth file, so Desktop must be stopped and
+            // relaunched after the new credential has been persisted and verified.
             var addStatus = await _cli.ReadAsync<AddAccountStatusResponse>("add-account-status");
             if (addStatus.Active || _isAddAccountSession)
             {
@@ -338,10 +336,14 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
             var began = false;
             try
             {
+                if (CodexDesktopLifecycle.IsRunning())
+                {
+                    LoginStatus = "Đang đóng Codex Desktop để bảo vệ credential trong lúc đăng nhập…";
+                    _loginRelaunch = await CodexDesktopLifecycle.CloseForAccountSwitchAsync();
+                }
                 await _cli.RunCommandAsync("begin-add-account");
                 began = true;
                 CodexLoginLauncher.Start();
-                _loginRelaunch = null;
                 _isAddAccountSession = true;
                 _pendingLoginIdentity = null;
                 _expectedLoginEmail = expectedEmail;
@@ -363,6 +365,8 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
                     _loginWatchCancellation?.Cancel();
                     NotifyPendingLoginChanged();
                 }
+                _loginRelaunch?.Restart();
+                _loginRelaunch = null;
                 throw;
             }
         });
@@ -370,29 +374,36 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
 
     private async Task ResumePendingLoginAsync(string? expectedEmail)
     {
-        IdentityDto? previous = null;
-        try { previous = (await _cli.ReadAsync<StatusResponse>("status")).CurrentAccount; }
-        catch { /* watcher will retry */ }
-        CodexLoginLauncher.Start();
-        _isAddAccountSession = true;
-        _expectedLoginEmail = expectedEmail;
-        NotifyPendingLoginChanged();
-        LoginStatus = expectedEmail is null
-            ? "Phiên thêm tài khoản vẫn đang mở. Hoàn tất đăng nhập; Roster sẽ tự lưu, hoặc chọn Hủy để khôi phục phiên trước."
-            : $"Phiên đăng nhập lại vẫn đang mở. Đăng nhập đúng {expectedEmail}; Roster sẽ tự lưu, hoặc chọn Hủy.";
-        WatchForNewLoginAsync(previous);
+        try
+        {
+            if (CodexDesktopLifecycle.IsRunning())
+            {
+                _loginRelaunch = await CodexDesktopLifecycle.CloseForAccountSwitchAsync();
+            }
+            IdentityDto? previous = null;
+            try { previous = (await _cli.ReadAsync<StatusResponse>("status")).CurrentAccount; }
+            catch { /* watcher will retry */ }
+            CodexLoginLauncher.Start();
+            _isAddAccountSession = true;
+            _expectedLoginEmail = expectedEmail;
+            NotifyPendingLoginChanged();
+            LoginStatus = expectedEmail is null
+                ? "Phiên thêm tài khoản vẫn đang mở. Hoàn tất đăng nhập; Roster sẽ tự lưu, hoặc chọn Hủy để khôi phục phiên trước."
+                : $"Phiên đăng nhập lại vẫn đang mở. Đăng nhập đúng {expectedEmail}; Roster sẽ tự lưu, hoặc chọn Hủy.";
+            WatchForNewLoginAsync(previous);
+        }
+        catch
+        {
+            _loginRelaunch?.Restart();
+            _loginRelaunch = null;
+            throw;
+        }
     }
 
     public async Task SaveCurrentAccountAsync()
     {
         var expectedReloginEmail = _expectedLoginEmail;
         var completedRelogin = expectedReloginEmail is not null;
-        var reloginAccountId = completedRelogin
-            ? Accounts.FirstOrDefault(account => string.Equals(
-                account.Email,
-                expectedReloginEmail,
-                StringComparison.OrdinalIgnoreCase))?.Id
-            : null;
         await RunAsync(async () =>
         {
             var current = await _cli.ReadAsync<StatusResponse>("status");
@@ -421,16 +432,32 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
                     throw new InvalidOperationException($"Phiên hiện tại không phải {_expectedLoginEmail}. Hãy đăng nhập đúng tài khoản rồi thử lại.");
                 }
             }
-            await _cli.RunCommandAsync(_isAddAccountSession ? "save-added-account" : "save");
-            if (completedRelogin)
+            var savedLocally = false;
+            try
             {
-                if (reloginAccountId is not Guid accountId)
-                {
-                    throw new InvalidOperationException("Không tìm thấy account cần xác minh sau đăng nhập lại.");
-                }
+                var saved = await _cli.ReadAsync<SaveAccountResponse>(
+                    _isAddAccountSession ? "save-added-account" : "save");
+                savedLocally = true;
                 // Saving is only local evidence. Require a successful server
-                // usage request before clearing the marker or advancing the queue.
-                await _cli.RunCommandAsync("usage", accountId.ToString());
+                // request for both new accounts and relogins.
+                await _cli.RunCommandAsync("usage", saved.Account.Id.ToString());
+            }
+            catch
+            {
+                if (savedLocally && _isAddAccountSession)
+                {
+                    CodexLoginLauncher.Stop();
+                    _loginRelaunch?.Restart();
+                    _loginRelaunch = null;
+                    _isAddAccountSession = false;
+                    _pendingLoginIdentity = null;
+                    _expectedLoginEmail = null;
+                    _loginWatchCancellation?.Cancel();
+                    NotifyPendingLoginChanged();
+                    try { await RefreshRosterDataAsync(); }
+                    catch { /* the original verification error is authoritative */ }
+                }
+                throw;
             }
             if (_isAddAccountSession)
             {
@@ -1200,7 +1227,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    private void WatchForNewLoginAsync(IdentityDto? previousIdentity)
+    private void WatchForNewLoginAsync(IdentityDto? _)
     {
         _loginWatchCancellation?.Cancel();
         var cancellation = new CancellationTokenSource();
@@ -1212,9 +1239,10 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
                 try
                 {
                     await Task.Delay(TimeSpan.FromSeconds(1), cancellation.Token);
+                    var addStatus = await _cli.ReadAsync<AddAccountStatusResponse>("add-account-status");
+                    if (!addStatus.Active || !addStatus.AuthChanged) continue;
                     var status = await _cli.ReadAsync<StatusResponse>("status");
                     if (status.CurrentAccount is null) continue;
-                    if (_expectedLoginEmail is null && SameIdentity(status.CurrentAccount, previousIdentity)) continue;
                     if (_expectedLoginEmail is not null
                         && !string.Equals(status.CurrentAccount.Email, _expectedLoginEmail, StringComparison.OrdinalIgnoreCase))
                     {

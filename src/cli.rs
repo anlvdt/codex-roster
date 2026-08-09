@@ -264,7 +264,10 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         Some(Command::AddAccountStatus { json }) => {
-            let output = serde_json::json!({ "active": app.add_account_session_active() });
+            let output = serde_json::json!({
+                "active": app.add_account_session_active(),
+                "auth_changed": app.add_account_session_auth_changed()?,
+            });
             if json {
                 print_json(&output)?;
             } else {

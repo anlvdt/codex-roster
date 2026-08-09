@@ -78,6 +78,23 @@ pub fn add_account_session_active(env: &AppEnv) -> bool {
     env.codex_root.join(ADD_ACCOUNT_MARKER).exists()
 }
 
+/// A completed Codex login must replace the auth document that was present
+/// when the add/re-login session began. Identity alone is not sufficient for a
+/// same-account re-login, and an OAuth callback can succeed before Codex has
+/// finished persisting its new credentials.
+pub fn add_account_auth_changed(env: &AppEnv) -> Result<bool> {
+    if !add_account_session_active(env) {
+        return Ok(false);
+    }
+    let current = fs::read(env.codex_root.join("auth.json")).ok();
+    let previous = fs::read(env.codex_root.join(ADD_ACCOUNT_AUTH_BACKUP)).ok();
+    Ok(match (previous, current) {
+        (Some(previous), Some(current)) => current != previous,
+        (None, Some(current)) => !current.is_empty(),
+        _ => false,
+    })
+}
+
 /// Preserve the current session before starting a new device login.
 ///
 /// Keep the live files in place while the login starts, matching the legacy
@@ -123,6 +140,11 @@ pub fn begin_add_account_session(env: &AppEnv) -> Result<()> {
 pub fn finish_add_account_session(env: &AppEnv) -> Result<()> {
     if !add_account_session_active(env) {
         bail!("no add-account session is in progress");
+    }
+    if !add_account_auth_changed(env)? {
+        bail!(
+            "Codex login has not written new credentials yet; finish the browser login and wait for it to complete before saving"
+        );
     }
     ensure_cap_sid_exists(env)?;
     clear_add_account_artifacts(env);
@@ -690,6 +712,37 @@ mod tests {
             fs::read_to_string(codex_root.join("cap_sid"))?,
             "sid-original"
         );
+        assert!(!add_account_session_active(&env));
+        Ok(())
+    }
+
+    #[test]
+    fn add_account_cannot_finish_until_codex_persists_new_auth() -> Result<()> {
+        let temp = tempdir()?;
+        let codex_root = temp.path().join(".codex");
+        fs::create_dir_all(&codex_root)?;
+        fs::write(
+            codex_root.join("auth.json"),
+            auth_json_fixture("person@example.com", "sub-1", Some("pro")),
+        )?;
+        let env = AppEnv {
+            kind: EnvironmentKind::Linux,
+            home_dir: temp.path().to_path_buf(),
+            codex_root: codex_root.clone(),
+            app_data_dir: temp.path().join("data"),
+        };
+
+        begin_add_account_session(&env)?;
+        assert!(!add_account_auth_changed(&env)?);
+        let error = finish_add_account_session(&env).expect_err("unchanged auth must be rejected");
+        assert!(format!("{error:#}").contains("has not written new credentials"));
+
+        fs::write(
+            codex_root.join("auth.json"),
+            auth_json_fixture("person@example.com", "sub-1", Some("plus")),
+        )?;
+        assert!(add_account_auth_changed(&env)?);
+        finish_add_account_session(&env)?;
         assert!(!add_account_session_active(&env));
         Ok(())
     }

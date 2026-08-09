@@ -91,6 +91,19 @@ where
         force: bool,
     ) -> Result<AutoSwitchOutput> {
         let enabled = self.auto_switch_enabled()?;
+        if codex::add_account_session_active(&self.env) {
+            return Ok(auto_switch_output(
+                enabled,
+                "waiting_for_login",
+                None,
+                None,
+                None,
+                Some(
+                    "Account login is in progress; the current session was left unchanged."
+                        .to_owned(),
+                ),
+            ));
+        }
         if !enabled {
             return Ok(auto_switch_output(
                 false, "disabled", None, None, None, None,
@@ -357,6 +370,8 @@ where
     /// session, and cancel still restores the backed-up session if login changes it.
     pub fn begin_add_account_session(&self) -> Result<()> {
         let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
+        let warnings = activation_process_warnings();
+        ensure_activation_processes_stopped(&warnings)?;
         if codex::try_read_live_auth_bundle(&self.env)?.is_some() {
             self.save_current_inner(true)?;
         }
@@ -366,6 +381,11 @@ where
 
     pub fn save_added_account_session(&self) -> Result<SaveOutput> {
         let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
+        if !codex::add_account_auth_changed(&self.env)? {
+            anyhow::bail!(
+                "Codex login has not written new credentials yet; finish the browser login and wait for it to complete before saving"
+            );
+        }
         let output = self.save_current_inner(true)?;
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         codex::finish_add_account_session(&self.env)?;
@@ -380,6 +400,10 @@ where
 
     pub fn add_account_session_active(&self) -> bool {
         codex::add_account_session_active(&self.env)
+    }
+
+    pub fn add_account_session_auth_changed(&self) -> Result<bool> {
+        codex::add_account_auth_changed(&self.env)
     }
 
     /// Import one or more accounts from a JSON file.
@@ -570,31 +594,11 @@ where
                 anyhow::bail!("automatic switch was superseded because the active account changed");
             }
         }
-        let (mut snapshot, snapshot_identity, restore_identity) =
+        let (snapshot, snapshot_identity, restore_identity) =
             self.load_activation_target(account_id)?;
-        // Refresh-on-restore: hand Codex a valid access token instead of an
-        // expired one it would have to refresh itself (which can loop on
-        // `refresh_token_reused` and force a login). Skip the account that is
-        // already live — Codex owns that refresh token. Rotated tokens are
-        // persisted to the saved copy first so the two never diverge.
-        if !self.is_live_saved_account(account_id)?
-            && let Some(refreshed) =
-                crate::usage::refresh_snapshot_if_access_token_stale(&snapshot)?
-        {
-            let cached_usage = self
-                .repository
-                .load_snapshot(&self.env.kind, account_id)
-                .ok()
-                .and_then(|(metadata, _)| metadata.cached_usage);
-            self.repository.replace_snapshot_without_backup(
-                &self.env.kind,
-                account_id,
-                &snapshot_identity,
-                &refreshed,
-                cached_usage,
-            )?;
-            snapshot = refreshed;
-        }
+        // Preserve the legacy ownership model: restore the saved auth document
+        // unchanged and let Codex's official auth manager refresh it in place.
+        // Roster must never consume an inactive account's rotating refresh token.
         let loaded_target_at = Instant::now();
         let verify_stable = should_verify_activation_stability(force_running, &warnings);
         let verify_retries = 4;
@@ -778,6 +782,11 @@ where
     }
 
     pub fn usage(&self, account_id: Option<Uuid>) -> Result<UsageOutput> {
+        if codex::add_account_session_active(&self.env) {
+            anyhow::bail!(
+                "account login is in progress; quota refresh is paused until the new credential is saved or cancelled"
+            );
+        }
         let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
         self.usage_with_auth_lock(account_id)
     }
@@ -814,7 +823,7 @@ where
                     self.env.kind.clone(),
                     snapshot,
                     UsageSource::SavedAccessToken,
-                    true,
+                    false,
                 )?;
                 match fetch_usage(target) {
                     Ok((output, refreshed_snapshot)) => {
@@ -1256,6 +1265,35 @@ mod tests {
             app.is_live_saved_account(saved.id)
                 .expect("active account check")
         );
+    }
+
+    #[test]
+    fn save_added_account_rejects_unchanged_live_credentials() {
+        let temp = tempdir().expect("tempdir");
+        let env = AppEnv {
+            kind: EnvironmentKind::Linux,
+            home_dir: temp.path().to_path_buf(),
+            codex_root: temp.path().join(".codex"),
+            app_data_dir: temp.path().join("app"),
+        };
+        std::fs::create_dir_all(&env.codex_root).expect("codex root");
+        std::fs::write(
+            env.codex_root.join("auth.json"),
+            auth_json_fixture("person@example.com", "sub-1", Some("pro")),
+        )
+        .expect("auth");
+        let app = App::new(
+            env,
+            SnapshotRepository::new(temp.path(), MemorySecretStore::default()),
+        );
+
+        app.begin_add_account_session().expect("begin login");
+        let error = app
+            .save_added_account_session()
+            .expect_err("unchanged auth must not be accepted");
+
+        assert!(format!("{error:#}").contains("has not written new credentials"));
+        app.cancel_add_account_session().expect("cancel");
     }
 
     #[test]

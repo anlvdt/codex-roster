@@ -26,6 +26,13 @@ public sealed class LegacyRecoveryResponse
 public sealed class AddAccountStatusResponse
 {
     public bool Active { get; init; }
+    [JsonPropertyName("auth_changed")]
+    public bool AuthChanged { get; init; }
+}
+
+public sealed class SaveAccountResponse
+{
+    public AccountDto Account { get; init; } = new();
 }
 
 public sealed class RunningProcessDto

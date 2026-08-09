@@ -8,6 +8,10 @@
 - Wait briefly for Desktop helpers to drain without forcing, restore the previous Desktop session when a switch is blocked, and verify the restored auth remains stable for a full second.
 - Preserve existing login-error markers when auth is merely saved locally; only a successful server usage/refresh check clears them.
 - Distinguish explicit server session revocation, rejected refresh tokens, and an unproven access-token 401 without storing token material.
+- Require Codex to persist a genuinely changed auth document before add/re-login can be saved, and require OpenAI to accept it before the UI reports success or advances a bulk-login queue.
+- Stop and later restore Desktop around login, pin Codex login to file-backed credentials, and pause quota/auto-switch work for the entire login transaction.
+- Restore legacy token ownership for inactive accounts: background quota checks and activation no longer consume saved rotating refresh tokens; Codex refreshes the active auth in place.
+- Disable background Codex logins for inactive accounts so an interrupted usage-window ping can never consume a saved refresh token without persisting its replacement.
 - Add cross-platform CI and regression gates that fail if forced account switching is reintroduced.
 
 ## v0.2.29 - 2026-08-09

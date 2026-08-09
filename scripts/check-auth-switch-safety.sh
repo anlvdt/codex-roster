@@ -26,4 +26,25 @@ done
 grep -F -q 'ensure_activation_processes_stopped(&warnings)?;' \
   "$root_dir/src/app/service.rs"
 
+if grep -F -n 'refresh_snapshot_if_access_token_stale(&snapshot)' \
+  "$root_dir/src/app/service.rs"; then
+  echo "Unsafe inactive snapshot refresh detected during activation." >&2
+  exit 1
+fi
+
+if grep -F -A 2 'UsageSource::SavedAccessToken,' \
+  "$root_dir/src/app/service.rs" | grep -F -q 'true'; then
+  echo "Unsafe background refresh-token rotation detected for a saved account." >&2
+  exit 1
+fi
+
+grep -F -q '"auth_changed": app.add_account_session_auth_changed()?' \
+  "$root_dir/src/cli.rs"
+
+if grep -F -n 'Command::new("codex")' \
+  "$root_dir/src/app/auto_start.rs"; then
+  echo "Unsafe background Codex login detected for inactive accounts." >&2
+  exit 1
+fi
+
 echo "Auth switch safety checks passed."

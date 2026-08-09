@@ -25,7 +25,7 @@ public static class CodexLoginLauncher
         startInfo.ArgumentList.Add("/d");
         startInfo.ArgumentList.Add("/s");
         startInfo.ArgumentList.Add("/c");
-        startInfo.ArgumentList.Add($"{quoted} login");
+        startInfo.ArgumentList.Add($"{quoted} -c cli_auth_credentials_store='file' login");
         _deviceLoginProcess = Process.Start(startInfo)
             ?? throw new InvalidOperationException("Không thể mở đăng nhập Codex.");
     }

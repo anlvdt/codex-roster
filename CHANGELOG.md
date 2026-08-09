@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.35 - 2026-08-09
+
+### Changed
+
+- Redesign the menu bar popover action bar into two rows so the primary "Thêm tài khoản" and "Mở Codex Roster" buttons share the full width and no longer truncate; secondary utilities (refresh, update, about, quit) move to their own row with the destructive Quit set apart.
+- Show a per-filter account count on each Bulk account manager tab (e.g. "Tất cả · 12", "Cần xử lý · 0") so it is obvious which groups contain accounts, and give the empty state a clearer message plus a one-tap shortcut to view all accounts.
+
 ## v0.2.34 - 2026-08-09
 
 ### Fixed

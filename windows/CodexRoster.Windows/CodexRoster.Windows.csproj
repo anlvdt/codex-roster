@@ -6,9 +6,9 @@
     <RootNamespace>CodexRoster.Windows</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>..\..\assets\codex-roster.ico</ApplicationIcon>
-    <Version>0.2.34</Version>
-    <AssemblyVersion>0.2.34.0</AssemblyVersion>
-    <FileVersion>0.2.34.0</FileVersion>
+    <Version>0.2.35</Version>
+    <AssemblyVersion>0.2.35.0</AssemblyVersion>
+    <FileVersion>0.2.35.0</FileVersion>
     <UseWinUI>true</UseWinUI>
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>

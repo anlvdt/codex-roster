@@ -1581,6 +1581,7 @@ private struct AddAccountSheet: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @Environment(\.dismiss) private var dismiss
+    @State private var didStart = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -1589,58 +1590,30 @@ private struct AddAccountSheet: View {
                 .foregroundStyle(.tint)
 
             Text(language.text(
-                "Đăng nhập một tài khoản mới hoặc lưu phiên Codex đang dùng.",
-                "Sign in to a new account or save the Codex session you are already using."
+                "Hoàn tất đăng nhập OpenAI trong cửa sổ vừa mở. Roster sẽ tự nhận diện và lưu tài khoản mới.",
+                "Finish signing in to OpenAI in the window that just opened. Roster will detect and save the new account automatically."
             ))
             .foregroundStyle(.secondary)
 
             GroupBox {
-                VStack(alignment: .leading, spacing: 10) {
-                    Label(language.text("1. Đăng nhập tài khoản mới", "1. Sign in to a new account"), systemImage: "arrow.right.circle.fill")
-                        .font(.headline)
-                    Text(language.text(
-                        "Trang đăng nhập OpenAI và Terminal sẽ mở. Hoàn tất mã xác thực trong trình duyệt, rồi quay lại đây.",
-                        "OpenAI sign-in and Terminal will open. Complete the device verification in your browser, then return here."
-                    ))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    Button(language.text("Mở đăng nhập OpenAI", "Open OpenAI sign-in")) {
-                        store.startNewAccountLogin()
+                HStack(spacing: 12) {
+                    if isFinished {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.title2)
+                            .foregroundStyle(.green)
+                    } else {
+                        ProgressView()
+                            .controlSize(.small)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(store.isWorking || isWaitingForLogin)
-
-                    if isWaitingForLogin {
-                        Label(language.text(
-                            "Đang chờ Codex hoàn tất đăng nhập trên trình duyệt… App sẽ tự nhận diện tài khoản mới.",
-                            "Waiting for Codex to finish the browser sign-in… The app will detect the new account automatically."
-                        ), systemImage: "hourglass")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(progressTitle).font(.headline)
+                        Text(saveStatusText)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
                     }
                 }
-            }
-
-            GroupBox {
-                VStack(alignment: .leading, spacing: 10) {
-                    Label(language.text("2. Lưu vào Codex Roster", "2. Save to Codex Roster"), systemImage: "tray.and.arrow.down.fill")
-                        .font(.headline)
-                    Text(saveStatusText)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    HStack {
-                        Button(language.text("Tải lại trạng thái", "Reload status")) {
-                            store.refresh()
-                        }
-                        .disabled(store.isWorking)
-                        Spacer()
-                        Button(language.text("Lưu tài khoản mới", "Save new account")) {
-                            store.saveDetectedNewAccount()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(store.isWorking || !canSaveNewAccount)
-                    }
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(4)
             }
 
             if case let .saved(identity) = store.newAccountLoginState {
@@ -1663,15 +1636,17 @@ private struct AddAccountSheet: View {
             .foregroundStyle(.secondary)
 
             HStack {
-                if store.isPendingLogin {
-                    Button(language.text("Hủy và khôi phục phiên", "Cancel and restore session")) {
-                        store.cancelPendingLogin()
-                        dismiss()
+                if case .failed = store.newAccountLoginState {
+                    Button(language.text("Thử lại", "Try again")) {
+                        store.resetNewAccountLogin()
+                        store.startNewAccountLogin()
                     }
-                    .tint(.orange)
+                    .buttonStyle(.borderedProminent)
                 }
                 Spacer()
-                Button(language.text("Đóng", "Close")) {
+                Button(store.isPendingLogin
+                    ? language.text("Hủy", "Cancel")
+                    : language.text("Đóng", "Close")) {
                     if store.isPendingLogin {
                         store.cancelPendingLogin()
                     } else {
@@ -1679,35 +1654,65 @@ private struct AddAccountSheet: View {
                     }
                     dismiss()
                 }
+                .disabled(store.isWorking)
             }
         }
         .padding(24)
-        .frame(width: 560)
+        .frame(width: 500)
+        .interactiveDismissDisabled(store.isPendingLogin)
+        .onAppear {
+            guard !didStart else { return }
+            didStart = true
+            if case .idle = store.newAccountLoginState {
+                store.startNewAccountLogin()
+            } else if case .ready = store.newAccountLoginState {
+                Task {
+                    try? await Task.sleep(for: .milliseconds(150))
+                    store.saveDetectedNewAccount()
+                }
+            }
+        }
+        .onChange(of: store.newAccountLoginState) { _, state in
+            if case .ready = state {
+                Task {
+                    // A resumed login can publish `.ready` just before the
+                    // launcher operation releases its busy flag.
+                    try? await Task.sleep(for: .milliseconds(150))
+                    store.saveDetectedNewAccount()
+                }
+            } else if case .saved = state {
+                Task {
+                    try? await Task.sleep(for: .milliseconds(650))
+                    dismiss()
+                }
+            }
+        }
     }
 
-    private var isWaitingForLogin: Bool {
-        if case .waiting = store.newAccountLoginState { return true }
+    private var isFinished: Bool {
+        if case .saved = store.newAccountLoginState { return true }
         return false
     }
 
-    private var canSaveNewAccount: Bool {
-        if case .ready = store.newAccountLoginState { return true }
-        return false
+    private var progressTitle: String {
+        switch store.newAccountLoginState {
+        case .idle, .waiting: return language.text("Đang chờ đăng nhập", "Waiting for sign-in")
+        case .ready, .saving: return language.text("Đang tự động lưu", "Saving automatically")
+        case .saved: return language.text("Đã thêm tài khoản", "Account added")
+        case .failed: return language.text("Chưa thể hoàn tất", "Could not finish")
+        }
     }
 
     private var saveStatusText: String {
         switch store.newAccountLoginState {
         case .idle:
-            return language.text(
-                "Mở đăng nhập ở bước 1; app sẽ chỉ bật nút Lưu sau khi nhận diện account mới.",
-                "Start step 1; the Save button unlocks only after the new account is detected."
-            )
+            return language.text("Đang mở trang đăng nhập OpenAI…", "Opening OpenAI sign-in…")
         case .waiting:
-            return language.text("Đang chờ account mới…", "Waiting for the new account…")
+            return language.text("Không cần bấm thêm — Roster đang theo dõi phiên Codex.", "No more clicks needed — Roster is watching the Codex session.")
         case .ready(let identity):
-            return language.text("Đã nhận diện: \(identity.email)", "Detected: \(identity.email)")
+            return language.text("Đã nhận diện \(identity.email).", "Detected \(identity.email).")
         case .saving:
-            return language.text("Đang lưu account mới…", "Saving the new account…")
+            return language.text("Đang lưu và cập nhật quota…", "Saving and refreshing quota…")
         case .saved(let identity):
             return language.text("Đã lưu: \(identity.email)", "Saved: \(identity.email)")
         case .failed:
@@ -1868,7 +1873,8 @@ private struct ReloginAccountSheet: View {
     @EnvironmentObject private var language: LanguageStore
     @Environment(\.dismiss) private var dismiss
     let account: SavedAccount
-    @State private var loginStarted = false
+    @State private var didStart = false
+    @State private var isCompleting = false
     @State private var localError: String?
 
     var body: some View {
@@ -1879,8 +1885,8 @@ private struct ReloginAccountSheet: View {
 
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(language.text(
-                    "Làm mới phiên Codex cho \(account.displayName) (\(account.email)).",
-                    "Refresh the Codex session for \(account.displayName) (\(account.email))."
+                    "Đăng nhập \(account.email) trong cửa sổ vừa mở. Roster sẽ tự xác minh và cập nhật phiên này.",
+                    "Sign in as \(account.email) in the window that just opened. Roster will verify and update this session automatically."
                 ))
                 .foregroundStyle(.secondary)
                 Button {
@@ -1892,66 +1898,23 @@ private struct ReloginAccountSheet: View {
             }
 
             GroupBox {
-                VStack(alignment: .leading, spacing: 10) {
-                    Label(language.text("1. Đăng nhập đúng tài khoản này", "1. Sign in with this exact account"), systemImage: "arrow.right.circle.fill")
-                        .font(.headline)
-                    Text(language.text(
-                        "Trang OpenAI và Terminal sẽ mở. Hãy chọn/đăng nhập \(account.email), hoàn tất mã xác thực, rồi quay lại đây.",
-                        "OpenAI and Terminal will open. Sign in as \(account.email), finish device verification, then return here."
-                    ))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    Button(language.text("Mở đăng nhập OpenAI", "Open OpenAI sign-in")) {
-                        localError = nil
-                        loginStarted = true
-                        store.startRelogin(for: account)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.orange)
-                    .disabled(store.isWorking)
-
-                    if loginStarted {
-                        Label(language.text(
-                            "Đăng nhập đang chờ trong Terminal. Khi Codex báo thành công, lưu phiên ở bước 2.",
-                            "Sign-in is waiting in Terminal. When Codex confirms success, save the session in step 2."
-                        ), systemImage: "checkmark.circle")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    ProgressView()
+                        .controlSize(.small)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(isCompleting
+                            ? language.text("Đang tự động cập nhật", "Updating automatically")
+                            : language.text("Đang chờ đúng tài khoản", "Waiting for the correct account"))
+                            .font(.headline)
+                        Text(isCompleting
+                            ? language.text("Đang lưu phiên và kiểm tra lại quota…", "Saving the session and checking quota…")
+                            : language.text("Không cần tải lại hay bấm Lưu — Roster tự hoàn tất khi nhận diện \(account.email).", "No reload or Save click needed — Roster finishes when it detects \(account.email)."))
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
                     }
                 }
-            }
-
-            GroupBox {
-                VStack(alignment: .leading, spacing: 10) {
-                    Label(language.text("2. Lưu phiên mới vào tài khoản này", "2. Save the new session to this account"), systemImage: "tray.and.arrow.down.fill")
-                        .font(.headline)
-                    Text(store.status?.currentAccount?.email ?? language.text(
-                        "Sau khi đăng nhập xong, email phiên hiện tại sẽ hiện ở đây.",
-                        "After sign-in finishes, the current session email appears here."
-                    ))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    HStack {
-                        Button(language.text("Tải lại trạng thái", "Reload status")) {
-                            store.refresh()
-                        }
-                        .disabled(store.isWorking)
-                        Spacer()
-                        Button(language.text("Lưu & khôi phục tài khoản", "Save & restore account")) {
-                            Task {
-                                do {
-                                    localError = nil
-                                    try await store.completeRelogin(for: account)
-                                    dismiss()
-                                } catch {
-                                    localError = error.localizedDescription
-                                }
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(store.isWorking || store.status?.currentAccount == nil)
-                    }
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(4)
             }
 
             if let localError {
@@ -1968,24 +1931,59 @@ private struct ReloginAccountSheet: View {
             .foregroundStyle(.secondary)
 
             HStack {
-                if store.isPendingLogin || loginStarted {
-                    Button(language.text("Hủy và khôi phục phiên", "Cancel and restore session")) {
-                        store.cancelPendingLogin()
-                        dismiss()
+                if localError != nil {
+                    Button(language.text("Thử lại", "Try again")) {
+                        localError = nil
+                        isCompleting = false
+                        store.startRelogin(for: account)
                     }
+                    .buttonStyle(.borderedProminent)
                     .tint(.orange)
                 }
                 Spacer()
-                Button(language.text("Đóng", "Close")) {
-                    if store.isPendingLogin || loginStarted {
+                Button(store.isPendingLogin
+                    ? language.text("Hủy", "Cancel")
+                    : language.text("Đóng", "Close")) {
+                    if store.isPendingLogin {
                         store.cancelPendingLogin()
                     }
                     dismiss()
                 }
+                .disabled(isCompleting || store.isWorking)
             }
         }
         .padding(24)
-        .frame(width: 560)
+        .frame(width: 500)
+        .interactiveDismissDisabled(store.isPendingLogin || isCompleting)
+        .onAppear {
+            guard !didStart else { return }
+            didStart = true
+            store.startRelogin(for: account)
+        }
+        .onChange(of: store.newAccountLoginState) { _, state in
+            switch state {
+            case .ready where !isCompleting:
+                isCompleting = true
+                Task {
+                    do {
+                        // Let the login launcher release its action lock before
+                        // verification starts on a resumed session.
+                        try? await Task.sleep(for: .milliseconds(150))
+                        localError = nil
+                        try await store.completeRelogin(for: account)
+                        dismiss()
+                    } catch {
+                        isCompleting = false
+                        localError = error.localizedDescription
+                    }
+                }
+            case .failed(let message):
+                isCompleting = false
+                localError = message
+            default:
+                break
+            }
+        }
     }
 }
 

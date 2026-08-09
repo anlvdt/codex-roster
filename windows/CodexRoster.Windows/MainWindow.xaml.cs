@@ -147,22 +147,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        if (desktopRunning)
-        {
-            var dialog = new ContentDialog
-            {
-                XamlRoot = Content.XamlRoot,
-                Title = "Chuyển tài khoản Codex?",
-                Content = "Codex Desktop sẽ được đóng, chuyển session, rồi mở lại. Các tác vụ Codex CLI đang chạy phải được đóng trước.",
-                PrimaryButtonText = "Chuyển và mở lại",
-                CloseButtonText = "Hủy",
-                DefaultButton = ContentDialogButton.Primary,
-            };
-            if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
-            await ViewModel.ActivateAsync(account, restartDesktop: true);
-            return;
-        }
-        await ViewModel.ActivateAsync(account, restartDesktop: false);
+        await ViewModel.ActivateAsync(account, restartDesktop: desktopRunning);
     }
 
     private async void AccountActions_Click(object sender, RoutedEventArgs e)

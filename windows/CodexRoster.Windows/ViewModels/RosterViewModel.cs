@@ -131,7 +131,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
                 if (current is not null)
                 {
                     _pendingLoginIdentity = current;
-                    LoginStatus = $"Đã nhận diện {current.Email}. Chọn Lưu phiên hiện tại để thêm vào Roster.";
+                    LoginStatus = $"Đã nhận diện {current.Email}. Roster đang tự động lưu phiên.";
                     NotifyPendingLoginChanged();
                 }
                 WatchForNewLoginAsync(previousIdentity: null);
@@ -171,6 +171,10 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         catch
         {
             // The roster remains usable if the legacy preference has not been created yet.
+        }
+        if (_pendingLoginIdentity is not null)
+        {
+            await SaveCurrentAccountAsync();
         }
         _ = CreateAutomaticBackupAsync();
         _ = RefreshInsightsAsync(silent: true);
@@ -331,8 +335,8 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
                 _expectedLoginEmail = expectedEmail;
                 NotifyPendingLoginChanged();
                 LoginStatus = expectedEmail is null
-                    ? "Phiên cũ đã được bảo toàn. Hoàn tất đăng nhập trên trình duyệt/Terminal; Roster sẽ tự nhận diện phiên mới."
-                    : $"Phiên cũ đã được bảo toàn. Đăng nhập lại đúng tài khoản {expectedEmail}; Roster sẽ xác minh trước khi lưu.";
+                    ? "Phiên cũ đã được bảo toàn. Hoàn tất đăng nhập; Roster sẽ tự nhận diện và lưu phiên mới."
+                    : $"Phiên cũ đã được bảo toàn. Đăng nhập đúng {expectedEmail}; Roster sẽ tự xác minh và lưu.";
                 WatchForNewLoginAsync(status.CurrentAccount);
             }
             catch
@@ -362,8 +366,8 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         _expectedLoginEmail = expectedEmail;
         NotifyPendingLoginChanged();
         LoginStatus = expectedEmail is null
-            ? "Phiên thêm tài khoản vẫn đang mở. Hoàn tất đăng nhập, hoặc chọn Hủy để khôi phục phiên trước."
-            : $"Phiên đăng nhập lại vẫn đang mở. Đăng nhập đúng {expectedEmail}, hoặc chọn Hủy để khôi phục phiên trước.";
+            ? "Phiên thêm tài khoản vẫn đang mở. Hoàn tất đăng nhập; Roster sẽ tự lưu, hoặc chọn Hủy để khôi phục phiên trước."
+            : $"Phiên đăng nhập lại vẫn đang mở. Đăng nhập đúng {expectedEmail}; Roster sẽ tự lưu, hoặc chọn Hủy.";
         WatchForNewLoginAsync(previous);
     }
 
@@ -1102,8 +1106,9 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
                     {
                         if (cancellation.IsCancellationRequested) return;
                         _pendingLoginIdentity = detectedIdentity;
-                        LoginStatus = $"Đã nhận diện {detectedIdentity.Email}. Chọn Lưu phiên hiện tại để thêm vào Roster.";
+                        LoginStatus = $"Đã nhận diện {detectedIdentity.Email}. Roster đang tự động lưu phiên.";
                         NotifyPendingLoginChanged();
+                        _ = SaveCurrentAccountAsync();
                     });
                     return;
                 }

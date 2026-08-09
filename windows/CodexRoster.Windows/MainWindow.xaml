@@ -133,7 +133,7 @@
                 <InfoBar
                     IsOpen="{x:Bind ViewModel.IsPendingLogin, Mode=OneWay}"
                     Severity="Informational"
-                    Title="Đang thêm tài khoản"
+                    Title="Đang tự động hoàn tất đăng nhập"
                     Message="{x:Bind ViewModel.LoginStatus, Mode=OneWay}"
                     IsClosable="False">
                     <InfoBar.ActionButton>

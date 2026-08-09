@@ -553,8 +553,32 @@ where
         }
         let warnings = crate::process::detect_running_codex_processes();
         let scanned_processes_at = Instant::now();
-        let (snapshot, snapshot_identity, restore_identity) =
+        let (mut snapshot, snapshot_identity, restore_identity) =
             self.load_activation_target(account_id)?;
+        // Refresh-on-restore: hand Codex a valid access token instead of an
+        // expired one it would have to refresh itself (which can loop on
+        // `refresh_token_reused` and force a login). Skip the account that is
+        // already live — Codex owns that refresh token. Rotated tokens are
+        // persisted to the saved copy first so the two never diverge.
+        if warnings.is_empty()
+            && !self.is_live_saved_account(account_id).unwrap_or(false)
+            && let Ok(Some(refreshed)) =
+                crate::usage::refresh_snapshot_if_access_token_stale(&snapshot)
+        {
+            let cached_usage = self
+                .repository
+                .load_snapshot(&self.env.kind, account_id)
+                .ok()
+                .and_then(|(metadata, _)| metadata.cached_usage);
+            self.repository.replace_snapshot_without_backup(
+                &self.env.kind,
+                account_id,
+                &snapshot_identity,
+                &refreshed,
+                cached_usage,
+            )?;
+            snapshot = refreshed;
+        }
         let loaded_target_at = Instant::now();
         let verify_stable = should_verify_activation_stability(force_running, &warnings);
         let verify_retries = if force_running { 2 } else { 4 };
@@ -648,6 +672,34 @@ where
     pub fn refresh_saved_usage_cache(&self) -> Result<()> {
         let accounts = self.repository.list_accounts(&self.env.kind)?;
         for account in accounts {
+            let _ = self.usage(Some(account.id));
+        }
+        Ok(())
+    }
+
+    /// Refresh usage for every saved account whose cached quota is stale, so the
+    /// whole roster picks up an off-schedule ChatGPT reset without waiting for a
+    /// manual refresh or an auto-switch decision. Accounts that still have quota
+    /// in every window (fresh cache) are skipped to avoid needless network and
+    /// token churn; accounts that need a fresh login are skipped because they
+    /// cannot be refreshed without the user.
+    pub fn refresh_stale_saved_usage(&self) -> Result<()> {
+        let accounts = self.repository.list_accounts(&self.env.kind)?;
+        let now = time::OffsetDateTime::now_utc();
+        for account in accounts {
+            if account.archived {
+                continue;
+            }
+            if account
+                .cached_usage_error
+                .as_deref()
+                .is_some_and(usage_error_requires_login)
+            {
+                continue;
+            }
+            if cached_usage_is_fresh(account.cached_usage.as_ref(), now) {
+                continue;
+            }
             let _ = self.usage(Some(account.id));
         }
         Ok(())
@@ -1060,9 +1112,13 @@ fn cached_usage_is_fresh(
     now: time::OffsetDateTime,
 ) -> bool {
     usage.is_some_and(|usage| {
+        // An exhausted window is never treated as "fresh" on the strength of a
+        // future reset_at. ChatGPT can lift a limit off-schedule (mass reset),
+        // and trusting reset_at would keep re-querying suppressed until the old
+        // scheduled time, hiding restored quota. Only accounts that still have
+        // quota in every reported window skip the refetch.
         now - usage.fetched_at < time::Duration::minutes(15)
-            && quota_windows(Some(usage))
-                .all(|window| window.remaining_percent > 0 || window.reset_at > now)
+            && quota_windows(Some(usage)).all(|window| window.remaining_percent > 0)
     })
 }
 
@@ -1231,6 +1287,44 @@ mod tests {
         };
 
         assert!(!cached_usage_is_fresh(Some(&usage), now));
+    }
+
+    #[test]
+    fn cached_exhausted_usage_is_stale_even_before_the_scheduled_reset() {
+        // Guards against ChatGPT mass resets that lift a limit off-schedule: an
+        // exhausted window must be refetched, not trusted until its old reset_at.
+        let now = OffsetDateTime::now_utc();
+        let usage = AccountUsageView {
+            source: UsageSource::SavedAccessToken,
+            fetched_at: now,
+            five_hour: Some(UsageWindowView {
+                used_percent: 100,
+                remaining_percent: 0,
+                reset_at: now + time::Duration::hours(48),
+            }),
+            weekly: None,
+            credits: None,
+        };
+
+        assert!(!cached_usage_is_fresh(Some(&usage), now));
+    }
+
+    #[test]
+    fn cached_usage_with_quota_stays_fresh_within_window() {
+        let now = OffsetDateTime::now_utc();
+        let usage = AccountUsageView {
+            source: UsageSource::SavedAccessToken,
+            fetched_at: now - time::Duration::minutes(5),
+            five_hour: Some(UsageWindowView {
+                used_percent: 40,
+                remaining_percent: 60,
+                reset_at: now + time::Duration::hours(1),
+            }),
+            weekly: None,
+            credits: None,
+        };
+
+        assert!(cached_usage_is_fresh(Some(&usage), now));
     }
 
     #[test]

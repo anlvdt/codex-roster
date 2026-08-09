@@ -548,6 +548,38 @@ fn format_last_refresh(value: OffsetDateTime) -> String {
         .unwrap_or_else(|_| value.unix_timestamp().to_string())
 }
 
+/// Ensure a saved snapshot carries a usable (non-expired) access token before it
+/// is restored into `~/.codex`. When the access token is near expiry and a
+/// refresh token is present, rotate the tokens now and hand back the refreshed
+/// snapshot so the caller can persist it and restore fresh auth.
+///
+/// This mirrors how Codex CLI and peer switchers (e.g. codex-router) refresh
+/// during a switch: it lets Codex Desktop/CLI start from a valid access token
+/// instead of running its own refresh, which can loop on `refresh_token_reused`
+/// and force a login.
+///
+/// Returns `Ok(Some(refreshed))` only when a rotation happened, `Ok(None)` when
+/// the snapshot is already fresh, has no refresh token, or a transient refresh
+/// error occurred (restoring the existing snapshot is then no worse than before).
+/// Never call this for the account that is currently live in `~/.codex`: Codex
+/// owns that refresh token, and rotating it out from under a running session is
+/// exactly the desync that forces re-login.
+pub fn refresh_snapshot_if_access_token_stale(
+    snapshot: &SnapshotBlob,
+) -> Result<Option<SnapshotBlob>> {
+    let auth = snapshot_auth(snapshot)?;
+    if !needs_proactive_refresh(&auth) {
+        return Ok(None);
+    }
+    match refresh_auth(&auth) {
+        Ok(refreshed) => Ok(Some(update_snapshot_auth(snapshot, &refreshed)?)),
+        // A hard "login required" error means the saved refresh token is already
+        // dead; restoring the stale snapshot lets the caller surface the same
+        // re-login as today. Transient errors should never block a switch.
+        Err(_) => Ok(None),
+    }
+}
+
 pub fn usage_target_from_snapshot(
     environment: EnvironmentKind,
     snapshot: SnapshotBlob,
@@ -718,6 +750,40 @@ mod tests {
             changed: false,
         };
         assert!(needs_proactive_refresh(&auth));
+    }
+
+    #[test]
+    fn refresh_on_restore_skips_snapshot_with_valid_access_token() {
+        let far = OffsetDateTime::now_utc() + Duration::days(1);
+        let snapshot = auth_snapshot(json!({
+            "tokens": {
+                "access_token": jwt_with_exp(far.unix_timestamp()),
+                "refresh_token": "refresh",
+                "account_id": "acct"
+            }
+        }));
+
+        assert!(
+            refresh_snapshot_if_access_token_stale(&snapshot)
+                .expect("refresh check")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn refresh_on_restore_skips_snapshot_without_refresh_token() {
+        let soon = OffsetDateTime::now_utc() + Duration::minutes(1);
+        let snapshot = auth_snapshot(json!({
+            "tokens": {
+                "access_token": jwt_with_exp(soon.unix_timestamp())
+            }
+        }));
+
+        assert!(
+            refresh_snapshot_if_access_token_stale(&snapshot)
+                .expect("refresh check")
+                .is_none()
+        );
     }
 
     #[test]

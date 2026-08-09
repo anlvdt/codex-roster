@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Keep ChatGPT/Codex Desktop running throughout add-account and re-login; these flows pause automatic switching and quota work without masquerading as an account switch or restarting Desktop.
+
 ## v0.2.30 - 2026-08-09
 
 ### Fixed

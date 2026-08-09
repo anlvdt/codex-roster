@@ -90,7 +90,6 @@ final class AccountStore: ObservableObject {
     private var isInteractiveLoginInProgress = false
     private var isAddAccountSession = false
     private var expectedReloginEmail: String?
-    private var loginDesktopRelaunch: ChatGPTDesktop.RelaunchPlan?
     private var newAccountLoginWatchTask: Task<Void, Never>?
     private var resetNotificationTask: Task<Void, Never>?
     private var coreBootstrapStarted = false
@@ -320,7 +319,6 @@ final class AccountStore: ObservableObject {
         let liveStatus = try await cli.decode(StatusOutput.self, arguments: ["status"])
         var began = false
         do {
-            try await closeDesktopForLoginIfNeeded()
             try await beginAddAccountAfterProcessesDrain()
             began = true
             isAddAccountSession = true
@@ -334,8 +332,6 @@ final class AccountStore: ObservableObject {
                 _ = try? await cli.data(arguments: ["cancel-add-account", "--json"])
                 clearPendingLoginFlags()
                 newAccountLoginState = .idle
-            } else {
-                relaunchLoginDesktopIfNeeded()
             }
             throw error
         }
@@ -347,29 +343,16 @@ final class AccountStore: ObservableObject {
         isInteractiveLoginInProgress = true
         isPendingLogin = true
         newAccountLoginState = .waiting
-        do {
-            try await closeDesktopForLoginIfNeeded()
-            let addStatus = try await cli.decode(AddAccountStatusOutput.self, arguments: ["add-account-status"])
-            let status = try? await cli.decode(StatusOutput.self, arguments: ["status"])
-            if let current = status?.currentAccount,
-               addStatus.authChanged,
-               expectedEmail.map({ current.email.caseInsensitiveCompare($0) == .orderedSame }) ?? true {
-                newAccountLoginState = .ready(current)
-                return
-            }
-            try CodexLoginLauncher.start()
-            watchForNewAccount(after: nil)
-        } catch {
-            CodexLoginLauncher.stop()
-            _ = try? await cli.data(arguments: ["cancel-add-account", "--json"])
-            isAddAccountSession = false
-            expectedReloginEmail = nil
-            isInteractiveLoginInProgress = false
-            isPendingLogin = false
-            newAccountLoginState = .idle
-            relaunchLoginDesktopIfNeeded()
-            throw error
+        let addStatus = try await cli.decode(AddAccountStatusOutput.self, arguments: ["add-account-status"])
+        let status = try? await cli.decode(StatusOutput.self, arguments: ["status"])
+        if let current = status?.currentAccount,
+           addStatus.authChanged,
+           expectedEmail.map({ current.email.caseInsensitiveCompare($0) == .orderedSame }) ?? true {
+            newAccountLoginState = .ready(current)
+            return
         }
+        try CodexLoginLauncher.start()
+        watchForNewAccount(after: nil)
     }
 
     private func watchForNewAccount(after _: AccountIdentity?) {
@@ -441,12 +424,6 @@ final class AccountStore: ObservableObject {
         isAddAccountSession = false
         expectedReloginEmail = nil
         isPendingLogin = false
-        relaunchLoginDesktopIfNeeded()
-    }
-
-    private func closeDesktopForLoginIfNeeded() async throws {
-        guard ChatGPTDesktop.isRunning else { return }
-        loginDesktopRelaunch = try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
     }
 
     private func beginAddAccountAfterProcessesDrain() async throws {
@@ -462,12 +439,6 @@ final class AccountStore: ObservableObject {
                 try? await Task.sleep(for: .milliseconds(150))
             }
         }
-    }
-
-    private func relaunchLoginDesktopIfNeeded() {
-        guard let relaunch = loginDesktopRelaunch else { return }
-        loginDesktopRelaunch = nil
-        relaunchDesktopInBackground(relaunch)
     }
 
     func activate(_ account: SavedAccount, force: Bool = false) {

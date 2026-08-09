@@ -370,8 +370,8 @@ where
     /// session, and cancel still restores the backed-up session if login changes it.
     pub fn begin_add_account_session(&self) -> Result<()> {
         let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
-        let warnings = activation_process_warnings();
-        ensure_activation_processes_stopped(&warnings)?;
+        // Login is an explicit credential transaction, not an account switch.
+        // Leave Desktop running and pause Roster background work via the marker.
         if codex::try_read_live_auth_bundle(&self.env)?.is_some() {
             self.save_current_inner(true)?;
         }

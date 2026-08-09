@@ -26,6 +26,19 @@ done
 grep -F -q 'ensure_activation_processes_stopped(&warnings)?;' \
   "$root_dir/src/app/service.rs"
 
+if sed -n '/pub fn begin_add_account_session/,/pub fn save_added_account_session/p' \
+  "$root_dir/src/app/service.rs" | grep -F -q 'ensure_activation_processes_stopped'; then
+  echo "Login must not be treated as an account switch that requires closing Desktop." >&2
+  exit 1
+fi
+
+if grep -E -n 'closeDesktopForLoginIfNeeded|loginDesktopRelaunch|_loginRelaunch' \
+  "$root_dir/macos/NextAccount/Sources/NextAccount/AccountStore.swift" \
+  "$root_dir/windows/CodexRoster.Windows/ViewModels/RosterViewModel.cs"; then
+  echo "Desktop close/relaunch lifecycle detected in an add/re-login flow." >&2
+  exit 1
+fi
+
 if grep -F -n 'refresh_snapshot_if_access_token_stale(&snapshot)' \
   "$root_dir/src/app/service.rs"; then
   echo "Unsafe inactive snapshot refresh detected during activation." >&2

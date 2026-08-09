@@ -642,6 +642,14 @@ private struct DashboardView: View {
         attentionAccounts.filter(\.requiresLogin)
     }
 
+    private var exhaustedAccounts: [SavedAccount] {
+        readyAccounts.filter(\.isExhaustedForSwitch)
+    }
+
+    private var recoveryAccounts: [SavedAccount] {
+        attentionAccounts.filter { !$0.requiresLogin }
+    }
+
     var body: some View {
         GeometryReader { geometry in
             ScrollView {
@@ -652,13 +660,19 @@ private struct DashboardView: View {
                     readyAccounts: readyAccounts,
                     attentionAccounts: attentionAccounts,
                     reloginAccounts: reloginAccounts,
+                    exhaustedAccounts: exhaustedAccounts,
+                    recoveryAccounts: recoveryAccounts,
                     selection: $selection,
                     reloginAll: { reloginAll(reloginAccounts) },
                     passkeyPendingCount: passkeyPendingCount,
                     setupPasskeys: setupPasskeys
                 )
 
-                BulkAccountManager(reloginAll: reloginAll)
+                BulkAccountManager(
+                    selection: $selection,
+                    relogin: relogin,
+                    reloginAll: reloginAll
+                )
 
                 ViewThatFits(in: .horizontal) {
                     HStack(alignment: .top, spacing: 16) {
@@ -862,11 +876,13 @@ private enum BulkAccountFilter: String, CaseIterable, Identifiable {
 private struct BulkAccountManager: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
+    @Binding var selection: UUID?
+    let relogin: (SavedAccount) -> Void
     let reloginAll: ([SavedAccount]) -> Void
     @State private var filter: BulkAccountFilter = .all
     @State private var selectedAccountIDs: Set<UUID> = []
     @State private var confirmingDelete = false
-    @State private var isExpanded = false
+    @State private var isExpanded = true
 
     private var visibleAccounts: [SavedAccount] {
         store.sortedAccounts(store.accounts.filter { account in
@@ -977,6 +993,7 @@ private struct BulkAccountManager: View {
                 }
                 .controlSize(.small)
 
+                comparisonHeader
                 Divider()
 
                 if visibleAccounts.isEmpty {
@@ -989,45 +1006,7 @@ private struct BulkAccountManager: View {
                     .padding(.vertical, 8)
                 } else {
                     ForEach(visibleAccounts) { account in
-                        HStack(spacing: 10) {
-                            Toggle(isOn: Binding(
-                                get: { selectedAccountIDs.contains(account.id) },
-                                set: { selected in
-                                    if selected { selectedAccountIDs.insert(account.id) }
-                                    else { selectedAccountIDs.remove(account.id) }
-                                }
-                            )) { EmptyView() }
-                            .toggleStyle(.checkbox)
-                            .labelsHidden()
-                            Image(systemName: healthIcon(account))
-                                .foregroundStyle(healthColor(account))
-                                .frame(width: 18)
-                            VStack(alignment: .leading, spacing: 2) {
-                                HStack(spacing: 6) {
-                                    Text(account.displayName)
-                                        .lineLimit(1)
-                                    if account.isActive {
-                                        Text(language.text("Đang dùng", "Active"))
-                                            .font(.caption2.weight(.semibold))
-                                            .foregroundStyle(.green)
-                                    }
-                                }
-                                Text(account.email)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
-                            Spacer()
-                            VStack(alignment: .trailing, spacing: 2) {
-                                Text(healthLabel(account))
-                                    .font(.caption.weight(.medium))
-                                    .foregroundStyle(healthColor(account))
-                                Text(lastVerifiedLabel(account))
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .padding(.vertical, 5)
+                        comparisonRow(account)
                         if account.id != visibleAccounts.last?.id { Divider() }
                     }
                 }
@@ -1066,6 +1045,160 @@ private struct BulkAccountManager: View {
                 "The active session will not be removed. Selected snapshots will be deleted from this Mac and cannot be undone."
             ))
         }
+    }
+
+    private var comparisonHeader: some View {
+        HStack(spacing: 10) {
+            Color.clear.frame(width: 18)
+            Text(language.text("Tài khoản", "Account"))
+                .frame(minWidth: 150, maxWidth: .infinity, alignment: .leading)
+            Text(language.text("Gói", "Plan"))
+                .frame(width: 66, alignment: .leading)
+            Text(language.text("Phiên", "Session"))
+                .frame(width: 132, alignment: .leading)
+            Text("5h")
+                .frame(width: 104, alignment: .leading)
+            Text(language.text("Tuần", "Weekly"))
+                .frame(width: 104, alignment: .leading)
+            Text(language.text("Thao tác", "Action"))
+                .frame(width: 92, alignment: .trailing)
+        }
+        .font(.caption2.weight(.semibold))
+        .foregroundStyle(.secondary)
+        .textCase(.uppercase)
+        .padding(.top, 2)
+    }
+
+    private func comparisonRow(_ account: SavedAccount) -> some View {
+        HStack(spacing: 10) {
+            Toggle(isOn: Binding(
+                get: { selectedAccountIDs.contains(account.id) },
+                set: { selected in
+                    if selected { selectedAccountIDs.insert(account.id) }
+                    else { selectedAccountIDs.remove(account.id) }
+                }
+            )) { EmptyView() }
+            .toggleStyle(.checkbox)
+            .labelsHidden()
+            .frame(width: 18)
+
+            Button {
+                selection = account.id
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Image(systemName: healthIcon(account))
+                            .foregroundStyle(healthColor(account))
+                        Text(account.displayName)
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                    }
+                    Text(account.email)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .frame(minWidth: 150, maxWidth: .infinity, alignment: .leading)
+            .help(language.text("Mở chẩn đoán tài khoản", "Open account diagnostics"))
+
+            Text(account.planLabel ?? "—")
+                .font(.caption.weight(.medium))
+                .lineLimit(1)
+                .frame(width: 66, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(healthLabel(account))
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(healthColor(account))
+                    .lineLimit(1)
+                Text(lastVerifiedLabel(account))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(width: 132, alignment: .leading)
+
+            quotaCell(account.usage?.fiveHour)
+            quotaCell(account.usage?.weekly)
+            primaryAction(for: account)
+                .frame(width: 92, alignment: .trailing)
+        }
+        .padding(.vertical, 6)
+        .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private func quotaCell(_ window: UsageWindow?) -> some View {
+        if let window {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 4) {
+                    Text("\(window.remainingPercent)%")
+                        .font(.caption.weight(.semibold).monospacedDigit())
+                        .foregroundStyle(quotaTint(window.remainingPercent))
+                    Spacer(minLength: 0)
+                    Text(window.relativeReset(in: language.language))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                ProgressView(value: Double(window.remainingPercent), total: 100)
+                    .tint(quotaTint(window.remainingPercent))
+                    .controlSize(.mini)
+            }
+            .frame(width: 104, alignment: .leading)
+            .accessibilityLabel(language.text(
+                "Còn \(window.remainingPercent) phần trăm, đặt lại \(window.relativeReset(in: language.language))",
+                "\(window.remainingPercent) percent remaining, resets \(window.relativeReset(in: language.language))"
+            ))
+        } else {
+            Text("—")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.tertiary)
+                .frame(width: 104, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private func primaryAction(for account: SavedAccount) -> some View {
+        if account.archived || account.requiresLocalRecovery {
+            Button(language.text("Chi tiết", "Details")) { selection = account.id }
+                .controlSize(.small)
+        } else if account.requiresLogin {
+            Button(language.text("Login lại", "Sign in")) { relogin(account) }
+                .controlSize(.small)
+                .tint(.orange)
+        } else if account.hasTransientUsageError {
+            Button(language.text("Thử lại", "Retry")) {
+                store.refreshUsage(for: account)
+            }
+            .controlSize(.small)
+            .disabled(store.isBusyForActions)
+        } else if account.isActive {
+            Label(language.text("Đang dùng", "Active"), systemImage: "checkmark.circle.fill")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.green)
+        } else if account.isExhaustedForSwitch {
+            Text(language.text("Hết quota", "Quota empty"))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.red)
+        } else {
+            Button(language.text("Chuyển", "Switch")) {
+                store.activate(account, force: true)
+            }
+            .controlSize(.small)
+            .buttonStyle(.borderedProminent)
+            .disabled(store.isBusyForActions)
+        }
+    }
+
+    private func quotaTint(_ remainingPercent: Int) -> Color {
+        if remainingPercent == 0 { return .red }
+        if remainingPercent < 20 { return .orange }
+        if remainingPercent < 50 { return .yellow }
+        return .green
     }
 
     private var allVisibleSelected: Bool {
@@ -1127,6 +1260,8 @@ private struct DashboardHero: View {
     let readyAccounts: [SavedAccount]
     let attentionAccounts: [SavedAccount]
     let reloginAccounts: [SavedAccount]
+    let exhaustedAccounts: [SavedAccount]
+    let recoveryAccounts: [SavedAccount]
     @Binding var selection: UUID?
     let reloginAll: () -> Void
     let passkeyPendingCount: Int
@@ -1143,8 +1278,10 @@ private struct DashboardHero: View {
 
                 HStack(spacing: 10) {
                     HeroCount(value: accountCount, title: language.text("đã lưu", "saved"), tint: .accentColor)
-                    HeroCount(value: readyAccounts.count, title: language.text("sẵn dùng", "available"), tint: .green)
-                    HeroCount(value: attentionAccounts.count, title: language.text("cần xử lý", "need attention"), tint: attentionAccounts.isEmpty ? .secondary : .orange)
+                    HeroCount(value: readyAccounts.count, title: language.text("phiên ổn", "healthy"), tint: .green)
+                    HeroCount(value: exhaustedAccounts.count, title: language.text("hết quota", "quota empty"), tint: exhaustedAccounts.isEmpty ? .secondary : .red)
+                    HeroCount(value: reloginAccounts.count, title: language.text("cần login", "sign-in"), tint: reloginAccounts.isEmpty ? .secondary : .orange)
+                    HeroCount(value: recoveryAccounts.count, title: language.text("cần kiểm tra", "check needed"), tint: recoveryAccounts.isEmpty ? .secondary : .yellow)
                 }
                 .padding(.top, 4)
             }
@@ -2191,6 +2328,8 @@ private struct AccountDetail: View {
                     }
                 }
 
+                SessionDiagnosticsPanel(account: account)
+
                 HStack(spacing: 16) {
                     UsageCard(title: language.text("Quota hiện tại", "Current quota"), window: account.usage?.fiveHour)
                     UsageCard(title: language.text("Quota theo chu kỳ", "Quota window"), window: account.usage?.weekly)
@@ -2345,6 +2484,142 @@ private struct AccountDetail: View {
                 .help(language.text("Quay về trang tổng quan", "Return to overview"))
             }
         }
+    }
+}
+
+private struct SessionDiagnosticsPanel: View {
+    @EnvironmentObject private var language: LanguageStore
+    let account: SavedAccount
+
+    private var sessionTitle: String {
+        if account.requiresLogin {
+            return language.text("Cần đăng nhập", "Sign-in required")
+        }
+        if account.requiresLocalRecovery {
+            return language.text("Cần phục hồi local", "Local recovery")
+        }
+        if account.hasTransientUsageError {
+            return language.text("Lỗi kiểm tra tạm thời", "Temporary check error")
+        }
+        return language.text("Chưa ghi nhận thu hồi", "No revocation detected")
+    }
+
+    private var sessionIcon: String {
+        if account.requiresLogin { return "person.crop.circle.badge.exclamationmark" }
+        if account.requiresLocalRecovery { return "externaldrive.badge.exclamationmark" }
+        if account.hasTransientUsageError { return "wifi.exclamationmark" }
+        return "checkmark.shield.fill"
+    }
+
+    private var sessionColor: Color {
+        if account.requiresLogin { return .orange }
+        if account.requiresLocalRecovery { return .red }
+        if account.hasTransientUsageError { return .yellow }
+        return .green
+    }
+
+    private var quotaTitle: String {
+        guard let verifiedAt = account.lastVerifiedAt else {
+            return language.text("Chưa xác minh", "Not verified")
+        }
+        if account.hasTransientUsageError {
+            return language.text("Giữ kết quả tốt gần nhất", "Last good result kept")
+        }
+        return language.text(
+            "Xác minh \(verifiedAt.formatted(date: .omitted, time: .shortened))",
+            "Verified \(verifiedAt.formatted(date: .omitted, time: .shortened))"
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label(language.text("Chẩn đoán phiên", "Session diagnostics"), systemImage: "stethoscope")
+                    .font(.headline)
+                Spacer()
+                Text(language.text("Không coi lỗi quota là logout", "Quota errors are not sign-outs"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) { diagnosticItems }
+                VStack(spacing: 8) { diagnosticItems }
+            }
+        }
+        .padding(16)
+        .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    @ViewBuilder
+    private var diagnosticItems: some View {
+        DiagnosticMetric(
+            title: language.text("Roster", "Roster"),
+            value: language.text("Snapshot đã lưu", "Snapshot saved"),
+            detail: language.text("Dữ liệu tài khoản còn nguyên", "Account data is intact"),
+            icon: "externaldrive.fill.badge.checkmark",
+            tint: .green
+        )
+        DiagnosticMetric(
+            title: language.text("Phiên server", "Server session"),
+            value: sessionTitle,
+            detail: account.requiresLogin
+                ? language.text("Chỉ login lại khi server xác nhận", "Re-login only after server confirmation")
+                : language.text("Không suy diễn từ lỗi mạng", "Network errors do not imply logout"),
+            icon: sessionIcon,
+            tint: sessionColor
+        )
+        DiagnosticMetric(
+            title: language.text("Quota", "Quota"),
+            value: quotaTitle,
+            detail: account.hasTransientUsageError
+                ? language.text("Snapshot không bị thay đổi", "Snapshot remains unchanged")
+                : language.text("Hai cửa sổ 5h và tuần", "5h and weekly windows"),
+            icon: account.hasTransientUsageError ? "wifi.exclamationmark" : "gauge.with.dots.needle.67percent",
+            tint: account.hasTransientUsageError ? .yellow : .accentColor
+        )
+        DiagnosticMetric(
+            title: language.text("Live session", "Live session"),
+            value: account.isActive
+                ? language.text("Đang dùng", "Active now")
+                : language.text("Đã lưu, chưa nạp", "Saved, not loaded"),
+            detail: language.text("Theo ~/.codex", "Based on ~/.codex"),
+            icon: account.isActive ? "checkmark.circle.fill" : "person.crop.circle",
+            tint: account.isActive ? .green : .secondary
+        )
+    }
+}
+
+private struct DiagnosticMetric: View {
+    let title: String
+    let value: String
+    let detail: String
+    let icon: String
+    let tint: Color
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .foregroundStyle(tint)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(tint)
+                    .lineLimit(2)
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, minHeight: 66, alignment: .topLeading)
+        .padding(11)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 

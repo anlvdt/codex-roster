@@ -237,6 +237,20 @@
                         </Border>
 
                         <ListView x:Name="AccountList" Grid.Row="1" ItemsSource="{x:Bind ViewModel.Accounts, Mode=OneWay}" SelectionMode="Multiple" IsItemClickEnabled="False" Visibility="{x:Bind ViewModel.AccountsListVisibility, Mode=OneWay}" BorderThickness="0" Background="Transparent" ScrollViewer.VerticalScrollBarVisibility="Auto">
+                            <ListView.Header>
+                                <Grid ColumnSpacing="16" Padding="16,6,16,8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="112" />
+                                        <ColumnDefinition Width="156" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="TÀI KHOẢN · PHIÊN" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                                    <TextBlock Grid.Column="1" Text="5 GIỜ" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                                    <TextBlock Grid.Column="2" Text="TUẦN · RESET" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                                    <TextBlock Grid.Column="3" Text="THAO TÁC" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" HorizontalAlignment="Right" />
+                                </Grid>
+                            </ListView.Header>
                             <ListView.ItemContainerStyle>
                                 <Style TargetType="ListViewItem">
                                     <Setter Property="Padding" Value="0" />
@@ -250,7 +264,8 @@
                                         <Grid ColumnSpacing="16">
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="176" />
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="156" />
                                                 <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
                                             <StackPanel Spacing="5">
@@ -272,15 +287,18 @@
                                                 </StackPanel>
                                             </StackPanel>
                                             <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="4">
+                                                <TextBlock Text="{x:Bind SecondaryQuotaLabel}" Style="{StaticResource BodyStrongTextBlockStyle}" Foreground="{StaticResource RosterInkBrush}" Visibility="{x:Bind SecondaryQuotaVisibility}" />
+                                                <TextBlock Text="Cửa sổ ngắn" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="2" VerticalAlignment="Center" Spacing="4">
                                                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="6">
                                                     <TextBlock Text="{x:Bind QuotaLabel}" FontSize="17" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" />
-                                                    <TextBlock Text="quota" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                                                    <TextBlock Text="tuần" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
                                                 </StackPanel>
                                                 <ProgressBar Value="{x:Bind QuotaPercent}" Maximum="100" Visibility="{x:Bind QuotaMeterVisibility}" Height="5" />
-                                                <TextBlock Text="{x:Bind SecondaryQuotaLabel}" HorizontalAlignment="Right" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" Visibility="{x:Bind SecondaryQuotaVisibility}" />
                                                 <TextBlock Text="{x:Bind ResetLabel}" HorizontalAlignment="Right" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
                                             </StackPanel>
-                                            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                            <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                                                 <Button Content="Đang dùng" Style="{StaticResource RosterSecondaryButtonStyle}" IsEnabled="False" Visibility="{x:Bind ActiveStateVisibility}" />
                                                 <Button Content="Chuyển" Style="{StaticResource RosterPrimaryButtonStyle}" Tag="{x:Bind}" Click="ActivateAccount_Click" Visibility="{x:Bind SwitchVisibility}" />
                                                 <Button Content="Đăng nhập lại" Style="{StaticResource RosterSecondaryButtonStyle}" Tag="{x:Bind}" Click="ReloginAccount_Click" Visibility="{x:Bind ReloginVisibility}" />
@@ -298,10 +316,38 @@
                     <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                     <StackPanel Spacing="10">
                         <Border Style="{StaticResource RosterSurfaceCardStyle}" Padding="18">
-                            <StackPanel Spacing="6">
-                                <TextBlock Text="An toàn phiên Codex" FontSize="17" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" />
-                                <TextBlock Text="Roster không xoay refresh token của phiên đang dùng. Quota nền chỉ dùng access token hiện có và giữ dữ liệu tốt gần nhất khi lỗi tạm thời." TextWrapping="Wrap" Foreground="{StaticResource RosterMutedBrush}" Style="{StaticResource CaptionTextBlockStyle}" />
-                                <TextBlock Text="{x:Bind ViewModel.ProcessSafetyStatus, Mode=OneWay}" TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                            <StackPanel Spacing="10">
+                                <TextBlock Text="Chẩn đoán phiên" FontSize="17" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" />
+                                <TextBlock Text="Quota lỗi không đồng nghĩa tài khoản đã logout." TextWrapping="Wrap" Foreground="{StaticResource RosterMutedBrush}" Style="{StaticResource CaptionTextBlockStyle}" />
+                                <Grid ColumnSpacing="10" RowSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <Border Padding="10" Background="{StaticResource RosterAccentSoftBrush}" CornerRadius="9">
+                                        <StackPanel Spacing="2">
+                                            <TextBlock Text="ROSTER" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                                            <TextBlock Text="Snapshot đã lưu" Style="{StaticResource BodyStrongTextBlockStyle}" Foreground="{StaticResource RosterAccentBrush}" />
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Grid.Column="1" Padding="10" Background="{StaticResource RosterAccentSoftBrush}" CornerRadius="9">
+                                        <StackPanel Spacing="2">
+                                            <TextBlock Text="LIVE SESSION" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                                            <TextBlock Text="{x:Bind ViewModel.CurrentAccountLabel, Mode=OneWay}" Style="{StaticResource BodyStrongTextBlockStyle}" Foreground="{StaticResource RosterAccentBrush}" TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Grid.Row="1" Grid.ColumnSpan="2" Padding="10" Background="{StaticResource RosterPageBrush}" CornerRadius="9">
+                                        <StackPanel Spacing="2">
+                                            <TextBlock Text="AN TOÀN CHUYỂN PHIÊN" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                                            <TextBlock Text="{x:Bind ViewModel.ProcessSafetyStatus, Mode=OneWay}" TextWrapping="Wrap" Style="{StaticResource BodyStrongTextBlockStyle}" Foreground="{StaticResource RosterInkBrush}" />
+                                        </StackPanel>
+                                    </Border>
+                                </Grid>
+                                <TextBlock Text="Roster không xoay refresh token của phiên đang dùng; khi lỗi mạng, app giữ kết quả tốt gần nhất thay vì yêu cầu đăng nhập lại." TextWrapping="Wrap" Foreground="{StaticResource RosterMutedBrush}" Style="{StaticResource CaptionTextBlockStyle}" />
                             </StackPanel>
                         </Border>
 

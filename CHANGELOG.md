@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.34 - 2026-08-09
+
+### Fixed
+
+- Stop switching accounts from falsely requiring a fresh login. The post-switch acceptance check no longer treats a routine expired access token (a read-only 401) as a rejected target; it accepts the switch and lets the official Codex/ChatGPT Desktop refresh the still-valid refresh token lazily on first use, exactly like the legacy flow. A rollback now happens only when the session is proven signed out (revoked/reused/invalid refresh token) or Desktop fails to relaunch, for both manual and automatic switches.
+
 ## v0.2.33 - 2026-08-09
 
 ### Fixed

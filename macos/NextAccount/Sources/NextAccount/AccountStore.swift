@@ -1053,17 +1053,55 @@ final class AccountStore: ObservableObject {
     private func waitForDesktopAcceptance(accountID: UUID) async -> Bool {
         // Give the official Desktop auth manager first ownership of the restored
         // refresh token before Roster performs a read-only access-token probe.
-        try? await Task.sleep(for: .seconds(2))
-        let started = ContinuousClock.now
-        while ContinuousClock.now - started < .seconds(12) {
-            if (try? await cli.data(arguments: [
-                "usage", accountID.uuidString, "--json",
-            ])) != nil {
+        try? await Task.sleep(for: .seconds(3))
+        let deadline = ContinuousClock.now + .seconds(8)
+        while ContinuousClock.now < deadline {
+            do {
+                _ = try await cli.data(arguments: [
+                    "usage", accountID.uuidString, "--json",
+                ])
+                // Usage succeeded: the restored access token is valid and live.
                 return true
+            } catch {
+                // A merely-expired access token is NOT a rejection. The probe runs
+                // read-only (it never rotates the refresh token), so on a not
+                // recently used account it returns a plain 401 until the official
+                // Desktop refreshes the session lazily on first use — exactly what
+                // the legacy flow relied on. Only a *proven-dead* session
+                // (revoked/reused/invalid refresh token) justifies a rollback.
+                // Mirrors `usage_error_requires_login` in src/usage.rs.
+                if Self.usageErrorForcesRollback(error.localizedDescription) {
+                    return false
+                }
+                try? await Task.sleep(for: .milliseconds(500))
             }
-            try? await Task.sleep(for: .milliseconds(500))
         }
-        return false
+        // No positive confirmation within the window, but nothing proved the
+        // target dead either. Trust the official Desktop to refresh on first use
+        // (legacy ownership model) rather than bouncing the user back with a
+        // false rejection over a merely-expired access token.
+        return true
+    }
+
+    /// Whether a `usage` probe error means the target account is genuinely
+    /// signed out and the switch must roll back. Mirrors
+    /// `usage_error_requires_login` in `src/usage.rs`, the source of truth for
+    /// this classification: a plain access-token 401 is deliberately excluded
+    /// because the saved refresh token was not proven invalid.
+    private static func usageErrorForcesRollback(_ message: String) -> Bool {
+        let error = message.lowercased()
+        if error.contains("login required")
+            || error.contains("usage authorization failed")
+            || error.contains("snapshot refresh token missing")
+            || error.contains("refresh_token_invalidated")
+            || error.contains("your session has ended") {
+            return true
+        }
+        return error.contains("token refresh failed")
+            && (error.contains("invalid_grant")
+                || error.contains("refresh token")
+                || error.contains("log out")
+                || error.contains("sign in"))
     }
 
     private func rollbackRejectedTarget(

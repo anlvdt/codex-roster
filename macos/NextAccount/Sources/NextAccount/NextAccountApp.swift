@@ -149,6 +149,7 @@ struct ContentView: View {
     @State private var accountForDeletion: SavedAccount?
     @State private var accountForEditing: SavedAccount?
     @State private var accountForRelogin: SavedAccount?
+    @State private var reloginQueue: [UUID] = []
     @State private var showingAddAccount = false
     @State private var backupOperation: BackupOperation?
 
@@ -163,7 +164,7 @@ struct ContentView: View {
                 },
                 restore: { store.restore($0) },
                 remove: { accountForDeletion = $0 },
-                relogin: { accountForRelogin = $0 }
+                relogin: { presentRelogin($0) }
             )
         } detail: {
             detailContent
@@ -177,10 +178,10 @@ struct ContentView: View {
                 ?? notification.object as? UUID
             if let id, let account = store.accounts.first(where: { $0.id == id }) {
                 selection = id
-                accountForRelogin = account
+                presentRelogin(account)
             } else if let account = store.accounts.first(where: { !store.isArchived($0) && $0.requiresLogin }) {
                 selection = account.id
-                accountForRelogin = account
+                presentRelogin(account)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .exportBackup)) { _ in
@@ -202,8 +203,12 @@ struct ContentView: View {
                 .environmentObject(store)
                 .environmentObject(language)
         }
-        .sheet(item: $accountForRelogin) { account in
-            ReloginAccountSheet(account: account)
+        .sheet(item: $accountForRelogin, onDismiss: presentNextQueuedRelogin) { account in
+            ReloginAccountSheet(
+                account: account,
+                queuedCount: reloginQueue.count,
+                cancelQueue: { reloginQueue.removeAll() }
+            )
                 .environmentObject(store)
                 .environmentObject(language)
         }
@@ -263,15 +268,47 @@ struct ContentView: View {
                 },
                 restore: { store.restore(selected) },
                 remove: { accountForDeletion = selected },
-                relogin: { accountForRelogin = selected }
+                relogin: { presentRelogin(selected) }
             )
         } else {
-            DashboardView(selection: $selection, relogin: { accountForRelogin = $0 })
+            DashboardView(
+                selection: $selection,
+                relogin: presentRelogin,
+                reloginAll: startReloginQueue
+            )
         }
     }
 
     private var selectedAccount: SavedAccount? {
         store.accounts.first { $0.id == selection }
+    }
+
+    private func presentRelogin(_ account: SavedAccount) {
+        reloginQueue.removeAll()
+        selection = account.id
+        accountForRelogin = account
+    }
+
+    private func startReloginQueue(_ accounts: [SavedAccount]) {
+        let pending = accounts.filter { !store.isArchived($0) && $0.requiresLogin }
+        guard let first = pending.first else { return }
+        reloginQueue = pending.dropFirst().map(\.id)
+        selection = first.id
+        accountForRelogin = first
+    }
+
+    private func presentNextQueuedRelogin() {
+        while let nextID = reloginQueue.first {
+            reloginQueue.removeFirst()
+            guard let account = store.accounts.first(where: {
+                $0.id == nextID && !store.isArchived($0) && $0.requiresLogin
+            }) else { continue }
+            selection = account.id
+            DispatchQueue.main.async {
+                accountForRelogin = account
+            }
+            return
+        }
     }
 
 }
@@ -485,6 +522,7 @@ private struct DashboardView: View {
     @EnvironmentObject private var language: LanguageStore
     @Binding var selection: UUID?
     let relogin: (SavedAccount) -> Void
+    let reloginAll: ([SavedAccount]) -> Void
     @State private var automationExpanded = false
     @State private var confirmingFullBackupRestore = false
 
@@ -506,7 +544,7 @@ private struct DashboardView: View {
                     readyAccounts: readyAccounts,
                     attentionAccounts: attentionAccounts,
                     selection: $selection,
-                    relogin: relogin
+                    reloginAll: { reloginAll(attentionAccounts) }
                 )
 
                 ProviderOverview(selection: $selection)
@@ -741,7 +779,7 @@ private struct DashboardHero: View {
     let readyAccounts: [SavedAccount]
     let attentionAccounts: [SavedAccount]
     @Binding var selection: UUID?
-    let relogin: (SavedAccount) -> Void
+    let reloginAll: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 22) {
@@ -774,9 +812,9 @@ private struct DashboardHero: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 if let firstAttention = attentionAccounts.first {
-                    Button(language.text("Đăng nhập lại \(attentionAccounts.count) tài khoản", "Sign in again for \(attentionAccounts.count) accounts")) {
+                    Button(language.text("Sửa nhanh \(attentionAccounts.count) tài khoản", "Quickly repair \(attentionAccounts.count) accounts")) {
                         selection = firstAttention.id
-                        relogin(firstAttention)
+                        reloginAll()
                     }
                     .controlSize(.small)
                 } else if let active = readyAccounts.first(where: \.isActive) {
@@ -1873,6 +1911,8 @@ private struct ReloginAccountSheet: View {
     @EnvironmentObject private var language: LanguageStore
     @Environment(\.dismiss) private var dismiss
     let account: SavedAccount
+    let queuedCount: Int
+    let cancelQueue: () -> Void
     @State private var didStart = false
     @State private var isCompleting = false
     @State private var localError: String?
@@ -1917,6 +1957,15 @@ private struct ReloginAccountSheet: View {
                 .padding(4)
             }
 
+            if queuedCount > 0 {
+                Label(language.text(
+                    "Sau tài khoản này, Roster tự mở lần lượt \(queuedCount) tài khoản còn lại.",
+                    "After this account, Roster will automatically open the remaining \(queuedCount) accounts in sequence."
+                ), systemImage: "list.number")
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(.tint)
+            }
+
             if let localError {
                 Label(localError, systemImage: "exclamationmark.triangle.fill")
                     .font(.footnote)
@@ -1945,7 +1994,10 @@ private struct ReloginAccountSheet: View {
                     ? language.text("Hủy", "Cancel")
                     : language.text("Đóng", "Close")) {
                     if store.isPendingLogin {
+                        cancelQueue()
                         store.cancelPendingLogin()
+                    } else {
+                        cancelQueue()
                     }
                     dismiss()
                 }

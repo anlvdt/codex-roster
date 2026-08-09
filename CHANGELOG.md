@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.28 - 2026-08-09
+
+### Changed
+
+- **macOS can repair every account that needs sign-in as one guided queue.** The dashboard's quick-repair action opens each required browser login in sequence, verifies the expected email, saves and checks the recovered session automatically, then advances to the next account without reopening the sheet manually.
+- Cancelling batch re-login stops the remaining queue and safely restores the session that was active before the current login attempt.
+
 ## v0.2.27 - 2026-08-09
 
 ### Added

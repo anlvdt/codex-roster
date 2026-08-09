@@ -86,11 +86,7 @@ fn run_auto_switch_for_env(env: AppEnv) -> Result<()> {
         let paths = crate::windows_shell::close_desktop_for_switch();
         // After an explicit Desktop close, lingering Electron helpers must not
         // block apply forever — same policy as the Windows tray activate path.
-        let applied = app.auto_switch_with_candidate(
-            true,
-            decision.candidate_account_id,
-            true,
-        )?;
+        let applied = app.auto_switch_with_candidate(true, decision.candidate_account_id, true)?;
         if applied.status != "switched" {
             crate::windows_shell::relaunch_desktop(&paths);
             return Ok(());
@@ -99,11 +95,7 @@ fn run_auto_switch_for_env(env: AppEnv) -> Result<()> {
     };
     #[cfg(not(windows))]
     {
-        let applied = app.auto_switch_with_candidate(
-            true,
-            decision.candidate_account_id,
-            false,
-        )?;
+        let applied = app.auto_switch_with_candidate(true, decision.candidate_account_id, false)?;
         if applied.status != "switched" {
             return Ok(());
         }

@@ -172,33 +172,38 @@ where
             UserEvent::Menu(event) => {
                 let command = self.commands.get(event.id.as_ref()).copied();
                 match command {
-            Some(TrayCommand::Activate(account_id)) => {
-                #[cfg(windows)]
-                {
-                    // Close Desktop first so the relaunched app reads the new
-                    // ~/.codex session. Force only after that close attempt.
-                    let relaunch = crate::windows_shell::close_desktop_for_switch();
-                    let force = true;
-                    if let Err(error) = self.app.activate_with_running_policy(account_id, force) {
-                        eprintln!("failed to activate account from tray: {error:#}");
+                    Some(TrayCommand::Activate(account_id)) => {
+                        #[cfg(windows)]
+                        {
+                            // Close Desktop first so the relaunched app reads the new
+                            // ~/.codex session. Force only after that close attempt.
+                            let relaunch = crate::windows_shell::close_desktop_for_switch();
+                            let force = true;
+                            if let Err(error) =
+                                self.app.activate_with_running_policy(account_id, force)
+                            {
+                                eprintln!("failed to activate account from tray: {error:#}");
+                            }
+                            crate::windows_shell::relaunch_desktop(&relaunch);
+                        }
+                        #[cfg(not(windows))]
+                        if let Err(error) = self.app.activate_with_running_policy(account_id, false)
+                        {
+                            eprintln!("failed to activate account from tray: {error:#}");
+                        }
+                        if let Err(error) = self.update_tray_menu() {
+                            eprintln!("failed to refresh tray menu: {error:#}");
+                        }
                     }
-                    crate::windows_shell::relaunch_desktop(&relaunch);
-                }
-                #[cfg(not(windows))]
-                if let Err(error) = self.app.activate_with_running_policy(account_id, false) {
-                    eprintln!("failed to activate account from tray: {error:#}");
-                }
-                if let Err(error) = self.update_tray_menu() {
-                    eprintln!("failed to refresh tray menu: {error:#}");
-                }
-            }
-            Some(TrayCommand::SetAutoStartUsageWindows(enabled)) => {
-                if let Err(error) = self.app.set_auto_start_usage_windows(enabled) {
-                    eprintln!("failed to update auto-start usage windows from tray: {error:#}");
-                } else if enabled {
-                    let proxy = self.event_proxy.clone();
-                    let env = self.app.env().clone();
-                    let _ = thread::Builder::new()
+                    Some(TrayCommand::SetAutoStartUsageWindows(enabled)) => {
+                        if let Err(error) = self.app.set_auto_start_usage_windows(enabled) {
+                            eprintln!(
+                                "failed to update auto-start usage windows from tray: {error:#}"
+                            );
+                        } else if enabled {
+                            let proxy = self.event_proxy.clone();
+                            let env = self.app.env().clone();
+                            let _ = thread::Builder::new()
                         .name("tray-auto-start-usage-windows".to_owned())
                         .spawn(move || {
                             if let Err(error) =
@@ -210,41 +215,43 @@ where
                             }
                             let _ = proxy.send_event(UserEvent::AutoStartUsageWindowsChecked);
                         });
-                }
-                if let Err(error) = self.update_tray_menu() {
-                    eprintln!("failed to refresh tray menu: {error:#}");
-                }
-            }
-            Some(TrayCommand::SetAutoSwitchWhenExhausted(enabled)) => {
-                if let Err(error) = self.app.set_auto_switch_when_exhausted(enabled) {
-                    eprintln!("failed to update auto-switch from tray: {error:#}");
-                } else if enabled {
-                    let proxy = self.event_proxy.clone();
-                    let env = self.app.env().clone();
-                    let _ = thread::Builder::new()
-                        .name("tray-auto-switch-check".to_owned())
-                        .spawn(move || {
-                            if let Err(error) = crate::app::run_auto_switch_check_now(env) {
-                                eprintln!("failed to run auto-switch check from tray: {error:#}");
-                            }
-                            let _ = proxy.send_event(UserEvent::AutoSwitchChecked);
-                        });
-                }
-                if let Err(error) = self.update_tray_menu() {
-                    eprintln!("failed to refresh tray menu: {error:#}");
-                }
-            }
-            Some(TrayCommand::ShowDesktop) => {
-                if !crate::windows_shell::launch_if_bundled() {
-                    self.exit = TrayExit::ShowTui;
-                    event_loop.exit();
-                }
-            }
-            Some(TrayCommand::Quit) => {
-                self.exit = TrayExit::Quit;
-                event_loop.exit();
-            }
-            None => {}
+                        }
+                        if let Err(error) = self.update_tray_menu() {
+                            eprintln!("failed to refresh tray menu: {error:#}");
+                        }
+                    }
+                    Some(TrayCommand::SetAutoSwitchWhenExhausted(enabled)) => {
+                        if let Err(error) = self.app.set_auto_switch_when_exhausted(enabled) {
+                            eprintln!("failed to update auto-switch from tray: {error:#}");
+                        } else if enabled {
+                            let proxy = self.event_proxy.clone();
+                            let env = self.app.env().clone();
+                            let _ = thread::Builder::new()
+                                .name("tray-auto-switch-check".to_owned())
+                                .spawn(move || {
+                                    if let Err(error) = crate::app::run_auto_switch_check_now(env) {
+                                        eprintln!(
+                                            "failed to run auto-switch check from tray: {error:#}"
+                                        );
+                                    }
+                                    let _ = proxy.send_event(UserEvent::AutoSwitchChecked);
+                                });
+                        }
+                        if let Err(error) = self.update_tray_menu() {
+                            eprintln!("failed to refresh tray menu: {error:#}");
+                        }
+                    }
+                    Some(TrayCommand::ShowDesktop) => {
+                        if !crate::windows_shell::launch_if_bundled() {
+                            self.exit = TrayExit::ShowTui;
+                            event_loop.exit();
+                        }
+                    }
+                    Some(TrayCommand::Quit) => {
+                        self.exit = TrayExit::Quit;
+                        event_loop.exit();
+                    }
+                    None => {}
                 }
             }
         }

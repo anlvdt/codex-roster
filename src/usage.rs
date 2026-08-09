@@ -67,7 +67,8 @@ impl std::fmt::Display for FetchUsageError {
 impl std::error::Error for FetchUsageError {}
 
 pub fn fetch_usage(target: UsageTarget) -> Result<(UsageOutput, SnapshotBlob), FetchUsageError> {
-    let mut auth = snapshot_auth(&target.snapshot).map_err(|error| FetchUsageError::new(error, None))?;
+    let mut auth =
+        snapshot_auth(&target.snapshot).map_err(|error| FetchUsageError::new(error, None))?;
     let mut source = target.source;
 
     if target.allow_refresh && needs_proactive_refresh(&auth) {
@@ -128,11 +129,28 @@ pub fn fetch_usage(target: UsageTarget) -> Result<(UsageOutput, SnapshotBlob), F
         target.snapshot
     };
 
-    let fetched_identity = merge_identity(&target.identity, response.identity().map_err(|error| {
-        FetchUsageError::new(error, if auth.changed { Some(snapshot.clone()) } else { None })
-    })?);
+    let fetched_identity = merge_identity(
+        &target.identity,
+        response.identity().map_err(|error| {
+            FetchUsageError::new(
+                error,
+                if auth.changed {
+                    Some(snapshot.clone())
+                } else {
+                    None
+                },
+            )
+        })?,
+    );
     let usage = response.into_view(source).map_err(|error| {
-        FetchUsageError::new(error, if auth.changed { Some(snapshot.clone()) } else { None })
+        FetchUsageError::new(
+            error,
+            if auth.changed {
+                Some(snapshot.clone())
+            } else {
+                None
+            },
+        )
     })?;
     Ok((
         UsageOutput {
@@ -350,9 +368,8 @@ fn update_snapshot_auth(snapshot: &SnapshotBlob, auth: &SnapshotAuth) -> Result<
                 Value::String(format_last_refresh(last_refresh)),
             );
     }
-    updated.files[auth_index].bytes_base64 = STANDARD.encode(
-        serde_json::to_vec_pretty(&root).context("failed to encode refreshed auth.json")?,
-    );
+    updated.files[auth_index].bytes_base64 = STANDARD
+        .encode(serde_json::to_vec_pretty(&root).context("failed to encode refreshed auth.json")?);
     Ok(updated)
 }
 
@@ -485,10 +502,13 @@ fn access_token_expires_at(access_token: &str) -> Option<OffsetDateTime> {
     if payload.is_empty() {
         return None;
     }
-    let payload_bytes = URL_SAFE_NO_PAD.decode(payload).or_else(|_| {
-        let padding = "=".repeat((4 - payload.len() % 4) % 4);
-        URL_SAFE_NO_PAD.decode(format!("{payload}{padding}"))
-    }).ok()?;
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| {
+            let padding = "=".repeat((4 - payload.len() % 4) % 4);
+            URL_SAFE_NO_PAD.decode(format!("{payload}{padding}"))
+        })
+        .ok()?;
     let claims: Value = serde_json::from_slice(&payload_bytes).ok()?;
     let exp = claims.get("exp")?.as_i64()?;
     OffsetDateTime::from_unix_timestamp(exp).ok()

@@ -637,7 +637,10 @@ mod tests {
         assert_eq!(identity.email, "import@example.com");
         assert_eq!(identity.subject.as_deref(), Some("sub-import"));
         validate_snapshot(&snapshot)?;
-        assert_eq!(identity_from_snapshot(&snapshot)?.email, "import@example.com");
+        assert_eq!(
+            identity_from_snapshot(&snapshot)?.email,
+            "import@example.com"
+        );
         Ok(())
     }
 
@@ -664,8 +667,14 @@ mod tests {
         };
 
         begin_add_account_session(&env)?;
-        assert_eq!(fs::read_to_string(codex_root.join("auth.json"))?, original_auth);
-        assert_eq!(fs::read_to_string(codex_root.join("cap_sid"))?, "sid-original");
+        assert_eq!(
+            fs::read_to_string(codex_root.join("auth.json"))?,
+            original_auth
+        );
+        assert_eq!(
+            fs::read_to_string(codex_root.join("cap_sid"))?,
+            "sid-original"
+        );
         assert!(add_account_session_active(&env));
         fs::write(
             codex_root.join("auth.json"),

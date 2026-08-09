@@ -194,8 +194,11 @@ fn keyring_password(account: &str, key_name: &str, allow_create: bool) -> Result
 }
 
 fn key_file_path(account: &str) -> Option<std::path::PathBuf> {
-    directories::ProjectDirs::from("com", "codexroster", "codex-roster")
-        .map(|dirs| dirs.data_local_dir().join("keys").join(format!("{account}.key")))
+    directories::ProjectDirs::from("com", "codexroster", "codex-roster").map(|dirs| {
+        dirs.data_local_dir()
+            .join("keys")
+            .join(format!("{account}.key"))
+    })
 }
 
 fn read_key_file(account: &str) -> Option<String> {

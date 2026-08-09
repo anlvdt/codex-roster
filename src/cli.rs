@@ -392,7 +392,10 @@ pub fn run() -> Result<()> {
             } else {
                 println!(
                     "Imported {} ({}/{} created/updated) from {}",
-                    output.format, output.created, output.updated, input.display()
+                    output.format,
+                    output.created,
+                    output.updated,
+                    input.display()
                 );
                 for account in &output.accounts {
                     println!("  {} <{}>", account.email, account.id);

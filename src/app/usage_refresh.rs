@@ -73,11 +73,10 @@ fn run_usage_refresh_for_env(env: AppEnv) -> Result<()> {
     app.refresh_stale_saved_usage()
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 
-    #[cfg(windows)]
     #[test]
     fn usage_refresh_notification_reaches_listener() {
         let receiver = subscribe_usage_refresh_checks();

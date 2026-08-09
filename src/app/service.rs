@@ -386,8 +386,8 @@ where
         path: &std::path::Path,
         custom_label: Option<String>,
     ) -> Result<crate::model::ImportJsonOutput> {
-        let bytes = std::fs::read(path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
+        let bytes =
+            std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
         let value: serde_json::Value = serde_json::from_slice(&bytes)
             .with_context(|| format!("failed to parse JSON from {}", path.display()))?;
 
@@ -397,13 +397,16 @@ where
             let (metadata, created) =
                 self.repository
                     .save_snapshot(&self.env.kind, &identity, &snapshot)?;
-            let metadata = if let Some(label) = custom_label.filter(|value| !value.trim().is_empty())
-            {
-                self.repository
-                    .set_custom_label(&self.env.kind, metadata.id, Some(label.trim().to_owned()))?
-            } else {
-                metadata
-            };
+            let metadata =
+                if let Some(label) = custom_label.filter(|value| !value.trim().is_empty()) {
+                    self.repository.set_custom_label(
+                        &self.env.kind,
+                        metadata.id,
+                        Some(label.trim().to_owned()),
+                    )?
+                } else {
+                    metadata
+                };
             return Ok(crate::model::ImportJsonOutput {
                 format: "auth_json".to_owned(),
                 created: usize::from(created),
@@ -419,13 +422,16 @@ where
             let (metadata, created) =
                 self.repository
                     .save_snapshot(&self.env.kind, &identity, &snapshot)?;
-            let metadata = if let Some(label) = custom_label.filter(|value| !value.trim().is_empty())
-            {
-                self.repository
-                    .set_custom_label(&self.env.kind, metadata.id, Some(label.trim().to_owned()))?
-            } else {
-                metadata
-            };
+            let metadata =
+                if let Some(label) = custom_label.filter(|value| !value.trim().is_empty()) {
+                    self.repository.set_custom_label(
+                        &self.env.kind,
+                        metadata.id,
+                        Some(label.trim().to_owned()),
+                    )?
+                } else {
+                    metadata
+                };
             return Ok(crate::model::ImportJsonOutput {
                 format: "snapshot".to_owned(),
                 created: usize::from(created),
@@ -850,8 +856,7 @@ where
                             &refreshed_snapshot,
                             &output.account,
                         )?;
-                        if let Some(account_id) =
-                            self.saved_account_id_for_identity(&live_identity)
+                        if let Some(account_id) = self.saved_account_id_for_identity(&live_identity)
                         {
                             let snapshot_for_repo = self.snapshot_safe_for_saved_live_copy(
                                 &live_snapshot,
@@ -869,11 +874,7 @@ where
                         Ok(output)
                     }
                     Err(error) => {
-                        self.persist_rotated_live_auth(
-                            &live_identity,
-                            &live_snapshot,
-                            &error,
-                        )?;
+                        self.persist_rotated_live_auth(&live_identity, &live_snapshot, &error)?;
                         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
                         self.record_usage_error_for_identity(&live_identity, error.error());
                         Err(error.into_error())
@@ -883,11 +884,7 @@ where
         }
     }
 
-    fn persist_rotated_saved_auth(
-        &self,
-        account_id: Uuid,
-        error: &FetchUsageError,
-    ) -> Result<()> {
+    fn persist_rotated_saved_auth(&self, account_id: Uuid, error: &FetchUsageError) -> Result<()> {
         let Some(refreshed_snapshot) = &error.refreshed_snapshot else {
             return Ok(());
         };
@@ -913,9 +910,8 @@ where
         let Some(refreshed_snapshot) = &error.refreshed_snapshot else {
             return Ok(());
         };
-        let identity = codex::identity_from_snapshot(refreshed_snapshot).unwrap_or_else(|_| {
-            live_identity.clone()
-        });
+        let identity = codex::identity_from_snapshot(refreshed_snapshot)
+            .unwrap_or_else(|_| live_identity.clone());
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         let persisted = self.write_back_live_auth_if_unchanged(
             previous_live_snapshot,
@@ -923,16 +919,16 @@ where
             &identity,
         )?;
         if let Some(account_id) = self.saved_account_id_for_identity(live_identity) {
-            let cached_usage = self
-                .repository
-                .list_accounts(&self.env.kind)
-                .ok()
-                .and_then(|accounts| {
-                    accounts
-                        .into_iter()
-                        .find(|account| account.id == account_id)
-                        .and_then(|account| account.cached_usage)
-                });
+            let cached_usage =
+                self.repository
+                    .list_accounts(&self.env.kind)
+                    .ok()
+                    .and_then(|accounts| {
+                        accounts
+                            .into_iter()
+                            .find(|account| account.id == account_id)
+                            .and_then(|account| account.cached_usage)
+                    });
             let snapshot_for_repo = self.snapshot_safe_for_saved_live_copy(
                 previous_live_snapshot,
                 refreshed_snapshot,

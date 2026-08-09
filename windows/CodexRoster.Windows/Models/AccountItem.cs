@@ -70,6 +70,7 @@ public sealed class AccountItem(AccountDto account)
 
     private static string FormatReset(UsageWindowDto? quota, string? error)
     {
+        if (IsServerRevoked(error)) return "OpenAI đã thu hồi phiên";
         if (RequiresLogin(error)) return "Hãy đăng nhập lại";
         if (RequiresLocalRecovery(error)) return "Khôi phục snapshot local";
         if (quota is null) return "Chưa kiểm tra";
@@ -107,6 +108,7 @@ public sealed class AccountItem(AccountDto account)
     private static string FormatHealth(AccountDto account)
     {
         if (account.Archived) return "Đã lưu trữ";
+        if (IsServerRevoked(account.UsageError)) return "OpenAI đã thu hồi phiên";
         if (RequiresLogin(account.UsageError)) return "Cần đăng nhập";
         if (RequiresLocalRecovery(account.UsageError)) return "Cần khôi phục local";
         if (!string.IsNullOrWhiteSpace(account.UsageError)) return "Tạm thời không khả dụng";
@@ -125,4 +127,7 @@ public sealed class AccountItem(AccountDto account)
 
     private static bool RequiresLocalRecovery(string? error) =>
         error?.Contains("local recovery required", StringComparison.OrdinalIgnoreCase) == true;
+
+    private static bool IsServerRevoked(string? error) =>
+        error?.Contains("[server_session_revoked]", StringComparison.OrdinalIgnoreCase) == true;
 }

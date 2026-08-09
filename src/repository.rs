@@ -192,7 +192,9 @@ where
             account.subject = identity.subject.clone();
             account.name = identity.name.clone();
             account.plan_label = identity.plan_label.clone();
-            account.cached_usage_error = None;
+            // Saving only proves that a local auth bundle exists. Preserve any
+            // server-auth marker until a successful usage/refresh request proves
+            // that the replacement session is accepted by OpenAI.
             account.updated_at = now;
             (account.clone(), false)
         } else {
@@ -328,6 +330,7 @@ where
             return Ok(account.clone());
         }
         account.cached_usage_error = Some(usage_error);
+        account.updated_at = OffsetDateTime::now_utc();
         let metadata = account.clone();
         self.index_store.save_index(&index)?;
         Ok(metadata)
@@ -1476,6 +1479,58 @@ mod tests {
                 .cached_usage_error
                 .is_none()
         );
+    }
+
+    #[test]
+    fn saving_local_auth_does_not_clear_unverified_login_error() {
+        let temp = tempdir().expect("tempdir");
+        let repo = SnapshotRepository::new(temp.path(), MemorySecretStore::default());
+        let env = EnvironmentKind::Macos;
+        let snapshot = SnapshotBlob {
+            schema_version: 1,
+            files: vec![],
+        };
+        let identity = identity("person@example.com", "sub-1");
+        let saved = repo
+            .save_snapshot(&env, &identity, &snapshot)
+            .expect("save")
+            .0;
+        repo.record_usage_error(&env, saved.id, "Login required".to_owned())
+            .expect("record error");
+
+        repo.save_snapshot(&env, &identity, &snapshot)
+            .expect("re-save local auth");
+
+        assert_eq!(
+            repo.get_account(&env, saved.id)
+                .expect("get")
+                .expect("account")
+                .cached_usage_error
+                .as_deref(),
+            Some("Login required")
+        );
+    }
+
+    #[test]
+    fn recording_usage_error_updates_the_diagnostic_timestamp() {
+        let temp = tempdir().expect("tempdir");
+        let repo = SnapshotRepository::new(temp.path(), MemorySecretStore::default());
+        let env = EnvironmentKind::Linux;
+        let snapshot = SnapshotBlob {
+            schema_version: 1,
+            files: vec![],
+        };
+        let saved = repo
+            .save_snapshot(&env, &identity("person@example.com", "sub-1"), &snapshot)
+            .expect("save")
+            .0;
+        std::thread::sleep(std::time::Duration::from_millis(1));
+
+        let updated = repo
+            .record_usage_error(&env, saved.id, "Usage unavailable".to_owned())
+            .expect("record error");
+
+        assert!(updated.updated_at > saved.updated_at);
     }
 
     #[test]

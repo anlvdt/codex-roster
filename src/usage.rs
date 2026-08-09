@@ -165,9 +165,16 @@ pub fn fetch_usage(target: UsageTarget) -> Result<(UsageOutput, SnapshotBlob), F
 pub fn usage_error_message(error: &anyhow::Error) -> String {
     let rendered = format!("{error:#}");
     if usage_error_requires_login(&rendered) {
-        "Login required: Codex auth expired or was logged out. Log in with this account again, then refresh/save it.".to_owned()
+        match usage_error_reason_code(&rendered) {
+            "server_session_revoked" => "Login required [server_session_revoked]: OpenAI ended this OAuth session. Log in with this account again, then refresh/save it.".to_owned(),
+            "refresh_token_rejected" => "Login required [refresh_token_rejected]: OpenAI rejected the saved refresh token. Log in with this account again, then refresh/save it.".to_owned(),
+            "refresh_token_missing" => "Login required [refresh_token_missing]: the saved Codex session has no refresh token. Log in with this account again, then refresh/save it.".to_owned(),
+            _ => "Login required [authentication_required]: Codex auth expired or was logged out. Log in with this account again, then refresh/save it.".to_owned(),
+        }
     } else if usage_error_requires_local_recovery(&rendered) {
-        "Local recovery required: the saved session could not be decrypted. Restore an automatic backup before signing in again.".to_owned()
+        "Local recovery required [local_snapshot_unreadable]: the saved session could not be decrypted. Restore an automatic backup before signing in again.".to_owned()
+    } else if usage_error_reason_code(&rendered) == "access_token_unauthorized" {
+        "Usage unavailable [access_token_unauthorized]: OpenAI rejected the current access token, but the saved refresh token was not proven invalid.".to_owned()
     } else {
         let detail = rendered.lines().next().unwrap_or("unknown error");
         format!("Usage unavailable: {detail}")
@@ -208,6 +215,24 @@ pub fn usage_error_requires_local_recovery(error: &str) -> bool {
 
 pub fn usage_error_blocks_activation(error: &str) -> bool {
     usage_error_requires_login(error) || usage_error_requires_local_recovery(error)
+}
+
+fn usage_error_reason_code(error: &str) -> &'static str {
+    let error = error.to_ascii_lowercase();
+    if error.contains("refresh_token_invalidated") || error.contains("your session has ended") {
+        "server_session_revoked"
+    } else if error.contains("invalid_grant")
+        || error.contains("refresh token was already used")
+        || error.contains("refresh_token_reused")
+    {
+        "refresh_token_rejected"
+    } else if error.contains("snapshot refresh token missing") {
+        "refresh_token_missing"
+    } else if error.contains("usage authentication failed (401)") {
+        "access_token_unauthorized"
+    } else {
+        "unclassified"
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -700,6 +725,17 @@ mod tests {
             usage_error_label(&usage_error_message(&error)),
             "Login required"
         );
+    }
+
+    #[test]
+    fn plain_usage_401_does_not_claim_the_saved_session_was_revoked() {
+        let error = anyhow!("usage authentication failed (401)");
+        let message = usage_error_message(&error);
+
+        assert!(!usage_error_requires_login(&format!("{error:#}")));
+        assert_eq!(usage_error_label(&message), "Usage unavailable");
+        assert!(message.contains("[access_token_unauthorized]"));
+        assert!(!usage_error_blocks_activation(&message));
     }
 
     #[test]

@@ -31,6 +31,20 @@ enum QuotaRefreshScope {
     case allSaved
 }
 
+enum AccountActivationSafety {
+    static let processDrainAttempts = 20
+
+    static func arguments(accountID: UUID) -> [String] {
+        ["activate", accountID.uuidString]
+    }
+
+    static func isProcessSafetyBlock(_ error: Error) -> Bool {
+        let message = error.localizedDescription.lowercased()
+        return message.contains("account switch blocked")
+            || message.contains("codex appears to be running")
+    }
+}
+
 enum NewAccountLoginState: Equatable {
     case idle
     case waiting
@@ -394,12 +408,24 @@ final class AccountStore: ObservableObject {
 
     func activate(_ account: SavedAccount, force: Bool = false) {
         run(switching: true) {
+            let desktopWasRunning = ChatGPTDesktop.isRunning
             let relaunch = force
                 ? try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
                 : ChatGPTDesktop.RelaunchPlan.preferredDesktop()
-            var arguments = ["activate", account.id.uuidString]
-            if force { arguments.append("--force") }
-            let activated: ActivateOutput = try await self.cli.decode(ActivateOutput.self, arguments: arguments)
+            let activated: ActivateOutput
+            do {
+                activated = try await self.activateAfterProcessesDrain(
+                    accountID: account.id,
+                    waitForDrain: force
+                )
+            } catch {
+                // Desktop may already be closed while an independent Codex CLI
+                // correctly blocks the switch. Restore the previous app/session.
+                if desktopWasRunning {
+                    await relaunch.launchAndConfirm()
+                }
+                throw error
+            }
             self.applyActivatedAccount(activated.account)
             // Auth is restored. Reopen and verify Desktop in the background so a
             // slow LaunchServices response does not hold the switch UI hostage.
@@ -410,6 +436,28 @@ final class AccountStore: ObservableObject {
                 self.refreshUsageAfterSwitch(accountID: accountID)
             }
         }
+    }
+
+    private func activateAfterProcessesDrain(
+        accountID: UUID,
+        waitForDrain: Bool
+    ) async throws -> ActivateOutput {
+        for attempt in 0..<AccountActivationSafety.processDrainAttempts {
+            do {
+                return try await cli.decode(
+                    ActivateOutput.self,
+                    arguments: AccountActivationSafety.arguments(accountID: accountID)
+                )
+            } catch {
+                guard waitForDrain,
+                      AccountActivationSafety.isProcessSafetyBlock(error),
+                      attempt + 1 < AccountActivationSafety.processDrainAttempts else {
+                    throw error
+                }
+                try? await Task.sleep(for: .milliseconds(150))
+            }
+        }
+        throw CLIError("Account switch safety check did not complete.")
     }
 
     /// Quit ChatGPT Desktop if needed, then reopen it so the UI loads the current `~/.codex` session.

@@ -1178,6 +1178,9 @@ private struct BulkAccountManager: View {
 
     private func healthLabel(_ account: SavedAccount) -> String {
         if account.archived { return language.text("Đã lưu trữ", "Archived") }
+        if account.usageError?.localizedCaseInsensitiveContains("[server_session_revoked]") == true {
+            return language.text("OpenAI đã thu hồi phiên", "Session revoked by OpenAI")
+        }
         if account.requiresLogin { return language.text("Cần đăng nhập", "Sign-in required") }
         if account.requiresLocalRecovery { return language.text("Cần khôi phục local", "Local recovery") }
         if account.hasTransientUsageError { return language.text("Tạm thời không khả dụng", "Temporarily unavailable") }
@@ -2235,6 +2238,9 @@ private struct AccountDetail: View {
     let resetPasskeyStatus: () -> Void
 
     private var isArchived: Bool { store.isArchived(account) }
+    private var serverSessionRevoked: Bool {
+        account.usageError?.localizedCaseInsensitiveContains("[server_session_revoked]") == true
+    }
 
     var body: some View {
         ScrollView {
@@ -2305,11 +2311,20 @@ private struct AccountDetail: View {
 
                 if account.requiresLogin {
                     VStack(alignment: .leading, spacing: 10) {
-                        Label(language.text("Phiên Codex của tài khoản này đã hết hạn hoặc bị đăng xuất.", "This account's Codex session expired or was logged out."), systemImage: "exclamationmark.triangle.fill")
+                        Label(
+                            serverSessionRevoked
+                                ? language.text("OpenAI đã thu hồi phiên OAuth của tài khoản này.", "OpenAI revoked this account's OAuth session.")
+                                : language.text("Phiên Codex của tài khoản này đã hết hạn hoặc bị đăng xuất.", "This account's Codex session expired or was logged out."),
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
                             .foregroundStyle(.orange)
                         Text(language.text(
-                            "Đăng nhập lại bằng đúng email \(account.email), rồi lưu phiên mới vào Codex Roster.",
-                            "Sign in again with \(account.email), then save the new session into Codex Roster."
+                            serverSessionRevoked
+                                ? "Dữ liệu Roster vẫn còn nguyên; chỉ credential phía server không còn hiệu lực. Đăng nhập lại bằng đúng email \(account.email)."
+                                : "Đăng nhập lại bằng đúng email \(account.email), rồi lưu phiên mới vào Codex Roster.",
+                            serverSessionRevoked
+                                ? "Roster data is intact; only the server credential is no longer valid. Sign in again with \(account.email)."
+                                : "Sign in again with \(account.email), then save the new session into Codex Roster."
                         ))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)

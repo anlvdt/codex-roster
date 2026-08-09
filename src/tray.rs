@@ -175,11 +175,11 @@ where
                         #[cfg(windows)]
                         {
                             // Close Desktop first so the relaunched app reads the new
-                            // ~/.codex session. Force only after that close attempt.
+                            // ~/.codex session. Core preflight must still block if any
+                            // helper or independent CLI process remains alive.
                             let relaunch = crate::windows_shell::close_desktop_for_switch();
-                            let force = true;
                             if let Err(error) =
-                                self.app.activate_with_running_policy(account_id, force)
+                                self.app.activate_with_running_policy(account_id, false)
                             {
                                 eprintln!("failed to activate account from tray: {error:#}");
                             }

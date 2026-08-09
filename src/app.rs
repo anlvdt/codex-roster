@@ -115,9 +115,10 @@ fn subject_bound_identity_matches(expected: &DisplayIdentity, snapshot: &Display
 
 fn should_verify_activation_stability(
     _force_running: bool,
-    warnings: &[RunningCodexProcess],
+    _warnings: &[RunningCodexProcess],
 ) -> bool {
-    // Only wait for stability when a Codex/ChatGPT process is still alive.
-    // `--force` after the macOS UI already quit apps must stay fast.
-    !warnings.is_empty()
+    // Always verify for a full second after replacing auth files. A helper can
+    // start just after the final process scan and write the previous session
+    // back even when the scan itself was clean.
+    true
 }

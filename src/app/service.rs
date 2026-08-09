@@ -550,10 +550,15 @@ where
     ) -> Result<ActivateOutput> {
         let started = Instant::now();
         let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
+        let initial_warnings = activation_process_warnings();
+        ensure_activation_processes_stopped(&initial_warnings)?;
         self.refresh_current_saved_account_before_activation()?;
         let refreshed_current_at = Instant::now();
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         let acquired_lock_at = Instant::now();
+        let warnings = activation_process_warnings();
+        ensure_activation_processes_stopped(&warnings)?;
+        let scanned_processes_at = Instant::now();
         if let Some(expected_active_id) = expected_active_id {
             let accounts = self.repository.list_accounts(&self.env.kind)?;
             let live = codex::try_read_live_auth_bundle(&self.env)?;
@@ -565,8 +570,6 @@ where
                 anyhow::bail!("automatic switch was superseded because the active account changed");
             }
         }
-        let warnings = crate::process::detect_running_codex_processes();
-        let scanned_processes_at = Instant::now();
         let (mut snapshot, snapshot_identity, restore_identity) =
             self.load_activation_target(account_id)?;
         // Refresh-on-restore: hand Codex a valid access token instead of an
@@ -594,12 +597,8 @@ where
         }
         let loaded_target_at = Instant::now();
         let verify_stable = should_verify_activation_stability(force_running, &warnings);
-        let verify_retries = if force_running { 2 } else { 4 };
-        let verify_delay = if force_running {
-            Duration::from_millis(50)
-        } else {
-            Duration::from_millis(250)
-        };
+        let verify_retries = 4;
+        let verify_delay = Duration::from_millis(250);
         codex::restore_snapshot_with_retry(
             &self.env,
             &snapshot,
@@ -1034,6 +1033,26 @@ where
     }
 }
 
+fn ensure_activation_processes_stopped(warnings: &[RunningCodexProcess]) -> Result<()> {
+    if warnings.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "account switch blocked because {} Codex process(es) are still running; the current session was left unchanged",
+        warnings.len()
+    )
+}
+
+#[cfg(not(test))]
+fn activation_process_warnings() -> Vec<RunningCodexProcess> {
+    crate::process::detect_running_codex_processes()
+}
+
+#[cfg(test)]
+fn activation_process_warnings() -> Vec<RunningCodexProcess> {
+    Vec::new()
+}
+
 fn live_bundle_still_matches_snapshot(env: &AppEnv, snapshot: &SnapshotBlob) -> bool {
     for attempt in 0..3 {
         if codex::live_bundle_matches_snapshot(env, snapshot).unwrap_or(false) {
@@ -1182,6 +1201,19 @@ mod tests {
         AccountUsageView, DisplayIdentity, EnvironmentKind, UsageSource, UsageWindowView,
     };
     use crate::secrets::test_support::MemorySecretStore;
+
+    #[test]
+    fn activation_never_forces_through_running_codex_processes() {
+        let warnings = vec![RunningCodexProcess {
+            pid: 42,
+            executable: "codex".to_owned(),
+            role: "app-server".to_owned(),
+            summary: None,
+        }];
+
+        let error = ensure_activation_processes_stopped(&warnings).expect_err("must block");
+        assert!(format!("{error:#}").contains("current session was left unchanged"));
+    }
 
     #[test]
     fn list_marks_active_account() {

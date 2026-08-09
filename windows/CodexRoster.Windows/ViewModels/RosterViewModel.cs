@@ -385,7 +385,14 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
 
     public async Task SaveCurrentAccountAsync()
     {
-        var completedRelogin = _expectedLoginEmail is not null;
+        var expectedReloginEmail = _expectedLoginEmail;
+        var completedRelogin = expectedReloginEmail is not null;
+        var reloginAccountId = completedRelogin
+            ? Accounts.FirstOrDefault(account => string.Equals(
+                account.Email,
+                expectedReloginEmail,
+                StringComparison.OrdinalIgnoreCase))?.Id
+            : null;
         await RunAsync(async () =>
         {
             var current = await _cli.ReadAsync<StatusResponse>("status");
@@ -415,6 +422,16 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
                 }
             }
             await _cli.RunCommandAsync(_isAddAccountSession ? "save-added-account" : "save");
+            if (completedRelogin)
+            {
+                if (reloginAccountId is not Guid accountId)
+                {
+                    throw new InvalidOperationException("Không tìm thấy account cần xác minh sau đăng nhập lại.");
+                }
+                // Saving is only local evidence. Require a successful server
+                // usage request before clearing the marker or advancing the queue.
+                await _cli.RunCommandAsync("usage", accountId.ToString());
+            }
             if (_isAddAccountSession)
             {
                 CodexLoginLauncher.Stop();
@@ -678,16 +695,9 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
                 : new CodexDesktopRestartPlan([]);
             try
             {
-                // After an explicit Desktop close confirmation, pass --force so
-                // Electron helper processes that linger briefly do not block the swap.
-                if (restartDesktop)
-                {
-                    await _cli.RunCommandAsync("activate", account.Id.ToString(), "--force");
-                }
-                else
-                {
-                    await _cli.RunCommandAsync("activate", account.Id.ToString());
-                }
+                // Never force through a surviving Desktop helper or independent
+                // Codex CLI process. Core preflight leaves the current auth intact.
+                await _cli.RunCommandAsync("activate", account.Id.ToString());
             }
             finally
             {
@@ -933,9 +943,8 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
                 AutoSwitchStatus = "Đang đóng Codex Desktop trước khi tự động chuyển…";
                 relaunch = await CodexDesktopLifecycle.CloseForAccountSwitchAsync();
                 closedDesktop = true;
-                // Match tray activate: after an explicit Desktop close, helpers that
-                // linger in the process table must not block the swap forever.
-                applyArgs.Add("--force");
+                // A lingering helper or independent CLI must keep blocking the
+                // swap; forcing through it can rewrite the newly restored auth.
             }
 
             AutoSwitchOutput applied;

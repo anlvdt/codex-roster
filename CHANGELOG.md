@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Block every manual, tray, and automatic account switch while any Codex helper or CLI process can still rewrite the live auth bundle; `--force` can no longer bypass the core safety guard.
+- Wait briefly for Desktop helpers to drain without forcing, restore the previous Desktop session when a switch is blocked, and verify the restored auth remains stable for a full second.
+- Preserve existing login-error markers when auth is merely saved locally; only a successful server usage/refresh check clears them.
+- Distinguish explicit server session revocation, rejected refresh tokens, and an unproven access-token 401 without storing token material.
+- Add cross-platform CI and regression gates that fail if forced account switching is reintroduced.
+
 ## v0.2.29 - 2026-08-09
 
 ### Fixed

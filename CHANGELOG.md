@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.33 - 2026-08-09
+
+### Fixed
+
+- Restore the legacy OAuth ownership model: activation now copies saved auth unchanged and leaves refresh-token rotation exclusively to the official Codex/ChatGPT Desktop.
+- Preserve every current live session before switching, including previously unsaved accounts, and return an exact rollback point without exposing token material.
+- Verify manual and automatic switch targets after Desktop relaunch; if the official Desktop rejects a target, restore and relaunch the previous account automatically.
+- Defer repeated inactive access-token probes until activation so a temporary access-token rejection is not mislabeled as a required login.
+
 ## v0.2.32 - 2026-08-09
 
 ### Added

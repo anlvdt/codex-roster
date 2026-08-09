@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.2.25 - 2026-08-09
+
+### Fixed
+
+- **Snapshot key no longer orphaned by app updates.** The local-snapshot and automatic-backup keys lived only in the macOS Keychain, whose access is bound to the app's ad-hoc code signature. An app update changed the signature and silently orphaned every account snapshot encrypted under the previous key — those accounts could then never refresh quota or be switched into, and showed permanently stale quota. The key is now stored in a `0600` file in the app data directory (the current Keychain key is migrated into it on first read) so it survives updates.
+- **Undecryptable snapshots are now flagged for re-login** instead of silently keeping a stale quota, so you can see exactly which accounts need to be signed in again.
+
+### Note
+
+- Accounts whose snapshot was encrypted under a key that is already lost cannot be recovered and must be signed in again; they now appear under "needs login".
+
 ## v0.2.24 - 2026-08-09
 
 ### Fixed

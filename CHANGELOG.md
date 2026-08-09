@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.2.23 - 2026-08-09
+
+### Added
+
+- Background usage sweep: every saved account's quota is re-queried on a 120s worker (independent of auto-switch/auto-start), so an off-schedule ChatGPT mass reset shows up on the whole roster without a manual refresh. Fresh-quota and login-required accounts are skipped.
+
+### Changed
+
+- Sign-in now uses the Codex browser flow (`codex login`) instead of `--device-auth`, so adding or re-logging an account no longer requires entering a device code.
+
+### Fixed
+
+- Switching accounts no longer forces a re-login: a saved account's near-expiry access token is refreshed and persisted during the switch, so Codex starts from a valid token instead of looping on `refresh_token_reused`.
+- Quota no longer stays stale after an off-schedule reset: an exhausted window is re-queried instead of being trusted until its old scheduled `reset_at`.
+
 ## v0.2.22 - 2026-08-07
 
 ### Added

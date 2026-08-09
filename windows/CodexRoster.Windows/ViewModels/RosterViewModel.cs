@@ -1227,7 +1227,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    private void WatchForNewLoginAsync(IdentityDto? _)
+    private void WatchForNewLoginAsync(IdentityDto? previousIdentity)
     {
         _loginWatchCancellation?.Cancel();
         var cancellation = new CancellationTokenSource();

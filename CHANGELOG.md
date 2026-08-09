@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.2.26 - 2026-08-09
+
+### Changed
+
+- **Adding and re-signing accounts is now automatic.** Opening the flow launches OpenAI sign-in immediately; Roster detects the verified session, saves it, refreshes quota, and closes the sheet without requiring reload or save clicks.
+- **Windows account switching is now one click.** Roster closes and relaunches Codex Desktop around the session swap without an extra confirmation dialog, while active CLI work remains protected.
+
+### Fixed
+
+- Pending sign-in sheets can no longer be dismissed accidentally before the previous Codex session is safely restored.
+- Restored the formatting and lint release gates that had been failing on recent `main` builds.
+
 ## v0.2.25 - 2026-08-09
 
 ### Fixed

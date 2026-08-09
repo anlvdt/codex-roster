@@ -1612,8 +1612,8 @@ private struct AddAccountSheet: View {
 
                     if isWaitingForLogin {
                         Label(language.text(
-                            "Đang chờ Codex hoàn tất device login trong Terminal… App sẽ tự nhận diện tài khoản mới.",
-                            "Waiting for Codex to finish device login in Terminal… The app will detect the new account automatically."
+                            "Đang chờ Codex hoàn tất đăng nhập trên trình duyệt… App sẽ tự nhận diện tài khoản mới.",
+                            "Waiting for Codex to finish the browser sign-in… The app will detect the new account automatically."
                         ), systemImage: "hourglass")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -2855,7 +2855,7 @@ private struct AboutView: View {
 
                 AboutPanel(title: language.text("Tất cả tính năng", "Complete feature set"), icon: "checklist") {
                     AboutFeatureGroup(title: language.text("Tài khoản & phiên", "Accounts & sessions")) {
-                        AboutBullet(icon: "person.badge.plus", text: language.text("Mở đăng nhập thiết bị OpenAI, sau đó lưu phiên Codex đang dùng mà không đọc mật khẩu, mã xác thực hoặc cookie trình duyệt.", "Open OpenAI device sign-in, then save the active Codex session without reading passwords, verification codes, or browser cookies."))
+                        AboutBullet(icon: "person.badge.plus", text: language.text("Mở đăng nhập OpenAI trên trình duyệt, sau đó lưu phiên Codex đang dùng mà không đọc mật khẩu, mã xác thực hoặc cookie trình duyệt.", "Open the OpenAI browser sign-in, then save the active Codex session without reading passwords, verification codes, or browser cookies."))
                         AboutBullet(icon: "pencil", text: language.text("Đặt tên, sửa, tìm kiếm, lưu trữ, khôi phục và xóa từng tài khoản đã lưu.", "Label, edit, search, archive, restore, and remove each saved account."))
                         AboutBullet(icon: "sidebar.left", text: language.text("Nhóm sẵn sàng/cần đăng nhập; sắp xếp theo gói, quota, tên hoặc email; sao chép email nhanh.", "Group ready/needs-sign-in accounts; sort by plan, quota, name, or email; copy email quickly."))
                     }

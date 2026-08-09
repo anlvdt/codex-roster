@@ -12,7 +12,7 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
 
 - Save, label, archive, restore, and safely switch OpenAI / Codex account snapshots.
 - Show the active account's quota in the menu bar and account quota/reset state in the sidebar.
-- Launch the OpenAI device sign-in flow without reading passwords, verification codes, or browser cookies.
+- Launch the OpenAI browser sign-in flow without reading passwords, verification codes, or browser cookies.
 - Close and relaunch ChatGPT/Codex Desktop after a confirmed account switch.
 - Refresh local Codex token statistics, public OpenAI Status, and the optional Codex Reset community outlook.
 - Offer Vietnamese and English; Vietnamese is the default.

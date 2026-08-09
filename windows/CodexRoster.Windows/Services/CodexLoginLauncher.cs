@@ -9,7 +9,8 @@ public static class CodexLoginLauncher
     public static void Start()
     {
         Stop();
-        Process.Start(new ProcessStartInfo("https://auth.openai.com/codex/device") { UseShellExecute = true });
+        // `codex login` opens its own browser sign-in (loopback/PKCE) — no device
+        // code. Do not pre-open a page here; the CLI drives the correct auth URL.
         var codexPath = ResolveCodexExecutable();
         // Quote the resolved path for cmd.exe. Prefer ArgumentList-style safety by
         // escaping embedded quotes rather than interpolating untrusted tokens.
@@ -18,10 +19,10 @@ public static class CodexLoginLauncher
         {
             FileName = "cmd.exe",
             // /c waits for login to complete, then terminates the child shell.
-            Arguments = $"/c {quoted} login --device-auth",
+            Arguments = $"/c {quoted} login",
             UseShellExecute = true,
             WorkingDirectory = Path.GetTempPath(),
-        }) ?? throw new InvalidOperationException("Không thể mở đăng nhập Codex device.");
+        }) ?? throw new InvalidOperationException("Không thể mở đăng nhập Codex.");
     }
 
     public static void Stop()

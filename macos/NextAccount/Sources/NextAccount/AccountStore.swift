@@ -244,7 +244,7 @@ final class AccountStore: ObservableObject {
         }
     }
 
-    /// Open device login so the user can refresh an expired saved account.
+    /// Open browser sign-in so the user can refresh an expired saved account.
     func startRelogin(for account: SavedAccount) {
         isInteractiveLoginInProgress = true
         isPendingLogin = true
@@ -331,8 +331,8 @@ final class AccountStore: ObservableObject {
         try await load()
         guard let currentEmail = status?.currentAccount?.email else {
             throw CLIError(AppLanguage.text(
-                "Chưa có phiên Codex sau đăng nhập. Hãy hoàn tất OpenAI device login rồi thử lại.",
-                "No Codex session after sign-in. Finish OpenAI device login, then try again."
+                "Chưa có phiên Codex sau đăng nhập. Hãy hoàn tất đăng nhập OpenAI trên trình duyệt rồi thử lại.",
+                "No Codex session after sign-in. Finish the OpenAI browser sign-in, then try again."
             ))
         }
         guard currentEmail.caseInsensitiveCompare(account.email) == .orderedSame else {
@@ -350,8 +350,8 @@ final class AccountStore: ObservableObject {
         try await load()
         if accounts.first(where: { $0.id == account.id })?.requiresLogin == true {
             throw CLIError(AppLanguage.text(
-                "Tài khoản \(account.email) vẫn cần đăng nhập. Hãy hoàn tất OpenAI device login rồi thử lưu lại.",
-                "Account \(account.email) still needs sign-in. Finish OpenAI device login, then save again."
+                "Tài khoản \(account.email) vẫn cần đăng nhập. Hãy hoàn tất đăng nhập OpenAI trên trình duyệt rồi thử lưu lại.",
+                "Account \(account.email) still needs sign-in. Finish the OpenAI browser sign-in, then save again."
             ))
         }
     }
@@ -983,11 +983,8 @@ private struct CLIError: LocalizedError {
 
 private enum CodexLoginLauncher {
     static func start() throws {
-        guard let loginURL = URL(string: "https://auth.openai.com/codex/device") else {
-            throw CLIError("Unable to open the OpenAI sign-in page.")
-        }
-        NSWorkspace.shared.open(loginURL)
-
+        // `codex login` opens its own browser sign-in (loopback/PKCE) — no device
+        // code. Do not pre-open a page here; the CLI drives the correct auth URL.
         let command = codexLoginCommand()
         let script = "tell application \"Terminal\" to do script \(appleScriptString(command))"
         let process = Process()
@@ -1009,9 +1006,9 @@ private enum CodexLoginLauncher {
             .compactMap { $0 }
             .first(where: { FileManager.default.isExecutableFile(atPath: $0) })
         if let executable {
-            return "exec \(shellQuote(executable)) login --device-auth"
+            return "exec \(shellQuote(executable)) login"
         }
-        return "exec /usr/bin/env codex login --device-auth"
+        return "exec /usr/bin/env codex login"
     }
 
     private static func shellQuote(_ value: String) -> String {

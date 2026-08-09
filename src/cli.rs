@@ -230,7 +230,7 @@ pub fn run() -> Result<()> {
                 print_json(&serde_json::json!({ "status": "ready_for_login" }))?;
             } else {
                 println!(
-                    "Current session is saved. Complete Codex device login for the new account."
+                    "Current session is saved. Complete the Codex browser sign-in for the new account."
                 );
             }
             Ok(())

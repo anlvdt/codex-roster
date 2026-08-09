@@ -53,6 +53,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
 
     public ObservableCollection<AccountItem> Accounts { get; } = [];
     public event PropertyChangedEventHandler? PropertyChanged;
+    public event EventHandler? ReloginCompleted;
 
     public int SavedAccountCount => Accounts.Count(account => !account.IsArchived);
     public int ReadyAccountCount => Accounts.Count(account => account.IsReady);
@@ -245,8 +246,8 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
 
             ErrorTitle = "Quota chưa đủ";
             ErrorMessage = failures == targets.Count
-                ? "Không thể xác minh quota cho bất kỳ tài khoản nào. Hãy đăng nhập lại các phiên hết hạn."
-                : $"Đã cập nhật một phần: {targets.Count - failures}/{targets.Count} tài khoản. Các phiên còn lại có thể cần đăng nhập lại.";
+                ? "Không thể xác minh quota lúc này. Roster vẫn giữ dữ liệu tốt gần nhất; chỉ đăng nhập lại account có nhãn Cần đăng nhập."
+                : $"Đã cập nhật một phần: {targets.Count - failures}/{targets.Count} tài khoản. Dữ liệu tốt gần nhất được giữ cho phần còn lại.";
             QuotaRefreshStatus = $"Đã kiểm tra một phần lúc {DateTime.Now:t}";
         });
     }
@@ -384,6 +385,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
 
     public async Task SaveCurrentAccountAsync()
     {
+        var completedRelogin = _expectedLoginEmail is not null;
         await RunAsync(async () =>
         {
             var current = await _cli.ReadAsync<StatusResponse>("status");
@@ -427,6 +429,10 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
             LoginStatus = "Đã lưu phiên Codex hiện tại.";
             await RefreshRosterDataAsync();
         });
+        if (completedRelogin && !IsPendingLogin && !HasError)
+        {
+            ReloginCompleted?.Invoke(this, EventArgs.Empty);
+        }
     }
 
     public async Task CancelPendingLoginAsync()
@@ -462,6 +468,51 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         {
             await _cli.RunCommandAsync("delete", account.Id.ToString());
             await RefreshRosterDataAsync();
+        });
+    }
+
+    public async Task DeleteAsync(IReadOnlyList<AccountItem> accounts)
+    {
+        var targets = accounts.Where(account => !account.IsActive).ToList();
+        if (targets.Count == 0) return;
+        await RunAsync(async () =>
+        {
+            var failures = 0;
+            foreach (var account in targets)
+            {
+                try { await _cli.RunCommandAsync("delete", account.Id.ToString()); }
+                catch { failures++; }
+            }
+            await RefreshRosterDataAsync();
+            QuotaRefreshStatus = failures == 0
+                ? $"Đã xóa {targets.Count} tài khoản khỏi Roster."
+                : $"Đã xóa {targets.Count - failures}/{targets.Count} tài khoản.";
+        });
+    }
+
+    public async Task RefreshAccountsQuotaAsync(IReadOnlyList<AccountItem> accounts)
+    {
+        var targets = accounts.Where(account =>
+            !account.IsArchived && !account.NeedsRelogin && !account.NeedsLocalRecovery).ToList();
+        if (targets.Count == 0) return;
+        await RunAsync(async () =>
+        {
+            var failures = 0;
+            foreach (var account in targets)
+            {
+                try
+                {
+                    await _cli.RunCommandAsync("usage", account.Id.ToString());
+                }
+                catch
+                {
+                    failures++;
+                }
+            }
+            await RefreshRosterDataAsync();
+            QuotaRefreshStatus = failures == 0
+                ? $"Đã xác minh {targets.Count} tài khoản lúc {DateTime.Now:t}."
+                : $"Đã xác minh {targets.Count - failures}/{targets.Count}; giữ dữ liệu tốt gần nhất cho phần còn lại.";
         });
     }
 
@@ -670,6 +721,39 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
                 await _cli.RunCommandAsync("archive", account.Id.ToString());
             }
             await RefreshRosterDataAsync();
+        });
+    }
+
+    public async Task SetArchivedAsync(IReadOnlyList<AccountItem> accounts, bool archived)
+    {
+        var targets = accounts.Where(account =>
+            account.IsArchived != archived && !account.IsActive).ToList();
+        if (targets.Count == 0) return;
+        await RunAsync(async () =>
+        {
+            var failures = 0;
+            foreach (var account in targets)
+            {
+                try
+                {
+                    if (archived)
+                    {
+                        await _cli.RunCommandAsync("archive", account.Id.ToString());
+                    }
+                    else
+                    {
+                        await _cli.RunCommandAsync("archive", account.Id.ToString(), "--restore");
+                    }
+                }
+                catch
+                {
+                    failures++;
+                }
+            }
+            await RefreshRosterDataAsync();
+            QuotaRefreshStatus = failures == 0
+                ? $"Đã {(archived ? "lưu trữ" : "khôi phục")} {targets.Count} tài khoản."
+                : $"Đã xử lý {targets.Count - failures}/{targets.Count} tài khoản.";
         });
     }
 

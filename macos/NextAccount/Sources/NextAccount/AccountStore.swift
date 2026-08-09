@@ -173,6 +173,30 @@ final class AccountStore: ObservableObject {
         }
     }
 
+    func setArchived(_ accounts: [SavedAccount], archived: Bool) {
+        let targets = accounts.filter { $0.archived != archived && !$0.isActive }
+        guard !targets.isEmpty else { return }
+        run {
+            var failures = 0
+            for account in targets {
+                var arguments = ["archive", account.id.uuidString]
+                if !archived { arguments.append("--restore") }
+                do {
+                    _ = try await self.cli.data(arguments: arguments + ["--json"])
+                } catch {
+                    failures += 1
+                }
+            }
+            try await self.load()
+            if failures > 0 {
+                throw CLIError(AppLanguage.text(
+                    "Đã xử lý \(targets.count - failures)/\(targets.count) tài khoản.",
+                    "Updated \(targets.count - failures)/\(targets.count) accounts."
+                ))
+            }
+        }
+    }
+
     func refresh() {
         // Soft reload — do not freeze the dashboard behind the global busy overlay.
         guard !isBusyForActions else { return }
@@ -464,6 +488,28 @@ final class AccountStore: ObservableObject {
         }
     }
 
+    func delete(_ accounts: [SavedAccount]) {
+        let targets = accounts.filter { !$0.isActive }
+        guard !targets.isEmpty else { return }
+        run {
+            var failures = 0
+            for account in targets {
+                do {
+                    _ = try await self.cli.data(arguments: ["delete", account.id.uuidString, "--json"])
+                } catch {
+                    failures += 1
+                }
+            }
+            try await self.load()
+            if failures > 0 {
+                throw CLIError(AppLanguage.text(
+                    "Đã xóa \(targets.count - failures)/\(targets.count) tài khoản.",
+                    "Removed \(targets.count - failures)/\(targets.count) accounts."
+                ))
+            }
+        }
+    }
+
     func refreshUsage(scope: QuotaRefreshScope = .activeOnly) {
         run {
             let targets: [SavedAccount]
@@ -490,6 +536,31 @@ final class AccountStore: ObservableObject {
             try await self.load()
             if account.isActive {
                 self.lastQuotaRefreshAt = .now
+            }
+        }
+    }
+
+    func refreshUsage(for accounts: [SavedAccount]) {
+        let targets = accounts.filter {
+            !$0.archived && !$0.requiresLogin && !$0.requiresLocalRecovery
+        }
+        guard !targets.isEmpty else { return }
+        run {
+            var failures = 0
+            for account in targets {
+                do {
+                    _ = try await self.cli.data(arguments: ["usage", account.id.uuidString, "--json"])
+                } catch {
+                    failures += 1
+                }
+            }
+            try await self.load()
+            self.lastQuotaRefreshAt = .now
+            if failures > 0 {
+                throw CLIError(AppLanguage.text(
+                    "Đã xác minh \(targets.count - failures)/\(targets.count) tài khoản; dữ liệu tốt gần nhất được giữ nguyên cho phần còn lại.",
+                    "Verified \(targets.count - failures)/\(targets.count) accounts; the last known good data was kept for the rest."
+                ))
             }
         }
     }
@@ -1455,6 +1526,9 @@ struct SavedAccount: Identifiable, Decodable {
     let environment: String
     let isActive: Bool
     let archived: Bool
+    let createdAt: RustDate?
+    let updatedAt: RustDate?
+    let lastActivatedAt: RustDate?
     let usage: AccountUsage?
     let usageError: String?
 
@@ -1469,6 +1543,9 @@ struct SavedAccount: Identifiable, Decodable {
             environment: environment,
             isActive: isActive,
             archived: archived,
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+            lastActivatedAt: lastActivatedAt,
             usage: usage,
             usageError: usageError
         )
@@ -1484,6 +1561,9 @@ struct SavedAccount: Identifiable, Decodable {
         environment: String,
         isActive: Bool,
         archived: Bool,
+        createdAt: RustDate? = nil,
+        updatedAt: RustDate? = nil,
+        lastActivatedAt: RustDate? = nil,
         usage: AccountUsage?,
         usageError: String?
     ) {
@@ -1496,6 +1576,9 @@ struct SavedAccount: Identifiable, Decodable {
         self.environment = environment
         self.isActive = isActive
         self.archived = archived
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.lastActivatedAt = lastActivatedAt
         self.usage = usage
         self.usageError = usageError
     }
@@ -1512,6 +1595,18 @@ struct SavedAccount: Identifiable, Decodable {
 
     var requiresLogin: Bool {
         usageError?.localizedCaseInsensitiveContains("login required") == true
+    }
+
+    var requiresLocalRecovery: Bool {
+        usageError?.localizedCaseInsensitiveContains("local recovery required") == true
+    }
+
+    var hasTransientUsageError: Bool {
+        usageError != nil && !requiresLogin && !requiresLocalRecovery
+    }
+
+    var lastVerifiedAt: Date? {
+        usage?.fetchedAt?.value
     }
 
     var displayName: String {
@@ -1558,6 +1653,7 @@ struct SavedAccount: Identifiable, Decodable {
 }
 
 struct AccountUsage: Decodable {
+    let fetchedAt: RustDate?
     let fiveHour: UsageWindow?
     let weekly: UsageWindow?
     let credits: UsageCredits?

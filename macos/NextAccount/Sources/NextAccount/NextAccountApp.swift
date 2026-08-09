@@ -11,6 +11,40 @@ private extension Notification.Name {
 private let dashboardCardFill = Color(nsColor: .controlBackgroundColor)
 private let rosterActionBlue = Color(nsColor: .systemBlue)
 
+@MainActor
+private final class PasskeySetupStore: ObservableObject {
+    private static let defaultsKey = "confirmedPasskeyAccountIDs"
+    @Published private(set) var confirmedAccountIDs: Set<UUID>
+
+    init(defaults: UserDefaults = .standard) {
+        confirmedAccountIDs = Set(
+            defaults.stringArray(forKey: Self.defaultsKey)?
+                .compactMap(UUID.init(uuidString:)) ?? []
+        )
+    }
+
+    func isConfirmed(_ accountID: UUID) -> Bool {
+        confirmedAccountIDs.contains(accountID)
+    }
+
+    func confirm(_ accountID: UUID) {
+        confirmedAccountIDs.insert(accountID)
+        persist()
+    }
+
+    func reset(_ accountID: UUID) {
+        confirmedAccountIDs.remove(accountID)
+        persist()
+    }
+
+    private func persist() {
+        UserDefaults.standard.set(
+            confirmedAccountIDs.map(\.uuidString).sorted(),
+            forKey: Self.defaultsKey
+        )
+    }
+}
+
 private struct PointingHandCursor: ViewModifier {
     func body(content: Content) -> some View {
         content.onHover { isHovering in
@@ -67,6 +101,7 @@ struct CodexRosterApp: App {
                 .environmentObject(updater)
                 .environment(\.locale, language.language.locale)
                 .task {
+                    store.startCoreMonitoring()
                     store.refreshTokenUsage(silently: true)
                     store.refreshResetOutlook(silently: true)
                     store.refreshOpenAIStatus(silently: true)
@@ -145,11 +180,14 @@ struct CodexRosterApp: App {
 struct ContentView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
+    @StateObject private var passkeySetup = PasskeySetupStore()
     @State private var selection: UUID?
     @State private var accountForDeletion: SavedAccount?
     @State private var accountForEditing: SavedAccount?
     @State private var accountForRelogin: SavedAccount?
     @State private var reloginQueue: [UUID] = []
+    @State private var accountForPasskeySetup: SavedAccount?
+    @State private var passkeySetupQueue: [UUID] = []
     @State private var showingAddAccount = false
     @State private var backupOperation: BackupOperation?
 
@@ -212,6 +250,19 @@ struct ContentView: View {
                 .environmentObject(store)
                 .environmentObject(language)
         }
+        .sheet(item: $accountForPasskeySetup, onDismiss: presentNextQueuedPasskeySetup) { account in
+            PasskeySetupSheet(
+                account: account,
+                queuedCount: passkeySetupQueue.count,
+                confirm: {
+                    passkeySetup.confirm(account.id)
+                },
+                cancelQueue: {
+                    passkeySetupQueue.removeAll()
+                }
+            )
+            .environmentObject(language)
+        }
         .sheet(item: $backupOperation) { operation in
             BackupTransferSheet(operation: operation)
                 .environmentObject(store)
@@ -268,19 +319,30 @@ struct ContentView: View {
                 },
                 restore: { store.restore(selected) },
                 remove: { accountForDeletion = selected },
-                relogin: { presentRelogin(selected) }
+                relogin: { presentRelogin(selected) },
+                passkeyConfirmed: passkeySetup.isConfirmed(selected.id),
+                setupPasskey: { presentPasskeySetup(selected) },
+                resetPasskeyStatus: { passkeySetup.reset(selected.id) }
             )
         } else {
             DashboardView(
                 selection: $selection,
                 relogin: presentRelogin,
-                reloginAll: startReloginQueue
+                reloginAll: startReloginQueue,
+                passkeyPendingCount: passkeyPendingAccounts.count,
+                setupPasskeys: { startPasskeySetupQueue(passkeyPendingAccounts) }
             )
         }
     }
 
     private var selectedAccount: SavedAccount? {
         store.accounts.first { $0.id == selection }
+    }
+
+    private var passkeyPendingAccounts: [SavedAccount] {
+        store.sortedAccounts(store.accounts.filter {
+            !store.isArchived($0) && !passkeySetup.isConfirmed($0.id)
+        })
     }
 
     private func presentRelogin(_ account: SavedAccount) {
@@ -306,6 +368,36 @@ struct ContentView: View {
             selection = account.id
             DispatchQueue.main.async {
                 accountForRelogin = account
+            }
+            return
+        }
+    }
+
+    private func presentPasskeySetup(_ account: SavedAccount) {
+        passkeySetupQueue.removeAll()
+        selection = account.id
+        accountForPasskeySetup = account
+    }
+
+    private func startPasskeySetupQueue(_ accounts: [SavedAccount]) {
+        let pending = accounts.filter {
+            !store.isArchived($0) && !passkeySetup.isConfirmed($0.id)
+        }
+        guard let first = pending.first else { return }
+        passkeySetupQueue = pending.dropFirst().map(\.id)
+        selection = first.id
+        accountForPasskeySetup = first
+    }
+
+    private func presentNextQueuedPasskeySetup() {
+        while let nextID = passkeySetupQueue.first {
+            passkeySetupQueue.removeFirst()
+            guard let account = store.accounts.first(where: {
+                $0.id == nextID && !store.isArchived($0) && !passkeySetup.isConfirmed($0.id)
+            }) else { continue }
+            selection = account.id
+            DispatchQueue.main.async {
+                accountForPasskeySetup = account
             }
             return
         }
@@ -402,8 +494,12 @@ private struct AccountSidebar: View {
     @ViewBuilder
     private func providerSection(_ provider: AIProvider) -> some View {
         let providerAccounts = accounts(for: provider)
-        let readyAccounts = store.sortedAccounts(providerAccounts.filter { !$0.requiresLogin })
-        let attentionAccounts = store.sortedAccounts(providerAccounts.filter(\.requiresLogin))
+        let readyAccounts = store.sortedAccounts(providerAccounts.filter {
+            !$0.requiresLogin && !$0.requiresLocalRecovery && !$0.hasTransientUsageError
+        })
+        let attentionAccounts = store.sortedAccounts(providerAccounts.filter {
+            $0.requiresLogin || $0.requiresLocalRecovery || $0.hasTransientUsageError
+        })
         Section {
             if providerAccounts.isEmpty {
                 ProviderEmptyRow(provider: provider)
@@ -421,7 +517,7 @@ private struct AccountSidebar: View {
                         provider: provider,
                         accounts: attentionAccounts,
                         state: .attention,
-                        title: language.text("Cần đăng nhập", "Needs sign-in"),
+                        title: language.text("Cần xử lý", "Needs attention"),
                         tint: .orange
                     )
                 }
@@ -523,15 +619,32 @@ private struct DashboardView: View {
     @Binding var selection: UUID?
     let relogin: (SavedAccount) -> Void
     let reloginAll: ([SavedAccount]) -> Void
+    let passkeyPendingCount: Int
+    let setupPasskeys: () -> Void
     @State private var automationExpanded = false
     @State private var confirmingFullBackupRestore = false
+    @State private var selectedAttentionAccountIDs: Set<UUID> = []
 
     private var readyAccounts: [SavedAccount] {
-        store.sortedAccounts(store.accounts.filter { !store.isArchived($0) && !$0.requiresLogin })
+        store.sortedAccounts(store.accounts.filter {
+            !store.isArchived($0) && !$0.requiresLogin
+                && !$0.requiresLocalRecovery && !$0.hasTransientUsageError
+        })
     }
 
     private var attentionAccounts: [SavedAccount] {
-        store.sortedAccounts(store.accounts.filter { !store.isArchived($0) && $0.requiresLogin })
+        store.sortedAccounts(store.accounts.filter {
+            !store.isArchived($0) && ($0.requiresLogin
+                || $0.requiresLocalRecovery || $0.hasTransientUsageError)
+        })
+    }
+
+    private var reloginAccounts: [SavedAccount] {
+        attentionAccounts.filter(\.requiresLogin)
+    }
+
+    private var selectedAttentionAccounts: [SavedAccount] {
+        attentionAccounts.filter { selectedAttentionAccountIDs.contains($0.id) }
     }
 
     var body: some View {
@@ -543,11 +656,16 @@ private struct DashboardView: View {
                     accountCount: store.accounts.count,
                     readyAccounts: readyAccounts,
                     attentionAccounts: attentionAccounts,
+                    reloginAccounts: reloginAccounts,
                     selection: $selection,
-                    reloginAll: { reloginAll(attentionAccounts) }
+                    reloginAll: { reloginAll(reloginAccounts) },
+                    passkeyPendingCount: passkeyPendingCount,
+                    setupPasskeys: setupPasskeys
                 )
 
                 ProviderOverview(selection: $selection)
+
+                BulkAccountManager(reloginAll: reloginAll)
 
                 ViewThatFits(in: .horizontal) {
                     HStack(alignment: .top, spacing: 16) {
@@ -680,11 +798,51 @@ private struct DashboardView: View {
                     Text(language.text("Danh sách hiện tại sẽ được thay bằng bản sao tự động gần nhất trên máy này.", "The current account list will be replaced by this Mac's most recent automatic backup."))
                 }
 
-                if !attentionAccounts.isEmpty {
-                    GroupBox(language.text("Cần xử lý", "Needs attention")) {
+                if !reloginAccounts.isEmpty {
+                    GroupBox {
                         VStack(spacing: 0) {
-                            ForEach(attentionAccounts.prefix(3)) { account in
+                            HStack(spacing: 10) {
+                                Button(selectedAttentionAccountIDs.count == reloginAccounts.count
+                                    ? language.text("Bỏ chọn tất cả", "Clear selection")
+                                    : language.text("Chọn tất cả", "Select all")) {
+                                    if selectedAttentionAccountIDs.count == reloginAccounts.count {
+                                        selectedAttentionAccountIDs.removeAll()
+                                    } else {
+                                        selectedAttentionAccountIDs = Set(reloginAccounts.map(\.id))
+                                    }
+                                }
+                                .buttonStyle(.borderless)
+                                Spacer()
+                                Button(language.text("Sao chép email", "Copy emails")) {
+                                    copyAccountEmails(selectedAttentionAccounts.map(\.email))
+                                }
+                                .disabled(selectedAttentionAccounts.isEmpty)
+                                Button(language.text(
+                                    "Đăng nhập lại \(selectedAttentionAccounts.count) tài khoản…",
+                                    "Sign in to \(selectedAttentionAccounts.count) accounts…"
+                                )) {
+                                    reloginAll(selectedAttentionAccounts)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.orange)
+                                .disabled(selectedAttentionAccounts.isEmpty)
+                            }
+                            .controlSize(.small)
+                            .padding(.bottom, 8)
+
+                            Divider()
+
+                            ForEach(reloginAccounts) { account in
                                 HStack(spacing: 12) {
+                                    Toggle(isOn: Binding(
+                                        get: { selectedAttentionAccountIDs.contains(account.id) },
+                                        set: { selected in
+                                            if selected { selectedAttentionAccountIDs.insert(account.id) }
+                                            else { selectedAttentionAccountIDs.remove(account.id) }
+                                        }
+                                    )) { EmptyView() }
+                                    .toggleStyle(.checkbox)
+                                    .labelsHidden()
                                     Image(systemName: "exclamationmark.triangle.fill")
                                         .foregroundStyle(.orange)
                                     VStack(alignment: .leading, spacing: 2) {
@@ -702,12 +860,6 @@ private struct DashboardView: View {
                                     }
                                     .buttonStyle(.borderless)
                                     .help(language.text("Sao chép email", "Copy email"))
-                                    Button(language.text("Đăng nhập lại", "Sign in again")) {
-                                        selection = account.id
-                                        relogin(account)
-                                    }
-                                    .buttonStyle(.borderedProminent)
-                                    .tint(.orange)
                                     Button(language.text("Xem", "Review")) { selection = account.id }
                                         .buttonStyle(.borderless)
                                 }
@@ -717,16 +869,45 @@ private struct DashboardView: View {
                                     }
                                 }
                                 .padding(.vertical, 9)
-                                if account.id != attentionAccounts.prefix(3).last?.id {
+                                if account.id != reloginAccounts.last?.id {
                                     Divider()
                                 }
                             }
                         }
+                    } label: {
+                        HStack {
+                            Label(language.text("Trung tâm khôi phục", "Recovery center"), systemImage: "person.2.badge.gearshape")
+                            Spacer()
+                            Text(language.text(
+                                "\(reloginAccounts.count) cần đăng nhập lại",
+                                "\(reloginAccounts.count) need sign-in"
+                            ))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.orange)
+                        }
+                    }
+                    .onAppear {
+                        selectedAttentionAccountIDs = Set(reloginAccounts.map(\.id))
+                    }
+                    .onChange(of: reloginAccounts.map(\.id)) { _, accountIDs in
+                        selectedAttentionAccountIDs.formIntersection(accountIDs)
                     }
                 }
 
-                GroupBox(language.text("Trạng thái Codex", "Codex status")) {
-                    VStack(alignment: .leading, spacing: 7) {
+                GroupBox(language.text("An toàn phiên Codex", "Codex session safety")) {
+                    VStack(alignment: .leading, spacing: 9) {
+                        Label(language.text(
+                            "Roster không xoay refresh token của phiên đang dùng",
+                            "Roster does not rotate the active session refresh token"
+                        ), systemImage: "lock.shield.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.green)
+                        Text(language.text(
+                            "Codex là chủ sở hữu duy nhất của live session. Kiểm tra quota nền chỉ dùng access token hiện có; nếu token hết hạn, app giữ kết quả đã xác minh gần nhất thay vì mạo hiểm làm bạn bị đăng xuất.",
+                            "Codex is the sole owner of the live session. Background quota checks only use its current access token; if it expires, the app keeps the last verified result instead of risking a sign-out."
+                        ))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                         if store.hasRunningCodexProcesses {
                             Label(language.text("\(store.status?.processWarnings.count ?? 0) tiến trình Codex đang chạy", "\(store.status?.processWarnings.count ?? 0) Codex processes are running"), systemImage: "exclamationmark.triangle.fill")
                                 .font(.caption)
@@ -772,14 +953,275 @@ private struct DashboardView: View {
     }
 }
 
+private enum BulkAccountFilter: String, CaseIterable, Identifiable {
+    case all
+    case ready
+    case attention
+    case archived
+
+    var id: String { rawValue }
+}
+
+private struct BulkAccountManager: View {
+    @EnvironmentObject private var store: AccountStore
+    @EnvironmentObject private var language: LanguageStore
+    let reloginAll: ([SavedAccount]) -> Void
+    @State private var filter: BulkAccountFilter = .all
+    @State private var selectedAccountIDs: Set<UUID> = []
+    @State private var confirmingDelete = false
+
+    private var visibleAccounts: [SavedAccount] {
+        store.sortedAccounts(store.accounts.filter { account in
+            switch filter {
+            case .all:
+                true
+            case .ready:
+                !account.archived && !account.requiresLogin
+                    && !account.requiresLocalRecovery && !account.hasTransientUsageError
+            case .attention:
+                !account.archived && (account.requiresLogin
+                    || account.requiresLocalRecovery || account.hasTransientUsageError)
+            case .archived:
+                account.archived
+            }
+        })
+    }
+
+    private var selectedAccounts: [SavedAccount] {
+        store.accounts.filter { selectedAccountIDs.contains($0.id) }
+    }
+
+    private var refreshableAccounts: [SavedAccount] {
+        selectedAccounts.filter {
+            !$0.archived && !$0.requiresLogin && !$0.requiresLocalRecovery
+        }
+    }
+
+    private var reloginAccounts: [SavedAccount] {
+        selectedAccounts.filter { !$0.archived && $0.requiresLogin }
+    }
+
+    private var archivableAccounts: [SavedAccount] {
+        selectedAccounts.filter { !$0.archived && !$0.isActive }
+    }
+
+    private var restorableAccounts: [SavedAccount] {
+        selectedAccounts.filter(\.archived)
+    }
+
+    private var deletableAccounts: [SavedAccount] {
+        selectedAccounts.filter { !$0.isActive }
+    }
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                Picker("", selection: $filter) {
+                    ForEach(BulkAccountFilter.allCases) { item in
+                        Text(filterLabel(item)).tag(item)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                HStack(spacing: 8) {
+                    Button(allVisibleSelected
+                        ? language.text("Bỏ chọn", "Clear")
+                        : language.text("Chọn tất cả", "Select all")) {
+                        if allVisibleSelected {
+                            selectedAccountIDs.subtract(visibleAccounts.map(\.id))
+                        } else {
+                            selectedAccountIDs.formUnion(visibleAccounts.map(\.id))
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    Text(language.text(
+                        "Đã chọn \(selectedAccounts.count)",
+                        "\(selectedAccounts.count) selected"
+                    ))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    Spacer()
+                    Button(language.text("Copy email", "Copy emails")) {
+                        copyAccountEmails(selectedAccounts.map(\.email))
+                    }
+                    .disabled(selectedAccounts.isEmpty)
+                    Button(language.text("Quota", "Refresh")) {
+                        store.refreshUsage(for: refreshableAccounts)
+                    }
+                    .disabled(refreshableAccounts.isEmpty || store.isBusyForActions)
+                    Button(language.text("Lưu trữ", "Archive")) {
+                        store.setArchived(archivableAccounts, archived: true)
+                    }
+                    .disabled(archivableAccounts.isEmpty || store.isBusyForActions)
+                    Button(language.text("Khôi phục", "Restore")) {
+                        store.setArchived(restorableAccounts, archived: false)
+                    }
+                    .disabled(restorableAccounts.isEmpty || store.isBusyForActions)
+                    if !reloginAccounts.isEmpty {
+                        Button(language.text(
+                            "Login lại \(reloginAccounts.count)",
+                            "Sign in to \(reloginAccounts.count)"
+                        )) {
+                            reloginAll(reloginAccounts)
+                        }
+                        .tint(.orange)
+                    }
+                    Button(language.text("Xóa", "Remove"), role: .destructive) {
+                        confirmingDelete = true
+                    }
+                    .disabled(deletableAccounts.isEmpty || store.isBusyForActions)
+                }
+                .controlSize(.small)
+
+                Divider()
+
+                if visibleAccounts.isEmpty {
+                    Text(language.text(
+                        "Không có tài khoản trong nhóm này.",
+                        "No accounts in this group."
+                    ))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 8)
+                } else {
+                    ForEach(visibleAccounts) { account in
+                        HStack(spacing: 10) {
+                            Toggle(isOn: Binding(
+                                get: { selectedAccountIDs.contains(account.id) },
+                                set: { selected in
+                                    if selected { selectedAccountIDs.insert(account.id) }
+                                    else { selectedAccountIDs.remove(account.id) }
+                                }
+                            )) { EmptyView() }
+                            .toggleStyle(.checkbox)
+                            .labelsHidden()
+                            Image(systemName: healthIcon(account))
+                                .foregroundStyle(healthColor(account))
+                                .frame(width: 18)
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 6) {
+                                    Text(account.displayName)
+                                        .lineLimit(1)
+                                    if account.isActive {
+                                        Text(language.text("Đang dùng", "Active"))
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(.green)
+                                    }
+                                }
+                                Text(account.email)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            VStack(alignment: .trailing, spacing: 2) {
+                                Text(healthLabel(account))
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(healthColor(account))
+                                Text(lastVerifiedLabel(account))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 5)
+                        if account.id != visibleAccounts.last?.id { Divider() }
+                    }
+                }
+            }
+        } label: {
+            HStack {
+                Label(language.text("Quản lý hàng loạt", "Bulk account manager"), systemImage: "checklist")
+                Spacer()
+                Text("\(store.accounts.count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .onChange(of: store.accounts.map(\.id)) { _, accountIDs in
+            selectedAccountIDs.formIntersection(accountIDs)
+        }
+        .confirmationDialog(
+            language.text(
+                "Xóa \(deletableAccounts.count) tài khoản khỏi Roster?",
+                "Remove \(deletableAccounts.count) accounts from Roster?"
+            ),
+            isPresented: $confirmingDelete,
+            titleVisibility: .visible
+        ) {
+            Button(language.text("Xóa vĩnh viễn", "Remove permanently"), role: .destructive) {
+                store.delete(deletableAccounts)
+                selectedAccountIDs.subtract(deletableAccounts.map(\.id))
+            }
+            Button(language.text("Hủy", "Cancel"), role: .cancel) {}
+        } message: {
+            Text(language.text(
+                "Phiên đang dùng không bị xóa. Các snapshot đã chọn sẽ bị xóa khỏi máy và không thể hoàn tác.",
+                "The active session will not be removed. Selected snapshots will be deleted from this Mac and cannot be undone."
+            ))
+        }
+    }
+
+    private var allVisibleSelected: Bool {
+        !visibleAccounts.isEmpty
+            && visibleAccounts.allSatisfy { selectedAccountIDs.contains($0.id) }
+    }
+
+    private func filterLabel(_ filter: BulkAccountFilter) -> String {
+        switch filter {
+        case .all: language.text("Tất cả", "All")
+        case .ready: language.text("Sẵn dùng", "Ready")
+        case .attention: language.text("Cần xử lý", "Attention")
+        case .archived: language.text("Đã lưu trữ", "Archived")
+        }
+    }
+
+    private func healthLabel(_ account: SavedAccount) -> String {
+        if account.archived { return language.text("Đã lưu trữ", "Archived") }
+        if account.requiresLogin { return language.text("Cần đăng nhập", "Sign-in required") }
+        if account.requiresLocalRecovery { return language.text("Cần khôi phục local", "Local recovery") }
+        if account.hasTransientUsageError { return language.text("Tạm thời không khả dụng", "Temporarily unavailable") }
+        return language.text("Phiên khỏe", "Healthy session")
+    }
+
+    private func healthIcon(_ account: SavedAccount) -> String {
+        if account.requiresLogin { return "person.crop.circle.badge.exclamationmark" }
+        if account.requiresLocalRecovery { return "externaldrive.badge.exclamationmark" }
+        if account.hasTransientUsageError { return "wifi.exclamationmark" }
+        if account.archived { return "archivebox" }
+        return "checkmark.shield.fill"
+    }
+
+    private func healthColor(_ account: SavedAccount) -> Color {
+        if account.requiresLogin { return .orange }
+        if account.requiresLocalRecovery { return .red }
+        if account.hasTransientUsageError { return .yellow }
+        if account.archived { return .secondary }
+        return .green
+    }
+
+    private func lastVerifiedLabel(_ account: SavedAccount) -> String {
+        guard let date = account.lastVerifiedAt else {
+            return language.text("Chưa xác minh quota", "Quota not verified")
+        }
+        return language.text(
+            "Xác minh \(date.formatted(date: .abbreviated, time: .shortened))",
+            "Verified \(date.formatted(date: .abbreviated, time: .shortened))"
+        )
+    }
+}
+
 private struct DashboardHero: View {
     @EnvironmentObject private var language: LanguageStore
     let currentAccount: String?
     let accountCount: Int
     let readyAccounts: [SavedAccount]
     let attentionAccounts: [SavedAccount]
+    let reloginAccounts: [SavedAccount]
     @Binding var selection: UUID?
     let reloginAll: () -> Void
+    let passkeyPendingCount: Int
+    let setupPasskeys: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 22) {
@@ -811,13 +1253,23 @@ private struct DashboardHero: View {
                 Text(language.text("Theo ~/.codex · khớp ChatGPT sau khi mở lại", "From ~/.codex · matches ChatGPT after relaunch"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                if let firstAttention = attentionAccounts.first {
-                    Button(language.text("Sửa nhanh \(attentionAccounts.count) tài khoản", "Quickly repair \(attentionAccounts.count) accounts")) {
+                if let firstAttention = reloginAccounts.first {
+                    Button(language.text("Sửa nhanh \(reloginAccounts.count) tài khoản", "Quickly repair \(reloginAccounts.count) accounts")) {
                         selection = firstAttention.id
                         reloginAll()
                     }
                     .controlSize(.small)
-                } else if let active = readyAccounts.first(where: \.isActive) {
+                }
+                if passkeyPendingCount > 0 {
+                    Button(language.text(
+                        "Thiết lập passkey cho \(passkeyPendingCount) tài khoản",
+                        "Set up passkeys for \(passkeyPendingCount) accounts"
+                    )) {
+                        setupPasskeys()
+                    }
+                    .controlSize(.small)
+                } else if attentionAccounts.isEmpty,
+                          let active = readyAccounts.first(where: \.isActive) {
                     Button(language.text("Xem tài khoản hiện tại", "View current account")) {
                         selection = active.id
                     }
@@ -1183,6 +1635,14 @@ private struct SidebarQuotaMeter: View {
             Label(language.text("Cần đăng nhập lại", "Sign-in required"), systemImage: "exclamationmark.triangle.fill")
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.orange)
+        } else if account.requiresLocalRecovery {
+            Label(language.text("Cần khôi phục local", "Local recovery"), systemImage: "externaldrive.badge.exclamationmark")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.red)
+        } else if account.hasTransientUsageError {
+            Label(language.text("Quota tạm thời lỗi", "Quota temporarily unavailable"), systemImage: "wifi.exclamationmark")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.yellow)
         } else if let window = account.primaryQuotaWindow {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
@@ -1770,6 +2230,9 @@ private struct AccountDetail: View {
     let restore: () -> Void
     let remove: () -> Void
     let relogin: () -> Void
+    let passkeyConfirmed: Bool
+    let setupPasskey: () -> Void
+    let resetPasskeyStatus: () -> Void
 
     private var isArchived: Bool { store.isArchived(account) }
 
@@ -1809,7 +2272,8 @@ private struct AccountDetail: View {
                             .buttonStyle(.borderedProminent)
                             .tint(.orange)
                             .disabled(store.isWorking)
-                    } else if !isArchived && !account.isActive && !account.requiresLogin {
+                    } else if !isArchived && !account.isActive
+                                && !account.requiresLogin && !account.requiresLocalRecovery {
                         Button(language.text("Chuyển sang tài khoản này", "Activate"), action: activate)
                             .buttonStyle(.borderedProminent)
                             .disabled(store.isWorking)
@@ -1859,6 +2323,54 @@ private struct AccountDetail: View {
                     .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
                 }
 
+                if account.requiresLocalRecovery {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label(language.text(
+                            "Snapshot cục bộ không thể giải mã — chưa cần đăng nhập lại.",
+                            "The local snapshot could not be decrypted — do not sign in again yet."
+                        ), systemImage: "externaldrive.badge.exclamationmark")
+                        .foregroundStyle(.red)
+                        Text(language.text(
+                            "Hãy dùng Khôi phục phiên sao lưu ở Tổng quan. Chỉ đăng nhập lại nếu không còn bản sao hợp lệ.",
+                            "Use Restore saved sessions from Overview. Sign in again only if no valid backup remains."
+                        ))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                }
+
+                GroupBox(language.text("Bảo mật đăng nhập", "Sign-in security")) {
+                    HStack(alignment: .center, spacing: 14) {
+                        Label(
+                            passkeyConfirmed
+                                ? language.text("Đã xác nhận có passkey", "Passkey setup confirmed")
+                                : language.text("Chưa xác nhận passkey", "Passkey not confirmed"),
+                            systemImage: passkeyConfirmed ? "key.fill" : "key"
+                        )
+                        .foregroundStyle(passkeyConfirmed ? .green : .secondary)
+                        Spacer()
+                        if passkeyConfirmed {
+                            Button(language.text("Thiết lập lại", "Set up again"), action: setupPasskey)
+                            Button(language.text("Xóa xác nhận", "Clear confirmation"), action: resetPasskeyStatus)
+                                .buttonStyle(.borderless)
+                        } else {
+                            Button(language.text("Thiết lập passkey…", "Set up passkey…"), action: setupPasskey)
+                                .buttonStyle(.borderedProminent)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(language.text(
+                        "Trợ lý chỉ mở ChatGPT chính thức và lưu trạng thái xác nhận trên máy. Nó không gọi codex login, không chuyển account và không đọc hoặc ghi token.",
+                        "The assistant only opens official ChatGPT and stores confirmation locally. It does not run codex login, switch accounts, or read or write tokens."
+                    ))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 6)
+                }
+
                 GroupBox(language.text("Chi tiết tài khoản", "Account details")) {
                     Grid(alignment: .leading, horizontalSpacing: 28, verticalSpacing: 12) {
                         GridRow { Text(language.text("Tên hiển thị", "Display name")).foregroundStyle(.secondary); Text(account.displayName) }
@@ -1878,6 +2390,16 @@ private struct AccountDetail: View {
                         }
                         GridRow { Text(language.text("Gói ChatGPT", "ChatGPT plan")).foregroundStyle(.secondary); Text(account.planLabel ?? language.text("Chưa có", "Not available")) }
                         GridRow { Text(language.text("Trạng thái", "Status")).foregroundStyle(.secondary); Text(account.usageStatus(in: language.language)) }
+                        GridRow {
+                            Text(language.text("Quota xác minh gần nhất", "Last quota verification")).foregroundStyle(.secondary)
+                            Text(account.lastVerifiedAt?.formatted(date: .abbreviated, time: .standard)
+                                ?? language.text("Chưa có", "Not available"))
+                        }
+                        GridRow {
+                            Text(language.text("Kích hoạt gần nhất", "Last activated")).foregroundStyle(.secondary)
+                            Text(account.lastActivatedAt?.value.formatted(date: .abbreviated, time: .standard)
+                                ?? language.text("Chưa có", "Not available"))
+                        }
                         GridRow { Text(language.text("Môi trường", "Environment")).foregroundStyle(.secondary); Text(account.environment.capitalized) }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1903,6 +2425,95 @@ private struct AccountDetail: View {
                 .help(language.text("Quay về trang tổng quan", "Return to overview"))
             }
         }
+    }
+}
+
+private struct PasskeySetupSheet: View {
+    @EnvironmentObject private var language: LanguageStore
+    @Environment(\.dismiss) private var dismiss
+    let account: SavedAccount
+    let queuedCount: Int
+    let confirm: () -> Void
+    let cancelQueue: () -> Void
+
+    private let chatGPTURL = URL(string: "https://chatgpt.com")!
+    private let authDocsURL = URL(string: "https://learn.chatgpt.com/docs/auth")!
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Label(language.text("Thiết lập passkey", "Set up passkey"), systemImage: "key.fill")
+                .font(.title2.weight(.bold))
+                .foregroundStyle(.tint)
+
+            Text(language.text(
+                "Thiết lập cho \(account.email). Roster không đăng xuất Codex và không thay đổi session hiện tại.",
+                "Set up a passkey for \(account.email). Roster will not sign Codex out or change the current session."
+            ))
+            .foregroundStyle(.secondary)
+
+            HStack {
+                Button {
+                    copyAccountEmail(account.email)
+                } label: {
+                    Label(language.text("Sao chép email", "Copy email"), systemImage: "doc.on.doc")
+                }
+                Button {
+                    NSWorkspace.shared.open(chatGPTURL)
+                } label: {
+                    Label(language.text("Mở ChatGPT chính thức", "Open official ChatGPT"), systemImage: "safari")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+
+            GroupBox(language.text("Các bước trên ChatGPT", "Steps in ChatGPT")) {
+                VStack(alignment: .leading, spacing: 9) {
+                    Label(language.text("Xác nhận browser đang dùng đúng \(account.email).", "Confirm the browser is using \(account.email)."), systemImage: "1.circle.fill")
+                    Label(language.text("Mở Settings → Security → Passkeys.", "Open Settings → Security → Passkeys."), systemImage: "2.circle.fill")
+                    Label(language.text("Chọn Add passkey và xác nhận Touch ID hoặc khóa bảo mật.", "Choose Add passkey and confirm with Touch ID or a security key."), systemImage: "3.circle.fill")
+                    Label(language.text("Quay lại đây và chọn Đã bật passkey.", "Return here and select Passkey enabled."), systemImage: "4.circle.fill")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(4)
+            }
+
+            Label(language.text(
+                "Không có password, mã 2FA, passkey private key hoặc token nào được đưa vào Roster.",
+                "No password, 2FA code, passkey private key, or token is provided to Roster."
+            ), systemImage: "lock.shield.fill")
+            .font(.footnote.weight(.medium))
+            .foregroundStyle(.green)
+
+            if queuedCount > 0 {
+                Label(language.text(
+                    "Sau tài khoản này còn \(queuedCount) tài khoản trong hàng đợi.",
+                    "There are \(queuedCount) more accounts in the setup queue."
+                ), systemImage: "list.number")
+                .font(.footnote)
+                .foregroundStyle(.tint)
+            }
+
+            HStack {
+                Button(language.text("Tài liệu OpenAI", "OpenAI documentation")) {
+                    NSWorkspace.shared.open(authDocsURL)
+                }
+                .buttonStyle(.borderless)
+                Spacer()
+                Button(language.text("Dừng", "Stop")) {
+                    cancelQueue()
+                    dismiss()
+                }
+                Button(language.text("Bỏ qua", "Skip")) {
+                    dismiss()
+                }
+                Button(language.text("Đã bật passkey", "Passkey enabled")) {
+                    confirm()
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(24)
+        .frame(width: 560)
     }
 }
 
@@ -3049,4 +3660,10 @@ private struct AboutFeatureGroup<Content: View>: View {
 private func copyAccountEmail(_ email: String) {
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(email, forType: .string)
+}
+
+private func copyAccountEmails(_ emails: [String]) {
+    guard !emails.isEmpty else { return }
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(emails.joined(separator: "\n"), forType: .string)
 }

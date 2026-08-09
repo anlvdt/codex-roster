@@ -18,7 +18,7 @@ use crate::model::{
     MetadataIndex, SavedAccountMetadata, SnapshotBlob,
 };
 use crate::secrets::{LocalSecretStore, SecretStore};
-use crate::usage::usage_error_requires_login;
+use crate::usage::{usage_error_blocks_activation, usage_error_requires_login};
 use codec::{decode_snapshot, encode_snapshot};
 use index_store::MetadataIndexStore;
 
@@ -88,7 +88,7 @@ where
             if legacy
                 .cached_usage_error
                 .as_deref()
-                .is_some_and(usage_error_requires_login)
+                .is_some_and(usage_error_blocks_activation)
             {
                 skipped_accounts += 1;
                 continue;
@@ -321,7 +321,7 @@ where
         if account
             .cached_usage_error
             .as_deref()
-            .is_some_and(usage_error_requires_login)
+            .is_some_and(usage_error_blocks_activation)
             && !usage_error_requires_login(&usage_error)
             && !confirms_usage_access
         {

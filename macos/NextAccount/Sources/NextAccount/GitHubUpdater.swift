@@ -98,12 +98,27 @@ final class GitHubUpdater: ObservableObject {
         let helper = stagingDirectory.appendingPathComponent("install-update.sh")
         let appProcessID = ProcessInfo.processInfo.processIdentifier
         let backupBundle = installDirectory.appendingPathComponent(".Codex Roster.previous.app")
+        let bundledTrayPattern = installedApp
+            .appendingPathComponent("Contents/MacOS/codex-roster")
+            .path + " tray"
         let script = """
         #!/bin/sh
         set -eu
         log_directory="$HOME/Library/Logs/CodexRoster"
         /bin/mkdir -p "$log_directory"
         exec >> "$log_directory/updater.log" 2>&1
+        tray_pattern=\(Self.shellQuote(bundledTrayPattern))
+        for helper_pid in $(/usr/bin/pgrep -f "$tray_pattern" 2>/dev/null || true); do
+          if [ "$helper_pid" != "\(appProcessID)" ]; then
+            /bin/kill -TERM "$helper_pid" 2>/dev/null || true
+          fi
+        done
+        sleep 0.3
+        for helper_pid in $(/usr/bin/pgrep -f "$tray_pattern" 2>/dev/null || true); do
+          if [ "$helper_pid" != "\(appProcessID)" ]; then
+            /bin/kill -KILL "$helper_pid" 2>/dev/null || true
+          fi
+        done
         while /bin/kill -0 \(appProcessID) 2>/dev/null; do
           sleep 0.1
         done

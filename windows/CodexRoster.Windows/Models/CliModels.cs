@@ -55,6 +55,12 @@ public sealed class AccountDto
     [JsonPropertyName("is_active")]
     public bool IsActive { get; init; }
     public bool Archived { get; init; }
+    [JsonPropertyName("created_at")]
+    public DateTimeOffset? CreatedAt { get; init; }
+    [JsonPropertyName("updated_at")]
+    public DateTimeOffset? UpdatedAt { get; init; }
+    [JsonPropertyName("last_activated_at")]
+    public DateTimeOffset? LastActivatedAt { get; init; }
     public AccountUsageDto? Usage { get; init; }
     [JsonPropertyName("usage_error")]
     public string? UsageError { get; init; }
@@ -62,6 +68,8 @@ public sealed class AccountDto
 
 public sealed class AccountUsageDto
 {
+    [JsonPropertyName("fetched_at")]
+    public DateTimeOffset? FetchedAt { get; init; }
     [JsonPropertyName("five_hour")]
     public UsageWindowDto? FiveHour { get; init; }
     public UsageWindowDto? Weekly { get; init; }

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Made Codex the exclusive owner of the active refresh token; background quota checks never rotate the live session.
+- Split hard sign-in failures, local snapshot recovery, and transient usage errors so only confirmed server-side session failures request login.
+- Added macOS health filters, last-verification details, scoped bulk refresh/archive/restore/delete, and selective batch re-login.
+- Added Windows multi-select bulk actions, sequential batch re-login, session-health labels, passkey guidance, and live-session safety messaging.
+- Stop an old bundled macOS tray companion during self-update so pre-update token logic cannot remain alive after the bundle is replaced.
+
 ## v0.2.28 - 2026-08-09
 
 ### Changed

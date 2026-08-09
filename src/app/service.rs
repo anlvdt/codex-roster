@@ -16,9 +16,12 @@ use crate::repository::SnapshotRepository;
 use crate::secrets::SecretStore;
 use crate::settings::{load_settings, save_settings};
 use crate::usage::{
-    FetchUsageError, fetch_usage, usage_error_message, usage_error_requires_login,
+    FetchUsageError, fetch_usage, usage_error_blocks_activation, usage_error_message,
     usage_target_from_snapshot,
 };
+
+const ALLOW_LIVE_TOKEN_REFRESH: bool = false;
+const _: () = assert!(!ALLOW_LIVE_TOKEN_REFRESH);
 
 use super::{
     App, account_view, match_saved_account, saved_identity, should_verify_activation_stability,
@@ -141,7 +144,7 @@ where
                 && !candidate
                     .cached_usage_error
                     .as_deref()
-                    .is_some_and(usage_error_requires_login)
+                    .is_some_and(usage_error_blocks_activation)
         }) {
             // Fresh cache (usable or not) skips network/decrypt. Only refresh stale/missing.
             if cached_usage_is_fresh(candidate.cached_usage.as_ref(), now) {
@@ -166,7 +169,7 @@ where
                     && !candidate
                         .usage_error
                         .as_deref()
-                        .is_some_and(usage_error_requires_login)
+                        .is_some_and(usage_error_blocks_activation)
                     && is_usable_for_switch(candidate.usage.as_ref())
                     && usable_candidate_ids.contains(&candidate.id)
                     && !is_in_auto_switch_cooldown(&settings, candidate.id, now)
@@ -240,7 +243,7 @@ where
                             && !candidate
                                 .usage_error
                                 .as_deref()
-                                .is_some_and(usage_error_requires_login)
+                                .is_some_and(usage_error_blocks_activation)
                             && is_usable_for_switch(candidate.usage.as_ref())
                             && !is_in_auto_switch_cooldown(&settings, candidate.id, now)
                     }),
@@ -703,7 +706,7 @@ where
             if account
                 .cached_usage_error
                 .as_deref()
-                .is_some_and(usage_error_requires_login)
+                .is_some_and(usage_error_blocks_activation)
             {
                 continue;
             }
@@ -794,8 +797,8 @@ where
                 }
                 // A snapshot that no longer decrypts must surface as an error on
                 // the account, not silently keep stale quota forever. Record it
-                // (usage_error_requires_login treats decrypt failures as
-                // login-required) so the roster flags it for re-login.
+                // so the roster can distinguish local recovery from a real
+                // server-side sign-in requirement.
                 let (snapshot, _, _) = match self.load_activation_target(account_id) {
                     Ok(target) => target,
                     Err(error) => {
@@ -847,11 +850,13 @@ where
                 })?;
                 let live_identity = live.identity.clone();
                 let live_snapshot = live.snapshot.clone();
-                // Refresh tokens are single-use. Codex Desktop/CLI also refresh
-                // `~/.codex/auth.json`. A parallel Roster rotation invalidates
-                // their token and forces an unexpected logout.
-                let allow_refresh = crate::process::detect_running_codex_processes().is_empty()
-                    && !codex::add_account_session_active(&self.env);
+                // The live refresh token belongs exclusively to Codex. Process
+                // detection is inherently racy: Codex can start after the scan
+                // and refresh the same single-use token while Roster is doing so.
+                // Only read quota with the current access token here. If it has
+                // expired, retain the last verified quota until Codex refreshes
+                // its own live session instead of risking a surprise logout.
+                let allow_refresh = ALLOW_LIVE_TOKEN_REFRESH;
                 let target = usage_target_from_snapshot(
                     self.env.kind.clone(),
                     live.snapshot,
@@ -1120,7 +1125,7 @@ fn best_cached_auto_switch_candidate(
                 && !candidate
                     .usage_error
                     .as_deref()
-                    .is_some_and(usage_error_requires_login)
+                    .is_some_and(usage_error_blocks_activation)
                 && is_usable_for_switch(candidate.usage.as_ref())
                 && !is_in_auto_switch_cooldown(settings, candidate.id, now)
         })

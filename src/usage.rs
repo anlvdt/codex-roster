@@ -166,6 +166,8 @@ pub fn usage_error_message(error: &anyhow::Error) -> String {
     let rendered = format!("{error:#}");
     if usage_error_requires_login(&rendered) {
         "Login required: Codex auth expired or was logged out. Log in with this account again, then refresh/save it.".to_owned()
+    } else if usage_error_requires_local_recovery(&rendered) {
+        "Local recovery required: the saved session could not be decrypted. Restore an automatic backup before signing in again.".to_owned()
     } else {
         let detail = rendered.lines().next().unwrap_or("unknown error");
         format!("Usage unavailable: {detail}")
@@ -175,6 +177,8 @@ pub fn usage_error_message(error: &anyhow::Error) -> String {
 pub fn usage_error_label(error: &str) -> &'static str {
     if usage_error_requires_login(error) {
         "Login required"
+    } else if usage_error_requires_local_recovery(error) {
+        "Local recovery required"
     } else {
         "Usage unavailable"
     }
@@ -187,16 +191,23 @@ pub fn usage_error_requires_login(error: &str) -> bool {
         || error.contains("snapshot refresh token missing")
         || error.contains("refresh_token_invalidated")
         || error.contains("your session has ended")
-        // A snapshot that no longer decrypts (e.g. the local key changed after an
-        // app update) can only be recovered by signing in again — surface it as
-        // login-required instead of a silent, permanently stale quota.
-        || error.contains("decrypt")
-        || error.contains("credential key")
         || (error.contains("token refresh failed")
             && (error.contains("invalid_grant")
                 || error.contains("refresh token")
                 || error.contains("log out")
                 || error.contains("sign in")))
+}
+
+pub fn usage_error_requires_local_recovery(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("local recovery required")
+        || error.contains("decrypt")
+        || error.contains("credential key")
+        || error.contains("snapshot payload")
+}
+
+pub fn usage_error_blocks_activation(error: &str) -> bool {
+    usage_error_requires_login(error) || usage_error_requires_local_recovery(error)
 }
 
 #[derive(Clone, Debug)]
@@ -674,6 +685,7 @@ mod tests {
 
         assert_eq!(usage_error_label(&message), "Login required");
         assert!(message.contains("Log in with this account again"));
+        assert!(usage_error_blocks_activation(&message));
     }
 
     #[test]
@@ -691,15 +703,17 @@ mod tests {
     }
 
     #[test]
-    fn undecryptable_snapshot_is_login_required() {
+    fn undecryptable_snapshot_requires_local_recovery_not_login() {
         let error = anyhow!(
             "failed to decrypt snapshot /x/y.snapshot: could not decrypt local snapshot: Decryption failed"
         );
 
-        assert!(usage_error_requires_login(&format!("{error:#}")));
+        assert!(!usage_error_requires_login(&format!("{error:#}")));
+        assert!(usage_error_requires_local_recovery(&format!("{error:#}")));
+        assert!(usage_error_blocks_activation(&format!("{error:#}")));
         assert_eq!(
             usage_error_label(&usage_error_message(&error)),
-            "Login required"
+            "Local recovery required"
         );
     }
 
@@ -709,6 +723,7 @@ mod tests {
 
         assert_eq!(usage_error_label(&message), "Usage unavailable");
         assert_eq!(message, "Usage unavailable: failed to query Codex usage");
+        assert!(!usage_error_blocks_activation(&message));
     }
 
     #[test]

@@ -23,7 +23,7 @@ use crate::model::{
     AccountUsageView, AccountView, DisplayIdentity, RunningCodexProcess, SavedAccountMetadata,
 };
 use crate::repository::SnapshotRepository;
-use crate::usage::usage_error_requires_login;
+use crate::usage::usage_error_blocks_activation;
 
 pub struct App<S> {
     env: AppEnv,
@@ -53,7 +53,7 @@ fn account_view(
     let usage_error = usage_error.or(account.cached_usage_error);
     let usage = if usage_error
         .as_deref()
-        .is_some_and(usage_error_requires_login)
+        .is_some_and(usage_error_blocks_activation)
     {
         None
     } else {

@@ -10,7 +10,11 @@ public sealed class AccountItem(AccountDto account)
     public bool IsArchived { get; } = account.Archived;
     public string DisplayName { get; } = account.CustomLabel ?? account.Name ?? account.Email;
     public string PlanLabel { get; } = account.PlanLabel ?? "ChatGPT";
-    public bool NeedsRelogin { get; } = !string.IsNullOrWhiteSpace(account.UsageError);
+    public bool NeedsRelogin { get; } = RequiresLogin(account.UsageError);
+    public bool NeedsLocalRecovery { get; } = RequiresLocalRecovery(account.UsageError);
+    public bool HasTransientUsageError { get; } = !string.IsNullOrWhiteSpace(account.UsageError)
+        && !RequiresLogin(account.UsageError)
+        && !RequiresLocalRecovery(account.UsageError);
     public bool HasQuota { get; } = account.Usage?.Weekly is not null || account.Usage?.FiveHour is not null;
     public int QuotaPercent { get; } = account.Usage?.Weekly?.RemainingPercent
         ?? account.Usage?.FiveHour?.RemainingPercent
@@ -23,11 +27,14 @@ public sealed class AccountItem(AccountDto account)
     public string ResetLabel { get; } = FormatReset(account.Usage?.Weekly ?? account.Usage?.FiveHour, account.UsageError);
     public string SecondaryQuotaLabel { get; } = FormatSecondaryQuota(account);
     public string SidebarStatus { get; } = FormatSidebarStatus(account);
+    public string HealthLabel { get; } = FormatHealth(account);
+    public string LastVerifiedLabel { get; } = FormatLastVerified(account);
     public double RowOpacity { get; } = account.Archived ? 0.55 : 1;
-    public bool CanActivate { get; } = !account.IsActive && !account.Archived && string.IsNullOrWhiteSpace(account.UsageError);
-    public bool CanRelogin { get; } = !account.Archived && !string.IsNullOrWhiteSpace(account.UsageError);
+    public bool CanActivate { get; } = !account.IsActive && !account.Archived
+        && !RequiresLogin(account.UsageError) && !RequiresLocalRecovery(account.UsageError);
+    public bool CanRelogin { get; } = !account.Archived && RequiresLogin(account.UsageError);
 
-    public Visibility QuotaMeterVisibility => HasQuota && !NeedsRelogin ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility QuotaMeterVisibility => HasQuota && !NeedsRelogin && !NeedsLocalRecovery ? Visibility.Visible : Visibility.Collapsed;
     public Visibility SecondaryQuotaVisibility => string.IsNullOrWhiteSpace(SecondaryQuotaLabel) ? Visibility.Collapsed : Visibility.Visible;
     public Visibility ActiveBadgeVisibility => IsActive ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ArchivedBadgeVisibility => IsArchived ? Visibility.Visible : Visibility.Collapsed;
@@ -46,14 +53,15 @@ public sealed class AccountItem(AccountDto account)
 
     private static string FormatQuota(AccountDto account)
     {
-        if (!string.IsNullOrWhiteSpace(account.UsageError)) return "Cần đăng nhập";
+        if (RequiresLogin(account.UsageError)) return "Cần đăng nhập";
+        if (RequiresLocalRecovery(account.UsageError)) return "Cần khôi phục";
         var quota = account.Usage?.Weekly ?? account.Usage?.FiveHour;
         return quota is null ? "Chưa có quota" : $"{quota.RemainingPercent}%";
     }
 
     private static string FormatSecondaryQuota(AccountDto account)
     {
-        if (!string.IsNullOrWhiteSpace(account.UsageError)) return string.Empty;
+        if (RequiresLogin(account.UsageError) || RequiresLocalRecovery(account.UsageError)) return string.Empty;
         var weekly = account.Usage?.Weekly;
         var fiveHour = account.Usage?.FiveHour;
         if (weekly is null || fiveHour is null) return string.Empty;
@@ -62,7 +70,8 @@ public sealed class AccountItem(AccountDto account)
 
     private static string FormatReset(UsageWindowDto? quota, string? error)
     {
-        if (!string.IsNullOrWhiteSpace(error)) return "Hãy đăng nhập lại";
+        if (RequiresLogin(error)) return "Hãy đăng nhập lại";
+        if (RequiresLocalRecovery(error)) return "Khôi phục snapshot local";
         if (quota is null) return "Chưa kiểm tra";
         var span = quota.ResetAt - DateTimeOffset.Now;
         if (span <= TimeSpan.Zero) return "Đang chờ reset";
@@ -83,7 +92,9 @@ public sealed class AccountItem(AccountDto account)
 
     private static string FormatSidebarStatus(AccountDto account)
     {
-        if (!string.IsNullOrWhiteSpace(account.UsageError)) return "Cần đăng nhập lại";
+        if (RequiresLogin(account.UsageError)) return "Cần đăng nhập lại";
+        if (RequiresLocalRecovery(account.UsageError)) return "Cần khôi phục local";
+        if (!string.IsNullOrWhiteSpace(account.UsageError) && account.Usage is null) return "Quota tạm thời lỗi";
         var quota = account.Usage?.Weekly ?? account.Usage?.FiveHour;
         if (quota is null) return "Chưa kiểm tra quota";
         var remaining = quota.ResetAt - DateTimeOffset.Now;
@@ -92,4 +103,26 @@ public sealed class AccountItem(AccountDto account)
         if (remaining.TotalHours >= 1) return $"{quota.RemainingPercent}% · reset {quota.ResetAt.ToLocalTime():HH:mm}";
         return $"{quota.RemainingPercent}% · reset sớm";
     }
+
+    private static string FormatHealth(AccountDto account)
+    {
+        if (account.Archived) return "Đã lưu trữ";
+        if (RequiresLogin(account.UsageError)) return "Cần đăng nhập";
+        if (RequiresLocalRecovery(account.UsageError)) return "Cần khôi phục local";
+        if (!string.IsNullOrWhiteSpace(account.UsageError)) return "Tạm thời không khả dụng";
+        return "Phiên khỏe";
+    }
+
+    private static string FormatLastVerified(AccountDto account)
+    {
+        return account.Usage?.FetchedAt is { } fetchedAt
+            ? $"Xác minh {fetchedAt.ToLocalTime():HH:mm · dd/MM}"
+            : "Chưa xác minh quota";
+    }
+
+    private static bool RequiresLogin(string? error) =>
+        error?.Contains("login required", StringComparison.OrdinalIgnoreCase) == true;
+
+    private static bool RequiresLocalRecovery(string? error) =>
+        error?.Contains("local recovery required", StringComparison.OrdinalIgnoreCase) == true;
 }

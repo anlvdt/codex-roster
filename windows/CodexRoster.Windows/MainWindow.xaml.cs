@@ -1,21 +1,25 @@
 using CodexRoster.Windows.Models;
 using CodexRoster.Windows.Services;
 using CodexRoster.Windows.ViewModels;
+using System.Diagnostics;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Windowing;
 using WinRT.Interop;
+using Windows.ApplicationModel.DataTransfer;
 
 namespace CodexRoster.Windows;
 
 public sealed partial class MainWindow : Window
 {
     public RosterViewModel ViewModel { get; } = new();
+    private readonly Queue<Guid> _reloginQueue = new();
 
     public MainWindow()
     {
         InitializeComponent();
+        ViewModel.ReloginCompleted += ViewModel_ReloginCompleted;
         SetWindowIcon();
         Activated += MainWindow_Activated;
         Closed += MainWindow_Closed;
@@ -44,6 +48,7 @@ public sealed partial class MainWindow : Window
 
     private void MainWindow_Closed(object sender, WindowEventArgs args)
     {
+        ViewModel.ReloginCompleted -= ViewModel_ReloginCompleted;
         ViewModel.Dispose();
         Application.Current.Exit();
     }
@@ -51,6 +56,70 @@ public sealed partial class MainWindow : Window
     private async void Refresh_Click(object sender, RoutedEventArgs e) => await ViewModel.RefreshAsync();
 
     private async void RefreshQuota_Click(object sender, RoutedEventArgs e) => await ViewModel.RefreshAllQuotaAsync();
+
+    private IReadOnlyList<AccountItem> SelectedAccounts() =>
+        AccountList.SelectedItems.OfType<AccountItem>().ToList();
+
+    private void SelectAllAccounts_Click(object sender, RoutedEventArgs e) => AccountList.SelectAll();
+
+    private void ClearAccountSelection_Click(object sender, RoutedEventArgs e) => AccountList.SelectedItems.Clear();
+
+    private void CopySelectedEmails_Click(object sender, RoutedEventArgs e)
+    {
+        var emails = SelectedAccounts().Select(account => account.Email).ToArray();
+        if (emails.Length == 0) return;
+        var data = new DataPackage();
+        data.SetText(string.Join(Environment.NewLine, emails));
+        Clipboard.SetContent(data);
+    }
+
+    private async void RefreshSelectedAccounts_Click(object sender, RoutedEventArgs e) =>
+        await ViewModel.RefreshAccountsQuotaAsync(SelectedAccounts());
+
+    private async void ReloginSelectedAccounts_Click(object sender, RoutedEventArgs e)
+    {
+        var accounts = SelectedAccounts().Where(account => account.CanRelogin).ToList();
+        if (accounts.Count == 0) return;
+        _reloginQueue.Clear();
+        foreach (var account in accounts.Skip(1)) _reloginQueue.Enqueue(account.Id);
+        await ViewModel.StartReloginAsync(accounts[0]);
+    }
+
+    private async void ViewModel_ReloginCompleted(object? sender, EventArgs e)
+    {
+        while (_reloginQueue.TryDequeue(out var accountId))
+        {
+            var account = ViewModel.Accounts.FirstOrDefault(item =>
+                item.Id == accountId && item.CanRelogin);
+            if (account is null) continue;
+            await ViewModel.StartReloginAsync(account);
+            return;
+        }
+    }
+
+    private async void ArchiveSelectedAccounts_Click(object sender, RoutedEventArgs e) =>
+        await ViewModel.SetArchivedAsync(SelectedAccounts(), archived: true);
+
+    private async void RestoreSelectedAccounts_Click(object sender, RoutedEventArgs e) =>
+        await ViewModel.SetArchivedAsync(SelectedAccounts(), archived: false);
+
+    private async void DeleteSelectedAccounts_Click(object sender, RoutedEventArgs e)
+    {
+        var accounts = SelectedAccounts().Where(account => !account.IsActive).ToList();
+        if (accounts.Count == 0) return;
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = $"Xóa {accounts.Count} tài khoản khỏi Roster?",
+            Content = "Phiên đang dùng được bảo vệ. Các snapshot đã chọn sẽ bị xóa khỏi máy và không thể hoàn tác.",
+            PrimaryButtonText = "Xóa vĩnh viễn",
+            CloseButtonText = "Hủy",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        await ViewModel.DeleteAsync(accounts);
+        AccountList.SelectedItems.Clear();
+    }
 
     private void LoadDemoData_Click(object sender, RoutedEventArgs e) => ViewModel.LoadDemoData();
 
@@ -117,7 +186,11 @@ public sealed partial class MainWindow : Window
         await ViewModel.ImportAccountsFromJsonAsync(path.Text.Trim(), label.Text);
     }
 
-    private async void CancelPendingLogin_Click(object sender, RoutedEventArgs e) => await ViewModel.CancelPendingLoginAsync();
+    private async void CancelPendingLogin_Click(object sender, RoutedEventArgs e)
+    {
+        _reloginQueue.Clear();
+        await ViewModel.CancelPendingLoginAsync();
+    }
 
     private async void ReloginAccount_Click(object sender, RoutedEventArgs e)
     {
@@ -157,19 +230,43 @@ public sealed partial class MainWindow : Window
             var flyout = new MenuFlyout();
             var rename = new MenuFlyoutItem { Text = "Đổi tên hiển thị" };
             rename.Click += async (_, _) => await RenameAccountAsync(account);
-            var relogin = new MenuFlyoutItem { Text = "Đăng nhập lại tài khoản này" };
-            relogin.Click += async (_, _) => await ViewModel.StartReloginAsync(account);
             var archive = new MenuFlyoutItem { Text = account.IsArchived ? "Khôi phục tài khoản" : "Lưu trữ tài khoản" };
             archive.Click += async (_, _) => await ViewModel.ToggleArchiveAsync(account);
+            var passkey = new MenuFlyoutItem { Text = "Thiết lập passkey…" };
+            passkey.Click += async (_, _) => await OpenPasskeySetupAsync(account);
             var delete = new MenuFlyoutItem { Text = "Xóa khỏi Roster" };
             delete.Click += async (_, _) => await DeleteAccountAsync(account);
             flyout.Items.Add(rename);
-            flyout.Items.Add(relogin);
+            if (account.CanRelogin)
+            {
+                var relogin = new MenuFlyoutItem { Text = "Đăng nhập lại tài khoản này" };
+                relogin.Click += async (_, _) => await ViewModel.StartReloginAsync(account);
+                flyout.Items.Add(relogin);
+            }
+            flyout.Items.Add(passkey);
             flyout.Items.Add(archive);
             flyout.Items.Add(new MenuFlyoutSeparator());
             flyout.Items.Add(delete);
             flyout.ShowAt(sender as FrameworkElement);
         }
+    }
+
+    private async Task OpenPasskeySetupAsync(AccountItem account)
+    {
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = $"Thiết lập passkey cho {account.Email}",
+            Content = "Roster chỉ mở ChatGPT chính thức. Xác nhận đúng account, vào Settings → Security → Passkeys và chọn Add passkey. Roster không đọc password, 2FA hoặc token.",
+            PrimaryButtonText = "Copy email & mở ChatGPT",
+            CloseButtonText = "Hủy",
+            DefaultButton = ContentDialogButton.Primary,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        var data = new DataPackage();
+        data.SetText(account.Email);
+        Clipboard.SetContent(data);
+        Process.Start(new ProcessStartInfo("https://chatgpt.com") { UseShellExecute = true });
     }
 
     private async Task RenameAccountAsync(AccountItem account)

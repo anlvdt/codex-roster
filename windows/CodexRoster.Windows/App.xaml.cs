@@ -5,7 +5,9 @@ namespace CodexRoster.Windows;
 
 public partial class App : Application
 {
+    private static readonly Mutex SingleInstanceMutex = new(false, @"Local\CodexRoster.Windows.SingleInstance");
     private Window? _window;
+    private bool _ownsSingleInstance;
 
     public App()
     {
@@ -25,6 +27,19 @@ public partial class App : Application
     {
         try
         {
+            try
+            {
+                _ownsSingleInstance = SingleInstanceMutex.WaitOne(0, false);
+            }
+            catch (AbandonedMutexException)
+            {
+                _ownsSingleInstance = true;
+            }
+            if (!_ownsSingleInstance)
+            {
+                Environment.Exit(0);
+                return;
+            }
             _window = new MainWindow();
             _window.Activate();
         }

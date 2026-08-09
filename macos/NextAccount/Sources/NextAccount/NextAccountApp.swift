@@ -1,5 +1,27 @@
 import AppKit
+import Darwin
 import SwiftUI
+
+private final class SingleInstanceGuard {
+    private let descriptor: Int32
+
+    init?() {
+        let lockURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("com.codexroster.app-\(getuid()).lock")
+        let descriptor = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { return nil }
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            close(descriptor)
+            return nil
+        }
+        self.descriptor = descriptor
+    }
+
+    deinit {
+        flock(descriptor, LOCK_UN)
+        close(descriptor)
+    }
+}
 
 private extension Notification.Name {
     static let showAddAccount = Notification.Name("codexRoster.showAddAccount")
@@ -85,11 +107,21 @@ private extension View {
 
 @main
 struct CodexRosterApp: App {
+    private static let instanceGuard = SingleInstanceGuard()
     @StateObject private var store = AccountStore()
     @StateObject private var language = LanguageStore()
     @StateObject private var updater = GitHubUpdater()
 
     init() {
+        guard Self.instanceGuard != nil else {
+            NSRunningApplication.runningApplications(withBundleIdentifier: "com.codexroster.app")
+                .first { $0.processIdentifier != getpid() }?
+                .activate(options: [])
+            DispatchQueue.main.async {
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
         NSApplication.shared.setActivationPolicy(.accessory)
     }
 

@@ -167,7 +167,6 @@ where
                 if let Err(error) = self.update_tray_menu() {
                     eprintln!("failed to refresh tray menu: {error:#}");
                 }
-                return;
             }
             UserEvent::Menu(event) => {
                 let command = self.commands.get(event.id.as_ref()).copied();

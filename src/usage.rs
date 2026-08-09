@@ -585,23 +585,34 @@ fn format_last_refresh(value: OffsetDateTime) -> String {
 ///
 /// Returns `Ok(Some(refreshed))` only when a rotation happened, `Ok(None)` when
 /// the snapshot is already fresh, has no refresh token, or a transient refresh
-/// error occurred (restoring the existing snapshot is then no worse than before).
+/// error occurred. A hard authentication failure aborts activation so a dead
+/// snapshot can never replace the currently working live session.
 /// Never call this for the account that is currently live in `~/.codex`: Codex
 /// owns that refresh token, and rotating it out from under a running session is
 /// exactly the desync that forces re-login.
 pub fn refresh_snapshot_if_access_token_stale(
     snapshot: &SnapshotBlob,
 ) -> Result<Option<SnapshotBlob>> {
+    refresh_snapshot_if_access_token_stale_with(snapshot, refresh_auth)
+}
+
+fn refresh_snapshot_if_access_token_stale_with<F>(
+    snapshot: &SnapshotBlob,
+    refresh: F,
+) -> Result<Option<SnapshotBlob>>
+where
+    F: FnOnce(&SnapshotAuth) -> Result<SnapshotAuth>,
+{
     let auth = snapshot_auth(snapshot)?;
     if !needs_proactive_refresh(&auth) {
         return Ok(None);
     }
-    match refresh_auth(&auth) {
+    match refresh(&auth) {
         Ok(refreshed) => Ok(Some(update_snapshot_auth(snapshot, &refreshed)?)),
-        // A hard "login required" error means the saved refresh token is already
-        // dead; restoring the stale snapshot lets the caller surface the same
-        // re-login as today. Transient errors should never block a switch.
-        Err(_) => Ok(None),
+        Err(error) if is_transient_refresh_error(&error) => Ok(None),
+        Err(error) => Err(error).context(
+            "selected account could not be refreshed safely; the current session was left unchanged",
+        ),
     }
 }
 
@@ -822,6 +833,44 @@ mod tests {
                 .expect("refresh check")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn refresh_on_restore_aborts_on_invalid_refresh_token() {
+        let soon = OffsetDateTime::now_utc() + Duration::minutes(1);
+        let snapshot = auth_snapshot(json!({
+            "tokens": {
+                "access_token": jwt_with_exp(soon.unix_timestamp()),
+                "refresh_token": "already-consumed"
+            }
+        }));
+
+        let error = refresh_snapshot_if_access_token_stale_with(&snapshot, |_| {
+            Err(anyhow!(
+                "token refresh failed: invalid_grant refresh token was already used"
+            ))
+        })
+        .expect_err("hard auth failure must abort activation");
+
+        assert!(format!("{error:#}").contains("current session was left unchanged"));
+    }
+
+    #[test]
+    fn refresh_on_restore_tolerates_transient_network_error() {
+        let soon = OffsetDateTime::now_utc() + Duration::minutes(1);
+        let snapshot = auth_snapshot(json!({
+            "tokens": {
+                "access_token": jwt_with_exp(soon.unix_timestamp()),
+                "refresh_token": "refresh"
+            }
+        }));
+
+        let refreshed = refresh_snapshot_if_access_token_stale_with(&snapshot, |_| {
+            Err(anyhow!("connection timed out while refreshing tokens"))
+        })
+        .expect("transient error");
+
+        assert!(refreshed.is_none());
     }
 
     #[test]

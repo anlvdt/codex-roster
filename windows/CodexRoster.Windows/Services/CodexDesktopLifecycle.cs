@@ -58,7 +58,12 @@ public static class CodexDesktopLifecycle
             }
             catch { }
         }
-        await Task.Delay(TimeSpan.FromSeconds(2));
+        // Most Desktop processes exit quickly after CloseMainWindow. Poll instead
+        // of imposing a fixed two-second delay on every account switch.
+        for (var attempt = 0; attempt < 20 && desktops.Any(process => !process.HasExited); attempt++)
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(100));
+        }
         foreach (var process in desktops.Where(process => !process.HasExited))
         {
             try { process.Kill(entireProcessTree: true); }

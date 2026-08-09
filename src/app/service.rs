@@ -11,7 +11,7 @@ use crate::model::{
     LegacyRecoveryOutput, ListOutput, RunningCodexProcess, SaveAction, SaveOutput, SnapshotBlob,
     StatusOutput, TokenUsageSummaryOutput, UsageOutput, UsageSource,
 };
-use crate::operation_lock::OperationLock;
+use crate::operation_lock::{AuthLock, OperationLock};
 use crate::repository::SnapshotRepository;
 use crate::secrets::SecretStore;
 use crate::settings::{load_settings, save_settings};
@@ -344,6 +344,7 @@ where
     }
 
     pub fn save_current(&self) -> Result<SaveOutput> {
+        let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
         self.save_current_inner(true)
     }
 
@@ -352,14 +353,16 @@ where
     /// The existing live auth remains available for Codex to reuse a trusted
     /// session, and cancel still restores the backed-up session if login changes it.
     pub fn begin_add_account_session(&self) -> Result<()> {
+        let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
         if codex::try_read_live_auth_bundle(&self.env)?.is_some() {
-            self.save_current()?;
+            self.save_current_inner(true)?;
         }
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         codex::begin_add_account_session(&self.env)
     }
 
     pub fn save_added_account_session(&self) -> Result<SaveOutput> {
+        let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
         let output = self.save_current_inner(true)?;
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         codex::finish_add_account_session(&self.env)?;
@@ -367,6 +370,7 @@ where
     }
 
     pub fn cancel_add_account_session(&self) -> Result<()> {
+        let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         codex::cancel_add_account_session(&self.env)
     }
@@ -542,7 +546,8 @@ where
         expected_active_id: Option<Uuid>,
     ) -> Result<ActivateOutput> {
         let started = Instant::now();
-        self.refresh_current_saved_account_before_activation();
+        let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
+        self.refresh_current_saved_account_before_activation()?;
         let refreshed_current_at = Instant::now();
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         let acquired_lock_at = Instant::now();
@@ -566,10 +571,9 @@ where
         // `refresh_token_reused` and force a login). Skip the account that is
         // already live — Codex owns that refresh token. Rotated tokens are
         // persisted to the saved copy first so the two never diverge.
-        if warnings.is_empty()
-            && !self.is_live_saved_account(account_id).unwrap_or(false)
-            && let Ok(Some(refreshed)) =
-                crate::usage::refresh_snapshot_if_access_token_stale(&snapshot)
+        if !self.is_live_saved_account(account_id)?
+            && let Some(refreshed) =
+                crate::usage::refresh_snapshot_if_access_token_stale(&snapshot)?
         {
             let cached_usage = self
                 .repository
@@ -636,17 +640,17 @@ where
         })
     }
 
-    fn refresh_current_saved_account_before_activation(&self) {
-        let Ok(saved_accounts) = self.repository.list_accounts(&self.env.kind) else {
-            return;
-        };
-        let Ok(Some(live)) = codex::try_read_live_auth_bundle(&self.env) else {
-            return;
+    fn refresh_current_saved_account_before_activation(&self) -> Result<()> {
+        let saved_accounts = self.repository.list_accounts(&self.env.kind)?;
+        let Some(live) = codex::try_read_live_auth_bundle(&self.env)? else {
+            return Ok(());
         };
         let Some(_current_saved) = match_saved_account(&saved_accounts, &live.identity) else {
-            return;
+            return Ok(());
         };
-        let _ = self.save_current_for_activation();
+        self.save_current_for_activation()
+            .context("could not preserve the active Codex session before switching accounts")?;
+        Ok(())
     }
 
     fn load_activation_target(
@@ -772,15 +776,21 @@ where
     }
 
     pub fn usage(&self, account_id: Option<Uuid>) -> Result<UsageOutput> {
-        // Keep the exclusive lock off the network path so account activation is
-        // not blocked by a background quota refresh.
+        let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
+        self.usage_with_auth_lock(account_id)
+    }
+
+    fn usage_with_auth_lock(&self, account_id: Option<Uuid>) -> Result<UsageOutput> {
+        // Keep the account-state lock off the network path. AuthLock still
+        // serializes the full token transaction across processes so single-use
+        // refresh tokens cannot race.
         match account_id {
             Some(account_id) => {
                 // OAuth refresh tokens rotate. Refreshing a copy of the active
                 // account would invalidate the token still present in Codex's
                 // live auth.json, so always update the live bundle instead.
                 if self.is_live_saved_account(account_id)? {
-                    return self.usage(None);
+                    return self.usage_with_auth_lock(None);
                 }
                 // A snapshot that no longer decrypts must surface as an error on
                 // the account, not silently keep stale quota forever. Record it
@@ -1598,6 +1608,63 @@ mod tests {
 
         let list = app.list().expect("list");
         assert_eq!(list.accounts[0].email, "after@example.com");
+    }
+
+    #[test]
+    fn activate_preserves_latest_live_tokens_before_switching() {
+        let temp = tempdir().expect("tempdir");
+        let env = AppEnv {
+            kind: EnvironmentKind::Linux,
+            home_dir: temp.path().to_path_buf(),
+            codex_root: temp.path().join(".codex"),
+            app_data_dir: temp.path().join("app"),
+        };
+        std::fs::create_dir_all(&env.codex_root).expect("codex root");
+        std::fs::write(
+            env.codex_root.join("auth.json"),
+            auth_json_fixture("current@example.com", "sub-current", Some("pro")),
+        )
+        .expect("auth");
+        std::fs::write(env.codex_root.join("cap_sid"), "sid-old").expect("cap");
+
+        let app = App::new(
+            env.clone(),
+            SnapshotRepository::new(&env.app_data_dir, MemorySecretStore::default()),
+        );
+        let current_id = app.save_current().expect("save current").account.id;
+
+        let mut latest_auth: serde_json::Value = serde_json::from_str(&auth_json_fixture(
+            "current@example.com",
+            "sub-current",
+            Some("pro"),
+        ))
+        .expect("fixture json");
+        latest_auth["tokens"]["refresh_token"] = serde_json::json!("latest-live-refresh");
+        std::fs::write(
+            env.codex_root.join("auth.json"),
+            serde_json::to_vec(&latest_auth).expect("serialize latest auth"),
+        )
+        .expect("latest auth");
+        std::fs::write(env.codex_root.join("cap_sid"), "sid-latest").expect("latest cap");
+        let latest_live = crate::codex::read_live_auth_bundle(&env).expect("latest live");
+
+        let target_auth = auth_json_fixture("target@example.com", "sub-target", Some("plus"));
+        let (target_identity, target_snapshot) =
+            crate::codex::snapshot_from_auth_json(target_auth.as_bytes()).expect("target snapshot");
+        let target_id = app
+            .repository
+            .save_snapshot(&env.kind, &target_identity, &target_snapshot)
+            .expect("save target")
+            .0
+            .id;
+
+        app.activate(target_id).expect("activate target");
+
+        let (_, preserved_current) = app
+            .repository
+            .load_snapshot(&env.kind, current_id)
+            .expect("load preserved current");
+        assert_eq!(preserved_current, latest_live.snapshot);
     }
 
     #[test]

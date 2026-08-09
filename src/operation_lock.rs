@@ -15,42 +15,62 @@ const RETRY_INTERVAL: Duration = Duration::from_millis(50);
 /// Contended acquires wait briefly instead of failing immediately, so a usage
 /// refresh does not make account activation fail with a transient lock error.
 pub struct OperationLock(File);
+pub struct AuthLock(File);
 
 impl OperationLock {
     pub fn acquire(app_data_dir: &Path) -> Result<Self> {
-        fs::create_dir_all(app_data_dir)
-            .with_context(|| format!("failed to create {}", app_data_dir.display()))?;
-        let path = app_data_dir.join(".operation.lock");
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)
-            .with_context(|| format!("failed to open {}", path.display()))?;
-        let deadline = Instant::now() + ACQUIRE_TIMEOUT;
-        loop {
-            match file.try_lock_exclusive() {
-                Ok(()) => return Ok(Self(file)),
-                Err(error) if is_lock_contention(&error) && Instant::now() < deadline => {
-                    thread::sleep(RETRY_INTERVAL);
-                }
-                Err(error) if is_lock_contention(&error) => {
-                    return Err(anyhow!(
-                        "another Codex Roster operation is already changing account state; timed out waiting for it to finish"
-                    ));
-                }
-                Err(error) => {
-                    return Err(anyhow!(
-                        "failed to acquire Codex Roster account-state lock: {error}"
-                    ));
-                }
+        acquire_named_lock(app_data_dir, ".operation.lock", "account-state").map(Self)
+    }
+}
+
+impl AuthLock {
+    /// Serialize the complete read → OAuth refresh/Codex use → write transaction
+    /// across every Roster process. Refresh tokens are single-use, so locking
+    /// only the final file write is too late to prevent session invalidation.
+    pub fn acquire(app_data_dir: &Path) -> Result<Self> {
+        acquire_named_lock(app_data_dir, ".auth-operation.lock", "authentication").map(Self)
+    }
+}
+
+fn acquire_named_lock(app_data_dir: &Path, file_name: &str, operation: &str) -> Result<File> {
+    fs::create_dir_all(app_data_dir)
+        .with_context(|| format!("failed to create {}", app_data_dir.display()))?;
+    let path = app_data_dir.join(file_name);
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let deadline = Instant::now() + ACQUIRE_TIMEOUT;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(file),
+            Err(error) if is_lock_contention(&error) && Instant::now() < deadline => {
+                thread::sleep(RETRY_INTERVAL);
+            }
+            Err(error) if is_lock_contention(&error) => {
+                return Err(anyhow!(
+                    "another Codex Roster {operation} operation is still running; timed out waiting for it to finish"
+                ));
+            }
+            Err(error) => {
+                return Err(anyhow!(
+                    "failed to acquire Codex Roster {operation} lock: {error}"
+                ));
             }
         }
     }
 }
 
 impl Drop for OperationLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+impl Drop for AuthLock {
     fn drop(&mut self) {
         let _ = self.0.unlock();
     }
@@ -90,6 +110,29 @@ mod tests {
         barrier.wait();
         let started = Instant::now();
         let lock = OperationLock::acquire(&app_data_dir).expect("waiter acquire");
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        drop(lock);
+        holder.join().expect("holder thread");
+    }
+
+    #[test]
+    fn auth_lock_waits_for_contended_token_transaction() {
+        let temp = tempdir().expect("tempdir");
+        let app_data_dir = temp.path().to_path_buf();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let holder_dir = app_data_dir.clone();
+        let holder_barrier = Arc::clone(&barrier);
+        let holder = thread::spawn(move || {
+            let lock = AuthLock::acquire(&holder_dir).expect("holder acquire");
+            holder_barrier.wait();
+            thread::sleep(Duration::from_millis(200));
+            drop(lock);
+        });
+
+        barrier.wait();
+        let started = Instant::now();
+        let lock = AuthLock::acquire(&app_data_dir).expect("waiter acquire");
         assert!(started.elapsed() >= Duration::from_millis(150));
         drop(lock);
         holder.join().expect("holder thread");

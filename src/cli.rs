@@ -164,6 +164,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Return newly verified global reset events once, for desktop notifications.
+    ResetEvents {
+        #[arg(long)]
+        json: bool,
+    },
     OpenAiStatus {
         #[arg(long)]
         json: bool,
@@ -526,6 +531,19 @@ pub fn run() -> Result<()> {
                     outlook.chance_24_hours, outlook.chance_48_hours
                 );
                 println!("Last reset: {}", outlook.last_reset_at);
+            }
+            Ok(())
+        }
+        Some(Command::ResetEvents { json }) => {
+            let events = crate::reset_tracker::fetch_new_reset_events(&app.env().app_data_dir)?;
+            if json {
+                print_json(&events)?;
+            } else if events.is_empty() {
+                println!("No new verified global resets.");
+            } else {
+                for event in events {
+                    println!("Global reset {}: {}", event.announced_at, event.summary);
+                }
             }
             Ok(())
         }

@@ -2,6 +2,7 @@ import AppKit
 import Darwin
 import Foundation
 import ServiceManagement
+import UserNotifications
 
 enum AccountSortMode: String, CaseIterable, Identifiable {
     case planThenQuota
@@ -76,6 +77,7 @@ final class AccountStore: ObservableObject {
     private var isAddAccountSession = false
     private var expectedReloginEmail: String?
     private var newAccountLoginWatchTask: Task<Void, Never>?
+    private var resetNotificationTask: Task<Void, Never>?
     private var coreBootstrapStarted = false
     private var menuInteractionUntil: Date?
     private var isRefreshingAccountsInBackground = false
@@ -237,6 +239,7 @@ final class AccountStore: ObservableObject {
         run {
             self.newAccountLoginWatchTask?.cancel()
             self.newAccountLoginWatchTask = nil
+            CodexLoginLauncher.stop()
             _ = try await self.cli.data(arguments: ["cancel-add-account", "--json"])
             self.clearPendingLoginFlags()
             self.newAccountLoginState = .idle
@@ -273,6 +276,7 @@ final class AccountStore: ObservableObject {
             watchForNewAccount(after: liveStatus.currentAccount)
         } catch {
             if began {
+                CodexLoginLauncher.stop()
                 _ = try? await cli.data(arguments: ["cancel-add-account", "--json"])
                 clearPendingLoginFlags()
                 newAccountLoginState = .idle
@@ -357,6 +361,7 @@ final class AccountStore: ObservableObject {
     }
 
     private func clearPendingLoginFlags() {
+        CodexLoginLauncher.stop()
         isInteractiveLoginInProgress = false
         isAddAccountSession = false
         expectedReloginEmail = nil
@@ -410,11 +415,30 @@ final class AccountStore: ObservableObject {
     func startCoreMonitoring() {
         guard !coreBootstrapStarted else { return }
         coreBootstrapStarted = true
+        startResetNotificationMonitoring()
         Task { await self.resumeAddAccountSessionIfNeeded() }
         refresh()
         refreshResetOutlook(silently: true)
         startAutoSwitchMonitoring()
         startQuotaMonitoring()
+    }
+
+    private func startResetNotificationMonitoring() {
+        guard resetNotificationTask == nil else { return }
+        ResetNotifier.prepare()
+        resetNotificationTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if await ResetNotifier.isAuthorized(),
+                   let events = try? await self.cli.decode(
+                    [GlobalResetEvent].self,
+                    arguments: ["reset-events", "--json"]
+                ) {
+                    ResetNotifier.show(events)
+                }
+                try? await Task.sleep(for: .seconds(60))
+            }
+        }
     }
 
     private func resumeAddAccountSessionIfNeeded() async {
@@ -1005,19 +1029,38 @@ private struct CLIError: LocalizedError {
     var errorDescription: String? { message }
 }
 
+@MainActor
 private enum CodexLoginLauncher {
+    private static var process: Process?
+
     static func start() throws {
         // `codex login` opens its own browser sign-in (loopback/PKCE) — no device
-        // code. Do not pre-open a page here; the CLI drives the correct auth URL.
-        let command = codexLoginCommand()
-        let script = "tell application \"Terminal\" to do script \(appleScriptString(command))"
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
-        try process.run()
+        // code. Run it quietly: the browser is the only UI the user needs.
+        stop()
+        let login = Process()
+        if let executable = resolvedCodexExecutable() {
+            login.executableURL = URL(fileURLWithPath: executable)
+            login.arguments = ["login"]
+        } else {
+            login.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            login.arguments = ["codex", "login"]
+        }
+        login.currentDirectoryURL = FileManager.default.temporaryDirectory
+        login.standardOutput = FileHandle.nullDevice
+        login.standardError = FileHandle.nullDevice
+        try login.run()
+        process = login
     }
 
-    private static func codexLoginCommand() -> String {
+    static func stop() {
+        guard let login = process else { return }
+        process = nil
+        if login.isRunning {
+            login.terminate()
+        }
+    }
+
+    private static func resolvedCodexExecutable() -> String? {
         let environment = ProcessInfo.processInfo.environment
         let candidates = [
             environment["CODEX_ROSTER_CODEX_PATH"],
@@ -1026,24 +1069,9 @@ private enum CodexLoginLauncher {
             "/opt/homebrew/bin/codex",
             "/usr/local/bin/codex"
         ]
-        let executable = candidates
+        return candidates
             .compactMap { $0 }
             .first(where: { FileManager.default.isExecutableFile(atPath: $0) })
-        if let executable {
-            return "exec \(shellQuote(executable)) login"
-        }
-        return "exec /usr/bin/env codex login"
-    }
-
-    private static func shellQuote(_ value: String) -> String {
-        "'\(value.replacingOccurrences(of: "'", with: "'\\\"'\\\"'"))'"
-    }
-
-    private static func appleScriptString(_ value: String) -> String {
-        let escaped = value
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        return "\"\(escaped)\""
     }
 }
 
@@ -1318,6 +1346,77 @@ struct ResetOutlook: Decodable {
     let chance48Hours: Int
     let confidence: String
     let windowLabel: String
+}
+
+struct GlobalResetEvent: Decodable, Identifiable {
+    let id: String
+    let announcedAt: String
+    let summary: String
+    let url: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, summary, url
+        case announcedAt = "announced_at"
+    }
+}
+
+private enum ResetNotifier {
+    private static let delegate = ResetNotificationDelegate()
+
+    static func prepare() {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = delegate
+        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    static func isAuthorized() async -> Bool {
+        let status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+        return status == .authorized || status == .provisional
+    }
+
+    static func show(_ events: [GlobalResetEvent]) {
+        let center = UNUserNotificationCenter.current()
+        for event in events {
+            let content = UNMutableNotificationContent()
+            content.title = AppLanguage.text(
+                "ChatGPT vừa có đợt mass reset",
+                "ChatGPT mass reset detected"
+            )
+            content.subtitle = AppLanguage.text(
+                "Quota Codex và ChatGPT Work đang được đặt lại",
+                "Codex and ChatGPT Work quota is being reset"
+            )
+            content.body = event.summary
+            content.sound = .default
+            content.userInfo = ["url": event.url]
+            center.add(UNNotificationRequest(
+                identifier: "codex-roster-reset-\(event.id)",
+                content: content,
+                trigger: nil
+            ))
+        }
+    }
+}
+
+private final class ResetNotificationDelegate: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .list, .sound])
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        defer { completionHandler() }
+        guard let value = response.notification.request.content.userInfo["url"] as? String,
+              let url = URL(string: value) else { return }
+        NSWorkspace.shared.open(url)
+    }
 }
 
 struct OpenAIServiceStatus: Decodable {

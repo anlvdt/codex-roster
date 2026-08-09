@@ -117,6 +117,15 @@ public sealed class ResetOutlookDto
     public string Confidence { get; init; } = string.Empty;
 }
 
+public sealed class GlobalResetEventDto
+{
+    public string Id { get; init; } = string.Empty;
+    [JsonPropertyName("announced_at")]
+    public DateTimeOffset AnnouncedAt { get; init; }
+    public string Summary { get; init; } = string.Empty;
+    public string Url { get; init; } = string.Empty;
+}
+
 public sealed class OpenAiStatusDto
 {
     public string Indicator { get; init; } = string.Empty;

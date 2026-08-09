@@ -12,9 +12,11 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
 {
     private readonly CodexRosterCli _cli = new();
     private readonly GitHubUpdater _updater = new();
+    private readonly ResetNotifier _resetNotifier = new();
     private readonly DispatcherQueue? _dispatcher;
     private readonly DispatcherQueueTimer? _quotaTimer;
     private readonly DispatcherQueueTimer? _updateTimer;
+    private readonly DispatcherQueueTimer? _resetTimer;
     private List<AccountDto> _lastAccounts = [];
     private int _accountSortMode;
     private bool _isBusy;
@@ -111,6 +113,12 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
             _updateTimer.Interval = TimeSpan.FromHours(6);
             _updateTimer.Tick += async (_, _) => await CheckForUpdatesAsync(silent: true);
         }
+        _resetTimer = _dispatcher?.CreateTimer();
+        if (_resetTimer is not null)
+        {
+            _resetTimer.Interval = TimeSpan.FromMinutes(1);
+            _resetTimer.Tick += async (_, _) => await CheckForResetNotificationsAsync();
+        }
     }
 
     public async Task InitializeAsync()
@@ -179,6 +187,9 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         _ = CreateAutomaticBackupAsync();
         _ = RefreshInsightsAsync(silent: true);
         _ = CheckForUpdatesAsync(silent: true);
+        _resetNotifier.Register();
+        await CheckForResetNotificationsAsync();
+        _resetTimer?.Start();
         _updateTimer?.Start();
     }
 
@@ -763,6 +774,20 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         if (AutoSwitchWhenExhausted) await CheckAutoSwitchAsync(silent: true);
     }
 
+    private async Task CheckForResetNotificationsAsync()
+    {
+        if (!_resetNotifier.IsAvailable) return;
+        try
+        {
+            var resets = await _cli.ReadAsync<List<GlobalResetEventDto>>("reset-events");
+            foreach (var reset in resets) _resetNotifier.Show(reset);
+        }
+        catch
+        {
+            // Community reset tracking is advisory and retries on the next poll.
+        }
+    }
+
     private async Task CheckAutoSwitchAsync(bool silent)
     {
         if (!AutoSwitchWhenExhausted || IsBusy || _isCheckingAutoSwitch) return;
@@ -1043,6 +1068,8 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         _cli.Dispose();
         _quotaTimer?.Stop();
         _updateTimer?.Stop();
+        _resetTimer?.Stop();
+        _resetNotifier.Dispose();
     }
 
     private async Task RunAsync(Func<Task> operation)

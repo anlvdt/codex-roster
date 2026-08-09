@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.2.27 - 2026-08-09
+
+### Added
+
+- Desktop notifications for every newly verified ChatGPT mass-reset event, with persistent deduplication so each event is announced exactly once.
+
+### Changed
+
+- Account add and re-login now run quietly in the background and open only the required browser flow instead of an extra terminal window.
+- Windows account switching no longer waits a fixed two seconds for Codex Desktop to close; it continues as soon as the process exits.
+
+### Fixed
+
+- **Account switching no longer invalidates sessions or repeatedly logs users out.** All Roster processes now serialize the complete read-refresh-write token transaction, preventing background quota refresh, auto-start pings, manual switching, and automatic switching from racing single-use OAuth refresh tokens.
+- Switching always preserves the latest live session before restoring another account, and aborts safely without touching the current session when the selected account has an invalid refresh token.
+
 ## v0.2.26 - 2026-08-09
 
 ### Changed

@@ -15,14 +15,19 @@ public static class CodexLoginLauncher
         // Quote the resolved path for cmd.exe. Prefer ArgumentList-style safety by
         // escaping embedded quotes rather than interpolating untrusted tokens.
         var quoted = QuoteForCmd(codexPath);
-        _deviceLoginProcess = Process.Start(new ProcessStartInfo
+        var startInfo = new ProcessStartInfo
         {
             FileName = "cmd.exe",
-            // /c waits for login to complete, then terminates the child shell.
-            Arguments = $"/c {quoted} login",
-            UseShellExecute = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
             WorkingDirectory = Path.GetTempPath(),
-        }) ?? throw new InvalidOperationException("Không thể mở đăng nhập Codex.");
+        };
+        startInfo.ArgumentList.Add("/d");
+        startInfo.ArgumentList.Add("/s");
+        startInfo.ArgumentList.Add("/c");
+        startInfo.ArgumentList.Add($"{quoted} login");
+        _deviceLoginProcess = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Không thể mở đăng nhập Codex.");
     }
 
     public static void Stop()

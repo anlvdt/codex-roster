@@ -184,6 +184,7 @@ where
                         .as_deref()
                         .is_some_and(usage_error_blocks_activation)
                     && is_usable_for_switch(candidate.usage.as_ref())
+                    && !is_free_plan(candidate)
                     && usable_candidate_ids.contains(&candidate.id)
                     && !is_in_auto_switch_cooldown(&settings, candidate.id, now)
             })
@@ -258,6 +259,7 @@ where
                                 .as_deref()
                                 .is_some_and(usage_error_blocks_activation)
                             && is_usable_for_switch(candidate.usage.as_ref())
+                            && !is_free_plan(candidate)
                             && !is_in_auto_switch_cooldown(&settings, candidate.id, now)
                     }),
                 Err(_) => None,
@@ -521,6 +523,14 @@ where
                 self.env.codex_root.display()
             )
         })?;
+        codex::auth_debug(
+            &self.env,
+            &format!(
+                "SAVE-LIVE email={} {}",
+                live.identity.email,
+                codex::auth_fingerprint(&live.snapshot)
+            ),
+        );
         let (metadata, created) = if write_backup {
             self.repository
                 .save_snapshot(&self.env.kind, &live.identity, &live.snapshot)?
@@ -596,6 +606,14 @@ where
         }
         let (snapshot, snapshot_identity, restore_identity) =
             self.load_activation_target(account_id)?;
+        codex::auth_debug(
+            &self.env,
+            &format!(
+                "RESTORE-TARGET email={} {}",
+                snapshot_identity.email,
+                codex::auth_fingerprint(&snapshot)
+            ),
+        );
         // Preserve the legacy ownership model: Roster copies the complete
         // saved auth document unchanged, then the official Codex/ChatGPT auth
         // manager refreshes it after launch. Roster must never consume an
@@ -618,6 +636,19 @@ where
             .repository
             .sync_activated_account(&self.env.kind, account_id, &snapshot_identity)
             .context("activated live auth but failed to update local metadata")?;
+        codex::auth_debug(
+            &self.env,
+            &format!(
+                "RESTORED-OK email={} live={}",
+                snapshot_identity.email,
+                codex::try_read_live_auth_bundle(&self.env)
+                    .ok()
+                    .flatten()
+                    .map_or_else(|| "none".to_owned(), |bundle| codex::auth_fingerprint(
+                        &bundle.snapshot
+                    ))
+            ),
+        );
         let synced_metadata_at = Instant::now();
         if std::env::var_os("CODEX_ROSTER_PROFILE_SWITCH").is_some() {
             eprintln!(
@@ -870,6 +901,14 @@ where
                 })?;
                 let live_identity = live.identity.clone();
                 let live_snapshot = live.snapshot.clone();
+                codex::auth_debug(
+                    &self.env,
+                    &format!(
+                        "PROBE-LIVE email={} {}",
+                        live_identity.email,
+                        codex::auth_fingerprint(&live_snapshot)
+                    ),
+                );
                 // The live refresh token belongs exclusively to Codex. Process
                 // detection is inherently racy: Codex can start after the scan
                 // and refresh the same single-use token while Roster is doing so.
@@ -911,6 +950,14 @@ where
                     Err(error) => {
                         self.persist_rotated_live_auth(&live_identity, &live_snapshot, &error)?;
                         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+                        codex::auth_debug(
+                            &self.env,
+                            &format!(
+                                "PROBE-FAIL email={} err={}",
+                                live_identity.email,
+                                usage_error_message(error.error())
+                            ),
+                        );
                         self.record_usage_error_for_identity(&live_identity, error.error());
                         Err(error.into_error())
                     }
@@ -1130,6 +1177,15 @@ fn is_usable_for_switch(usage: Option<&AccountUsageView>) -> bool {
     !windows.is_empty() && windows.iter().all(|window| window.remaining_percent > 0)
 }
 
+/// Automatic switching must never silently downgrade the user onto a Free plan.
+/// A Free account is only ever reached by an explicit manual switch.
+fn is_free_plan(account: &AccountView) -> bool {
+    account
+        .plan_label
+        .as_deref()
+        .is_some_and(|plan| plan.trim().eq_ignore_ascii_case("free"))
+}
+
 fn switch_quota_score(usage: Option<&AccountUsageView>) -> u8 {
     quota_windows(usage)
         .map(|window| window.remaining_percent)
@@ -1167,6 +1223,7 @@ fn best_cached_auto_switch_candidate(
                     .as_deref()
                     .is_some_and(usage_error_blocks_activation)
                 && is_usable_for_switch(candidate.usage.as_ref())
+                && !is_free_plan(candidate)
                 && !is_in_auto_switch_cooldown(settings, candidate.id, now)
         })
         .max_by_key(|candidate| switch_quota_score(candidate.usage.as_ref()))
@@ -1381,6 +1438,36 @@ mod tests {
 
         assert!(is_exhausted_for_switch(Some(&usage)));
         assert!(!is_usable_for_switch(Some(&usage)));
+    }
+
+    #[test]
+    fn auto_switch_excludes_free_plan_candidates() {
+        let account = |plan: Option<&str>| crate::model::AccountView {
+            id: Uuid::new_v4(),
+            provider: crate::model::AiProvider::OpenAi,
+            email: "person@example.com".to_owned(),
+            subject: None,
+            name: None,
+            custom_label: None,
+            plan_label: plan.map(str::to_owned),
+            environment: EnvironmentKind::Linux,
+            is_active: false,
+            created_at: OffsetDateTime::now_utc(),
+            updated_at: OffsetDateTime::now_utc(),
+            last_activated_at: None,
+            archived: false,
+            usage: None,
+            usage_error: None,
+        };
+
+        // Free accounts must never be auto-switch targets, regardless of casing.
+        assert!(is_free_plan(&account(Some("Free"))));
+        assert!(is_free_plan(&account(Some("free"))));
+        assert!(is_free_plan(&account(Some("  FREE  "))));
+        // Paid plans and unknown/missing plans stay eligible.
+        assert!(!is_free_plan(&account(Some("Plus"))));
+        assert!(!is_free_plan(&account(Some("Pro"))));
+        assert!(!is_free_plan(&account(None)));
     }
 
     #[test]

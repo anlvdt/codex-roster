@@ -5,7 +5,6 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-#[cfg(test)]
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use uuid::Uuid;
 
@@ -68,6 +67,95 @@ pub fn read_live_auth_bundle(env: &AppEnv) -> Result<LiveAuthBundle> {
             files,
         },
     })
+}
+
+/// Opt-in switch diagnostics. Enabled by setting `CODEX_ROSTER_AUTH_DEBUG` or by
+/// creating a `.roster-auth-debug` marker in the Codex root (`touch
+/// ~/.codex/.roster-auth-debug`). Writes non-secret token fingerprints to
+/// `<app_data_dir>/auth-debug.log` so a re-login-on-switch report can be traced
+/// to the exact point a saved refresh token went stale.
+fn auth_debug_enabled(env: &AppEnv) -> bool {
+    std::env::var_os("CODEX_ROSTER_AUTH_DEBUG").is_some()
+        || env.codex_root.join(".roster-auth-debug").exists()
+}
+
+pub fn auth_debug(env: &AppEnv, line: &str) {
+    if !auth_debug_enabled(env) {
+        return;
+    }
+    let stamp = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "?".to_owned());
+    if fs::create_dir_all(&env.app_data_dir).is_err() {
+        return;
+    }
+    let path = env.app_data_dir.join("auth-debug.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{stamp} {line}");
+    }
+}
+
+/// A non-secret, non-reversible summary of the auth material in a snapshot, for
+/// diagnosing token staleness across a switch. Never emits token bytes: the
+/// refresh token is reduced to a stable one-way fingerprint so two lines can be
+/// compared to tell whether the token rotated, and only the access token's `exp`
+/// claim and `last_refresh` timestamp are surfaced.
+pub fn auth_fingerprint(snapshot: &SnapshotBlob) -> String {
+    let Some(auth) = snapshot.files.iter().find(|file| file.name == "auth.json") else {
+        return "auth.json-missing".to_owned();
+    };
+    match STANDARD.decode(&auth.bytes_base64) {
+        Ok(bytes) => auth_fingerprint_from_bytes(&bytes),
+        Err(_) => "auth.json-undecodable".to_owned(),
+    }
+}
+
+pub fn auth_fingerprint_from_bytes(bytes: &[u8]) -> String {
+    let Ok(root) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return "auth.json-unparsable".to_owned();
+    };
+    let tokens = root.get("tokens");
+    let account_id = tokens
+        .and_then(|tokens| tokens.get("account_id"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("?");
+    let last_refresh = root
+        .get("last_refresh")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("?");
+    let refresh_fp = tokens
+        .and_then(|tokens| tokens.get("refresh_token"))
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(|| "none".to_owned(), one_way_fingerprint);
+    let access_exp = tokens
+        .and_then(|tokens| tokens.get("access_token"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(jwt_exp_claim)
+        .map_or_else(|| "?".to_owned(), |exp| exp.to_string());
+    format!(
+        "account_id={account_id} last_refresh={last_refresh} access_exp={access_exp} refresh_fp={refresh_fp}"
+    )
+}
+
+/// Deterministic, non-cryptographic, one-way fingerprint. Enough to tell whether
+/// a refresh token changed between two log lines; not reversible to the token.
+fn one_way_fingerprint(value: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn jwt_exp_claim(jwt: &str) -> Option<i64> {
+    let payload = jwt.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims = serde_json::from_slice::<serde_json::Value>(&bytes).ok()?;
+    claims.get("exp")?.as_i64()
 }
 
 const ADD_ACCOUNT_AUTH_BACKUP: &str = "auth.json.roster-add-bak";

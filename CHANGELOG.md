@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.2.36 - 2026-08-10
+
+### Fixed
+
+- Automatic switching never downgrades onto a Free-plan account. When the active account is exhausted it now rotates only between paid plans; if no paid account has usable quota it stops and reports "all exhausted" instead of silently landing on a Free account.
+
+### Added
+
+- Opt-in switch auth diagnostics. Setting `CODEX_ROSTER_AUTH_DEBUG` or creating `~/.codex/.roster-auth-debug` records non-secret token fingerprints (account id, `last_refresh`, access-token expiry, and a one-way refresh-token fingerprint — never the tokens themselves) for save/restore/probe steps to `<app_data_dir>/auth-debug.log`, so a "re-login on switch" report can be traced to the exact point a saved token went stale. Disabled by default.
+
+### Notes
+
+- Investigation confirmed the switch mechanism itself is sound: a freshly signed-in account survives a full switch-away-and-back cycle with its token intact. Repeated re-login prompts come from saved tokens that OpenAI has already revoked server-side (they age out when an account is left unused); recover each affected account with a one-time re-login.
+
 ## v0.2.35 - 2026-08-09
 
 ### Changed

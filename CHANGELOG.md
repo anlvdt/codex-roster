@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.38 - 2026-08-13
+
+- CCS removal verified: account-switch behavior matches pre-CCS v0.2.36 baseline
+- Free-plan guard now recognizes Go and 'Free *' plan labels
+- Settings UI cleanup after CCS removal
+
 ## v0.2.37 - 2026-08-13
 
 - Remove CCS/CLIProxy and cmux integration entirely

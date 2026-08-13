@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.37 - 2026-08-13
+
+- Remove CCS/CLIProxy and cmux integration entirely
+- Restore standard account-switch flow (no CCS session guard)
+
 ## v0.2.36 - 2026-08-10
 
 ### Fixed

@@ -1,3 +1,6 @@
+use std::thread;
+use std::time::{Duration, Instant};
+
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use crate::model::RunningCodexProcess;
@@ -5,6 +8,7 @@ use crate::model::RunningCodexProcess;
 const SUMMARY_LIMIT: usize = 72;
 const EXECUTABLE_WIDTH: usize = 12;
 const ROLE_WIDTH: usize = 14;
+const PROCESS_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 pub fn detect_running_codex_processes() -> Vec<RunningCodexProcess> {
     let mut system = System::new();
@@ -44,6 +48,21 @@ pub fn detect_running_codex_processes() -> Vec<RunningCodexProcess> {
             .then_with(|| left.pid.cmp(&right.pid))
     });
     processes
+}
+
+/// Wait briefly for the last Electron/Codex child processes to exit after
+/// Desktop has been terminated. LaunchServices can report the app as gone a
+/// little before its process tree disappears, so callers that mutate auth
+/// files need this stronger quiescence check.
+pub fn wait_for_running_codex_processes_to_drain(timeout: Duration) -> Vec<RunningCodexProcess> {
+    let started = Instant::now();
+    loop {
+        let processes = detect_running_codex_processes();
+        if processes.is_empty() || started.elapsed() >= timeout {
+            return processes;
+        }
+        thread::sleep(PROCESS_DRAIN_POLL_INTERVAL.min(timeout.saturating_sub(started.elapsed())));
+    }
 }
 
 /// ChatGPT / Codex Desktop owns `~/.codex/auth.json` refresh while running.

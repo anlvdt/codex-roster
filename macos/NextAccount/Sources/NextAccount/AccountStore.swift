@@ -66,7 +66,6 @@ final class AccountStore: ObservableObject {
     @Published private(set) var autoSwitchState: AutoSwitchState?
     @Published private(set) var isCheckingAutoSwitch = false
     @Published private(set) var launchAtLoginEnabled: Bool
-    @Published private(set) var ccsCmuxIntegrationEnabled: Bool
     @Published private(set) var backupStatusMessage: String?
     @Published private(set) var isWorking = false
     @Published private(set) var isSwitching = false
@@ -85,7 +84,6 @@ final class AccountStore: ObservableObject {
     private var legacyArchivedAccountIDs: Set<UUID>
     private let legacyAutoSwitchWhenExhaustedKey = "codexRoster.autoSwitchWhenExhausted"
     private let accountSortModeKey = "codexRoster.accountSortMode"
-    private let ccsCmuxIntegrationEnabledKey = "codexRoster.ccsCmuxIntegrationEnabled"
     private var autoSwitchTask: Task<Void, Never>?
     private var quotaRefreshTask: Task<Void, Never>?
     private var autoSwitchAllExhaustedNotified = false
@@ -107,7 +105,6 @@ final class AccountStore: ObservableObject {
         )
         autoSwitchWhenExhausted = false
         launchAtLoginEnabled = LaunchAtLogin.isEnabled
-        ccsCmuxIntegrationEnabled = defaults.bool(forKey: ccsCmuxIntegrationEnabledKey)
         if let raw = defaults.string(forKey: accountSortModeKey),
            let mode = AccountSortMode(rawValue: raw) {
             accountSortMode = mode
@@ -119,11 +116,6 @@ final class AccountStore: ObservableObject {
     func setAccountSortMode(_ mode: AccountSortMode) {
         accountSortMode = mode
         UserDefaults.standard.set(mode.rawValue, forKey: accountSortModeKey)
-    }
-
-    func setCCSCmuxIntegrationEnabled(_ enabled: Bool) {
-        ccsCmuxIntegrationEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: ccsCmuxIntegrationEnabledKey)
     }
 
     func sortedAccounts(_ accounts: [SavedAccount]) -> [SavedAccount] {
@@ -451,29 +443,15 @@ final class AccountStore: ObservableObject {
 
     func activate(_ account: SavedAccount, force: Bool = false) {
         run(switching: true) {
-            if self.ccsCmuxIntegrationEnabled {
-                try await CCSCmuxIntegration.ensureNoActiveSessions()
-            }
             let desktopWasRunning = ChatGPTDesktop.isRunning
-            // Full CCS reconciliation must run while no Codex/ChatGPT process
-            // can rotate a refresh token or rewrite ~/.codex. The normal
-            // activation path only prepared a relaunch plan, so sync-ccs saw
-            // the still-running Desktop and refused to proceed.
-            let requiresDesktopQuiescence = force || self.ccsCmuxIntegrationEnabled
-            let relaunch = requiresDesktopQuiescence
+            let relaunch = force
                 ? try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
                 : ChatGPTDesktop.RelaunchPlan.preferredDesktop()
             let activated: ActivateOutput
             do {
-                if self.ccsCmuxIntegrationEnabled {
-                    _ = try await self.cli.data(arguments: ["sync-ccs", "--json"])
-                    try await CCSCmuxIntegration.persistDiscoveredAccounts()
-                    try await CCSCmuxIntegration.pauseFreeAccounts(self.freeCCSAccountEmails)
-                    try await CCSCmuxIntegration.prepareForAccountSwitch(email: account.email)
-                }
                 activated = try await self.activateAfterProcessesDrain(
                     accountID: account.id,
-                    waitForDrain: requiresDesktopQuiescence
+                    waitForDrain: force
                 )
             } catch {
                 // Desktop may already be closed while an independent Codex CLI
@@ -514,40 +492,6 @@ final class AccountStore: ObservableObject {
             if self.accounts.contains(where: { $0.id == activated.account.id && $0.isActive }) {
                 self.lastQuotaRefreshAt = .now
             }
-            if self.ccsCmuxIntegrationEnabled {
-                try await CCSCmuxIntegration.pauseFreeAccounts(self.freeCCSAccountEmails)
-                try await CCSCmuxIntegration.selectAccountAndLaunchCmux(email: activated.account.email)
-            }
-        }
-    }
-
-    func openCCSCodexInCmux() {
-        guard let account = accounts.first(where: \SavedAccount.isActive) else {
-            errorMessage = AppLanguage.text(
-                "Chưa có tài khoản Codex đang hoạt động.",
-                "There is no active Codex account."
-            )
-            return
-        }
-        run {
-            try await CCSCmuxIntegration.ensureNoActiveSessions()
-            let desktopWasRunning = ChatGPTDesktop.isRunning
-            let relaunch = try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
-            do {
-                _ = try await self.cli.data(arguments: ["sync-ccs", "--json"])
-                try await CCSCmuxIntegration.persistDiscoveredAccounts()
-                try await CCSCmuxIntegration.pauseFreeAccounts(self.freeCCSAccountEmails)
-                try await CCSCmuxIntegration.prepareForAccountSwitch(email: account.email)
-            } catch {
-                if desktopWasRunning {
-                    await relaunch.launchAndConfirm()
-                }
-                throw error
-            }
-            if desktopWasRunning {
-                await relaunch.launchAndConfirm()
-            }
-            try await CCSCmuxIntegration.selectAccountAndLaunchCmux(email: account.email)
         }
     }
 
@@ -1097,16 +1041,6 @@ final class AccountStore: ObservableObject {
                 }
             }
         }
-    }
-
-    private var freeCCSAccountEmails: [String] {
-        Array(Set(accounts.compactMap { account in
-            let plan = account.planLabel?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard plan == "free" || plan == "go" || plan?.hasPrefix("free ") == true else {
-                return nil
-            }
-            return account.email
-        })).sorted()
     }
 
     private func reloadAccountsAfterSwitch() async throws {

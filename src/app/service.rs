@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::backup::{read_encrypted, write_encrypted};
-use crate::ccs_sync::{CcsSyncOutput, SyncDecision, link_snapshot, sync_snapshot};
 use crate::codex;
 use crate::env::AppEnv;
 use crate::model::{
@@ -365,105 +364,6 @@ where
     pub fn save_current(&self) -> Result<SaveOutput> {
         let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
         self.save_current_inner(true)
-    }
-
-    /// Reconcile every saved Roster credential with CCS without another OAuth login.
-    /// Codex processes must be stopped so neither side can rotate or rewrite a token
-    /// while the newest credential is selected.
-    pub fn sync_ccs_credentials(&self, auth_dir: &std::path::Path) -> Result<CcsSyncOutput> {
-        let warnings =
-            crate::process::wait_for_running_codex_processes_to_drain(Duration::from_secs(6));
-        if !warnings.is_empty() {
-            anyhow::bail!("CCS credential sync requires Codex and ChatGPT processes to be closed");
-        }
-
-        let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
-        let live_account_id = if codex::try_read_live_auth_bundle(&self.env)?.is_some() {
-            Some(self.save_current_inner(false)?.account.id)
-        } else {
-            None
-        };
-        let accounts = self.repository.list_accounts(&self.env.kind)?;
-        let mut output = CcsSyncOutput {
-            accounts: accounts.len(),
-            ..CcsSyncOutput::default()
-        };
-
-        for metadata in accounts {
-            let result = (|| -> Result<SyncDecision> {
-                let (_, snapshot) = self.repository.load_snapshot(&self.env.kind, metadata.id)?;
-                sync_snapshot(&metadata, &snapshot, auth_dir)
-            })();
-
-            match result {
-                Ok(SyncDecision::WroteCcs { created }) => {
-                    if created {
-                        output.linked += 1;
-                    } else {
-                        output.ccs_updated += 1;
-                    }
-                }
-                Ok(SyncDecision::UpdatedRoster(snapshot)) => {
-                    let identity = codex::identity_from_snapshot(&snapshot)?;
-                    if !saved_identity(&metadata).matches(&identity) {
-                        output.skipped += 1;
-                        output.warnings.push(format!(
-                            "{}: CCS credential identity does not match the saved Roster account",
-                            metadata.email
-                        ));
-                        continue;
-                    }
-                    self.repository.replace_snapshot_without_backup(
-                        &self.env.kind,
-                        metadata.id,
-                        &identity,
-                        &snapshot,
-                        metadata.cached_usage.clone(),
-                    )?;
-                    if live_account_id == Some(metadata.id) {
-                        codex::restore_snapshot(&self.env, &snapshot, &identity, true)?;
-                    }
-                    output.roster_updated += 1;
-                }
-                Ok(SyncDecision::Unchanged) => output.unchanged += 1,
-                Err(error) => {
-                    output.skipped += 1;
-                    output
-                        .warnings
-                        .push(format!("{}: {error:#}", metadata.email));
-                }
-            }
-        }
-
-        Ok(output)
-    }
-
-    /// Link missing CCS accounts without touching a running Codex session or an
-    /// existing CCS credential. Full reconciliation happens during switching.
-    pub fn link_ccs_credentials(&self, auth_dir: &std::path::Path) -> Result<CcsSyncOutput> {
-        let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
-        let accounts = self.repository.list_accounts(&self.env.kind)?;
-        let mut output = CcsSyncOutput {
-            accounts: accounts.len(),
-            ..CcsSyncOutput::default()
-        };
-        for metadata in accounts {
-            let result = (|| -> Result<bool> {
-                let (_, snapshot) = self.repository.load_snapshot(&self.env.kind, metadata.id)?;
-                link_snapshot(&metadata, &snapshot, auth_dir)
-            })();
-            match result {
-                Ok(true) => output.linked += 1,
-                Ok(false) => output.unchanged += 1,
-                Err(error) => {
-                    output.skipped += 1;
-                    output
-                        .warnings
-                        .push(format!("{}: {error:#}", metadata.email));
-                }
-            }
-        }
-        Ok(output)
     }
 
     /// Save and back up the live session before starting device login.

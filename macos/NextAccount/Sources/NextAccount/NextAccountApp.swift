@@ -767,24 +767,6 @@ private struct DashboardView: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                        Divider()
-                        Toggle(language.text("Đồng bộ CCS và mở cmux sau khi chuyển", "Sync CCS and open cmux after switching"), isOn: Binding(
-                            get: { store.ccsCmuxIntegrationEnabled },
-                            set: { store.setCCSCmuxIntegrationEnabled($0) }
-                        ))
-                        .disabled(store.isBusyForActions)
-                        Text(language.text(
-                            "Codex Roster tự liên kết credential đã lưu với CCS, đồng bộ bản mới nhất, loại account Free khỏi pool, chọn đúng account rồi mở Claude CLI tương tác trong cmux với model Codex — không cần đăng nhập lại từng account. Để app ngoài điều khiển cmux, chạy `launchctl setenv CMUX_SOCKET_MODE allowAll` rồi mở lại cmux; chế độ này cho phép mọi tiến trình cục bộ dùng socket cmux.",
-                            "Codex Roster automatically links saved credentials with CCS, reconciles the newest version, excludes Free accounts from the pool, selects the matching account, then opens an interactive Claude CLI in cmux with Codex models—no per-account login required. For external cmux automation, run `launchctl setenv CMUX_SOCKET_MODE allowAll` and relaunch cmux; this mode lets any local process use the cmux socket."
-                        ))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Button(language.text("Mở cmux + CCS Codex ngay", "Open cmux + CCS Codex now")) {
-                            store.openCCSCodexInCmux()
-                        }
-                        .controlSize(.small)
-                        .disabled(store.isBusyForActions || store.status?.currentAccount == nil)
-                        Divider()
                         Toggle(language.text("Mở Codex Roster khi đăng nhập macOS", "Open Codex Roster at login"), isOn: Binding(
                             get: { store.launchAtLoginEnabled },
                             set: { store.setLaunchAtLogin($0) }

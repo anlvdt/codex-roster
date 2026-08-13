@@ -156,17 +156,6 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Link and reconcile saved Roster credentials with CCS without OAuth login.
-    SyncCcs {
-        /// CCS CLIProxy auth directory (defaults to ~/.ccs/cliproxy/auth).
-        #[arg(long)]
-        auth_dir: Option<PathBuf>,
-        /// Only create missing CCS accounts; do not update existing or live credentials.
-        #[arg(long)]
-        link_only: bool,
-        #[arg(long)]
-        json: bool,
-    },
     TokenUsage {
         #[arg(long)]
         json: bool,
@@ -523,35 +512,6 @@ pub fn run() -> Result<()> {
                 println!("Recovered snapshots: {}", output.recovered_accounts);
                 println!("Imported snapshots: {}", output.imported_accounts);
                 println!("Skipped snapshots: {}", output.skipped_accounts);
-            }
-            Ok(())
-        }
-        Some(Command::SyncCcs {
-            auth_dir,
-            link_only,
-            json,
-        }) => {
-            let auth_dir =
-                auth_dir.unwrap_or_else(|| app.env().home_dir.join(".ccs/cliproxy/auth"));
-            let output = if link_only {
-                app.link_ccs_credentials(&auth_dir)?
-            } else {
-                app.sync_ccs_credentials(&auth_dir)?
-            };
-            if json {
-                print_json(&output)?;
-            } else {
-                println!(
-                    "CCS sync: {} linked, {} CCS updated, {} Roster updated, {} unchanged, {} skipped",
-                    output.linked,
-                    output.ccs_updated,
-                    output.roster_updated,
-                    output.unchanged,
-                    output.skipped
-                );
-                for warning in output.warnings {
-                    eprintln!("warning: {warning}");
-                }
             }
             Ok(())
         }

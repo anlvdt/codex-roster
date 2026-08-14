@@ -696,9 +696,11 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
             ActivateOutput activated;
             try
             {
-                // Never force through a surviving Desktop helper or independent
-                // Codex CLI process. Core preflight leaves the current auth intact.
-                activated = await _cli.ReadAsync<ActivateOutput>("activate", account.Id.ToString());
+                // After Desktop has been quit, --force skips leftover Electron
+                // helpers. A live Codex CLI session still blocks.
+                activated = restartDesktop
+                    ? await _cli.ReadAsync<ActivateOutput>("activate", account.Id.ToString(), "--force")
+                    : await _cli.ReadAsync<ActivateOutput>("activate", account.Id.ToString());
             }
             catch
             {
@@ -965,8 +967,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
                 AutoSwitchStatus = "Đang đóng Codex Desktop trước khi tự động chuyển…";
                 relaunch = await CodexDesktopLifecycle.CloseForAccountSwitchAsync();
                 closedDesktop = true;
-                // A lingering helper or independent CLI must keep blocking the
-                // swap; forcing through it can rewrite the newly restored auth.
+                applyArgs.Add("--force");
             }
 
             AutoSwitchOutput applied;
@@ -1234,6 +1235,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         _quotaTimer.Interval = remaining switch
         {
             null => TimeSpan.FromMinutes(1),
+            0 => TimeSpan.FromMinutes(1),
             <= 5 => TimeSpan.FromSeconds(10),
             <= 20 => TimeSpan.FromSeconds(30),
             _ => TimeSpan.FromMinutes(1),
@@ -1250,6 +1252,7 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         return remaining switch
         {
             null => "Tự động kiểm tra mỗi phút",
+            0 => "Hết quota — kiểm tra mỗi phút",
             <= 5 => "Quota thấp — kiểm tra mỗi 10 giây",
             <= 20 => "Quota đang giảm — kiểm tra mỗi 30 giây",
             _ => "Tự động kiểm tra mỗi phút",

@@ -93,6 +93,8 @@ public static class CodexDesktopLifecycle
         return normalized.Contains("ChatGPT", StringComparison.OrdinalIgnoreCase)
             || normalized.Contains("OpenAI", StringComparison.OrdinalIgnoreCase)
             || normalized.Contains("\\Codex\\", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains(".codex\\plugins\\", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains(".plugin-appserver", StringComparison.OrdinalIgnoreCase)
             || normalized.EndsWith("ChatGPT.exe", StringComparison.OrdinalIgnoreCase)
             || normalized.EndsWith("Codex.exe", StringComparison.OrdinalIgnoreCase);
     }

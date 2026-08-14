@@ -18,6 +18,8 @@ pub struct AppSettings {
     pub last_auto_switch_at: Option<OffsetDateTime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_auto_switch_target: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_auto_switch_from: Option<Uuid>,
 }
 
 pub fn load_settings(app_data_dir: &Path) -> Result<AppSettings> {

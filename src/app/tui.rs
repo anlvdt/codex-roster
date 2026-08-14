@@ -709,8 +709,8 @@ fn confirm_delete(account: &AccountView) -> Result<bool> {
 
 fn confirm_activation(warnings: &[RunningCodexProcess]) -> Result<bool> {
     let body = vec![
-        "Codex appears to be running.".to_owned(),
-        "Close every listed process first for a reliable swap, or force activation anyway."
+        "Codex or ChatGPT Desktop still appears to be running.".to_owned(),
+        "Quit Desktop first for a reliable swap. Force skips leftover Desktop helpers only — a live `codex` CLI still blocks."
             .to_owned(),
     ];
     let details = process_summary_lines("Codex processes", warnings);
@@ -1118,6 +1118,7 @@ mod tests {
             executable: "codex.exe".to_owned(),
             role: "process".to_owned(),
             summary: None,
+            origin: None,
         }];
         assert!(should_verify_activation_stability(false, &warnings));
         assert!(should_verify_activation_stability(true, &warnings));

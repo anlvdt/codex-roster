@@ -1,4 +1,3 @@
-
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use crate::model::RunningCodexProcess;
@@ -21,7 +20,8 @@ pub fn detect_running_codex_processes() -> Vec<RunningCodexProcess> {
         .processes()
         .iter()
         .filter_map(|(pid, process)| {
-            if pid.as_u32() == current_pid {
+            let pid_u32 = pid.as_u32();
+            if pid_u32 == current_pid || is_ancestor_of(&system, current_pid, pid_u32) {
                 return None;
             }
             let name = process.name().to_string_lossy().to_ascii_lowercase();
@@ -54,21 +54,45 @@ pub fn codex_desktop_likely_running() -> bool {
         .any(is_desktop_like_process)
 }
 
+/// Processes that must stop before auth files are replaced.
+///
+/// `allow_desktop` is `--force` / GUI-after-quit: leftover ChatGPT/Codex.app
+/// helpers are ignored. A live `codex` CLI session still blocks — forcing
+/// through it can invalidate a single-use refresh token.
+pub fn processes_blocking_activation(allow_desktop: bool) -> Vec<RunningCodexProcess> {
+    detect_running_codex_processes()
+        .into_iter()
+        .filter(|process| !(allow_desktop && is_force_skippable_process(process)))
+        .collect()
+}
+
+pub fn is_force_skippable_process(process: &RunningCodexProcess) -> bool {
+    matches!(process.origin.as_deref(), Some("desktop") | Some("plugin"))
+        || is_desktop_like_process(process)
+        || is_desktop_main_process(process)
+}
+
 fn is_desktop_like_process(process: &RunningCodexProcess) -> bool {
     let exe = process.executable.to_ascii_lowercase();
+    if is_roster_name(&exe) {
+        return false;
+    }
     if exe.contains("chatgpt") {
         return true;
     }
-    let is_codex_named = exe == "codex"
-        || exe == "codex.exe"
-        || exe.ends_with("\\codex.exe")
-        || exe.ends_with("/codex")
-        || exe.contains("codex");
-    is_codex_named
+    if exe.starts_with("codex helper") {
+        return true;
+    }
+    is_codex_bin_name(&exe)
         && matches!(
             process.role.as_str(),
             "renderer" | "gpu-process" | "utility" | "zygote" | "gpu" | "broker"
         )
+}
+
+fn is_desktop_main_process(process: &RunningCodexProcess) -> bool {
+    let exe = process.executable.to_ascii_lowercase();
+    is_codex_bin_name(&exe) && matches!(process.role.as_str(), "process" | "main")
 }
 
 pub fn format_process_table(processes: &[RunningCodexProcess]) -> Vec<String> {
@@ -97,7 +121,10 @@ pub fn format_process_table(processes: &[RunningCodexProcess]) -> Vec<String> {
 }
 
 fn matches_codex_process(name: &str, command: &[String]) -> bool {
-    if matches!(name, "codex" | "codex.exe" | "chatgpt" | "chatgpt.exe") {
+    if is_roster_process(name, command) {
+        return false;
+    }
+    if is_chatgpt_name(name) || is_codex_bin_name(name) {
         return true;
     }
     command
@@ -105,21 +132,116 @@ fn matches_codex_process(name: &str, command: &[String]) -> bool {
         .filter_map(|token| path_file_name(token))
         .map(|token| token.to_ascii_lowercase())
         .any(|token| {
-            matches!(
-                token.as_str(),
-                "codex" | "codex.exe" | "codex.js" | "chatgpt" | "chatgpt.exe"
-            )
+            !is_roster_name(&token)
+                && matches!(
+                    token.as_str(),
+                    "codex" | "codex.exe" | "codex.js" | "chatgpt" | "chatgpt.exe"
+                )
         })
+}
+
+fn is_roster_process(name: &str, command: &[String]) -> bool {
+    if is_roster_name(name) {
+        return true;
+    }
+    command.iter().any(|token| {
+        let token = token.to_ascii_lowercase();
+        token.contains("codex roster.app")
+            || token.contains("codex-roster")
+            || token.contains("codexroster")
+    })
+}
+
+fn is_roster_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("codex-roster") || name.contains("codexroster") || name.contains("codex roster")
+}
+
+fn is_chatgpt_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name == "chatgpt" || name == "chatgpt.exe" || name.starts_with("chatgpt")
+}
+
+fn is_codex_bin_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    if is_roster_name(&name) {
+        return false;
+    }
+    name == "codex" || name == "codex.exe" || name.starts_with("codex helper")
+}
+
+fn is_ancestor_of(system: &System, descendant: u32, ancestor: u32) -> bool {
+    if descendant == ancestor {
+        return true;
+    }
+    let mut walk = descendant;
+    for _ in 0..32 {
+        let Some(process) = system.process(Pid::from_u32(walk)) else {
+            return false;
+        };
+        let Some(parent) = process.parent() else {
+            return false;
+        };
+        let parent = parent.as_u32();
+        if parent == 0 || parent == walk {
+            return false;
+        }
+        if parent == ancestor {
+            return true;
+        }
+        walk = parent;
+    }
+    false
 }
 
 fn format_process(pid: Pid, name: &str, command: &[String]) -> RunningCodexProcess {
     let (role, summary) = classify_process(command);
+    let origin = if is_desktop_owned_command(name, command, &role) {
+        Some("desktop".to_owned())
+    } else {
+        Some("cli".to_owned())
+    };
     RunningCodexProcess {
         pid: pid.as_u32(),
         executable: name.to_owned(),
         role,
         summary,
+        origin,
     }
+}
+
+fn is_desktop_owned_command(name: &str, command: &[String], role: &str) -> bool {
+    if is_chatgpt_name(name) || name.starts_with("codex helper") {
+        return true;
+    }
+    let blob = command
+        .iter()
+        .map(|token| token.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if blob.contains("chatgpt.app")
+        || blob.contains("codex.app/")
+        || blob.contains("codex.app\\")
+        || blob.contains("codex framework.framework")
+        || blob.contains(".codex/plugins/")
+        || blob.contains(".codex\\plugins\\")
+        || blob.contains(".plugin-appserver")
+        || blob.contains("openai-bundled/chrome")
+    {
+        return true;
+    }
+    is_codex_bin_name(name)
+        && matches!(
+            role,
+            "renderer"
+                | "gpu-process"
+                | "utility"
+                | "zygote"
+                | "gpu"
+                | "broker"
+                | "process"
+                | "main"
+        )
 }
 
 fn classify_process(command: &[String]) -> (String, Option<String>) {
@@ -274,9 +396,91 @@ fn truncate_cell(value: &str, width: usize) -> String {
 mod tests {
     use super::{
         classify_process, clean_token, detect_flag_value, format_process_table,
-        is_desktop_like_process, matches_codex_process, truncate_summary,
+        is_desktop_like_process, is_desktop_owned_command, is_force_skippable_process,
+        matches_codex_process, truncate_summary,
     };
     use crate::model::RunningCodexProcess;
+
+    #[test]
+    fn matches_codex_process_ignores_roster_binaries() {
+        assert!(!matches_codex_process("codexroster", &[]));
+        assert!(!matches_codex_process(
+            "codex-roster",
+            &[
+                "/Applications/Codex Roster.app/Contents/MacOS/codex-roster".to_owned(),
+                "activate".to_owned(),
+            ]
+        ));
+        assert!(!matches_codex_process(
+            "nextaccount",
+            &["/Applications/Codex Roster.app/Contents/MacOS/CodexRoster".to_owned()]
+        ));
+    }
+
+    #[test]
+    fn plugin_appserver_is_desktop_owned() {
+        assert!(is_desktop_owned_command(
+            "codex",
+            &[
+                "/Users/x/.codex/plugins/.plugin-appserver/codex".to_owned(),
+                "app-server".to_owned(),
+            ],
+            "app-server",
+        ));
+        assert!(!is_desktop_owned_command(
+            "codex",
+            &[
+                "/opt/homebrew/bin/codex".to_owned(),
+                "app-server".to_owned(),
+            ],
+            "app-server",
+        ));
+    }
+
+    #[test]
+    fn matches_codex_process_detects_chatgpt_helpers() {
+        assert!(matches_codex_process("chatgpt helper (gpu)", &[]));
+        assert!(matches_codex_process("chatgpt", &[]));
+    }
+
+    #[test]
+    fn force_skips_desktop_leftovers_but_not_cli() {
+        assert!(is_force_skippable_process(&RunningCodexProcess {
+            pid: 1,
+            executable: "chatgpt".to_owned(),
+            role: "process".to_owned(),
+            summary: None,
+            origin: Some("desktop".to_owned()),
+        }));
+        assert!(is_force_skippable_process(&RunningCodexProcess {
+            pid: 2,
+            executable: "codex".to_owned(),
+            role: "renderer".to_owned(),
+            summary: Some("app.asar".to_owned()),
+            origin: Some("desktop".to_owned()),
+        }));
+        assert!(is_force_skippable_process(&RunningCodexProcess {
+            pid: 3,
+            executable: "codex".to_owned(),
+            role: "process".to_owned(),
+            summary: None,
+            origin: Some("desktop".to_owned()),
+        }));
+        assert!(!is_force_skippable_process(&RunningCodexProcess {
+            pid: 4,
+            executable: "codex".to_owned(),
+            role: "app-server".to_owned(),
+            summary: None,
+            origin: Some("cli".to_owned()),
+        }));
+        assert!(is_force_skippable_process(&RunningCodexProcess {
+            pid: 5,
+            executable: "codex".to_owned(),
+            role: "app-server".to_owned(),
+            summary: None,
+            origin: Some("desktop".to_owned()),
+        }));
+    }
 
     #[test]
     fn matches_codex_process_detects_wrapped_cli() {
@@ -298,18 +502,21 @@ mod tests {
             executable: "chatgpt.exe".to_owned(),
             role: "process".to_owned(),
             summary: None,
+            origin: None,
         }));
         assert!(is_desktop_like_process(&RunningCodexProcess {
             pid: 2,
             executable: "codex.exe".to_owned(),
             role: "renderer".to_owned(),
             summary: Some("app.asar".to_owned()),
+            origin: None,
         }));
         assert!(!is_desktop_like_process(&RunningCodexProcess {
             pid: 3,
             executable: "codex.exe".to_owned(),
             role: "login".to_owned(),
             summary: Some("--device-auth".to_owned()),
+            origin: None,
         }));
     }
 
@@ -388,6 +595,7 @@ mod tests {
             executable: "codex.exe".to_owned(),
             role: "renderer".to_owned(),
             summary: Some("app.asar".to_owned()),
+            origin: None,
         }]);
         assert_eq!(lines[0], "PID    Exe          Role           Summary");
         assert!(lines[1].contains("12"));

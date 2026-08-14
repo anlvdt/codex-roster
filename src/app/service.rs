@@ -68,6 +68,7 @@ where
         if !enabled {
             settings.last_auto_switch_at = None;
             settings.last_auto_switch_target = None;
+            settings.last_auto_switch_from = None;
         }
         save_settings(&self.env.app_data_dir, &settings)?;
         Ok(AutoSwitchOutput {
@@ -184,33 +185,42 @@ where
             }
         }
 
-        let candidate = self
-            .list()?
-            .accounts
-            .into_iter()
+        let accounts = self.list()?.accounts;
+        let mut ranked: Vec<_> = accounts
+            .iter()
             .filter(|candidate| {
                 is_eligible_auto_switch_candidate(candidate, &active, &settings, now, None)
                     && usable_candidate_ids.contains(&candidate.id)
             })
-            .max_by_key(|candidate| switch_quota_score(candidate.usage.as_ref()));
-
-        let Some(candidate) = candidate else {
-            return Ok(auto_switch_output(
-                enabled,
-                "all_accounts_exhausted",
-                Some(active.id),
-                None,
-                None,
-                Some("No eligible saved account has fresh usable quota.".to_owned()),
-            ));
-        };
+            .cloned()
+            .collect();
+        ranked.sort_by_key(|candidate| {
+            std::cmp::Reverse(switch_quota_score(candidate.usage.as_ref()))
+        });
+        // Never tell the GUI to quit ChatGPT on a cache-only guess. A stale
+        // >0% window on the only other row (often the same exhausted identity)
+        // would otherwise close Desktop every 10s and bounce the session.
+        for cached in ranked {
+            if let Some(candidate) =
+                self.revalidated_auto_switch_candidate(cached.id, &active, &settings, now)
+            {
+                return Ok(auto_switch_output(
+                    enabled,
+                    "ready",
+                    Some(active.id),
+                    Some(candidate.id),
+                    Some(account_display_name(&candidate)),
+                    None,
+                ));
+            }
+        }
         Ok(auto_switch_output(
             enabled,
-            "ready",
+            "all_accounts_exhausted",
             Some(active.id),
-            Some(candidate.id),
-            Some(account_display_name(&candidate)),
             None,
+            None,
+            Some("No eligible saved account has fresh usable quota.".to_owned()),
         ))
     }
 
@@ -307,6 +317,7 @@ where
         let mut settings = load_settings(&self.env.app_data_dir)?;
         settings.last_auto_switch_at = Some(now);
         settings.last_auto_switch_target = Some(candidate.id);
+        settings.last_auto_switch_from = Some(active.id);
         save_settings(&self.env.app_data_dir, &settings)?;
         Ok(auto_switch_output(
             enabled,
@@ -596,13 +607,13 @@ where
     ) -> Result<ActivateOutput> {
         let started = Instant::now();
         let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
-        let initial_warnings = activation_process_warnings();
+        let initial_warnings = activation_process_warnings(force_running);
         ensure_activation_processes_stopped(&initial_warnings)?;
         let previous_account_id = self.refresh_current_saved_account_before_activation()?;
         let refreshed_current_at = Instant::now();
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         let acquired_lock_at = Instant::now();
-        let warnings = activation_process_warnings();
+        let warnings = activation_process_warnings(force_running);
         ensure_activation_processes_stopped(&warnings)?;
         let scanned_processes_at = Instant::now();
         if let Some(expected_active_id) = expected_active_id {
@@ -728,6 +739,10 @@ where
 
     pub fn activation_preflight_warnings(&self) -> Vec<RunningCodexProcess> {
         crate::process::detect_running_codex_processes()
+    }
+
+    pub fn activation_blocking_warnings(&self, allow_desktop: bool) -> Vec<RunningCodexProcess> {
+        crate::process::processes_blocking_activation(allow_desktop)
     }
 
     pub fn refresh_saved_usage_cache(&self) -> Result<()> {
@@ -1125,12 +1140,12 @@ fn ensure_activation_processes_stopped(warnings: &[RunningCodexProcess]) -> Resu
 }
 
 #[cfg(not(test))]
-fn activation_process_warnings() -> Vec<RunningCodexProcess> {
-    crate::process::detect_running_codex_processes()
+fn activation_process_warnings(allow_desktop: bool) -> Vec<RunningCodexProcess> {
+    crate::process::processes_blocking_activation(allow_desktop)
 }
 
 #[cfg(test)]
-fn activation_process_warnings() -> Vec<RunningCodexProcess> {
+fn activation_process_warnings(_allow_desktop: bool) -> Vec<RunningCodexProcess> {
     Vec::new()
 }
 
@@ -1307,7 +1322,9 @@ fn is_in_auto_switch_cooldown(
     candidate_id: Uuid,
     now: time::OffsetDateTime,
 ) -> bool {
-    settings.last_auto_switch_target == Some(candidate_id)
+    let recently_used = settings.last_auto_switch_target == Some(candidate_id)
+        || settings.last_auto_switch_from == Some(candidate_id);
+    recently_used
         && settings
             .last_auto_switch_at
             .is_some_and(|last_switch| now - last_switch < time::Duration::minutes(5))
@@ -1348,9 +1365,12 @@ fn ranked_cached_auto_switch_candidates(
 /// account. A different record ID must never make auto-switch restore the same
 /// exhausted subject/email.
 fn accounts_represent_same_identity(left: &AccountView, right: &AccountView) -> bool {
+    if left.email.eq_ignore_ascii_case(&right.email) {
+        return true;
+    }
     match (&left.subject, &right.subject) {
         (Some(left_subject), Some(right_subject)) => left_subject == right_subject,
-        _ => left.email.eq_ignore_ascii_case(&right.email),
+        _ => false,
     }
 }
 
@@ -1401,6 +1421,7 @@ mod tests {
             executable: "codex".to_owned(),
             role: "app-server".to_owned(),
             summary: None,
+            origin: Some("cli".to_owned()),
         }];
 
         let error = ensure_activation_processes_stopped(&warnings).expect_err("must block");
@@ -1594,6 +1615,53 @@ mod tests {
         assert!(!is_free_plan(&account(Some("Pro"))));
         assert!(!is_free_plan(&account(Some("Pro Lite"))));
         assert!(!is_free_plan(&account(Some("Team"))));
+    }
+
+    #[test]
+    fn auto_switch_treats_same_email_as_the_same_account() {
+        let now = OffsetDateTime::now_utc();
+        let row = |email: &str, subject: Option<&str>| crate::model::AccountView {
+            id: Uuid::new_v4(),
+            provider: crate::model::AiProvider::OpenAi,
+            email: email.to_owned(),
+            subject: subject.map(str::to_owned),
+            name: None,
+            custom_label: None,
+            plan_label: Some("Plus".to_owned()),
+            environment: EnvironmentKind::Linux,
+            is_active: false,
+            created_at: now,
+            updated_at: now,
+            last_activated_at: None,
+            archived: false,
+            usage: None,
+            usage_error: None,
+        };
+        assert!(accounts_represent_same_identity(
+            &row("person@example.com", Some("sub-a")),
+            &row("PERSON@example.com", Some("sub-b")),
+        ));
+        assert!(!accounts_represent_same_identity(
+            &row("one@example.com", Some("sub-a")),
+            &row("two@example.com", Some("sub-b")),
+        ));
+    }
+
+    #[test]
+    fn auto_switch_cools_down_both_source_and_target() {
+        let now = OffsetDateTime::now_utc();
+        let from = Uuid::new_v4();
+        let target = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let settings = crate::settings::AppSettings {
+            last_auto_switch_at: Some(now - time::Duration::minutes(1)),
+            last_auto_switch_target: Some(target),
+            last_auto_switch_from: Some(from),
+            ..crate::settings::AppSettings::default()
+        };
+        assert!(is_in_auto_switch_cooldown(&settings, from, now));
+        assert!(is_in_auto_switch_cooldown(&settings, target, now));
+        assert!(!is_in_auto_switch_cooldown(&settings, other, now));
     }
 
     #[test]

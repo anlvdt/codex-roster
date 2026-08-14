@@ -303,19 +303,30 @@ pub fn run() -> Result<()> {
                 Some(account_id) => {
                     app.validate_activation_target(account_id)?;
                     let warnings = app.activation_preflight_warnings();
-                    if !warnings.is_empty() {
-                        if !force {
-                            if !json {
-                                print_process_summary("Codex processes", &warnings);
-                            }
+                    let blocking = app.activation_blocking_warnings(force);
+                    if !blocking.is_empty() {
+                        if !json {
+                            print_process_summary("Codex processes", &blocking);
+                        }
+                        if blocking
+                            .iter()
+                            .any(|process| !crate::process::is_force_skippable_process(process))
+                        {
                             bail!(
-                                "Codex appears to be running. Close those processes first or rerun `activate` with `--force`."
+                                "Codex CLI is still running. Close those processes first; `--force` cannot override a live CLI session."
                             );
                         }
-                        if !json {
-                            showed_preflight = true;
-                            print_process_summary("Codex processes", &warnings);
+                        if !force {
+                            bail!(
+                                "ChatGPT/Codex Desktop is still running. Close it first or rerun `activate` with `--force` after quitting Desktop."
+                            );
                         }
+                    } else if !warnings.is_empty() && force && !json {
+                        showed_preflight = true;
+                        print_process_summary(
+                            "Desktop leftovers (ignored with --force)",
+                            &warnings,
+                        );
                     }
                     app.activate_with_running_policy(account_id, force)?
                 }

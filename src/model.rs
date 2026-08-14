@@ -262,6 +262,9 @@ pub struct RunningCodexProcess {
     pub executable: String,
     pub role: String,
     pub summary: Option<String>,
+    /// "desktop" (ChatGPT/Codex.app/plugin) or "cli". Optional for older tests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

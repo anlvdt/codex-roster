@@ -34,8 +34,12 @@ enum QuotaRefreshScope {
 enum AccountActivationSafety {
     static let processDrainAttempts = 20
 
-    static func arguments(accountID: UUID) -> [String] {
-        ["activate", accountID.uuidString]
+    static func arguments(accountID: UUID, forceDesktop: Bool = false) -> [String] {
+        var arguments = ["activate", accountID.uuidString]
+        if forceDesktop {
+            arguments.append("--force")
+        }
+        return arguments
     }
 
     static func isProcessSafetyBlock(_ error: Error) -> Bool {
@@ -155,6 +159,9 @@ final class AccountStore: ObservableObject {
             .remainingPercent else {
             return .seconds(60)
         }
+        // 0% must not poll every 10s — that made auto-switch close ChatGPT in a loop
+        // when decide briefly looked "ready" against a stale sibling row.
+        if remaining == 0 { return .seconds(60) }
         if remaining <= 5 { return .seconds(10) }
         if remaining <= 20 { return .seconds(30) }
         return .seconds(60)
@@ -503,7 +510,10 @@ final class AccountStore: ObservableObject {
             do {
                 return try await cli.decode(
                     ActivateOutput.self,
-                    arguments: AccountActivationSafety.arguments(accountID: accountID)
+                    arguments: AccountActivationSafety.arguments(
+                        accountID: accountID,
+                        forceDesktop: waitForDrain
+                    )
                 )
             } catch {
                 guard waitForDrain,
@@ -906,6 +916,9 @@ final class AccountStore: ObservableObject {
                 var applyArguments = ["auto-switch", "--apply"]
                 if let candidateId = decision.candidateAccountId {
                     applyArguments += ["--account-id", candidateId.uuidString]
+                }
+                if didCloseDesktop {
+                    applyArguments.append("--force")
                 }
                 var applied: AutoSwitchOutput = try await cli.decode(AutoSwitchOutput.self, arguments: applyArguments)
                 if applied.status == "waiting_for_processes",
@@ -1459,6 +1472,7 @@ private enum ChatGPTDesktop {
             kill(app.processIdentifier, SIGTERM)
         }
         if await waitUntilQuit(deadline: forceTerminateDeadline) {
+            killOrphanDesktopCodexServers()
             return relaunch
         }
         for app in runningApplications {
@@ -1466,8 +1480,10 @@ private enum ChatGPTDesktop {
             kill(app.processIdentifier, SIGKILL)
         }
         if await waitUntilQuit(deadline: .seconds(1)) {
+            killOrphanDesktopCodexServers()
             return relaunch
         }
+        killOrphanDesktopCodexServers()
         throw CLIError(AppLanguage.text(
             "Không thể đóng hoàn toàn ChatGPT Desktop trước khi chuyển tài khoản.",
             "Could not fully quit ChatGPT Desktop before switching accounts."
@@ -1502,6 +1518,40 @@ private enum ChatGPTDesktop {
             return nil
         }
         return bundleID
+    }
+
+    /// ChatGPT Desktop leaves `~/.codex/plugins/.plugin-appserver/codex app-server`
+    /// running after the UI process dies. Those look like a live CLI to Roster
+    /// and must be torn down before swapping auth.
+    private static func killOrphanDesktopCodexServers() {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let marker = "\(home)/.codex/plugins/.plugin-appserver/codex"
+        let pgrep = Process()
+        pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        pgrep.arguments = ["-f", marker]
+        let pipe = Pipe()
+        pgrep.standardOutput = pipe
+        pgrep.standardError = FileHandle.nullDevice
+        do {
+            try pgrep.run()
+            pgrep.waitUntilExit()
+        } catch {
+            return
+        }
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        for line in output.split(whereSeparator: \.isNewline) {
+            guard let pid = Int32(line.trimmingCharacters(in: .whitespaces)), pid > 1 else {
+                continue
+            }
+            kill(pid, SIGTERM)
+        }
+        usleep(200_000)
+        for line in output.split(whereSeparator: \.isNewline) {
+            guard let pid = Int32(line.trimmingCharacters(in: .whitespaces)), pid > 1 else {
+                continue
+            }
+            kill(pid, SIGKILL)
+        }
     }
 
     private static func waitUntilQuit(deadline: Duration) async -> Bool {

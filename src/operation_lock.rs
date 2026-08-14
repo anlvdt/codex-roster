@@ -16,6 +16,7 @@ const RETRY_INTERVAL: Duration = Duration::from_millis(50);
 /// refresh does not make account activation fail with a transient lock error.
 pub struct OperationLock(File);
 pub struct AuthLock(File);
+pub struct AutoSwitchLock(File);
 
 impl OperationLock {
     pub fn acquire(app_data_dir: &Path) -> Result<Self> {
@@ -29,6 +30,14 @@ impl AuthLock {
     /// only the final file write is too late to prevent session invalidation.
     pub fn acquire(app_data_dir: &Path) -> Result<Self> {
         acquire_named_lock(app_data_dir, ".auth-operation.lock", "authentication").map(Self)
+    }
+}
+
+impl AutoSwitchLock {
+    /// Serialize decide/apply across GUI, tray, and TUI so two monitors cannot
+    /// both conclude "ready" and activate at once.
+    pub fn acquire(app_data_dir: &Path) -> Result<Self> {
+        acquire_named_lock(app_data_dir, ".auto-switch.lock", "auto-switch").map(Self)
     }
 }
 
@@ -71,6 +80,12 @@ impl Drop for OperationLock {
 }
 
 impl Drop for AuthLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+impl Drop for AutoSwitchLock {
     fn drop(&mut self) {
         let _ = self.0.unlock();
     }

@@ -47,11 +47,23 @@ public sealed class AccountItem(AccountDto account)
 
     private static bool IsUsable(AccountDto account)
     {
+        if (HasUsableCredits(account)) return true;
         var windows = new[] { account.Usage?.Weekly, account.Usage?.FiveHour }
             .Where(window => window is not null)
             .Cast<UsageWindowDto>()
             .ToArray();
         return windows.Length > 0 && windows.All(window => window.RemainingPercent > 0);
+    }
+
+    private static bool HasUsableCredits(AccountDto account)
+    {
+        var credits = account.Usage?.Credits;
+        if (credits is null) return false;
+        if (credits.Unlimited) return true;
+        if (!credits.HasCredits) return false;
+        var digits = new string(credits.Balance.Where(ch => char.IsDigit(ch) || ch == '.').ToArray());
+        return double.TryParse(digits, System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out var value) && value > 0;
     }
 
     private static string FormatQuota(AccountDto account)

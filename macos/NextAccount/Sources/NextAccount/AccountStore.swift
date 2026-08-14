@@ -1820,12 +1820,21 @@ struct SavedAccount: Identifiable, Decodable {
         [usage?.weekly, usage?.fiveHour].compactMap { $0 }
     }
 
+    var hasUsableCredits: Bool {
+        guard let credits = usage?.credits else { return false }
+        if credits.unlimited { return true }
+        guard credits.hasCredits else { return false }
+        let digits = credits.balance.filter { $0.isNumber || $0 == "." }
+        return Double(digits).map { $0 > 0 } ?? false
+    }
+
     var isExhaustedForSwitch: Bool {
-        quotaWindowsForSwitch.contains { $0.remainingPercent == 0 }
+        !hasUsableCredits && quotaWindowsForSwitch.contains { $0.remainingPercent == 0 }
     }
 
     var isUsableForSwitch: Bool {
-        !quotaWindowsForSwitch.isEmpty && quotaWindowsForSwitch.allSatisfy { $0.remainingPercent > 0 }
+        hasUsableCredits
+            || (!quotaWindowsForSwitch.isEmpty && quotaWindowsForSwitch.allSatisfy { $0.remainingPercent > 0 })
     }
 
     var switchQuotaScore: Int {

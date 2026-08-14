@@ -80,6 +80,15 @@ public sealed class AccountUsageDto
     [JsonPropertyName("five_hour")]
     public UsageWindowDto? FiveHour { get; init; }
     public UsageWindowDto? Weekly { get; init; }
+    public UsageCreditsDto? Credits { get; init; }
+}
+
+public sealed class UsageCreditsDto
+{
+    [JsonPropertyName("has_credits")]
+    public bool HasCredits { get; init; }
+    public bool Unlimited { get; init; }
+    public string Balance { get; init; } = string.Empty;
 }
 
 public sealed class UsageWindowDto

@@ -11,7 +11,7 @@ use crate::model::{
     LegacyRecoveryOutput, ListOutput, RunningCodexProcess, SaveAction, SaveOutput, SnapshotBlob,
     StatusOutput, TokenUsageSummaryOutput, UsageOutput, UsageSource,
 };
-use crate::operation_lock::{AuthLock, OperationLock};
+use crate::operation_lock::{AuthLock, AutoSwitchLock, OperationLock};
 use crate::repository::SnapshotRepository;
 use crate::secrets::SecretStore;
 use crate::settings::{load_settings, save_settings};
@@ -109,6 +109,7 @@ where
                 false, "disabled", None, None, None, None,
             ));
         }
+        let _auto_switch_lock = AutoSwitchLock::acquire(&self.env.app_data_dir)?;
         // Apply reuses the prior decision when possible — avoid a second Keychain/network
         // fan-out that unlocks the keychain and blocks ChatGPT relaunch.
         if apply {
@@ -118,9 +119,9 @@ where
     }
 
     fn decide_auto_switch(&self, enabled: bool) -> Result<AutoSwitchOutput> {
-        // Fresh check of the live account only. Candidates prefer cached quota to
-        // avoid decrypting every saved snapshot on each 60s poll.
-        let _ = self.usage(None)?;
+        // Fresh check of the live account only. A transient probe error must not
+        // hide an already-cached 0% window — fall through to roster cache.
+        let _ = self.usage(None);
         let active = self
             .list()?
             .accounts
@@ -159,15 +160,27 @@ where
                     .as_deref()
                     .is_some_and(usage_error_blocks_activation)
         }) {
-            // Fresh cache (usable or not) skips network/decrypt. Only refresh stale/missing.
-            if cached_usage_is_fresh(candidate.cached_usage.as_ref(), now) {
+            let confirmed_paid = !is_free_plan_label(plan_for_auto_switch_from(
+                candidate.plan_label.as_deref(),
+                candidate.cached_usage.as_ref(),
+            ));
+            // Fresh paid cache skips network/decrypt. Unlabeled or Free must refetch
+            // so a stale Plus/Pro roster label cannot hide a Free downgrade, and so
+            // a paid account missing plan_label can still become eligible.
+            if cached_usage_is_fresh(candidate.cached_usage.as_ref(), now) && confirmed_paid {
                 if is_usable_for_switch(candidate.cached_usage.as_ref()) {
                     usable_candidate_ids.insert(candidate.id);
                 }
                 continue;
             }
-            if self.usage(Some(candidate.id)).is_ok() {
-                usable_candidate_ids.insert(candidate.id);
+            match self.usage(Some(candidate.id)) {
+                Ok(output)
+                    if is_usable_for_switch(Some(&output.usage))
+                        && !is_free_plan_label(output.usage.plan_label.as_deref()) =>
+                {
+                    usable_candidate_ids.insert(candidate.id);
+                }
+                _ => {}
             }
         }
 
@@ -176,17 +189,8 @@ where
             .accounts
             .into_iter()
             .filter(|candidate| {
-                candidate.id != active.id
-                    && !accounts_represent_same_identity(candidate, &active)
-                    && !candidate.archived
-                    && !candidate
-                        .usage_error
-                        .as_deref()
-                        .is_some_and(usage_error_blocks_activation)
-                    && is_usable_for_switch(candidate.usage.as_ref())
-                    && !is_free_plan(candidate)
+                is_eligible_auto_switch_candidate(candidate, &active, &settings, now, None)
                     && usable_candidate_ids.contains(&candidate.id)
-                    && !is_in_auto_switch_cooldown(&settings, candidate.id, now)
             })
             .max_by_key(|candidate| switch_quota_score(candidate.usage.as_ref()));
 
@@ -216,6 +220,8 @@ where
         preferred_candidate_id: Option<Uuid>,
         force: bool,
     ) -> Result<AutoSwitchOutput> {
+        // Re-probe the live account first so a mid-flight reset does not switch away.
+        let _ = self.usage(None);
         let accounts = self.list()?.accounts;
         let active = accounts.iter().find(|account| account.is_active);
         let Some(active) = active else {
@@ -242,43 +248,33 @@ where
 
         let settings = load_settings(&self.env.app_data_dir)?;
         let now = time::OffsetDateTime::now_utc();
-        let candidate = if let Some(preferred_id) = preferred_candidate_id {
-            // Revalidate only the decided candidate — never re-rank a stale roster cache.
-            let preferred = match self.usage(Some(preferred_id)) {
-                Ok(_) => self
-                    .list()?
-                    .accounts
-                    .into_iter()
-                    .find(|account| account.id == preferred_id)
-                    .filter(|candidate| {
-                        candidate.id != active.id
-                            && !accounts_represent_same_identity(candidate, active)
-                            && !candidate.archived
-                            && !candidate
-                                .usage_error
-                                .as_deref()
-                                .is_some_and(usage_error_blocks_activation)
-                            && is_usable_for_switch(candidate.usage.as_ref())
-                            && !is_free_plan(candidate)
-                            && !is_in_auto_switch_cooldown(&settings, candidate.id, now)
-                    }),
-                Err(_) => None,
-            };
-            // If the selected candidate changed while revalidating, use the next
-            // usable cached candidate rather than reporting every account exhausted
-            // and waiting for the next monitor tick.
-            preferred.or_else(|| {
-                best_cached_auto_switch_candidate(
-                    &accounts,
-                    active,
-                    &settings,
-                    now,
-                    Some(preferred_id),
-                )
-            })
-        } else {
-            best_cached_auto_switch_candidate(&accounts, active, &settings, now, None)
-        };
+        // Never activate from roster cache alone. A stale >0% window can hide a
+        // live 0% or a plan that just became Free. Walk every cached candidate
+        // until one live-validates.
+        let mut tried = HashSet::new();
+        let mut candidate = preferred_candidate_id.and_then(|preferred_id| {
+            tried.insert(preferred_id);
+            self.revalidated_auto_switch_candidate(preferred_id, active, &settings, now)
+        });
+        if candidate.is_none() {
+            for cached in ranked_cached_auto_switch_candidates(
+                &accounts,
+                active,
+                &settings,
+                now,
+                preferred_candidate_id,
+            ) {
+                if !tried.insert(cached.id) {
+                    continue;
+                }
+                if let Some(verified) =
+                    self.revalidated_auto_switch_candidate(cached.id, active, &settings, now)
+                {
+                    candidate = Some(verified);
+                    break;
+                }
+            }
+        }
 
         let Some(candidate) = candidate else {
             return Ok(auto_switch_output(
@@ -320,6 +316,22 @@ where
             Some(account_display_name(&candidate)),
             None,
         ))
+    }
+
+    fn revalidated_auto_switch_candidate(
+        &self,
+        candidate_id: Uuid,
+        active: &AccountView,
+        settings: &crate::settings::AppSettings,
+        now: time::OffsetDateTime,
+    ) -> Option<AccountView> {
+        if self.usage(Some(candidate_id)).is_err() {
+            return None;
+        }
+        self.list().ok()?.accounts.into_iter().find(|account| {
+            account.id == candidate_id
+                && is_eligible_auto_switch_candidate(account, active, settings, now, None)
+        })
     }
 
     pub fn recover_legacy_snapshots(&self) -> Result<LegacyRecoveryOutput> {
@@ -1170,21 +1182,117 @@ fn quota_windows(
 }
 
 fn is_exhausted_for_switch(usage: Option<&AccountUsageView>) -> bool {
-    quota_windows(usage).any(|window| window.remaining_percent == 0)
+    !has_usable_credits(usage) && quota_windows(usage).any(|window| window.remaining_percent == 0)
 }
 
 fn is_usable_for_switch(usage: Option<&AccountUsageView>) -> bool {
+    if has_usable_credits(usage) {
+        return true;
+    }
     let windows = quota_windows(usage).collect::<Vec<_>>();
     !windows.is_empty() && windows.iter().all(|window| window.remaining_percent > 0)
 }
 
+fn has_usable_credits(usage: Option<&AccountUsageView>) -> bool {
+    usage
+        .and_then(|usage| usage.credits.as_ref())
+        .is_some_and(|credits| {
+            credits.unlimited
+                || (credits.has_credits && credit_balance_is_positive(&credits.balance))
+        })
+}
+
+fn credit_balance_is_positive(balance: &str) -> bool {
+    let trimmed = balance.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+        return false;
+    }
+    let numeric: String = trimmed
+        .chars()
+        .filter(|ch| ch.is_ascii_digit() || *ch == '.')
+        .collect();
+    numeric.parse::<f64>().is_ok_and(|value| value > 0.0)
+}
+
 /// Automatic switching must never silently downgrade the user onto a Free plan.
-/// A Free account is only ever reached by an explicit manual switch.
+/// Missing/blank plan labels are treated the same way so an unlabeled Free
+/// account cannot sneak through. A Free account is only ever reached by an
+/// explicit manual switch.
 fn is_free_plan(account: &AccountView) -> bool {
-    account.plan_label.as_deref().is_some_and(|plan| {
-        let plan = plan.trim().to_ascii_lowercase();
-        plan == "free" || plan == "go" || plan.starts_with("free ")
-    })
+    is_free_plan_label(plan_for_auto_switch(account))
+}
+
+fn plan_for_auto_switch(account: &AccountView) -> Option<&str> {
+    plan_for_auto_switch_from(account.plan_label.as_deref(), account.usage.as_ref())
+}
+
+/// Cache-only hint: if this usage fetch never recorded a plan, still try
+/// roster metadata so a pre-migration Plus/Pro row can be live-revalidated.
+fn plan_hint_for_auto_switch(account: &AccountView) -> Option<&str> {
+    account
+        .usage
+        .as_ref()
+        .and_then(|usage| usage.plan_label.as_deref())
+        .or(account.plan_label.as_deref())
+}
+
+fn plan_for_auto_switch_from<'a>(
+    roster_plan: Option<&'a str>,
+    usage: Option<&'a AccountUsageView>,
+) -> Option<&'a str> {
+    match usage {
+        // A usage payload is the last live confirmation. If that fetch omitted
+        // plan_type, do not fall back to a stale roster Plus/Pro label.
+        Some(usage) => usage.plan_label.as_deref(),
+        None => roster_plan,
+    }
+}
+
+fn is_free_plan_label(plan: Option<&str>) -> bool {
+    let normalized = plan.unwrap_or("").replace(['-', '_'], " ");
+    let mut words = normalized.split_whitespace().peekable();
+    words.peek().is_none()
+        || words.any(|word| word.eq_ignore_ascii_case("free") || word.eq_ignore_ascii_case("go"))
+}
+
+fn is_eligible_auto_switch_candidate(
+    candidate: &AccountView,
+    active: &AccountView,
+    settings: &crate::settings::AppSettings,
+    now: time::OffsetDateTime,
+    excluded_id: Option<Uuid>,
+) -> bool {
+    candidate.id != active.id
+        && !accounts_represent_same_identity(candidate, active)
+        && Some(candidate.id) != excluded_id
+        && !candidate.archived
+        && !candidate
+            .usage_error
+            .as_deref()
+            .is_some_and(usage_error_blocks_activation)
+        && is_usable_for_switch(candidate.usage.as_ref())
+        && !is_free_plan(candidate)
+        && !is_in_auto_switch_cooldown(settings, candidate.id, now)
+}
+
+fn is_cached_auto_switch_hint(
+    candidate: &AccountView,
+    active: &AccountView,
+    settings: &crate::settings::AppSettings,
+    now: time::OffsetDateTime,
+    excluded_id: Option<Uuid>,
+) -> bool {
+    candidate.id != active.id
+        && !accounts_represent_same_identity(candidate, active)
+        && Some(candidate.id) != excluded_id
+        && !candidate.archived
+        && !candidate
+            .usage_error
+            .as_deref()
+            .is_some_and(usage_error_blocks_activation)
+        && is_usable_for_switch(candidate.usage.as_ref())
+        && !is_free_plan_label(plan_hint_for_auto_switch(candidate))
+        && !is_in_auto_switch_cooldown(settings, candidate.id, now)
 }
 
 fn switch_quota_score(usage: Option<&AccountUsageView>) -> u8 {
@@ -1212,23 +1320,28 @@ fn best_cached_auto_switch_candidate(
     now: time::OffsetDateTime,
     excluded_id: Option<Uuid>,
 ) -> Option<AccountView> {
-    accounts
+    ranked_cached_auto_switch_candidates(accounts, active, settings, now, excluded_id)
+        .into_iter()
+        .next()
+}
+
+fn ranked_cached_auto_switch_candidates(
+    accounts: &[AccountView],
+    active: &AccountView,
+    settings: &crate::settings::AppSettings,
+    now: time::OffsetDateTime,
+    excluded_id: Option<Uuid>,
+) -> Vec<AccountView> {
+    let mut candidates: Vec<_> = accounts
         .iter()
         .filter(|candidate| {
-            candidate.id != active.id
-                && !accounts_represent_same_identity(candidate, active)
-                && Some(candidate.id) != excluded_id
-                && !candidate.archived
-                && !candidate
-                    .usage_error
-                    .as_deref()
-                    .is_some_and(usage_error_blocks_activation)
-                && is_usable_for_switch(candidate.usage.as_ref())
-                && !is_free_plan(candidate)
-                && !is_in_auto_switch_cooldown(settings, candidate.id, now)
+            is_cached_auto_switch_hint(candidate, active, settings, now, excluded_id)
         })
-        .max_by_key(|candidate| switch_quota_score(candidate.usage.as_ref()))
         .cloned()
+        .collect();
+    candidates
+        .sort_by_key(|candidate| std::cmp::Reverse(switch_quota_score(candidate.usage.as_ref())));
+    candidates
 }
 
 /// A legacy/imported roster can contain duplicate records for one OpenAI
@@ -1435,6 +1548,7 @@ mod tests {
                 reset_at: OffsetDateTime::now_utc(),
             }),
             credits: None,
+            plan_label: None,
         };
 
         assert!(is_exhausted_for_switch(Some(&usage)));
@@ -1466,11 +1580,196 @@ mod tests {
         assert!(is_free_plan(&account(Some("free"))));
         assert!(is_free_plan(&account(Some("  FREE  "))));
         assert!(is_free_plan(&account(Some("Free Plan"))));
+        assert!(is_free_plan(&account(Some("free_plan"))));
+        assert!(is_free_plan(&account(Some("chatgpt-free"))));
+        assert!(is_free_plan(&account(Some("ChatGPT Free"))));
         assert!(is_free_plan(&account(Some("Go"))));
-        // Paid plans and unknown/missing plans stay eligible.
+        assert!(is_free_plan(&account(Some("chatgpt_go"))));
+        // Unlabeled accounts are treated as Free so hidden Free rows cannot be picked.
+        assert!(is_free_plan(&account(None)));
+        assert!(is_free_plan(&account(Some(""))));
+        assert!(is_free_plan(&account(Some("   "))));
+        // Known paid plans stay eligible.
         assert!(!is_free_plan(&account(Some("Plus"))));
         assert!(!is_free_plan(&account(Some("Pro"))));
-        assert!(!is_free_plan(&account(None)));
+        assert!(!is_free_plan(&account(Some("Pro Lite"))));
+        assert!(!is_free_plan(&account(Some("Team"))));
+    }
+
+    #[test]
+    fn auto_switch_uses_usage_plan_not_stale_roster_label() {
+        let now = OffsetDateTime::now_utc();
+        let usage = |plan: Option<&str>| AccountUsageView {
+            source: UsageSource::SavedAccessToken,
+            fetched_at: now,
+            five_hour: Some(UsageWindowView {
+                used_percent: 10,
+                remaining_percent: 90,
+                reset_at: now,
+            }),
+            weekly: Some(UsageWindowView {
+                used_percent: 10,
+                remaining_percent: 90,
+                reset_at: now,
+            }),
+            credits: None,
+            plan_label: plan.map(str::to_owned),
+        };
+        let account = |roster: Option<&str>, usage_plan: Option<&str>| crate::model::AccountView {
+            id: Uuid::new_v4(),
+            provider: crate::model::AiProvider::OpenAi,
+            email: "person@example.com".to_owned(),
+            subject: None,
+            name: None,
+            custom_label: None,
+            plan_label: roster.map(str::to_owned),
+            environment: EnvironmentKind::Linux,
+            is_active: false,
+            created_at: now,
+            updated_at: now,
+            last_activated_at: None,
+            archived: false,
+            usage: Some(usage(usage_plan)),
+            usage_error: None,
+        };
+
+        // Usage omitted plan_type: do not trust roster Plus.
+        assert!(is_free_plan(&account(Some("Plus"), None)));
+        // Usage confirms Free even if roster still says Pro.
+        assert!(is_free_plan(&account(Some("Pro"), Some("Free"))));
+        // Unlabeled roster becomes eligible once usage confirms Plus.
+        assert!(!is_free_plan(&account(None, Some("Plus"))));
+        // Pre-migration cache omitted usage.plan_label: do not activate on the
+        // roster Plus, but still queue the row for a live revalidation.
+        let mut stale = account(Some("Plus"), None);
+        stale.email = "stale-plus@example.com".to_owned();
+        stale.subject = Some("sub-stale".to_owned());
+        assert!(is_free_plan(&stale));
+        let settings = crate::settings::AppSettings::default();
+        let mut active = account(Some("Pro"), Some("Pro"));
+        active.email = "active-pro@example.com".to_owned();
+        active.subject = Some("sub-active".to_owned());
+        active.is_active = true;
+        assert!(is_cached_auto_switch_hint(
+            &stale, &active, &settings, now, None
+        ));
+        assert!(!is_eligible_auto_switch_candidate(
+            &stale, &active, &settings, now, None
+        ));
+    }
+
+    #[test]
+    fn auto_switch_treats_credits_as_remaining_quota() {
+        let now = OffsetDateTime::now_utc();
+        let usage = |remaining: u8, credits: Option<crate::model::CreditsView>| AccountUsageView {
+            source: UsageSource::SavedAccessToken,
+            fetched_at: now,
+            five_hour: Some(UsageWindowView {
+                used_percent: 100u8.saturating_sub(remaining),
+                remaining_percent: remaining,
+                reset_at: now,
+            }),
+            weekly: Some(UsageWindowView {
+                used_percent: 100u8.saturating_sub(remaining),
+                remaining_percent: remaining,
+                reset_at: now,
+            }),
+            credits,
+            plan_label: Some("Pro".to_owned()),
+        };
+
+        let exhausted = usage(0, None);
+        assert!(is_exhausted_for_switch(Some(&exhausted)));
+        assert!(!is_usable_for_switch(Some(&exhausted)));
+
+        let unlimited = usage(
+            0,
+            Some(crate::model::CreditsView {
+                has_credits: false,
+                unlimited: true,
+                balance: "0".to_owned(),
+            }),
+        );
+        assert!(!is_exhausted_for_switch(Some(&unlimited)));
+        assert!(is_usable_for_switch(Some(&unlimited)));
+
+        let paid_credits = usage(
+            0,
+            Some(crate::model::CreditsView {
+                has_credits: true,
+                unlimited: false,
+                balance: "12.50".to_owned(),
+            }),
+        );
+        assert!(!is_exhausted_for_switch(Some(&paid_credits)));
+        assert!(is_usable_for_switch(Some(&paid_credits)));
+
+        let empty_credits = usage(
+            0,
+            Some(crate::model::CreditsView {
+                has_credits: true,
+                unlimited: false,
+                balance: "0".to_owned(),
+            }),
+        );
+        assert!(is_exhausted_for_switch(Some(&empty_credits)));
+        assert!(!is_usable_for_switch(Some(&empty_credits)));
+    }
+
+    #[test]
+    fn auto_switch_cached_picker_skips_free_and_zero_quota() {
+        let now = OffsetDateTime::now_utc();
+        let settings = crate::settings::AppSettings::default();
+        let window = |remaining: u8| UsageWindowView {
+            used_percent: 100u8.saturating_sub(remaining),
+            remaining_percent: remaining,
+            reset_at: now,
+        };
+        let account = |plan: &str, remaining: u8, active: bool| crate::model::AccountView {
+            id: Uuid::new_v4(),
+            provider: crate::model::AiProvider::OpenAi,
+            email: format!("{plan}-{remaining}@example.com"),
+            subject: Some(format!("{plan}-{remaining}")),
+            name: None,
+            custom_label: None,
+            plan_label: Some(plan.to_owned()),
+            environment: EnvironmentKind::Linux,
+            is_active: active,
+            created_at: now,
+            updated_at: now,
+            last_activated_at: None,
+            archived: false,
+            usage: Some(AccountUsageView {
+                source: UsageSource::SavedAccessToken,
+                fetched_at: now,
+                five_hour: Some(window(remaining)),
+                weekly: Some(window(remaining)),
+                credits: None,
+                plan_label: Some(plan.to_owned()),
+            }),
+            usage_error: None,
+        };
+        let active = account("Plus", 0, true);
+        let free = account("Free", 80, false);
+        let unlabeled = {
+            let mut account = account("Hidden", 90, false);
+            account.plan_label = None;
+            if let Some(usage) = account.usage.as_mut() {
+                usage.plan_label = None;
+            }
+            account
+        };
+        let zero = account("Pro", 0, false);
+        let paid = account("Pro", 40, false);
+        let picked = best_cached_auto_switch_candidate(
+            &[active.clone(), free, unlabeled, zero, paid.clone()],
+            &active,
+            &settings,
+            now,
+            None,
+        )
+        .expect("paid usable account");
+        assert_eq!(picked.id, paid.id);
     }
 
     #[test]
@@ -1545,6 +1844,7 @@ mod tests {
             }),
             weekly: None,
             credits: None,
+            plan_label: None,
         };
 
         assert!(!cached_usage_is_fresh(Some(&usage), now));
@@ -1565,6 +1865,7 @@ mod tests {
             }),
             weekly: None,
             credits: None,
+            plan_label: None,
         };
 
         assert!(!cached_usage_is_fresh(Some(&usage), now));
@@ -1583,6 +1884,7 @@ mod tests {
             }),
             weekly: None,
             credits: None,
+            plan_label: None,
         };
 
         assert!(cached_usage_is_fresh(Some(&usage), now));
@@ -1675,6 +1977,7 @@ mod tests {
                     reset_at: OffsetDateTime::UNIX_EPOCH,
                 }),
                 credits: None,
+                plan_label: None,
             }),
         )
         .expect("replace");
@@ -1734,6 +2037,7 @@ mod tests {
                     reset_at: OffsetDateTime::UNIX_EPOCH,
                 }),
                 credits: None,
+                plan_label: None,
             }),
         )
         .expect("replace");

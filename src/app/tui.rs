@@ -943,6 +943,7 @@ mod tests {
                 reset_at,
             }),
             credits: None,
+            plan_label: None,
         });
 
         let label = render_account_label(
@@ -971,6 +972,7 @@ mod tests {
                     .replace_time(time::Time::from_hms(13, 56, 0).unwrap()),
             }),
             credits: None,
+            plan_label: None,
         });
         list.accounts[0].usage_error = Some("Login required: Codex auth expired.".to_owned());
 
@@ -1002,6 +1004,7 @@ mod tests {
                     .replace_time(time::Time::from_hms(13, 56, 0).unwrap()),
             }),
             credits: None,
+            plan_label: None,
         });
         list.accounts[0].usage_error =
             Some("Usage unavailable: failed to query Codex usage".to_owned());

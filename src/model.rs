@@ -301,6 +301,10 @@ pub struct AccountUsageView {
     pub five_hour: Option<UsageWindowView>,
     pub weekly: Option<UsageWindowView>,
     pub credits: Option<CreditsView>,
+    /// Plan returned by this usage fetch. Distinct from roster metadata so
+    /// auto-switch does not trust a stale Plus/Pro label when the API omitted it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_label: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

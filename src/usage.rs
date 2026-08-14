@@ -303,6 +303,7 @@ impl UsageResponse {
 
     fn into_view(self, source: UsageSource) -> Result<AccountUsageView> {
         let now = OffsetDateTime::now_utc();
+        let plan_label = normalize_plan_label(self.plan_type.as_deref());
         Ok(AccountUsageView {
             source,
             fetched_at: now,
@@ -319,6 +320,7 @@ impl UsageResponse {
                 .map(window_view)
                 .transpose()?,
             credits: self.credits.map(credits_view),
+            plan_label,
         })
     }
 }
@@ -579,14 +581,33 @@ fn credits_view(credits: UsageCredits) -> CreditsView {
 }
 
 fn normalize_plan_label(raw: Option<&str>) -> Option<String> {
-    match raw?.trim() {
-        "" => None,
-        "go" => Some("Go".to_owned()),
-        "plus" => Some("Plus".to_owned()),
-        "pro" => Some("Pro".to_owned()),
-        "free" => Some("Free".to_owned()),
-        other => Some(other.to_owned()),
+    let normalized = raw?.replace(['-', '_'], " ");
+    let normalized = normalized.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
     }
+    Some(match normalized.as_str() {
+        "go" => "Go".to_owned(),
+        "plus" => "Plus".to_owned(),
+        "pro" => "Pro".to_owned(),
+        "pro lite" => "Pro Lite".to_owned(),
+        "free" => "Free".to_owned(),
+        other => other
+            .split_whitespace()
+            .map(|word| {
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => {
+                        let mut result = first.to_uppercase().collect::<String>();
+                        result.push_str(chars.as_str());
+                        result
+                    }
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    })
 }
 
 fn merge_identity(base: &DisplayIdentity, fetched: Option<DisplayIdentity>) -> DisplayIdentity {

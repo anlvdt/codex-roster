@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.2.39 - 2026-08-14
+
+### Fixed
+
+- Auto-switch never lands on a Free/Go account, an unlabeled plan, or a 0% quota window.
+- Apply revalidates live usage before activating and walks every remaining candidate instead of trusting a stale roster cache.
+- Stale Plus/Pro roster labels are ignored unless the latest usage fetch confirms a paid plan.
+- Decide no longer aborts the whole tick when the live usage probe fails; cached 0% still rotates.
+- GUI, tray, and TUI serialize auto-switch through a cross-process lock so two monitors cannot apply at once.
+
+### Added
+
+- Unlimited or remaining ChatGPT credits count as usable quota for both the active account and auto-switch targets.
+- Windows app version is synced to the release (was still 0.2.36).
+
 ## v0.2.38 - 2026-08-13
 
 - CCS removal verified: account-switch behavior matches pre-CCS v0.2.36 baseline

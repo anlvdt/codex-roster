@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.40 - 2026-08-15
+
+### Fixed
+
+- macOS re-login now closes ChatGPT Desktop before running `codex login`, freeing the fixed loopback port its bundled app-server holds. Previously the sign-in browser never opened because the port was already in use, leaving the re-login sheet stuck waiting. Desktop is reopened automatically after login finishes, is cancelled, or fails.
+
 ## v0.2.39 - 2026-08-14
 
 ### Fixed

@@ -95,6 +95,9 @@ final class AccountStore: ObservableObject {
     private var isAddAccountSession = false
     private var expectedReloginEmail: String?
     private var newAccountLoginWatchTask: Task<Void, Never>?
+    /// Desktop apps to reopen after an interactive `codex login` finishes.
+    /// Set when we close ChatGPT Desktop to free the fixed login port.
+    private var pendingLoginDesktopRelaunch: ChatGPTDesktop.RelaunchPlan?
     private var resetNotificationTask: Task<Void, Never>?
     private var coreBootstrapStarted = false
     private var menuInteractionUntil: Date?
@@ -326,6 +329,10 @@ final class AccountStore: ObservableObject {
         let liveStatus = try await cli.decode(StatusOutput.self, arguments: ["status"])
         var began = false
         do {
+            // ChatGPT Desktop's bundled Codex app-server holds the fixed
+            // loopback port that `codex login` needs to open its browser.
+            // Close Desktop first so the sign-in window can actually open.
+            await closeDesktopForLogin()
             try await beginAddAccountAfterProcessesDrain()
             began = true
             isAddAccountSession = true
@@ -339,6 +346,9 @@ final class AccountStore: ObservableObject {
                 _ = try? await cli.data(arguments: ["cancel-add-account", "--json"])
                 clearPendingLoginFlags()
                 newAccountLoginState = .idle
+            } else {
+                // Login never started; reopen Desktop if we closed it above.
+                relaunchDesktopAfterLogin()
             }
             throw error
         }
@@ -358,6 +368,8 @@ final class AccountStore: ObservableObject {
             newAccountLoginState = .ready(current)
             return
         }
+        // Free the fixed login port before reopening the browser sign-in.
+        await closeDesktopForLogin()
         try CodexLoginLauncher.start()
         watchForNewAccount(after: nil)
     }
@@ -431,6 +443,21 @@ final class AccountStore: ObservableObject {
         isAddAccountSession = false
         expectedReloginEmail = nil
         isPendingLogin = false
+        relaunchDesktopAfterLogin()
+    }
+
+    /// Quit ChatGPT Desktop so `codex login` can bind its fixed loopback port
+    /// and open the browser sign-in. Records which apps to reopen afterwards.
+    private func closeDesktopForLogin() async {
+        guard ChatGPTDesktop.isRunning else { return }
+        pendingLoginDesktopRelaunch = try? await ChatGPTDesktop.prepareForAccountSwitch(force: true)
+    }
+
+    /// Reopen ChatGPT Desktop after the login flow ends, if we closed it.
+    private func relaunchDesktopAfterLogin() {
+        guard let plan = pendingLoginDesktopRelaunch else { return }
+        pendingLoginDesktopRelaunch = nil
+        Task { await plan.launchAndConfirm() }
     }
 
     private func beginAddAccountAfterProcessesDrain() async throws {

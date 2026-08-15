@@ -1330,6 +1330,7 @@ fn is_in_auto_switch_cooldown(
             .is_some_and(|last_switch| now - last_switch < time::Duration::minutes(5))
 }
 
+#[cfg(test)]
 fn best_cached_auto_switch_candidate(
     accounts: &[AccountView],
     active: &AccountView,

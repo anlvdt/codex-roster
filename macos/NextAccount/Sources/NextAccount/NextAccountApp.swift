@@ -33,40 +33,6 @@ private extension Notification.Name {
 private let dashboardCardFill = Color(nsColor: .controlBackgroundColor)
 private let rosterActionBlue = Color(nsColor: .systemBlue)
 
-@MainActor
-private final class PasskeySetupStore: ObservableObject {
-    private static let defaultsKey = "confirmedPasskeyAccountIDs"
-    @Published private(set) var confirmedAccountIDs: Set<UUID>
-
-    init(defaults: UserDefaults = .standard) {
-        confirmedAccountIDs = Set(
-            defaults.stringArray(forKey: Self.defaultsKey)?
-                .compactMap(UUID.init(uuidString:)) ?? []
-        )
-    }
-
-    func isConfirmed(_ accountID: UUID) -> Bool {
-        confirmedAccountIDs.contains(accountID)
-    }
-
-    func confirm(_ accountID: UUID) {
-        confirmedAccountIDs.insert(accountID)
-        persist()
-    }
-
-    func reset(_ accountID: UUID) {
-        confirmedAccountIDs.remove(accountID)
-        persist()
-    }
-
-    private func persist() {
-        UserDefaults.standard.set(
-            confirmedAccountIDs.map(\.uuidString).sorted(),
-            forKey: Self.defaultsKey
-        )
-    }
-}
-
 private struct PointingHandCursor: ViewModifier {
     func body(content: Content) -> some View {
         content.onHover { isHovering in
@@ -212,14 +178,12 @@ struct CodexRosterApp: App {
 struct ContentView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
-    @StateObject private var passkeySetup = PasskeySetupStore()
+    @StateObject private var router = RouterStore()
     @State private var selection: UUID?
     @State private var accountForDeletion: SavedAccount?
     @State private var accountForEditing: SavedAccount?
     @State private var accountForRelogin: SavedAccount?
     @State private var reloginQueue: [UUID] = []
-    @State private var accountForPasskeySetup: SavedAccount?
-    @State private var passkeySetupQueue: [UUID] = []
     @State private var showingAddAccount = false
     @State private var backupOperation: BackupOperation?
 
@@ -230,6 +194,7 @@ struct ContentView: View {
             detailContent
         }
         .toolbar { AccountToolbar(showingAddAccount: $showingAddAccount) }
+        .task { router.startAutomation() }
         .onReceive(NotificationCenter.default.publisher(for: .showAddAccount)) { _ in
             showingAddAccount = true
         }
@@ -271,19 +236,6 @@ struct ContentView: View {
             )
                 .environmentObject(store)
                 .environmentObject(language)
-        }
-        .sheet(item: $accountForPasskeySetup, onDismiss: presentNextQueuedPasskeySetup) { account in
-            PasskeySetupSheet(
-                account: account,
-                queuedCount: passkeySetupQueue.count,
-                confirm: {
-                    passkeySetup.confirm(account.id)
-                },
-                cancelQueue: {
-                    passkeySetupQueue.removeAll()
-                }
-            )
-            .environmentObject(language)
         }
         .sheet(item: $backupOperation) { operation in
             BackupTransferSheet(operation: operation)
@@ -341,30 +293,20 @@ struct ContentView: View {
                 },
                 restore: { store.restore(selected) },
                 remove: { accountForDeletion = selected },
-                relogin: { presentRelogin(selected) },
-                passkeyConfirmed: passkeySetup.isConfirmed(selected.id),
-                setupPasskey: { presentPasskeySetup(selected) },
-                resetPasskeyStatus: { passkeySetup.reset(selected.id) }
+                relogin: { presentRelogin(selected) }
             )
         } else {
             DashboardView(
+                router: router,
                 selection: $selection,
                 relogin: presentRelogin,
-                reloginAll: startReloginQueue,
-                passkeyPendingCount: passkeyPendingAccounts.count,
-                setupPasskeys: { startPasskeySetupQueue(passkeyPendingAccounts) }
+                reloginAll: startReloginQueue
             )
         }
     }
 
     private var selectedAccount: SavedAccount? {
         store.accounts.first { $0.id == selection }
-    }
-
-    private var passkeyPendingAccounts: [SavedAccount] {
-        store.sortedAccounts(store.accounts.filter {
-            !store.isArchived($0) && !passkeySetup.isConfirmed($0.id)
-        })
     }
 
     private func presentRelogin(_ account: SavedAccount) {
@@ -390,36 +332,6 @@ struct ContentView: View {
             selection = account.id
             DispatchQueue.main.async {
                 accountForRelogin = account
-            }
-            return
-        }
-    }
-
-    private func presentPasskeySetup(_ account: SavedAccount) {
-        passkeySetupQueue.removeAll()
-        selection = account.id
-        accountForPasskeySetup = account
-    }
-
-    private func startPasskeySetupQueue(_ accounts: [SavedAccount]) {
-        let pending = accounts.filter {
-            !store.isArchived($0) && !passkeySetup.isConfirmed($0.id)
-        }
-        guard let first = pending.first else { return }
-        passkeySetupQueue = pending.dropFirst().map(\.id)
-        selection = first.id
-        accountForPasskeySetup = first
-    }
-
-    private func presentNextQueuedPasskeySetup() {
-        while let nextID = passkeySetupQueue.first {
-            passkeySetupQueue.removeFirst()
-            guard let account = store.accounts.first(where: {
-                $0.id == nextID && !store.isArchived($0) && !passkeySetup.isConfirmed($0.id)
-            }) else { continue }
-            selection = account.id
-            DispatchQueue.main.async {
-                accountForPasskeySetup = account
             }
             return
         }
@@ -567,12 +479,10 @@ private struct AccountSidebar: View {
 private struct DashboardView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
-    @StateObject private var router = RouterStore()
+    @ObservedObject var router: RouterStore
     @Binding var selection: UUID?
     let relogin: (SavedAccount) -> Void
     let reloginAll: ([SavedAccount]) -> Void
-    let passkeyPendingCount: Int
-    let setupPasskeys: () -> Void
     @State private var automationExpanded = false
     @State private var confirmingFullBackupRestore = false
 
@@ -615,9 +525,7 @@ private struct DashboardView: View {
                     exhaustedAccounts: exhaustedAccounts,
                     recoveryAccounts: recoveryAccounts,
                     selection: $selection,
-                    reloginAll: { reloginAll(reloginAccounts) },
-                    passkeyPendingCount: passkeyPendingCount,
-                    setupPasskeys: setupPasskeys
+                    reloginAll: { reloginAll(reloginAccounts) }
                 )
 
                 RouterIntegrationCard(router: router)
@@ -791,7 +699,6 @@ private struct DashboardView: View {
             }
         }
         .navigationTitle(language.text("Tổng quan", "Overview"))
-        .task { router.refresh(silently: true) }
     }
 
     private func autoSwitchStatusText(_ state: AutoSwitchState) -> String {
@@ -800,6 +707,18 @@ private struct DashboardView: View {
             language.text("Tự động chuyển tạm dừng trong khi bạn đăng nhập.", "Auto-switch is paused while you sign in.")
         case .allAccountsExhausted:
             language.text("Tất cả tài khoản đã hết quota; tự động chuyển sẽ thử lại sau.", "All accounts are out of quota; auto-switch will try again later.")
+        case .bankedResetAvailable(let account, let count, let isActive):
+            if isActive {
+                language.text(
+                    "\(account) đã hết quota nhưng còn \(count) banked reset. App giữ reset an toàn, không tự tiêu; hãy dùng reset trong Codex rồi Auto-switch sẽ kiểm tra lại.",
+                    "\(account) is out of quota but has \(count) banked reset. The app preserves it instead of spending it silently; redeem it in Codex and Auto-switch will check again."
+                )
+            } else {
+                language.text(
+                    "Không còn account có quota dùng ngay; \(account) còn \(count) banked reset chưa redeem. Auto-switch không chuyển sang account vẫn 0%.",
+                    "No account has immediately usable quota; \(account) has \(count) unredeemed banked reset. Auto-switch will not move to an account that is still at 0%."
+                )
+            }
         case .closingDesktop:
             language.text("Đang đóng ChatGPT/Codex trước khi chuyển tài khoản hết quota…", "Closing ChatGPT/Codex before switching the exhausted account…")
         case .switchingAccount:
@@ -835,6 +754,7 @@ private struct BulkAccountManager: View {
     let reloginAll: ([SavedAccount]) -> Void
     @State private var filter: BulkAccountFilter = .all
     @State private var searchText = ""
+    @State private var hidesUnavailableAccounts = true
     @State private var selectedAccountIDs: Set<UUID> = []
     @State private var confirmingDelete = false
     @State private var isExpanded = true
@@ -864,7 +784,44 @@ private struct BulkAccountManager: View {
                 .compactMap { $0 }
                 .joined(separator: " ")
                 .localizedCaseInsensitiveContains(searchText)
+        }.filter { account in
+            !shouldTemporarilyHide(account)
         }
+    }
+
+    private func shouldTemporarilyHide(_ account: SavedAccount) -> Bool {
+        guard hidesUnavailableAccounts,
+              !account.archived,
+              !account.requiresLogin,
+              !account.requiresLocalRecovery,
+              !account.hasTransientUsageError else { return false }
+        let bankedResetCount = max(0, account.usage?.bankedResets?.availableCount ?? 0)
+        return account.isExhaustedForSwitch && bankedResetCount == 0
+    }
+
+    private func hiddenUnavailableCount(for filter: BulkAccountFilter) -> Int {
+        guard hidesUnavailableAccounts else { return 0 }
+        return store.accounts.filter { account in
+            let matchesFilter: Bool
+            switch filter {
+            case .all:
+                matchesFilter = true
+            case .ready:
+                matchesFilter = !account.archived && !account.requiresLogin
+                    && !account.requiresLocalRecovery && !account.hasTransientUsageError
+            case .attention:
+                matchesFilter = !account.archived && (account.requiresLogin
+                    || account.requiresLocalRecovery || account.hasTransientUsageError)
+            case .archived:
+                matchesFilter = account.archived
+            }
+            let matchesSearch = searchText.isEmpty
+                || [account.displayName, account.email, account.planLabel]
+                    .compactMap { $0 }
+                    .joined(separator: " ")
+                    .localizedCaseInsensitiveContains(searchText)
+            return matchesFilter && matchesSearch && shouldTemporarilyHide(account)
+        }.count
     }
 
     private func count(for filter: BulkAccountFilter) -> Int {
@@ -913,6 +870,19 @@ private struct BulkAccountManager: View {
                     .frame(minWidth: 180, maxWidth: 300)
 
                     Spacer(minLength: 0)
+
+                    Toggle(isOn: $hidesUnavailableAccounts) {
+                        Label(
+                            language.text("Ẩn hết lượt", "Hide unavailable"),
+                            systemImage: "eye.slash"
+                        )
+                    }
+                    .toggleStyle(.checkbox)
+                    .controlSize(.small)
+                    .help(language.text(
+                        "Ẩn tài khoản đã hết quota và không có banked reset. Tắt để hiện lại toàn bộ.",
+                        "Hide accounts with exhausted quota and no banked resets. Turn off to show all."
+                    ))
 
                     Picker(language.text("Sắp xếp", "Sort"), selection: Binding(
                         get: { store.accountSortMode },
@@ -994,7 +964,13 @@ private struct BulkAccountManager: View {
 
                 if visibleAccounts.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(searchText.isEmpty
+                        let hiddenCount = hiddenUnavailableCount(for: filter)
+                        Text(hiddenCount > 0
+                            ? language.text(
+                                "Đang tạm ẩn \(hiddenCount) tài khoản đã hết lượt dùng.",
+                                "Temporarily hiding \(hiddenCount) unavailable accounts."
+                            )
+                            : searchText.isEmpty
                             ? language.text(
                                 "Nhóm “\(filterLabel(filter))” chưa có tài khoản nào.",
                                 "No accounts in the “\(filterLabel(filter))” group."
@@ -1002,10 +978,19 @@ private struct BulkAccountManager: View {
                             : language.text(
                                 "Không tìm thấy tài khoản khớp “\(searchText)”.",
                                 "No accounts match “\(searchText)”."
-                            ))
+                        ))
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        if !searchText.isEmpty {
+                        if hiddenCount > 0 {
+                            Button(language.text(
+                                "Hiện lại \(hiddenCount) tài khoản",
+                                "Show \(hiddenCount) accounts"
+                            )) {
+                                hidesUnavailableAccounts = false
+                            }
+                            .buttonStyle(.link)
+                            .controlSize(.small)
+                        } else if !searchText.isEmpty {
                             Button(language.text("Xóa tìm kiếm", "Clear search")) {
                                 searchText = ""
                             }
@@ -1334,8 +1319,6 @@ private struct DashboardHero: View {
     let recoveryAccounts: [SavedAccount]
     @Binding var selection: UUID?
     let reloginAll: () -> Void
-    let passkeyPendingCount: Int
-    let setupPasskeys: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 22) {
@@ -1373,14 +1356,6 @@ private struct DashboardHero: View {
                     Button(language.text("Sửa nhanh \(reloginAccounts.count) tài khoản", "Quickly repair \(reloginAccounts.count) accounts")) {
                         selection = firstAttention.id
                         reloginAll()
-                    }
-                    .controlSize(.small)
-                } else if passkeyPendingCount > 0 {
-                    Button(language.text(
-                        "Thiết lập passkey cho \(passkeyPendingCount) tài khoản",
-                        "Set up passkeys for \(passkeyPendingCount) accounts"
-                    )) {
-                        setupPasskeys()
                     }
                     .controlSize(.small)
                 } else if attentionAccounts.isEmpty,
@@ -1994,26 +1969,39 @@ private struct GlobalResetOutlookCard: View {
             }
 
             if let outlook = store.resetOutlook {
+                let isConfirmedReset = outlook.signalKind?.hasPrefix("confirmed_") == true
                 HStack(spacing: 10) {
                     ResetOutlookMetric(
-                        title: language.text("Tín hiệu 24 giờ", "24-hour signal"),
+                        title: language.text("Điểm dự báo 24h", "24h forecast score"),
                         value: "\(outlook.chance24Hours)%",
                         tint: .accentColor
                     )
                     ResetOutlookMetric(
-                        title: language.text("Tín hiệu 48 giờ", "48-hour signal"),
+                        title: language.text("Điểm dự báo 48h", "48h forecast score"),
                         value: "\(outlook.chance48Hours)%",
                         tint: .accentColor
                     )
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(language.text("Tín hiệu Tibo gần nhất", "Latest Tibo signal"))
+                        Text(isConfirmedReset
+                            ? language.text("Lần reset gần nhất", "Last reset")
+                            : language.text("Tín hiệu Tibo gần nhất", "Latest Tibo signal"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Text(formattedResetDate(outlook.lastResetAt, language: language.language))
                             .font(.subheadline.weight(.semibold))
-                        Text(language.text("Độ tin cậy: \(localizedConfidence(outlook.confidence)) · \(localizedTiboWindow(outlook.windowLabel, language: language.language))", "Confidence: \(localizedConfidence(outlook.confidence)) · \(outlook.windowLabel)"))
+                        TimelineView(.periodic(from: .now, by: 60)) { context in
+                            let relativeTime = formattedRelativeResetDate(
+                                outlook.lastResetAt,
+                                relativeTo: context.date,
+                                language: language.language
+                            )
+                            Text(language.text(
+                                "\(relativeTime) · Độ tin cậy: \(localizedConfidence(outlook.confidence))",
+                                "\(relativeTime) · Confidence: \(localizedConfidence(outlook.confidence))"
+                            ))
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -2027,7 +2015,7 @@ private struct GlobalResetOutlookCard: View {
                 }
 
                 HStack {
-                    Text(language.text("Đọc trực tiếp hồ sơ X công khai của Tibo; quota tài khoản vẫn là xác nhận cuối cùng.", "Read directly from Tibo's public X profile; account quota remains the final confirmation."))
+                    Text(language.text("Điểm giảm theo độ cũ của tín hiệu; reset đã xác nhận là sự kiện đã xảy ra nên dự báo tương lai về 0. Quota tài khoản vẫn là xác nhận cuối cùng.", "Scores decay with signal age; a confirmed reset is a completed event, so its future forecast returns to 0. Account quota remains the final confirmation."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -2104,17 +2092,20 @@ private func formattedResetDate(_ value: String, language: AppLanguage) -> Strin
     )
 }
 
-private func localizedTiboWindow(_ value: String, language: AppLanguage) -> String {
-    guard language == .vietnamese else { return value }
-    return switch value {
-    case "Banked reset confirmed": "Đã xác nhận banked reset"
-    case "Banked reset scheduled": "Đã hẹn banked reset"
-    case "Global reset confirmed": "Đã xác nhận mass reset"
-    case "Global reset scheduled": "Đã hẹn mass reset"
-    case "Tibo hint detected": "Phát hiện gợi ý từ Tibo"
-    case "No current Tibo signal": "Chưa có tín hiệu Tibo mới"
-    default: value
+private func formattedRelativeResetDate(
+    _ value: String,
+    relativeTo referenceDate: Date,
+    language: AppLanguage
+) -> String {
+    let isoFormatter = ISO8601DateFormatter()
+    isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    guard let date = isoFormatter.date(from: value) ?? ISO8601DateFormatter().date(from: value) else {
+        return value
     }
+    let relativeFormatter = RelativeDateTimeFormatter()
+    relativeFormatter.locale = language.locale
+    relativeFormatter.unitsStyle = .full
+    return relativeFormatter.localizedString(for: date, relativeTo: referenceDate)
 }
 
 private struct ProviderStatusRow: View {
@@ -2386,9 +2377,6 @@ private struct AccountDetail: View {
     let restore: () -> Void
     let remove: () -> Void
     let relogin: () -> Void
-    let passkeyConfirmed: Bool
-    let setupPasskey: () -> Void
-    let resetPasskeyStatus: () -> Void
 
     private var isArchived: Bool { store.isArchived(account) }
     private var serverSessionRevoked: Bool {
@@ -2514,35 +2502,6 @@ private struct AccountDetail: View {
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-                }
-
-                GroupBox(language.text("Bảo mật đăng nhập", "Sign-in security")) {
-                    HStack(alignment: .center, spacing: 14) {
-                        Label(
-                            passkeyConfirmed
-                                ? language.text("Đã xác nhận có passkey", "Passkey setup confirmed")
-                                : language.text("Chưa xác nhận passkey", "Passkey not confirmed"),
-                            systemImage: passkeyConfirmed ? "key.fill" : "key"
-                        )
-                        .foregroundStyle(passkeyConfirmed ? .green : .secondary)
-                        Spacer()
-                        if passkeyConfirmed {
-                            Button(language.text("Thiết lập lại", "Set up again"), action: setupPasskey)
-                            Button(language.text("Xóa xác nhận", "Clear confirmation"), action: resetPasskeyStatus)
-                                .buttonStyle(.borderless)
-                        } else {
-                            Button(language.text("Thiết lập passkey…", "Set up passkey…"), action: setupPasskey)
-                                .buttonStyle(.borderedProminent)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    Text(language.text(
-                        "Trợ lý chỉ mở ChatGPT chính thức và lưu trạng thái xác nhận trên máy. Nó không gọi codex login, không chuyển account và không đọc hoặc ghi token.",
-                        "The assistant only opens official ChatGPT and stores confirmation locally. It does not run codex login, switch accounts, or read or write tokens."
-                    ))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 6)
                 }
 
                 GroupBox(language.text("Chi tiết tài khoản", "Account details")) {
@@ -2735,95 +2694,6 @@ private struct DiagnosticMetric: View {
         .frame(maxWidth: .infinity, minHeight: 66, alignment: .topLeading)
         .padding(11)
         .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
-    }
-}
-
-private struct PasskeySetupSheet: View {
-    @EnvironmentObject private var language: LanguageStore
-    @Environment(\.dismiss) private var dismiss
-    let account: SavedAccount
-    let queuedCount: Int
-    let confirm: () -> Void
-    let cancelQueue: () -> Void
-
-    private let chatGPTURL = URL(string: "https://chatgpt.com")!
-    private let authDocsURL = URL(string: "https://learn.chatgpt.com/docs/auth")!
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Label(language.text("Thiết lập passkey", "Set up passkey"), systemImage: "key.fill")
-                .font(.title2.weight(.bold))
-                .foregroundStyle(.tint)
-
-            Text(language.text(
-                "Thiết lập cho \(account.email). Roster không đăng xuất Codex và không thay đổi session hiện tại.",
-                "Set up a passkey for \(account.email). Roster will not sign Codex out or change the current session."
-            ))
-            .foregroundStyle(.secondary)
-
-            HStack {
-                Button {
-                    copyAccountEmail(account.email)
-                } label: {
-                    Label(language.text("Sao chép email", "Copy email"), systemImage: "doc.on.doc")
-                }
-                Button {
-                    NSWorkspace.shared.open(chatGPTURL)
-                } label: {
-                    Label(language.text("Mở ChatGPT chính thức", "Open official ChatGPT"), systemImage: "safari")
-                }
-                .buttonStyle(.borderedProminent)
-            }
-
-            GroupBox(language.text("Các bước trên ChatGPT", "Steps in ChatGPT")) {
-                VStack(alignment: .leading, spacing: 9) {
-                    Label(language.text("Xác nhận browser đang dùng đúng \(account.email).", "Confirm the browser is using \(account.email)."), systemImage: "1.circle.fill")
-                    Label(language.text("Mở Settings → Security → Passkeys.", "Open Settings → Security → Passkeys."), systemImage: "2.circle.fill")
-                    Label(language.text("Chọn Add passkey và xác nhận Touch ID hoặc khóa bảo mật.", "Choose Add passkey and confirm with Touch ID or a security key."), systemImage: "3.circle.fill")
-                    Label(language.text("Quay lại đây và chọn Đã bật passkey.", "Return here and select Passkey enabled."), systemImage: "4.circle.fill")
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(4)
-            }
-
-            Label(language.text(
-                "Không có password, mã 2FA, passkey private key hoặc token nào được đưa vào Roster.",
-                "No password, 2FA code, passkey private key, or token is provided to Roster."
-            ), systemImage: "lock.shield.fill")
-            .font(.footnote.weight(.medium))
-            .foregroundStyle(.green)
-
-            if queuedCount > 0 {
-                Label(language.text(
-                    "Sau tài khoản này còn \(queuedCount) tài khoản trong hàng đợi.",
-                    "There are \(queuedCount) more accounts in the setup queue."
-                ), systemImage: "list.number")
-                .font(.footnote)
-                .foregroundStyle(.tint)
-            }
-
-            HStack {
-                Button(language.text("Tài liệu OpenAI", "OpenAI documentation")) {
-                    NSWorkspace.shared.open(authDocsURL)
-                }
-                .buttonStyle(.borderless)
-                Spacer()
-                Button(language.text("Dừng", "Stop")) {
-                    cancelQueue()
-                    dismiss()
-                }
-                Button(language.text("Bỏ qua", "Skip")) {
-                    dismiss()
-                }
-                Button(language.text("Đã bật passkey", "Passkey enabled")) {
-                    confirm()
-                    dismiss()
-                }
-                .buttonStyle(.borderedProminent)
-            }
-        }
-        .padding(24)
-        .frame(width: 560)
     }
 }
 
@@ -3620,6 +3490,11 @@ private struct MenuBarOperationStatus: View {
             return language.text("Tự động chuyển tạm dừng khi đang đăng nhập", "Auto-switch paused while signing in")
         case .allAccountsExhausted:
             return language.text("Tất cả tài khoản đều hết quota", "All accounts are out of quota")
+        case .bankedResetAvailable(let account, let count, _):
+            return language.text(
+                "\(account) còn \(count) banked reset cần dùng",
+                "\(account) has \(count) banked reset to redeem"
+            )
         case .closingDesktop:
             return language.text("Đang đóng ChatGPT để tự chuyển…", "Closing ChatGPT to auto-switch…")
         case .switchingAccount:
@@ -3643,7 +3518,7 @@ private struct MenuBarOperationStatus: View {
         switch store.autoSwitchState {
         case .some(.switched): return .green
         case .some(.closingDesktop), .some(.switchingAccount), .some(.relaunchingDesktop): return .secondary
-        case .some(.waitingForLogin), .some(.allAccountsExhausted), .some(.desktopRelaunchFailed), .some(.waitingForProcesses), .some(.checkFailed): return .orange
+        case .some(.waitingForLogin), .some(.allAccountsExhausted), .some(.bankedResetAvailable), .some(.desktopRelaunchFailed), .some(.waitingForProcesses), .some(.checkFailed): return .orange
         case .none: return .secondary
         }
     }
@@ -3932,7 +3807,7 @@ private struct AboutView: View {
                     AboutPanel(title: language.text("Quyền riêng tư", "Privacy"), icon: "hand.raised.fill") {
                         AboutBullet(icon: "internaldrive", text: language.text("Snapshot tài khoản và backup được lưu cục bộ trên máy này.", "Account snapshots and backups are stored locally on this Mac."))
                         AboutBullet(icon: "eye.slash", text: language.text("Không đọc mật khẩu, mã xác thực hoặc cookie trình duyệt.", "Never reads passwords, verification codes, or browser cookies."))
-                        AboutBullet(icon: "point.3.connected.trianglepath.dotted", text: language.text("Codex Router, nếu có, tự quản lý credential và state riêng.", "Codex Router, when installed, owns its own credentials and state."))
+                        AboutBullet(icon: "point.3.connected.trianglepath.dotted", text: language.text("Roster tự cài, cập nhật và sửa Codex Router; Router vẫn sở hữu credential và state riêng.", "Roster installs, updates, and repairs Codex Router automatically; Router still owns its credentials and state."))
                     }
                 }
 

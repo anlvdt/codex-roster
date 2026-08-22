@@ -78,6 +78,7 @@ where
             candidate_account_id: None,
             candidate_display_name: None,
             detail: None,
+            banked_reset_count: 0,
         })
     }
 
@@ -213,6 +214,46 @@ where
                     None,
                 ));
             }
+        }
+
+        // A banked reset is valuable but not immediately usable quota. OpenAI's
+        // own client redeems it through a separate, explicit consume action, so
+        // never spend it or switch to a still-exhausted account silently. Return
+        // a distinct state so the UI can explain exactly why monitoring did not
+        // switch while keeping the normal paid/quota path fully automatic.
+        let active_banked_reset_count = banked_reset_count(active.usage.as_ref());
+        let banked_reset_candidate = if active_banked_reset_count > 0 {
+            Some((active.clone(), active_banked_reset_count))
+        } else {
+            let mut candidates = accounts
+                .iter()
+                .filter(|candidate| {
+                    is_banked_reset_fallback_candidate(candidate, &active, &settings, now)
+                })
+                .map(|candidate| {
+                    (
+                        candidate.clone(),
+                        banked_reset_count(candidate.usage.as_ref()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+            candidates.into_iter().next()
+        };
+        if let Some((candidate, count)) = banked_reset_candidate {
+            let mut output = auto_switch_output(
+                enabled,
+                "banked_reset_available",
+                Some(active.id),
+                Some(candidate.id),
+                Some(account_display_name(&candidate)),
+                Some(
+                    "A banked rate-limit reset is available but must be redeemed explicitly before it becomes usable quota."
+                        .to_owned(),
+                ),
+            );
+            output.banked_reset_count = count;
+            return Ok(output);
         }
         Ok(auto_switch_output(
             enabled,
@@ -1184,6 +1225,7 @@ fn auto_switch_output(
         candidate_account_id,
         candidate_display_name,
         detail,
+        banked_reset_count: 0,
     }
 }
 
@@ -1215,6 +1257,32 @@ fn has_usable_credits(usage: Option<&AccountUsageView>) -> bool {
             credits.unlimited
                 || (credits.has_credits && credit_balance_is_positive(&credits.balance))
         })
+}
+
+fn banked_reset_count(usage: Option<&AccountUsageView>) -> i64 {
+    usage
+        .and_then(|usage| usage.banked_resets.as_ref())
+        .map(|resets| resets.available_count.max(0))
+        .unwrap_or_default()
+}
+
+fn is_banked_reset_fallback_candidate(
+    candidate: &AccountView,
+    active: &AccountView,
+    settings: &crate::settings::AppSettings,
+    now: time::OffsetDateTime,
+) -> bool {
+    candidate.id != active.id
+        && !accounts_represent_same_identity(candidate, active)
+        && !candidate.archived
+        && !candidate
+            .usage_error
+            .as_deref()
+            .is_some_and(usage_error_blocks_activation)
+        && !is_usable_for_switch(candidate.usage.as_ref())
+        && !is_free_plan(candidate)
+        && banked_reset_count(candidate.usage.as_ref()) > 0
+        && !is_in_auto_switch_cooldown(settings, candidate.id, now)
 }
 
 fn credit_balance_is_positive(balance: &str) -> bool {
@@ -1786,6 +1854,66 @@ mod tests {
         );
         assert!(is_exhausted_for_switch(Some(&empty_credits)));
         assert!(!is_usable_for_switch(Some(&empty_credits)));
+    }
+
+    #[test]
+    fn auto_switch_reports_banked_resets_without_treating_them_as_spendable_quota() {
+        let now = OffsetDateTime::now_utc();
+        let usage = |plan: &str, reset_count: i64| AccountUsageView {
+            source: UsageSource::SavedAccessToken,
+            fetched_at: now,
+            five_hour: Some(UsageWindowView {
+                used_percent: 100,
+                remaining_percent: 0,
+                reset_at: now,
+            }),
+            weekly: None,
+            credits: None,
+            banked_resets: Some(crate::model::BankedResetSummaryView {
+                available_count: reset_count,
+                credits: None,
+            }),
+            plan_label: Some(plan.to_owned()),
+        };
+        let account = |email: &str, plan: &str, reset_count: i64| AccountView {
+            id: Uuid::new_v4(),
+            provider: crate::model::AiProvider::OpenAi,
+            email: email.to_owned(),
+            subject: Some(format!("subject-{email}")),
+            name: None,
+            custom_label: None,
+            plan_label: Some(plan.to_owned()),
+            environment: EnvironmentKind::Linux,
+            is_active: false,
+            created_at: now,
+            updated_at: now,
+            last_activated_at: None,
+            archived: false,
+            usage: Some(usage(plan, reset_count)),
+            usage_error: None,
+        };
+        let mut active = account("active@example.com", "Plus", 0);
+        active.is_active = true;
+        let candidate = account("candidate@example.com", "Plus", 1);
+        let settings = crate::settings::AppSettings::default();
+
+        assert!(is_exhausted_for_switch(candidate.usage.as_ref()));
+        assert!(!is_usable_for_switch(candidate.usage.as_ref()));
+        assert_eq!(banked_reset_count(candidate.usage.as_ref()), 1);
+        assert!(is_banked_reset_fallback_candidate(
+            &candidate, &active, &settings, now
+        ));
+
+        let free = account("free@example.com", "Free", 1);
+        assert!(!is_banked_reset_fallback_candidate(
+            &free, &active, &settings, now
+        ));
+        let mut blocked = account("blocked@example.com", "Plus", 1);
+        blocked.usage_error =
+            Some("Login required [refresh_token_invalidated]: sign in again".to_owned());
+        assert!(!is_banked_reset_fallback_candidate(
+            &blocked, &active, &settings, now
+        ));
     }
 
     #[test]

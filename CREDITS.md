@@ -13,9 +13,9 @@ Except for the original MIT foundation explicitly identified below, Codex Roster
 | [jlcodes99/cockpit-tools](https://github.com/jlcodes99/cockpit-tools) | `v1.3.24` / `34d8701` | High-level product and UI/UX research | CC BY-NC-SA 4.0 as declared in its README; no source/assets copied |
 | [Ducksss/codex-profiles](https://github.com/Ducksss/codex-profiles) | `main` / `e8ca967` (package 0.8.0) | Profile, workspace, and local-state boundary research | MIT; no source imported |
 | [vyctorbrzezowski/codex-switchboard](https://github.com/vyctorbrzezowski/codex-switchboard) | `v1.0.10` / `296c0b3` | Local-first switching and shared-auth safety research | MIT; independently implemented |
-| [duolahypercho/codex-router](https://github.com/duolahypercho/codex-router) | `main` / `9b2b88a` (0.4.0-beta.4) | Optional integration through its documented CLI | MIT; separate installation and state |
+| [duolahypercho/codex-router](https://github.com/duolahypercho/codex-router) | `v0.4.0-beta.4` / `2376def` | Automated lifecycle through its documented CLI and verified official installer | MIT; separate installation and state |
 
-The reviewed updates were applied selectively. Roster already follows the current Router `status` / `panel` / `doctor` command boundary and preserves the stricter local-first rule from current switching research: it does not refresh inactive accounts' OAuth refresh tokens in the background. Provider aggregation, spend dashboards, profile cloning, and Router-owned credential/model management remain out of scope.
+The reviewed updates were applied selectively. Roster follows Router's documented status, provider-selection, guided-setup, and maintenance command boundaries and preserves the stricter local-first rule from current switching research: it does not refresh inactive accounts' OAuth refresh tokens in the background. Roster now coordinates provider visibility in its macOS UI, while Router-owned credentials, routing, catalog curation, provider spend, and provider quota remain outside Roster's data model.
 
 ## Original foundation
 
@@ -37,7 +37,7 @@ We also reviewed [vyctorbrzezowski/codex-switchboard](https://github.com/vyctorb
 
 ## Codex Router
 
-Codex Roster integrates with [duolahypercho/codex-router](https://github.com/duolahypercho/codex-router) through its documented command-line boundary. Roster detects the separate installation and can invoke its status, panel, and read-only doctor commands; Codex Router remains the source of truth for external models, provider credentials, and routing policy. No Codex Router source code, visual assets, secrets, or state files are incorporated into Roster. Codex Router is MIT licensed.
+Codex Roster integrates with [duolahypercho/codex-router](https://github.com/duolahypercho/codex-router) through its documented command-line boundary. On macOS, Roster may download the official `v0.4.0-beta.4` installer and executes it only after verifying the pinned SHA-256 checksum. Roster automates dependency preparation, native-only setup, service repair, status checks, maintenance updates, and provider visibility. Its in-app provider picker delegates credential entry and OAuth to Router's guided secure flow, preserves already-enabled providers and native GPT, and never reads provider secrets. Codex Router remains the source of truth for external models, provider credentials, routing policy, and curated catalogs. No Codex Router source code, visual assets, secrets, or state files are incorporated into Roster. Codex Router is MIT licensed.
 
 ## Public reset signal source
 

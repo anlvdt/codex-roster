@@ -195,6 +195,11 @@ enum RouterCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Open the verified official Codex Router installer in Terminal.
+    Install {
+        #[arg(long)]
+        json: bool,
+    },
     /// Open Codex Router's credential-safe local Control Center.
     Open {
         #[arg(long)]
@@ -202,6 +207,25 @@ enum RouterCommand {
     },
     /// Run Codex Router's read-only installation doctor.
     Doctor {
+        #[arg(long)]
+        json: bool,
+    },
+    /// List external providers known to the managed Codex Router installation.
+    Providers {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Connect or enable one provider while preserving native GPT and other providers.
+    Connect {
+        provider_id: String,
+        #[arg(long)]
+        allow_anonymous: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Hide one provider without deleting credentials or native GPT models.
+    Disable {
+        provider_id: String,
         #[arg(long)]
         json: bool,
     },
@@ -521,6 +545,7 @@ pub fn run() -> Result<()> {
                     candidate_account_id: None,
                     candidate_display_name: None,
                     detail: None,
+                    banked_reset_count: 0,
                 }
             } else {
                 app.auto_switch_with_candidate(apply, account_id, force)?
@@ -628,6 +653,15 @@ pub fn run() -> Result<()> {
                 }
                 Ok(())
             }
+            RouterCommand::Install { json } => {
+                let output = crate::router::install()?;
+                if json {
+                    print_json(&output)?;
+                } else {
+                    println!("{}", output.message);
+                }
+                Ok(())
+            }
             RouterCommand::Open { json } => {
                 let output = crate::router::open_control_center()?;
                 if json {
@@ -639,6 +673,48 @@ pub fn run() -> Result<()> {
             }
             RouterCommand::Doctor { json } => {
                 let output = crate::router::doctor()?;
+                if json {
+                    print_json(&output)?;
+                } else {
+                    println!("{}", output.message);
+                }
+                Ok(())
+            }
+            RouterCommand::Providers { json } => {
+                let output = crate::router::providers()?;
+                if json {
+                    print_json(&output)?;
+                } else {
+                    for provider in output.providers {
+                        println!(
+                            "{}\t{}\t{}",
+                            if provider.visible { "SHOW" } else { "HIDE" },
+                            if provider.configured {
+                                "ready"
+                            } else {
+                                "needs connection"
+                            },
+                            provider.name
+                        );
+                    }
+                }
+                Ok(())
+            }
+            RouterCommand::Connect {
+                provider_id,
+                allow_anonymous,
+                json,
+            } => {
+                let output = crate::router::connect_provider(&provider_id, allow_anonymous)?;
+                if json {
+                    print_json(&output)?;
+                } else {
+                    println!("{}", output.message);
+                }
+                Ok(())
+            }
+            RouterCommand::Disable { provider_id, json } => {
+                let output = crate::router::disable_provider(&provider_id)?;
                 if json {
                     print_json(&output)?;
                 } else {

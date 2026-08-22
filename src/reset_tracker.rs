@@ -306,25 +306,60 @@ fn classify_post(text: &str) -> Option<SignalKind> {
 }
 
 fn build_reset_outlook(posts: &[TiboPost], now: OffsetDateTime) -> ResetOutlook {
-    let latest_signal = posts.iter().find_map(|post| {
-        let kind = classify_post(&post.text)?;
-        let announced_at = parse_event_time(&post.created_at)?;
-        (now - announced_at <= time::Duration::hours(48)).then_some((post, kind))
-    });
+    let latest_signal = posts
+        .iter()
+        .filter_map(|post| {
+            let kind = classify_post(&post.text)?;
+            let announced_at = parse_event_time(&post.created_at)?;
+            let age = now - announced_at;
+            (age >= time::Duration::ZERO && age <= time::Duration::hours(48)).then_some((
+                post,
+                kind,
+                announced_at,
+            ))
+        })
+        .max_by_key(|(_, _, announced_at)| *announced_at);
 
     let (chance_24_hours, chance_48_hours, confidence, window_label) = match latest_signal {
-        Some((_, SignalKind::ConfirmedBanked)) => (100, 100, "high", "Banked reset confirmed"),
-        Some((_, SignalKind::ScheduledBanked)) => (95, 100, "high", "Banked reset scheduled"),
-        Some((_, SignalKind::ConfirmedReset)) => (100, 100, "high", "Global reset confirmed"),
-        Some((_, SignalKind::ScheduledReset)) => (90, 98, "high", "Global reset scheduled"),
-        Some((_, SignalKind::Hint)) => (55, 75, "medium", "Tibo hint detected"),
-        None => (5, 15, "low", "No current Tibo signal"),
+        Some((_, SignalKind::ConfirmedBanked, _)) => (0, 0, "high", "Banked reset confirmed"),
+        Some((_, SignalKind::ConfirmedReset, _)) => (0, 0, "high", "Global reset confirmed"),
+        Some((_, kind @ SignalKind::ScheduledBanked, announced_at)) => {
+            let age = now - announced_at;
+            let (score_24, score_48) = forecast_scores(kind, age);
+            (
+                score_24,
+                score_48,
+                forecast_confidence(kind, age),
+                "Banked reset scheduled",
+            )
+        }
+        Some((_, kind @ SignalKind::ScheduledReset, announced_at)) => {
+            let age = now - announced_at;
+            let (score_24, score_48) = forecast_scores(kind, age);
+            (
+                score_24,
+                score_48,
+                forecast_confidence(kind, age),
+                "Global reset scheduled",
+            )
+        }
+        Some((_, kind @ SignalKind::Hint, announced_at)) => {
+            let age = now - announced_at;
+            let (score_24, score_48) = forecast_scores(kind, age);
+            (
+                score_24,
+                score_48,
+                forecast_confidence(kind, age),
+                "Tibo hint detected",
+            )
+        }
+        None => (0, 0, "low", "No current Tibo signal"),
     };
     let latest_confirmed = posts
         .iter()
         .find(|post| classify_post(&post.text).is_some_and(SignalKind::is_confirmed));
     let last_reset_at = latest_confirmed
-        .or_else(|| latest_signal.map(|(post, _)| post))
+        .or_else(|| latest_signal.map(|(post, _, _)| post))
         .or_else(|| posts.first())
         .map(|post| post.created_at.clone())
         .unwrap_or_else(|| format_time(now));
@@ -336,7 +371,7 @@ fn build_reset_outlook(posts: &[TiboPost], now: OffsetDateTime) -> ResetOutlook 
                 X_PROFILE_ENDPOINT.to_owned(),
             )
         },
-        |(post, kind)| {
+        |(post, kind, _)| {
             (
                 kind.as_str().to_owned(),
                 post.text.clone(),
@@ -356,6 +391,45 @@ fn build_reset_outlook(posts: &[TiboPost], now: OffsetDateTime) -> ResetOutlook 
         signal_summary,
         source_url,
         source_freshness: "live_x_profile".to_owned(),
+    }
+}
+
+fn forecast_scores(kind: SignalKind, age: time::Duration) -> (u8, u8) {
+    let (base_24, base_48) = match kind {
+        SignalKind::ScheduledBanked => (95, 100),
+        SignalKind::ScheduledReset => (90, 98),
+        SignalKind::Hint => (55, 75),
+        SignalKind::ConfirmedBanked | SignalKind::ConfirmedReset => return (0, 0),
+    };
+    (
+        recency_weighted_score(base_24, age, time::Duration::hours(24)),
+        recency_weighted_score(base_48, age, time::Duration::hours(48)),
+    )
+}
+
+fn recency_weighted_score(base: u8, age: time::Duration, horizon: time::Duration) -> u8 {
+    if age < time::Duration::ZERO || age >= horizon {
+        return 0;
+    }
+    let total_seconds = horizon.whole_seconds();
+    let remaining_seconds = (horizon - age).whole_seconds();
+    ((i64::from(base) * remaining_seconds + total_seconds / 2) / total_seconds) as u8
+}
+
+fn forecast_confidence(kind: SignalKind, age: time::Duration) -> &'static str {
+    match kind {
+        SignalKind::ScheduledBanked | SignalKind::ScheduledReset
+            if age <= time::Duration::hours(12) =>
+        {
+            "high"
+        }
+        SignalKind::Hint if age <= time::Duration::hours(12) => "medium",
+        SignalKind::ScheduledBanked | SignalKind::ScheduledReset
+            if age <= time::Duration::hours(24) =>
+        {
+            "medium"
+        }
+        _ => "low",
     }
 }
 
@@ -477,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn outlook_uses_latest_actionable_tibo_signal() {
+    fn confirmed_reset_completes_the_future_forecast() {
         let now = parse_event_time("2026-08-22T02:00:00Z").unwrap();
         let posts = vec![post(
             "landed",
@@ -485,9 +559,55 @@ mod tests {
             "The banked reset has landed for ChatGPT Work and Codex.",
         )];
         let outlook = build_reset_outlook(&posts, now);
-        assert_eq!(outlook.chance_24_hours, 100);
+        assert_eq!(outlook.chance_24_hours, 0);
+        assert_eq!(outlook.chance_48_hours, 0);
         assert_eq!(outlook.signal_kind, "confirmed_banked_reset");
         assert_eq!(outlook.source_url, "https://x.com/thsottiaux/status/landed");
+    }
+
+    #[test]
+    fn scheduled_forecast_decays_at_24_and_48_hour_boundaries() {
+        let announced_at = "2026-08-21T00:00:00Z";
+        let posts = vec![post(
+            "scheduled",
+            announced_at,
+            "The banked reset will land tomorrow for paid Codex users.",
+        )];
+
+        let fresh = build_reset_outlook(&posts, parse_event_time(announced_at).unwrap());
+        assert_eq!((fresh.chance_24_hours, fresh.chance_48_hours), (95, 100));
+        assert_eq!(fresh.confidence, "high");
+
+        let at_24_hours =
+            build_reset_outlook(&posts, parse_event_time("2026-08-22T00:00:00Z").unwrap());
+        assert_eq!(
+            (at_24_hours.chance_24_hours, at_24_hours.chance_48_hours),
+            (0, 50)
+        );
+        assert_eq!(at_24_hours.confidence, "medium");
+
+        let at_48_hours =
+            build_reset_outlook(&posts, parse_event_time("2026-08-23T00:00:00Z").unwrap());
+        assert_eq!(
+            (at_48_hours.chance_24_hours, at_48_hours.chance_48_hours),
+            (0, 0)
+        );
+        assert_eq!(at_48_hours.confidence, "low");
+    }
+
+    #[test]
+    fn outlook_rejects_future_dated_and_stale_signals() {
+        let now = parse_event_time("2026-08-22T00:00:00Z").unwrap();
+        for created_at in ["2026-08-22T00:00:01Z", "2026-08-19T23:59:59Z"] {
+            let posts = vec![post(
+                "invalid-time",
+                created_at,
+                "The banked reset will land tomorrow for paid Codex users.",
+            )];
+            let outlook = build_reset_outlook(&posts, now);
+            assert_eq!((outlook.chance_24_hours, outlook.chance_48_hours), (0, 0));
+            assert_eq!(outlook.signal_kind, "none");
+        }
     }
 
     #[test]

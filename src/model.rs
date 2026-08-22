@@ -218,6 +218,8 @@ pub struct AutoSwitchOutput {
     pub candidate_account_id: Option<Uuid>,
     pub candidate_display_name: Option<String>,
     pub detail: Option<String>,
+    /// A reset is available, but has not been redeemed into immediately usable quota.
+    pub banked_reset_count: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]

@@ -934,6 +934,14 @@ final class AccountStore: ObservableObject {
                     autoSwitchState = .allAccountsExhausted
                     autoSwitchAllExhaustedNotified = true
                 }
+            case "banked_reset_available":
+                autoSwitchAllExhaustedNotified = false
+                autoSwitchState = .bankedResetAvailable(
+                    account: decision.candidateDisplayName
+                        ?? AppLanguage.text("một tài khoản", "an account"),
+                    count: max(decision.bankedResetCount ?? 0, 1),
+                    isActive: decision.candidateAccountId == decision.activeAccountId
+                )
             case "ready":
                 guard !isBusyForActions else { return }
                 isSwitching = true
@@ -1207,6 +1215,7 @@ final class AccountStore: ObservableObject {
 enum AutoSwitchState: Equatable {
     case waitingForLogin
     case allAccountsExhausted
+    case bankedResetAvailable(account: String, count: Int, isActive: Bool)
     case closingDesktop
     case switchingAccount
     case relaunchingDesktop
@@ -2251,6 +2260,8 @@ struct AutoSwitchOutput: Decodable {
     let activeAccountId: UUID?
     let candidateAccountId: UUID?
     let candidateDisplayName: String?
+    let detail: String?
+    let bankedResetCount: Int?
 }
 
 enum AIProvider: String, CaseIterable, Identifiable {
@@ -2278,20 +2289,58 @@ struct RouterStatusOutput: Decodable {
     let repositoryUrl: URL
 }
 
+struct RouterProviderOutput: Decodable, Identifiable, Equatable {
+    let id: String
+    let name: String
+    let visible: Bool
+    let configured: Bool
+    let connectionKind: String
+    let requiresExplicitConsent: Bool
+}
+
+private struct RouterProvidersOutput: Decodable {
+    let providers: [RouterProviderOutput]
+}
+
 private struct RouterActionOutput: Decodable {
     let ok: Bool
     let action: String
     let message: String
 }
 
+private struct RouterProviderActionOutput: Decodable {
+    let ok: Bool
+    let action: String
+    let providerId: String
+    let message: String
+    let pendingUserAction: Bool
+}
+
 @MainActor
 final class RouterStore: ObservableObject {
     @Published private(set) var status: RouterStatusOutput?
+    @Published private(set) var providers: [RouterProviderOutput] = []
     @Published private(set) var isRefreshing = false
     @Published private(set) var isWorking = false
+    @Published private(set) var providerActionId: String?
     @Published private(set) var notice: String?
 
     private let cli = AccountHubCLI()
+    private var automationTask: Task<Void, Never>?
+    private var providerPollingTask: Task<Void, Never>?
+    private static let maintenanceDefaultsKey = "routerLastAutomaticMaintenanceAt"
+    private static let maintenanceInterval: TimeInterval = 6 * 60 * 60
+    private static let healthCheckInterval: Duration = .seconds(5 * 60)
+
+    func startAutomation() {
+        guard automationTask == nil else { return }
+        automationTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.reconcile()
+                try? await Task.sleep(for: Self.healthCheckInterval)
+            }
+        }
+    }
 
     func refresh(silently: Bool = false) {
         guard !isRefreshing, !isWorking else { return }
@@ -2304,34 +2353,152 @@ final class RouterStore: ObservableObject {
                     RouterStatusOutput.self,
                     arguments: ["router", "status"]
                 )
+                if status?.healthy == true {
+                    try await loadProviders()
+                } else {
+                    providers = []
+                }
             } catch {
                 if !silently { notice = error.localizedDescription }
             }
         }
     }
 
-    func openControlCenter() {
-        runAction(arguments: ["router", "open"])
-    }
-
-    func runDoctor() {
-        runAction(arguments: ["router", "doctor"])
-    }
-
-    private func runAction(arguments: [String]) {
-        guard !isWorking else { return }
+    func connect(_ provider: RouterProviderOutput, allowAnonymous: Bool = false) {
+        guard !isWorking, !isRefreshing else { return }
         isWorking = true
+        providerActionId = provider.id
         notice = nil
         Task {
+            var arguments = ["router", "connect", provider.id]
+            if allowAnonymous { arguments.append("--allow-anonymous") }
             do {
-                let output = try await cli.decode(RouterActionOutput.self, arguments: arguments)
+                let output = try await cli.decode(
+                    RouterProviderActionOutput.self,
+                    arguments: arguments
+                )
                 notice = output.message
+                try await refreshRouterState()
                 isWorking = false
-                refresh(silently: true)
+                if output.pendingUserAction {
+                    startProviderPolling(providerId: output.providerId)
+                } else {
+                    providerActionId = nil
+                }
             } catch {
                 notice = error.localizedDescription
                 isWorking = false
+                providerActionId = nil
             }
+        }
+    }
+
+    func disable(_ provider: RouterProviderOutput) {
+        guard !isWorking, !isRefreshing else { return }
+        isWorking = true
+        providerActionId = provider.id
+        notice = nil
+        Task {
+            do {
+                let output = try await cli.decode(
+                    RouterProviderActionOutput.self,
+                    arguments: ["router", "disable", provider.id]
+                )
+                notice = output.message
+                try await refreshRouterState()
+            } catch {
+                notice = error.localizedDescription
+            }
+            isWorking = false
+            providerActionId = nil
+        }
+    }
+
+    func isActing(on provider: RouterProviderOutput) -> Bool {
+        providerActionId == provider.id
+    }
+
+    private func reconcile() async {
+        guard !isWorking, !isRefreshing else { return }
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let current = try await cli.decode(
+                RouterStatusOutput.self,
+                arguments: ["router", "status"]
+            )
+            status = current
+            if current.healthy {
+                try await loadProviders()
+            } else {
+                providers = []
+            }
+            let lastMaintenance = UserDefaults.standard.object(
+                forKey: Self.maintenanceDefaultsKey
+            ) as? Date
+            let maintenanceDue = lastMaintenance.map {
+                Date().timeIntervalSince($0) >= Self.maintenanceInterval
+            } ?? true
+            guard !current.healthy || !current.configured || maintenanceDue else {
+                notice = nil
+                return
+            }
+            let _: RouterActionOutput = try await cli.decode(
+                RouterActionOutput.self,
+                arguments: ["router", "install"]
+            )
+            notice = nil
+            UserDefaults.standard.set(Date(), forKey: Self.maintenanceDefaultsKey)
+            status = try await cli.decode(
+                RouterStatusOutput.self,
+                arguments: ["router", "status"]
+            )
+            if status?.healthy == true {
+                try await loadProviders()
+            }
+        } catch {
+            notice = error.localizedDescription
+        }
+    }
+
+    private func loadProviders() async throws {
+        providers = try await cli.decode(
+            RouterProvidersOutput.self,
+            arguments: ["router", "providers"]
+        ).providers
+    }
+
+    private func refreshRouterState() async throws {
+        status = try await cli.decode(
+            RouterStatusOutput.self,
+            arguments: ["router", "status"]
+        )
+        if status?.healthy == true {
+            try await loadProviders()
+        }
+    }
+
+    private func startProviderPolling(providerId: String) {
+        providerPollingTask?.cancel()
+        providerPollingTask = Task { [weak self] in
+            for _ in 0..<40 {
+                guard !Task.isCancelled else { return }
+                try? await Task.sleep(for: .seconds(3))
+                guard let self else { return }
+                do {
+                    try await self.refreshRouterState()
+                    if self.providers.first(where: { $0.id == providerId })?.visible == true {
+                        self.notice = "Provider connected. Native GPT models remain available."
+                        self.providerActionId = nil
+                        self.providerPollingTask = nil
+                        return
+                    }
+                } catch {
+                    // The background health loop will retry without interrupting account work.
+                }
+            }
+            self?.providerActionId = nil
+            self?.providerPollingTask = nil
         }
     }
 }

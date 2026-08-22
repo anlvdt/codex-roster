@@ -157,6 +157,7 @@ public sealed class GlobalResetEventDto
     public DateTimeOffset AnnouncedAt { get; init; }
     public string Summary { get; init; } = string.Empty;
     public string Url { get; init; } = string.Empty;
+    public string Kind { get; init; } = string.Empty;
 }
 
 public sealed class OpenAiStatusDto

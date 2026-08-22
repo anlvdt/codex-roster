@@ -179,9 +179,32 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Inspect or open the optional Codex Router integration.
+    Router {
+        #[command(subcommand)]
+        command: RouterCommand,
+    },
     #[cfg(windows)]
     /// Run the lightweight notification-area companion.
     Tray,
+}
+
+#[derive(Subcommand)]
+enum RouterCommand {
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Open Codex Router's credential-safe local Control Center.
+    Open {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run Codex Router's read-only installation doctor.
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub fn run() -> Result<()> {
@@ -589,6 +612,41 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::Router { command }) => match command {
+            RouterCommand::Status { json } => {
+                let status = crate::router::status();
+                if json {
+                    print_json(&status)?;
+                } else {
+                    println!("Codex Router: {}", status.state_label());
+                    if let Some(version) = status.version {
+                        println!("Version: {version}");
+                    }
+                    if let Some(detail) = status.detail {
+                        println!("Detail: {detail}");
+                    }
+                }
+                Ok(())
+            }
+            RouterCommand::Open { json } => {
+                let output = crate::router::open_control_center()?;
+                if json {
+                    print_json(&output)?;
+                } else {
+                    println!("{}", output.message);
+                }
+                Ok(())
+            }
+            RouterCommand::Doctor { json } => {
+                let output = crate::router::doctor()?;
+                if json {
+                    print_json(&output)?;
+                } else {
+                    println!("{}", output.message);
+                }
+                Ok(())
+            }
+        },
         #[cfg(windows)]
         Some(Command::Tray) => {
             crate::app::spawn_auto_start_usage_windows_worker(app.env().clone());
@@ -778,5 +836,17 @@ fn print_usage_summary(usage: &AccountUsageView) {
             "Credits: {} (has_credits={}, unlimited={})",
             credits.balance, credits.has_credits, credits.unlimited
         );
+    }
+    if let Some(resets) = &usage.banked_resets {
+        println!("Banked resets: {} available", resets.available_count);
+        if let Some(details) = &resets.credits {
+            for credit in details {
+                let title = credit.title.as_deref().unwrap_or("Codex rate-limit reset");
+                match credit.expires_at {
+                    Some(expires_at) => println!("  {title} · expires {expires_at}"),
+                    None => println!("  {title} · no expiry reported"),
+                }
+            }
+        }
     }
 }

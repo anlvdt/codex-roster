@@ -14,6 +14,7 @@ pub mod operation_lock;
 pub mod process;
 pub mod repository;
 pub mod reset_tracker;
+pub mod router;
 pub mod secrets;
 pub mod settings;
 mod time_display;

@@ -593,16 +593,27 @@ final class AccountStore: ObservableObject {
         guard resetNotificationTask == nil else { return }
         ResetNotifier.prepare()
         resetNotificationTask = Task { [weak self] in
+            var nextPublicSignalCheck = Date.distantPast
             while !Task.isCancelled {
                 guard let self else { return }
-                if await ResetNotifier.isAuthorized(),
-                   let events = try? await self.cli.decode(
-                    [GlobalResetEvent].self,
-                    arguments: ["reset-events", "--json"]
-                ) {
-                    ResetNotifier.show(events)
+                if await ResetNotifier.isAuthorized() {
+                    // Account-authenticated usage is the source of truth for
+                    // personal banked credits and actual quota resets.
+                    ResetNotifier.showAccountSignals(self.accounts)
+                    if Date.now >= nextPublicSignalCheck {
+                        if let signals = try? await self.cli.decode(
+                            [GlobalResetEvent].self,
+                            arguments: ["reset-events"]
+                        ) {
+                            signals.forEach { ResetNotifier.showPublicSignal($0) }
+                            self.refreshResetOutlook(silently: true)
+                        }
+                        nextPublicSignalCheck = Date.now.addingTimeInterval(60)
+                    }
                 }
-                try? await Task.sleep(for: .seconds(60))
+                // Usage refreshes separately; checking the local result often
+                // makes the banner appear immediately after a signal lands.
+                try? await Task.sleep(for: .seconds(2))
             }
         }
     }
@@ -1677,22 +1688,46 @@ struct ResetOutlook: Decodable {
     let chance48Hours: Int
     let confidence: String
     let windowLabel: String
+    let signalKind: String?
+    let signalSummary: String?
+    let sourceUrl: String?
+    let sourceFreshness: String?
 }
 
-struct GlobalResetEvent: Decodable, Identifiable {
+private struct GlobalResetEvent: Decodable {
     let id: String
     let announcedAt: String
     let summary: String
     let url: String
-
-    enum CodingKeys: String, CodingKey {
-        case id, summary, url
-        case announcedAt = "announced_at"
-    }
+    let kind: String
 }
 
 private enum ResetNotifier {
     private static let delegate = ResetNotificationDelegate()
+    private static let signalStateKey = "codexRoster.resetSignalNotificationState.v1"
+
+    private struct SignalState: Codable, Equatable {
+        var seenCreditIDs: Set<String> = []
+        var availableCountByAccount: [String: Int] = [:]
+        var usageByAccount: [String: UsageObservation] = [:]
+    }
+
+    private struct UsageObservation: Codable, Equatable {
+        let fetchedAt: Date
+        let fiveHour: WindowObservation?
+        let weekly: WindowObservation?
+    }
+
+    private struct WindowObservation: Codable, Equatable {
+        let remainingPercent: Int
+        let resetAt: Date
+    }
+
+    private struct WindowResetChange {
+        let label: String
+        let previousRemaining: Int
+        let currentRemaining: Int
+    }
 
     static func prepare() {
         let center = UNUserNotificationCenter.current()
@@ -1705,27 +1740,193 @@ private enum ResetNotifier {
         return status == .authorized || status == .provisional
     }
 
-    static func show(_ events: [GlobalResetEvent]) {
-        let center = UNUserNotificationCenter.current()
-        for event in events {
-            let content = UNMutableNotificationContent()
-            content.title = AppLanguage.text(
-                "ChatGPT vừa có đợt mass reset",
-                "ChatGPT mass reset detected"
-            )
-            content.subtitle = AppLanguage.text(
-                "Quota Codex và ChatGPT Work đang được đặt lại",
-                "Codex and ChatGPT Work quota is being reset"
-            )
-            content.body = event.summary
-            content.sound = .default
-            content.userInfo = ["url": event.url]
-            center.add(UNNotificationRequest(
-                identifier: "codex-roster-reset-\(event.id)",
-                content: content,
-                trigger: nil
-            ))
+    static func showAccountSignals(_ accounts: [SavedAccount]) {
+        var state = loadSignalState()
+        let previousState = state
+        for account in accounts where !account.archived {
+            let accountKey = account.id.uuidString
+            showNewBankedResets(for: account, accountKey: accountKey, state: &state)
+            showDetectedQuotaReset(for: account, accountKey: accountKey, state: &state)
         }
+        if state != previousState {
+            saveSignalState(state)
+        }
+    }
+
+    static func showPublicSignal(_ signal: GlobalResetEvent) {
+        let title = switch signal.kind {
+        case "confirmed_banked_reset":
+            AppLanguage.text("Tibo: banked reset đã được cấp", "Tibo: banked reset confirmed")
+        case "scheduled_banked_reset":
+            AppLanguage.text("Tibo báo banked reset sắp tới", "Tibo scheduled a banked reset")
+        case "confirmed_global_reset":
+            AppLanguage.text("Tibo xác nhận mass reset", "Tibo confirmed a global reset")
+        case "scheduled_global_reset":
+            AppLanguage.text("Tibo báo mass reset sắp tới", "Tibo scheduled a global reset")
+        default:
+            AppLanguage.text("Tibo phát tín hiệu reset", "Tibo posted a reset signal")
+        }
+        enqueue(
+            identifier: "codex-roster-tibo-\(signal.id)",
+            title: title,
+            subtitle: "@thsottiaux · X",
+            body: signal.summary,
+            url: signal.url
+        )
+    }
+
+    private static func showNewBankedResets(
+        for account: SavedAccount,
+        accountKey: String,
+        state: inout SignalState
+    ) {
+        guard let resets = account.usage?.bankedResets else { return }
+        let availableCount = max(0, resets.availableCount)
+        let availableCredits = (resets.credits ?? []).filter { $0.status == "available" }
+        let unseenCredits = availableCredits.filter { !state.seenCreditIDs.contains($0.id) }
+        let previousCount = state.availableCountByAccount[accountKey] ?? 0
+        let countIncrease = max(0, availableCount - previousCount)
+        let newlyGranted = max(unseenCredits.count, countIncrease)
+
+        state.seenCreditIDs.formUnion(availableCredits.map(\.id))
+        state.availableCountByAccount[accountKey] = availableCount
+        guard newlyGranted > 0 else { return }
+
+        let nearestExpiry = (unseenCredits.isEmpty ? availableCredits : unseenCredits)
+            .compactMap { $0.expiresAt?.value }
+            .min()
+        var body = AppLanguage.text(
+            "Tài khoản có thêm \(newlyGranted) lượt đặt lại quota Codex.",
+            newlyGranted == 1
+                ? "This account received 1 Codex quota reset."
+                : "This account received \(newlyGranted) Codex quota resets."
+        )
+        if let title = unseenCredits.first?.title, !title.isEmpty {
+            body += " \(title)"
+        }
+        if let nearestExpiry {
+            body += AppLanguage.text(
+                " Hết hạn \(nearestExpiry.formatted(date: .abbreviated, time: .shortened)).",
+                " Expires \(nearestExpiry.formatted(date: .abbreviated, time: .shortened))."
+            )
+        }
+        enqueue(
+            identifier: "codex-roster-banked-\(accountKey)-\(unseenCredits.first?.id ?? String(availableCount))",
+            title: AppLanguage.text("Bạn vừa nhận banked reset", "Banked reset received"),
+            subtitle: account.displayName,
+            body: body
+        )
+    }
+
+    private static func showDetectedQuotaReset(
+        for account: SavedAccount,
+        accountKey: String,
+        state: inout SignalState
+    ) {
+        guard let current = usageObservation(for: account) else { return }
+        defer { state.usageByAccount[accountKey] = current }
+        guard let previous = state.usageByAccount[accountKey],
+              current.fetchedAt > previous.fetchedAt else { return }
+
+        let changes = resetChanges(previous: previous, current: current)
+        guard !changes.isEmpty else { return }
+        let detail = changes.map { change in
+            "\(change.label) \(change.previousRemaining)% → \(change.currentRemaining)%"
+        }.joined(separator: " · ")
+        enqueue(
+            identifier: "codex-roster-quota-reset-\(accountKey)-\(Int(current.fetchedAt.timeIntervalSince1970))",
+            title: AppLanguage.text("Quota Codex vừa được đặt lại", "Codex quota reset detected"),
+            subtitle: account.displayName,
+            body: detail
+        )
+    }
+
+    private static func usageObservation(for account: SavedAccount) -> UsageObservation? {
+        guard let usage = account.usage, let fetchedAt = usage.fetchedAt?.value else { return nil }
+        return UsageObservation(
+            fetchedAt: fetchedAt,
+            fiveHour: usage.fiveHour.map {
+                WindowObservation(remainingPercent: $0.remainingPercent, resetAt: $0.resetAt.value)
+            },
+            weekly: usage.weekly.map {
+                WindowObservation(remainingPercent: $0.remainingPercent, resetAt: $0.resetAt.value)
+            }
+        )
+    }
+
+    private static func resetChanges(
+        previous: UsageObservation,
+        current: UsageObservation
+    ) -> [WindowResetChange] {
+        var changes: [WindowResetChange] = []
+        if let change = resetChange(
+            label: AppLanguage.text("5 giờ", "5-hour"),
+            previous: previous.fiveHour,
+            current: current.fiveHour
+        ) {
+            changes.append(change)
+        }
+        if let change = resetChange(
+            label: AppLanguage.text("Tuần", "Weekly"),
+            previous: previous.weekly,
+            current: current.weekly
+        ) {
+            changes.append(change)
+        }
+        return changes
+    }
+
+    private static func resetChange(
+        label: String,
+        previous: WindowObservation?,
+        current: WindowObservation?
+    ) -> WindowResetChange? {
+        guard let previous, let current else { return nil }
+        let restoredPercent = current.remainingPercent - previous.remainingPercent
+        guard restoredPercent >= 5,
+              current.resetAt > previous.resetAt || previous.remainingPercent == 0 else {
+            return nil
+        }
+        return WindowResetChange(
+            label: label,
+            previousRemaining: previous.remainingPercent,
+            currentRemaining: current.remainingPercent
+        )
+    }
+
+    private static func enqueue(
+        identifier: String,
+        title: String,
+        subtitle: String,
+        body: String,
+        url: String? = nil
+    ) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.subtitle = subtitle
+        content.body = body
+        content.sound = .default
+        if let url {
+            content.userInfo["url"] = url
+        }
+        UNUserNotificationCenter.current().add(UNNotificationRequest(
+            identifier: identifier,
+            content: content,
+            trigger: nil
+        ))
+    }
+
+    private static func loadSignalState() -> SignalState {
+        guard let data = UserDefaults.standard.data(forKey: signalStateKey),
+              let state = try? JSONDecoder().decode(SignalState.self, from: data) else {
+            return SignalState()
+        }
+        return state
+    }
+
+    private static func saveSignalState(_ state: SignalState) {
+        guard let data = try? JSONEncoder().encode(state) else { return }
+        UserDefaults.standard.set(data, forKey: signalStateKey)
     }
 }
 
@@ -1938,6 +2139,7 @@ struct AccountUsage: Decodable {
     let fiveHour: UsageWindow?
     let weekly: UsageWindow?
     let credits: UsageCredits?
+    let bankedResets: BankedResetSummary?
 }
 
 struct UsageCredits: Decodable {
@@ -1948,6 +2150,21 @@ struct UsageCredits: Decodable {
     var hasDisplayableBalance: Bool {
         hasCredits && !balance.isEmpty && balance != "null"
     }
+}
+
+struct BankedResetSummary: Decodable {
+    let availableCount: Int
+    let credits: [BankedResetCredit]?
+}
+
+struct BankedResetCredit: Identifiable, Decodable {
+    let id: String
+    let resetType: String
+    let status: String
+    let grantedAt: RustDate
+    let expiresAt: RustDate?
+    let title: String?
+    let description: String?
 }
 
 struct UsageWindow: Decodable {
@@ -2047,5 +2264,74 @@ enum AIProvider: String, CaseIterable, Identifiable {
 
     var icon: String {
         "sparkles"
+    }
+}
+
+struct RouterStatusOutput: Decodable {
+    let installed: Bool
+    let healthy: Bool
+    let configured: Bool
+    let state: String
+    let version: String?
+    let installation: String?
+    let detail: String?
+    let repositoryUrl: URL
+}
+
+private struct RouterActionOutput: Decodable {
+    let ok: Bool
+    let action: String
+    let message: String
+}
+
+@MainActor
+final class RouterStore: ObservableObject {
+    @Published private(set) var status: RouterStatusOutput?
+    @Published private(set) var isRefreshing = false
+    @Published private(set) var isWorking = false
+    @Published private(set) var notice: String?
+
+    private let cli = AccountHubCLI()
+
+    func refresh(silently: Bool = false) {
+        guard !isRefreshing, !isWorking else { return }
+        isRefreshing = true
+        if !silently { notice = nil }
+        Task {
+            defer { isRefreshing = false }
+            do {
+                status = try await cli.decode(
+                    RouterStatusOutput.self,
+                    arguments: ["router", "status"]
+                )
+            } catch {
+                if !silently { notice = error.localizedDescription }
+            }
+        }
+    }
+
+    func openControlCenter() {
+        runAction(arguments: ["router", "open"])
+    }
+
+    func runDoctor() {
+        runAction(arguments: ["router", "doctor"])
+    }
+
+    private func runAction(arguments: [String]) {
+        guard !isWorking else { return }
+        isWorking = true
+        notice = nil
+        Task {
+            do {
+                let output = try await cli.decode(RouterActionOutput.self, arguments: arguments)
+                notice = output.message
+                isWorking = false
+                refresh(silently: true)
+            } catch {
+                notice = error.localizedDescription
+                isWorking = false
+            }
+        }
     }
 }

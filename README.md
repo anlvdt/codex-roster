@@ -1,10 +1,14 @@
 # Codex Roster
 
-Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex. A native Windows Preview is now in development.
+Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex.
 
 [English](#english) · [Tiếng Việt](#tiếng-việt)
 
-> Codex Roster is local-first. It manages only the Codex authentication files already present on your Mac. It is not affiliated with OpenAI.
+> Codex Roster is a local-first, independent macOS app built for the Codex community. It is not affiliated with, endorsed by, or reviewed by OpenAI.
+
+> “Codex”, “ChatGPT”, “OpenAI”, and related marks belong to OpenAI and are used only to describe compatibility. See the [OpenAI brand guidelines](https://openai.com/brand/).
+
+> **Platform focus:** macOS is the only actively developed and released desktop app. Windows and Linux desktop work is paused; their existing source is retained for possible future maintenance.
 
 ## English
 
@@ -14,14 +18,19 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
 - Show the active account's quota in the menu bar and account quota/reset state in the sidebar.
 - Launch the OpenAI browser sign-in flow without reading passwords, verification codes, or browser cookies.
 - Close and relaunch ChatGPT/Codex Desktop after a confirmed account switch.
-- Refresh local Codex token statistics, public OpenAI Status, and the optional Codex Reset community outlook.
+- Refresh local Codex token statistics, public OpenAI Status, and reset signals read directly from [Tibo / @thsottiaux on X](https://x.com/thsottiaux).
+- Detect an optional [Codex Router](https://github.com/duolahypercho/codex-router) installation, show its readiness, and open its credential-safe local Control Center or read-only Doctor.
 - Offer Vietnamese and English; Vietnamese is the default.
+
+### Optional external-model routing
+
+Codex Router remains a separate installation and keeps ownership of its provider credentials, service, model catalog, and Codex configuration. Roster never reads API keys or copies Router state. The dashboard detects standard checkout, Homebrew, and `PATH` installations; use its Router card to check readiness, run the read-only Doctor, or open Router's local Control Center.
 
 ### Quota and automatic switching
 
 `GPT Free`, `GPT Plus`, and `GPT Pro` identify the ChatGPT plan. They do not imply a fixed Codex quota. Codex Roster displays the quota/reset windows returned for the signed-in account.
 
-**Auto-switch when quota is exhausted** is opt-in and shared by the macOS and Windows clients. It refreshes the active Codex account (`~/.codex`), prefers candidate quota cached within about 15 minutes, and revalidates the chosen candidate on apply (`--account-id`). It switches only when the active account is at `0%` and another saved account has usable quota in every reported window. On macOS, when ChatGPT/Codex Desktop is open, auto-switch closes it, applies the new `~/.codex` session, then relaunches Desktop so the UI matches Roster. On Windows, a direct switch offers to close and relaunch the visible Codex/ChatGPT Desktop window; automatic switching still defers while Codex processes are running. If every account is exhausted, it leaves the current session untouched.
+**Auto-switch when quota is exhausted** is opt-in. It refreshes the active Codex account (`~/.codex`), prefers candidate quota cached within about 15 minutes, and revalidates the chosen candidate on apply (`--account-id`). It switches only when the active account is at `0%` and another saved account has usable quota in every reported window. On macOS, when ChatGPT/Codex Desktop is open, auto-switch closes it, applies the new `~/.codex` session, then relaunches Desktop so the UI matches Roster. If every account is exhausted, it leaves the current session untouched.
 
 Account lists can be sorted by ChatGPT plan (Pro → Plus → Free), remaining quota, display name, or email. The menu bar shows up to five quick-switch candidates using the same sort order.
 
@@ -58,9 +67,11 @@ zsh scripts/build-macos-app.sh
 open "build/Codex Roster.app"
 ```
 
-### Windows desktop app
+### Platform status
 
-Download **Codex-Roster-Windows-x64.zip** from [Releases](https://github.com/anlvdt/codex-roster/releases), extract the entire ZIP, then start `CodexRoster.Windows.exe`. Do not run an executable directly from the ZIP or copy only one `.exe`: the desktop app needs the bundled WinUI runtime beside it. `CodexRoster.CLI.exe` is reserved for terminal automation. The Windows app uses **WinUI 3** and calls the same Rust CLI; see [windows/README.md](windows/README.md). Closing the dashboard stops its login and helper processes. The only intentional background mode is **Send to notification area**, which asks for confirmation; choose **Quit** from its notification-area menu before deleting or replacing the app folder. When the user confirms a direct switch, the visible Codex/ChatGPT Desktop window is closed and reopened against the selected session; active Codex CLI work remains protected.
+- **macOS:** active product development, CI, packaging, and releases.
+- **Windows:** desktop source and maintenance build scripts are retained, but feature work, CI packaging, previews, and releases are paused.
+- **Linux:** no active desktop distribution. Shared Rust source remains in the repository only to preserve future portability.
 
 ### CLI
 
@@ -82,12 +93,14 @@ codex-roster auto-switch [--enable|--disable|--status|--apply] [--json]
 codex-roster token-usage [--json]
 codex-roster reset-outlook [--json]
 codex-roster open-ai-status [--json]
-codex-roster tray # Windows only
+codex-roster router status [--json]
+codex-roster router open [--json]
+codex-roster router doctor [--json]
 ```
 
 ### Privacy, status, and credits
 
-Saved account data remains on this Mac. The OpenAI Status and Codex Reset requests are public service/forecast lookups; neither receives account credentials. Read [OpenAI's current ChatGPT and Codex pricing documentation](https://learn.chatgpt.com/docs/pricing) for plan and usage policy.
+Saved account data remains on this Mac. OpenAI Status checks and reads of Tibo's public X profile never include account credentials, identifiers, saved sessions, or quota data. Public reset posts are advisory; authenticated per-account quota returned by Codex remains the source of truth. Read [OpenAI's current ChatGPT and Codex pricing documentation](https://learn.chatgpt.com/docs/pricing) for plan and usage policy.
 
 Codex Roster is MIT licensed. It is maintained by [LE AN (@anlvdt)](https://github.com/anlvdt). See [AUTHORS.md](AUTHORS.md) and [CREDITS.md](CREDITS.md) for original-foundation, research, and license attribution.
 
@@ -108,14 +121,19 @@ swift build --package-path macos/NextAccount
 - Hiển thị quota tài khoản đang dùng trên menu bar; hiển thị quota và thời điểm reset ở sidebar.
 - Mở luồng đăng nhập thiết bị OpenAI mà không đọc mật khẩu, mã xác thực hay cookie trình duyệt.
 - Đóng rồi mở lại ChatGPT/Codex Desktop sau khi bạn xác nhận chuyển tài khoản.
-- Theo dõi token Codex cục bộ, trạng thái công khai OpenAI và dự báo cộng đồng Codex Reset.
+- Theo dõi token Codex cục bộ, trạng thái công khai OpenAI và tín hiệu reset đọc trực tiếp từ [Tibo / @thsottiaux trên X](https://x.com/thsottiaux).
+- Tự nhận diện bản cài [Codex Router](https://github.com/duolahypercho/codex-router), hiển thị trạng thái và mở Control Center local hoặc Doctor chỉ-đọc.
 - Hỗ trợ Tiếng Việt và English; mặc định là Tiếng Việt.
+
+### Định tuyến model ngoài (tùy chọn)
+
+Codex Router vẫn được cài riêng và tự quản lý credential provider, dịch vụ, model catalog cùng cấu hình Codex. Roster không đọc API key hay sao chép state của Router. Card Router trên dashboard nhận diện bản cài checkout chuẩn, Homebrew và `PATH`; từ đó bạn có thể kiểm tra trạng thái, chạy Doctor chỉ-đọc hoặc mở Control Center local của Router.
 
 ### Quota và tự động chuyển
 
 `GPT Free`, `GPT Plus`, `GPT Pro` là nhãn gói ChatGPT, không phải quota Codex cố định. Codex Roster hiển thị quota/thời điểm reset thực tế được trả về cho tài khoản đang đăng nhập.
 
-Chế độ **Tự động chuyển khi hết quota** là tùy chọn và dùng chung chính sách trên macOS/Windows. App theo dõi phiên Codex tại `~/.codex` (không đọc cookie đăng nhập riêng trong ChatGPT). Khi hết `0%`, macOS sẽ đóng ChatGPT/Codex nếu cần, chuyển phiên, rồi mở lại Desktop để khớp Roster. Trên Windows, thao tác chuyển thủ công sẽ đề nghị đóng/mở lại cửa sổ Codex/ChatGPT Desktop đang hiện; tự chuyển vẫn hoãn khi tiến trình Codex còn chạy. Nếu mọi tài khoản đều hết quota, phiên hiện tại không bị thay đổi.
+Chế độ **Tự động chuyển khi hết quota** là tùy chọn. App theo dõi phiên Codex tại `~/.codex` (không đọc cookie đăng nhập riêng trong ChatGPT). Khi hết `0%`, macOS sẽ đóng ChatGPT/Codex nếu cần, chuyển phiên, rồi mở lại Desktop để khớp Roster. Nếu mọi tài khoản đều hết quota, phiên hiện tại không bị thay đổi.
 
 Danh sách tài khoản có thể sắp xếp theo gói ChatGPT (Pro → Plus → Free), quota còn lại, tên hiển thị hoặc email. Menu bar hiện tối đa năm ứng viên chuyển nhanh theo cùng thứ tự sắp xếp.
 
@@ -152,12 +170,14 @@ zsh scripts/build-macos-app.sh
 open "build/Codex Roster.app"
 ```
 
-### Ứng dụng Windows
+### Trạng thái nền tảng
 
-Tải **Codex-Roster-Windows-x64.zip** từ [Releases](https://github.com/anlvdt/codex-roster/releases), giải nén toàn bộ rồi mở `CodexRoster.Windows.exe`. Không chạy executable trực tiếp trong ZIP hoặc chỉ chép một file `.exe`: app desktop cần WinUI runtime đi kèm trong cùng thư mục. `CodexRoster.CLI.exe` chỉ dành cho automation qua terminal. Bản Windows native dùng **WinUI 3** và gọi chung Rust CLI; xem [windows/README.md](windows/README.md). Khi đóng dashboard, app sẽ dừng tiến trình đăng nhập và helper của chính nó. Chỉ **Gửi vào notification area** mới là chế độ chạy nền có chủ đích và sẽ hỏi xác nhận; hãy chọn **Quit** trong menu notification area trước khi xóa hay thay thư mục app. Khi người dùng xác nhận chuyển thủ công, app sẽ đóng/mở lại cửa sổ Codex/ChatGPT Desktop để nạp session đã chọn; tác vụ Codex CLI đang chạy vẫn được bảo vệ.
+- **macOS:** đang được phát triển, chạy CI, đóng gói và phát hành.
+- **Windows:** giữ lại mã nguồn desktop và script maintenance, nhưng tạm dừng feature, CI đóng gói, preview và release.
+- **Linux:** chưa phát triển bản desktop. Mã Rust dùng chung chỉ được giữ để bảo toàn khả năng mở rộng trong tương lai.
 
 ### Riêng tư, trạng thái và ghi nhận
 
-Dữ liệu tài khoản lưu trên máy Mac. Các yêu cầu tới OpenAI Status và Codex Reset chỉ lấy trạng thái/dự báo công khai, không gửi thông tin đăng nhập. Xem [tài liệu pricing và usage chính thức của ChatGPT/Codex](https://learn.chatgpt.com/docs/pricing) để biết chính sách gói và quota mới nhất.
+Dữ liệu tài khoản lưu trên máy Mac. Kiểm tra OpenAI Status và đọc hồ sơ X công khai của Tibo không gửi credential, định danh tài khoản, phiên đã lưu hay dữ liệu quota. Bài đăng reset công khai chỉ là tín hiệu tham khảo; quota có xác thực do Codex trả về cho từng tài khoản vẫn là nguồn xác nhận cuối cùng. Xem [tài liệu pricing và usage chính thức của ChatGPT/Codex](https://learn.chatgpt.com/docs/pricing) để biết chính sách gói và quota mới nhất.
 
 Codex Roster dùng giấy phép MIT, được duy trì bởi [LE AN (@anlvdt)](https://github.com/anlvdt). Xem [AUTHORS.md](AUTHORS.md) và [CREDITS.md](CREDITS.md) để biết ghi nhận tác giả, nguồn tham khảo và ranh giới giấy phép.

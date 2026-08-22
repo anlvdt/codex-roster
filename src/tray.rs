@@ -669,6 +669,7 @@ mod tests {
                 reset_at,
             }),
             credits: None,
+            banked_resets: None,
             plan_label: None,
         });
 
@@ -710,6 +711,7 @@ mod tests {
                         .replace_time(Time::from_hms(13, 56, 0).unwrap()),
                 }),
                 credits: None,
+                banked_resets: None,
                 plan_label: None,
             }),
             usage_error: Some("Login required: Codex auth expired.".to_owned()),
@@ -832,6 +834,7 @@ mod tests {
                 reset_at,
             }),
             credits: None,
+            banked_resets: None,
             plan_label: None,
         });
         let account = DisplayIdentity {

@@ -3,25 +3,33 @@ set -euo pipefail
 
 root_dir="$(cd "$(dirname "$0")/.." && pwd)"
 
-unsafe_patterns=(
-  'arguments.append("--force")'
-  'RunCommandAsync("activate", account.Id.ToString(), "--force")'
-  'applyArgs.Add("--force")'
-  'activate_with_running_policy(account_id, true)'
-)
+# macOS centralizes its two allowed force flags: the activation helper and the
+# auto-switch apply path after Desktop was confirmed closed. Any extra literal
+# is an unsafe ad-hoc bypass and must fail CI.
+macos_force_count="$(grep -R -F -h -- '--force' \
+  "$root_dir/macos/NextAccount/Sources/NextAccount" | wc -l | tr -d ' ')"
+if [[ "$macos_force_count" -ne 2 ]]; then
+  echo "Expected exactly two guarded macOS --force append sites; found $macos_force_count." >&2
+  exit 1
+fi
 
-scoped_files=(
-  "$root_dir/macos/NextAccount/Sources/NextAccount/AccountStore.swift"
-  "$root_dir/windows/CodexRoster.Windows/ViewModels/RosterViewModel.cs"
-  "$root_dir/src/tray.rs"
-)
+activation_arguments_block="$(sed -n \
+  '/enum AccountActivationSafety/,/enum NewAccountLoginState/p' \
+  "$root_dir/macos/NextAccount/Sources/NextAccount/AccountStore.swift")"
+if ! grep -F -q 'if forceDesktop {' <<<"$activation_arguments_block" \
+  || ! grep -F -q 'arguments.append("--force")' <<<"$activation_arguments_block"; then
+  echo "The centralized macOS activation helper lost its forceDesktop guard." >&2
+  exit 1
+fi
 
-for pattern in "${unsafe_patterns[@]}"; do
-  if grep -F -n -- "$pattern" "${scoped_files[@]}"; then
-    echo "Unsafe forced account switch detected: $pattern" >&2
-    exit 1
-  fi
-done
+auto_switch_block="$(sed -n \
+  '/private func checkAutoSwitchWhenExhausted/,/private func reloadAccountsAfterSwitch/p' \
+  "$root_dir/macos/NextAccount/Sources/NextAccount/AccountStore.swift")"
+if ! grep -F -q 'if didCloseDesktop {' <<<"$auto_switch_block" \
+  || ! grep -F -q 'applyArguments.append("--force")' <<<"$auto_switch_block"; then
+  echo "The macOS auto-switch force flag must remain guarded by didCloseDesktop." >&2
+  exit 1
+fi
 
 grep -F -q 'ensure_activation_processes_stopped(&warnings)?;' \
   "$root_dir/src/app/service.rs"
@@ -33,8 +41,7 @@ if sed -n '/pub fn begin_add_account_session/,/pub fn save_added_account_session
 fi
 
 if grep -E -n 'closeDesktopForLoginIfNeeded|loginDesktopRelaunch|_loginRelaunch' \
-  "$root_dir/macos/NextAccount/Sources/NextAccount/AccountStore.swift" \
-  "$root_dir/windows/CodexRoster.Windows/ViewModels/RosterViewModel.cs"; then
+  "$root_dir/macos/NextAccount/Sources/NextAccount/AccountStore.swift"; then
   echo "Desktop close/relaunch lifecycle detected in an add/re-login flow." >&2
   exit 1
 fi

@@ -1,5 +1,7 @@
 # Codex Roster for Windows
 
+> **Paused:** Windows desktop feature development, CI packaging, previews, and releases are paused while the project focuses on the macOS app. The source and manual build notes below are retained for future maintenance only.
+
 This folder contains the native **WinUI 3** Windows desktop app. It is deliberately separate from the Swift macOS app and calls the shared Rust `codex-roster.exe` through JSON commands.
 
 ## Desktop experience
@@ -36,6 +38,6 @@ and the helper CLI. It is the asset attached to GitHub releases.
 
 For development with a different CLI binary, set `CODEX_ROSTER_CLI_PATH` to its full path. Do not point it to a shared or cloud-synced directory containing account snapshots.
 
-## Release path
+## Release path (paused)
 
-The first public Windows release will be an `x64` MSIX after real-device validation. `ARM64`, automatic app relaunch, signed MSIX, Microsoft Store submission, and update delivery follow after Preview acceptance.
+No Windows release is currently scheduled. The previous `x64` MSIX roadmap is retained in repository history and can be reconsidered when Windows development resumes.

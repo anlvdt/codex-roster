@@ -304,6 +304,10 @@ pub struct AccountUsageView {
     pub five_hour: Option<UsageWindowView>,
     pub weekly: Option<UsageWindowView>,
     pub credits: Option<CreditsView>,
+    /// Per-account Codex rate-limit reset credits. This is distinct from
+    /// ChatGPT spend credits and from community-wide reset announcements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banked_resets: Option<BankedResetSummaryView>,
     /// Plan returned by this usage fetch. Distinct from roster metadata so
     /// auto-switch does not trust a stale Plus/Pro label when the API omitted it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -322,6 +326,25 @@ pub struct CreditsView {
     pub has_credits: bool,
     pub unlimited: bool,
     pub balance: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BankedResetSummaryView {
+    pub available_count: i64,
+    /// `None` means the authenticated usage response only exposed the count.
+    /// The backend may cap this list below `available_count`.
+    pub credits: Option<Vec<BankedResetCreditView>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BankedResetCreditView {
+    pub id: String,
+    pub reset_type: String,
+    pub status: String,
+    pub granted_at: OffsetDateTime,
+    pub expires_at: Option<OffsetDateTime>,
+    pub title: Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

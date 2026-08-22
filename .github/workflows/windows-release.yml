@@ -1,29 +1,13 @@
-name: Windows desktop release
+name: Windows desktop release (paused)
 
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  package:
-    runs-on: windows-latest
+  paused:
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.release.tag_name }}
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: '8.0.x'
-      - name: Build the Windows desktop bundle
-        shell: pwsh
-        run: ./scripts/package-windows.ps1
-      - name: Attach the Windows desktop bundle
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload $env:RELEASE_TAG build/windows/Codex-Roster-Windows-x64.zip --clobber
+      - run: echo "Windows releases are paused while development focuses on macOS."

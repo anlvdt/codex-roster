@@ -28,9 +28,17 @@ public sealed class ResetNotifier : IDisposable
         if (!_registered) return;
         try
         {
+            var title = reset.Kind switch
+            {
+                "confirmed_banked_reset" => "Tibo: banked reset đã được cấp",
+                "scheduled_banked_reset" => "Tibo báo banked reset sắp tới",
+                "confirmed_global_reset" => "Tibo xác nhận mass reset",
+                "scheduled_global_reset" => "Tibo báo mass reset sắp tới",
+                _ => "Tibo phát tín hiệu reset"
+            };
             var notification = new AppNotificationBuilder()
-                .AddText("ChatGPT vừa có đợt mass reset")
-                .AddText("Quota Codex và ChatGPT Work đang được đặt lại")
+                .AddText(title)
+                .AddText("Nguồn trực tiếp: @thsottiaux trên X")
                 .AddText(reset.Summary)
                 .BuildNotification();
             AppNotificationManager.Default.Show(notification);

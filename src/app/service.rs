@@ -1570,6 +1570,7 @@ mod tests {
                 reset_at: OffsetDateTime::now_utc(),
             }),
             credits: None,
+            banked_resets: None,
             plan_label: None,
         };
 
@@ -1682,6 +1683,7 @@ mod tests {
                 reset_at: now,
             }),
             credits: None,
+            banked_resets: None,
             plan_label: plan.map(str::to_owned),
         };
         let account = |roster: Option<&str>, usage_plan: Option<&str>| crate::model::AccountView {
@@ -1744,6 +1746,7 @@ mod tests {
                 reset_at: now,
             }),
             credits,
+            banked_resets: None,
             plan_label: Some("Pro".to_owned()),
         };
 
@@ -1814,6 +1817,7 @@ mod tests {
                 five_hour: Some(window(remaining)),
                 weekly: Some(window(remaining)),
                 credits: None,
+                banked_resets: None,
                 plan_label: Some(plan.to_owned()),
             }),
             usage_error: None,
@@ -1913,6 +1917,7 @@ mod tests {
             }),
             weekly: None,
             credits: None,
+            banked_resets: None,
             plan_label: None,
         };
 
@@ -1934,6 +1939,7 @@ mod tests {
             }),
             weekly: None,
             credits: None,
+            banked_resets: None,
             plan_label: None,
         };
 
@@ -1953,6 +1959,7 @@ mod tests {
             }),
             weekly: None,
             credits: None,
+            banked_resets: None,
             plan_label: None,
         };
 
@@ -2046,6 +2053,7 @@ mod tests {
                     reset_at: OffsetDateTime::UNIX_EPOCH,
                 }),
                 credits: None,
+                banked_resets: None,
                 plan_label: None,
             }),
         )
@@ -2106,6 +2114,7 @@ mod tests {
                     reset_at: OffsetDateTime::UNIX_EPOCH,
                 }),
                 credits: None,
+                banked_resets: None,
                 plan_label: None,
             }),
         )

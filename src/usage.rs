@@ -10,12 +10,14 @@ use time::{Duration, OffsetDateTime};
 
 use crate::identity::parse_identity_from_auth_json;
 use crate::model::{
-    AccountUsageView, CreditsView, DisplayIdentity, EnvironmentKind, SnapshotBlob, UsageOutput,
-    UsageSource, UsageWindowView,
+    AccountUsageView, BankedResetCreditView, BankedResetSummaryView, CreditsView, DisplayIdentity,
+    EnvironmentKind, SnapshotBlob, UsageOutput, UsageSource, UsageWindowView,
 };
 
 static CHATGPT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 static USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
+static RESET_CREDITS_ENDPOINT: &str =
+    "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 static REFRESH_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 /// Matches Codex CLI: treat ChatGPT-managed sessions as stale after ~8 days.
 static TOKEN_REFRESH_INTERVAL: LazyLock<Duration> = LazyLock::new(|| Duration::days(8));
@@ -122,6 +124,18 @@ pub fn fetch_usage(target: UsageTarget) -> Result<(UsageOutput, SnapshotBlob), F
         }
     };
 
+    // Details are best-effort and fall back to the count embedded in the usage
+    // response. Avoid a second request when the authoritative count is zero.
+    let reset_credit_details = if response
+        .rate_limit_reset_credits
+        .as_ref()
+        .is_some_and(|summary| summary.available_count <= 0)
+    {
+        None
+    } else {
+        fetch_reset_credit_details(&auth.access_token, auth.account_id.as_deref()).ok()
+    };
+
     let snapshot = if auth.changed {
         update_snapshot_auth(&target.snapshot, &auth)
             .map_err(|error| FetchUsageError::new(error, None))?
@@ -142,16 +156,18 @@ pub fn fetch_usage(target: UsageTarget) -> Result<(UsageOutput, SnapshotBlob), F
             )
         })?,
     );
-    let usage = response.into_view(source).map_err(|error| {
-        FetchUsageError::new(
-            error,
-            if auth.changed {
-                Some(snapshot.clone())
-            } else {
-                None
-            },
-        )
-    })?;
+    let usage = response
+        .into_view(source, reset_credit_details)
+        .map_err(|error| {
+            FetchUsageError::new(
+                error,
+                if auth.changed {
+                    Some(snapshot.clone())
+                } else {
+                    None
+                },
+            )
+        })?;
     Ok((
         UsageOutput {
             environment: target.environment,
@@ -258,6 +274,29 @@ struct UsageResponse {
     plan_type: Option<String>,
     rate_limit: Option<UsageRateLimit>,
     credits: Option<UsageCredits>,
+    rate_limit_reset_credits: Option<UsageResetCreditsSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageResetCreditsSummary {
+    available_count: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResetCreditDetailsResponse {
+    credits: Vec<ResetCreditDetails>,
+    available_count: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResetCreditDetails {
+    id: String,
+    reset_type: String,
+    status: String,
+    granted_at: String,
+    expires_at: Option<String>,
+    title: Option<String>,
+    description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -301,9 +340,22 @@ impl UsageResponse {
         }))
     }
 
-    fn into_view(self, source: UsageSource) -> Result<AccountUsageView> {
+    fn into_view(
+        self,
+        source: UsageSource,
+        reset_credit_details: Option<ResetCreditDetailsResponse>,
+    ) -> Result<AccountUsageView> {
         let now = OffsetDateTime::now_utc();
         let plan_label = normalize_plan_label(self.plan_type.as_deref());
+        let banked_resets = reset_credit_details
+            .and_then(|details| details.into_view().ok())
+            .or_else(|| {
+                self.rate_limit_reset_credits
+                    .map(|summary| BankedResetSummaryView {
+                        available_count: summary.available_count,
+                        credits: None,
+                    })
+            });
         Ok(AccountUsageView {
             source,
             fetched_at: now,
@@ -320,7 +372,38 @@ impl UsageResponse {
                 .map(window_view)
                 .transpose()?,
             credits: self.credits.map(credits_view),
+            banked_resets,
             plan_label,
+        })
+    }
+}
+
+impl ResetCreditDetailsResponse {
+    fn into_view(self) -> Result<BankedResetSummaryView> {
+        let credits = self
+            .credits
+            .into_iter()
+            .map(|credit| {
+                Ok(BankedResetCreditView {
+                    id: credit.id,
+                    reset_type: credit.reset_type,
+                    status: credit.status,
+                    granted_at: OffsetDateTime::parse(&credit.granted_at, &Rfc3339)
+                        .context("invalid banked reset grant time")?,
+                    expires_at: credit
+                        .expires_at
+                        .as_deref()
+                        .map(|value| OffsetDateTime::parse(value, &Rfc3339))
+                        .transpose()
+                        .context("invalid banked reset expiry time")?,
+                    title: credit.title,
+                    description: credit.description,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(BankedResetSummaryView {
+            available_count: self.available_count,
+            credits: Some(credits),
         })
     }
 }
@@ -446,6 +529,34 @@ fn fetch_usage_response(access_token: &str, account_id: Option<&str>) -> Result<
         .body_mut()
         .read_json::<UsageResponse>()
         .context("failed to decode Codex usage response")
+}
+
+fn fetch_reset_credit_details(
+    access_token: &str,
+    account_id: Option<&str>,
+) -> Result<ResetCreditDetailsResponse> {
+    let mut request = ureq::get(RESET_CREDITS_ENDPOINT)
+        .header("Authorization", &format!("Bearer {access_token}"))
+        .header("User-Agent", "codex-roster")
+        .config()
+        .http_status_as_error(false)
+        .timeout_global(Some(std::time::Duration::from_secs(5)))
+        .build();
+    if let Some(account_id) = account_id {
+        request = request.header("ChatGPT-Account-Id", account_id);
+    }
+    let mut response = request
+        .call()
+        .context("failed to query Codex banked resets")?;
+    let status = response.status();
+    if status.as_u16() >= 400 {
+        let body = response.body_mut().read_to_string().unwrap_or_default();
+        bail!("banked reset request failed with {status}: {body}");
+    }
+    response
+        .body_mut()
+        .read_json::<ResetCreditDetailsResponse>()
+        .context("failed to decode Codex banked reset response")
 }
 
 fn needs_proactive_refresh(auth: &SnapshotAuth) -> bool {
@@ -788,6 +899,50 @@ mod tests {
         assert_eq!(usage_error_label(&message), "Usage unavailable");
         assert_eq!(message, "Usage unavailable: failed to query Codex usage");
         assert!(!usage_error_blocks_activation(&message));
+    }
+
+    #[test]
+    fn detailed_banked_resets_preserve_count_and_expiry() {
+        let details: ResetCreditDetailsResponse = serde_json::from_value(json!({
+            "available_count": 2,
+            "credits": [{
+                "id": "credit-1",
+                "reset_type": "codex_rate_limits",
+                "status": "available",
+                "granted_at": "2026-08-22T00:00:00Z",
+                "expires_at": "2026-09-21T00:00:00Z",
+                "title": "Full reset",
+                "description": "Ready to redeem"
+            }]
+        }))
+        .expect("details payload");
+
+        let view = details.into_view().expect("details view");
+
+        assert_eq!(view.available_count, 2);
+        let credits = view.credits.expect("detailed rows");
+        assert_eq!(credits.len(), 1);
+        assert_eq!(credits[0].status, "available");
+        assert_eq!(
+            credits[0].expires_at.map(|value| value.unix_timestamp()),
+            Some(1_789_948_800)
+        );
+    }
+
+    #[test]
+    fn usage_banked_reset_count_survives_missing_details() {
+        let response: UsageResponse = serde_json::from_value(json!({
+            "rate_limit_reset_credits": { "available_count": 3 }
+        }))
+        .expect("usage payload");
+
+        let view = response
+            .into_view(UsageSource::LiveAccessToken, None)
+            .expect("usage view");
+
+        let resets = view.banked_resets.expect("banked reset summary");
+        assert_eq!(resets.available_count, 3);
+        assert!(resets.credits.is_none());
     }
 
     #[test]

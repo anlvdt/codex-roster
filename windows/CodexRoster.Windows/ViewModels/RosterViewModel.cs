@@ -899,10 +899,15 @@ public sealed class RosterViewModel : INotifyPropertyChanged, IDisposable
         {
             var resets = await _cli.ReadAsync<List<GlobalResetEventDto>>("reset-events");
             foreach (var reset in resets) _resetNotifier.Show(reset);
+            if (resets.Count > 0)
+            {
+                var outlook = await _cli.ReadAsync<ResetOutlookDto>("reset-outlook");
+                ResetOutlookSummary = $"{outlook.Chance24Hours}% trong 24 giờ · {outlook.Chance48Hours}% trong 48 giờ · {outlook.WindowLabel}";
+            }
         }
         catch
         {
-            // Community reset tracking is advisory and retries on the next poll.
+            // Public X signal tracking is advisory and retries on the next poll.
         }
     }
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.2.41 - 2026-08-22
+
+### Added
+
+- macOS can install, configure, repair, and maintain Codex Router automatically from its checksum-verified official installer.
+- Add, connect, enable, or hide external-model providers from Roster while Router remains the owner of credentials, routing, and model catalogs.
+- Show banked-reset availability separately from immediately usable quota, with explicit account and reset counts.
+
+### Changed
+
+- Streamline the macOS dashboard, sidebar, menu bar, and About view around live quota, account health, reset monitoring, and frequent actions; remove duplicate account lists and passkey setup UI.
+- Replace hard-coded 24h/48h reset percentages with recency-weighted forecast scores. Confirmed resets complete the future forecast at zero, and the latest reset time is shown as a live relative duration.
+- Keep quota-exhausted accounts hidden from primary switching surfaces unless they have actionable banked resets or require attention.
+
+### Fixed
+
+- Auto-switch distinguishes unredeemed banked resets from usable quota and never silently consumes an irreversible reset or switches to an account still at 0%.
+- Reject future-dated and stale public reset signals, select the latest actionable post by timestamp, and decay confidence at the 12h, 24h, and 48h boundaries.
+
 ## v0.2.40 - 2026-08-15
 
 ### Fixed

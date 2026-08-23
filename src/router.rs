@@ -76,6 +76,87 @@ fn provider_is_external(provider: &str) -> bool {
     !normalized.is_empty() && !normalized.eq_ignore_ascii_case("openai")
 }
 
+#[derive(Debug, Deserialize)]
+struct ModelPickerFile {
+    #[serde(default)]
+    visible: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MergedModelsFile {
+    #[serde(default)]
+    models: Vec<MergedModelEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MergedModelEntry {
+    #[serde(default)]
+    slug: Option<String>,
+    #[serde(default)]
+    visibility: Option<String>,
+}
+
+/// Pure check: a model the picker marks visible but the published catalog does
+/// not list (missing entirely, or flagged with a non-`list` visibility) is the
+/// stale-catalog symptom that keeps a just-enabled model out of Codex's picker.
+fn catalog_omits_visible_models(picker_visible: &[String], catalog: &[MergedModelEntry]) -> bool {
+    let listed: std::collections::HashMap<&str, &str> = catalog
+        .iter()
+        .filter_map(|entry| {
+            Some((
+                entry.slug.as_deref()?,
+                entry.visibility.as_deref().unwrap_or(""),
+            ))
+        })
+        .collect();
+    picker_visible
+        .iter()
+        .any(|slug| listed.get(slug.as_str()).copied() != Some("list"))
+}
+
+/// Read the router's picker and published catalog and report whether the
+/// catalog has fallen behind the picker (see [`catalog_omits_visible_models`]).
+/// Any read/parse failure is treated as "not stale" so a missing file never
+/// forces a needless republish.
+fn catalog_visibility_is_stale() -> bool {
+    let state = router_state_dir();
+    let Some(picker) = std::fs::read(state.join("model-picker.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ModelPickerFile>(&bytes).ok())
+    else {
+        return false;
+    };
+    if picker.visible.is_empty() {
+        return false;
+    }
+    let Some(catalog) = std::fs::read(state.join("merged-models.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<MergedModelsFile>(&bytes).ok())
+    else {
+        return false;
+    };
+    catalog_omits_visible_models(&picker.visible, &catalog.models)
+}
+
+/// After a provider is enabled the merged catalog can lag the picker — its
+/// rebuild silently failed (e.g. a network timeout during `refresh-catalog`) —
+/// leaving just-enabled models flagged hidden so Codex never shows them.
+/// Re-running `providers enable` republishes the whole catalog; retry a few
+/// times until it lists every picker-visible model. Returns whether it
+/// converged.
+fn reconcile_catalog_visibility(installation: &RouterInstallation, provider_id: &str) -> bool {
+    for _ in 0..3 {
+        if !catalog_visibility_is_stale() {
+            return true;
+        }
+        let _ = run_router_dynamic(
+            &installation.executable,
+            &["providers", "enable", provider_id],
+        );
+    }
+    !catalog_visibility_is_stale()
+}
+
 impl RouterStatusOutput {
     pub fn state_label(&self) -> &'static str {
         match self.state {
@@ -390,11 +471,22 @@ pub fn connect_provider(
         );
     }
     if provider.visible {
+        // The provider is enabled, but its models can still be missing from the
+        // catalog Codex reads if an earlier catalog rebuild failed. Republish if
+        // so, and report honestly when the catalog is still catching up.
+        let reconciled = reconcile_catalog_visibility(&installation, provider.id.as_str());
         return Ok(RouterProviderActionOutput {
             ok: true,
             action: "connect_provider",
             provider_id: provider.id.clone(),
-            message: format!("{} is already available in Codex.", provider.name),
+            message: if reconciled {
+                format!("{} is already available in Codex.", provider.name)
+            } else {
+                format!(
+                    "{} is enabled, but Codex's model catalog is still catching up. Restart ChatGPT; if it stays missing, sync Router again.",
+                    provider.name
+                )
+            },
             pending_user_action: false,
         });
     }
@@ -465,12 +557,22 @@ pub fn connect_provider(
                 ""
             }
         };
+        // Republish if the catalog lags the picker, unless the models are still
+        // waiting on interactive curation (they are legitimately absent until
+        // the user picks them).
+        let sync_note = if !needs_interactive_curation
+            && !reconcile_catalog_visibility(&installation, provider.id.as_str())
+        {
+            " Codex's catalog is still catching up — restart ChatGPT, then sync Router again if the model stays missing."
+        } else {
+            ""
+        };
         return Ok(RouterProviderActionOutput {
             ok: true,
             action: "connect_provider",
             provider_id: provider.id.clone(),
             message: format!(
-                "{} is now available alongside native GPT models.{catalog_note}",
+                "{} is now available alongside native GPT models.{catalog_note}{sync_note}",
                 provider.name
             ),
             pending_user_action: needs_interactive_curation,
@@ -1021,6 +1123,34 @@ mod tests {
             session.model.as_deref(),
             Some("opencode-free/x-preview-f-free")
         );
+    }
+
+    #[test]
+    fn detects_catalog_that_lags_the_picker() {
+        use super::MergedModelEntry;
+        let entry = |slug: &str, vis: &str| MergedModelEntry {
+            slug: Some(slug.to_owned()),
+            visibility: Some(vis.to_owned()),
+        };
+        let visible = vec![
+            "grok-oauth/grok-4.6".to_owned(),
+            "opencode-free/big-pickle".to_owned(),
+        ];
+        // Both listed → consistent.
+        let good = [
+            entry("grok-oauth/grok-4.6", "list"),
+            entry("opencode-free/big-pickle", "list"),
+        ];
+        assert!(!super::catalog_omits_visible_models(&visible, &good));
+        // One still flagged hidden → stale.
+        let hidden = [
+            entry("grok-oauth/grok-4.6", "hide"),
+            entry("opencode-free/big-pickle", "list"),
+        ];
+        assert!(super::catalog_omits_visible_models(&visible, &hidden));
+        // One missing from the catalog entirely → stale.
+        let missing = [entry("opencode-free/big-pickle", "list")];
+        assert!(super::catalog_omits_visible_models(&visible, &missing));
     }
 
     #[test]

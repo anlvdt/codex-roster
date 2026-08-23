@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.44 - 2026-08-23
+
+### Fixed
+
+- Connecting a Codex Router provider now self-heals a stale model catalog: when a provider is enabled but its models are still missing from (or hidden in) the catalog Codex reads — because an earlier catalog rebuild failed, e.g. a network timeout — Roster republishes the catalog automatically and, if it still lags, says so and asks you to restart ChatGPT instead of silently leaving the models out of the picker.
+
 ## v0.2.43 - 2026-08-23
 
 ### Changed

@@ -175,10 +175,12 @@ pub fn status() -> RouterStatusOutput {
                 .is_some_and(|state| state.eq_ignore_ascii_case("generating"))
     });
     let external_session = activity.as_ref().and_then(|activity| {
-        activity
-            .active
-            .iter()
-            .find(|session| session.provider.as_deref().is_some_and(provider_is_external))
+        activity.active.iter().find(|session| {
+            session
+                .provider
+                .as_deref()
+                .is_some_and(provider_is_external)
+        })
     });
 
     RouterStatusOutput {
@@ -1012,8 +1014,13 @@ mod tests {
         assert_eq!(activity.active_count, 1);
         assert_eq!(activity.state.as_deref(), Some("generating"));
         let session = &activity.active[0];
-        assert!(super::provider_is_external(session.provider.as_deref().unwrap()));
-        assert_eq!(session.model.as_deref(), Some("opencode-free/x-preview-f-free"));
+        assert!(super::provider_is_external(
+            session.provider.as_deref().unwrap()
+        ));
+        assert_eq!(
+            session.model.as_deref(),
+            Some("opencode-free/x-preview-f-free")
+        );
     }
 
     #[test]
@@ -1027,7 +1034,8 @@ mod tests {
 
     #[test]
     fn idle_router_reports_no_activity() {
-        let stdout = "{\"ok\":true,\"activity\":{\"state\":\"idle\",\"activeCount\":0,\"active\":[]}}\n";
+        let stdout =
+            "{\"ok\":true,\"activity\":{\"state\":\"idle\",\"activeCount\":0,\"active\":[]}}\n";
         let activity = super::parse_router_activity(stdout.as_bytes()).expect("activity present");
         assert_eq!(activity.active_count, 0);
         assert!(activity.active.is_empty());

@@ -3154,7 +3154,9 @@ private struct MenuBarView: View {
 
     private var switchableAccounts: [SavedAccount] {
         store.accounts.filter {
-            !store.isArchived($0) && !$0.requiresLogin && $0.isUsableForSwitch
+            !store.isArchived($0)
+                && !$0.requiresLogin
+                && ($0.isUsableForSwitch || max(0, $0.usage?.bankedResets?.availableCount ?? 0) > 0)
         }
     }
 
@@ -3214,13 +3216,13 @@ private struct MenuBarView: View {
                     Text(language.text("Chuyển nhanh", "Quick switch"))
                         .font(.subheadline.weight(.semibold))
                     Spacer()
-                    Text(language.text("\(switchTargets.count) có quota", "\(switchTargets.count) with quota"))
+                    Text(language.text("\(switchTargets.count) khả dụng", "\(switchTargets.count) available"))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
 
                 if quickSwitchAccounts.isEmpty {
-                    Text(language.text("Chưa có tài khoản khác có quota khả dụng để chuyển.", "No other saved account has quota available to switch."))
+                    Text(language.text("Chưa có tài khoản khác đủ điều kiện để chuyển.", "No other saved account is available to switch."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 8)
@@ -3783,6 +3785,20 @@ private struct MenuBarAccountRow: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 4)
+            if let resets = account.usage?.bankedResets, max(0, resets.availableCount) > 0 {
+                Label("\(max(0, resets.availableCount))", systemImage: "arrow.counterclockwise.circle.fill")
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .help(language.text(
+                        "Banked reset khả dụng: \(max(0, resets.availableCount))",
+                        "Available banked resets: \(max(0, resets.availableCount))"
+                    ))
+                    .accessibilityLabel(language.text(
+                        "Có \(max(0, resets.availableCount)) lượt banked reset",
+                        "\(max(0, resets.availableCount)) banked resets available"
+                    ))
+            }
             if let quota = account.primaryQuotaWindow {
                 MenuBarQuota(window: quota)
             } else {
@@ -3888,7 +3904,7 @@ private struct AboutView: View {
                     AboutPanel(title: language.text("Tóm tắt", "Overview"), icon: "person.3.sequence.fill") {
                         AboutBullet(icon: "person.crop.circle", text: language.text("Nhìn ngay phiên đang dùng, quota, thời điểm reset và banked reset.", "See the active session, quota, reset time, and banked resets at a glance."))
                         AboutBullet(icon: "antenna.radiowaves.left.and.right", text: language.text("Theo dõi live trạng thái OpenAI và tín hiệu reset công khai của Tibo.", "Monitor OpenAI service health and Tibo's public reset signals live."))
-                        AboutBullet(icon: "arrow.left.arrow.right.circle", text: language.text("Chuyển nhanh sang tài khoản còn quota ngay từ menu bar.", "Quick-switch to an account with usable quota from the menu bar."))
+                        AboutBullet(icon: "arrow.left.arrow.right.circle", text: language.text("Chuyển nhanh từ menu bar đến tài khoản còn quota hoặc có banked reset.", "Quick-switch from the menu bar to accounts with usable quota or banked resets."))
                     }
 
                     AboutPanel(title: language.text("Quyền riêng tư", "Privacy"), icon: "hand.raised.fill") {
@@ -3927,7 +3943,7 @@ private struct AboutView: View {
                     }
                     AboutFeatureGroup(title: language.text("Quota & chuyển tài khoản", "Quota & switching")) {
                         AboutBullet(icon: "gauge.with.dots.needle.50percent", text: language.text("Theo dõi quota Codex, thời điểm reset và gói ChatGPT; làm mới tài khoản đang dùng mỗi phút hoặc kiểm tra toàn bộ theo yêu cầu.", "Track Codex quota, reset timing, and ChatGPT plan; refresh the active account every minute or check every account on demand."))
-                        AboutBullet(icon: "arrow.left.arrow.right.circle", text: language.text("Chuyển nhanh từ menu bar; sắp xếp theo gói ChatGPT (Pro/Plus/Free) và quota còn lại.", "Quick-switch from the menu bar; sort by ChatGPT plan (Pro/Plus/Free) and remaining quota."))
+                        AboutBullet(icon: "arrow.left.arrow.right.circle", text: language.text("Chuyển nhanh từ menu bar; bao gồm tài khoản 0% đang giữ banked reset.", "Quick-switch from the menu bar; includes 0% accounts holding a banked reset."))
                         AboutBullet(icon: "arrow.triangle.2.circlepath", text: language.text("Tự động chuyển khi hết quota (tùy chọn): đóng ChatGPT nếu cần, đổi phiên ~/.codex, rồi mở lại Desktop để khớp Roster; không lặp khi mọi tài khoản đều hết quota.", "Optional auto-switch when exhausted: close ChatGPT if needed, switch ~/.codex, then relaunch Desktop to match Roster; never loops when every account is exhausted."))
                         AboutBullet(icon: "arrow.clockwise.icloud", text: language.text("Nút “Mở lại ChatGPT theo phiên này” đóng rồi mở Desktop để khớp ~/.codex ngay.", "“Relaunch ChatGPT with this session” quits and reopens Desktop to match ~/.codex immediately."))
                     }

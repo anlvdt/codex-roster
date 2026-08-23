@@ -1716,6 +1716,8 @@ struct TokenUsageSummary: Decodable {
 struct ResetOutlook: Decodable {
     let updatedAt: String
     let lastResetAt: String
+    let nextResetAt: String?
+    let lastResetIsConfirmed: Bool?
     let chance24Hours: Int
     let chance48Hours: Int
     let confidence: String

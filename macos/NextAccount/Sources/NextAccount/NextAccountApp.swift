@@ -1995,7 +1995,7 @@ private struct GlobalResetOutlookCard: View {
             }
 
             if let outlook = store.resetOutlook {
-                let isConfirmedReset = outlook.signalKind?.hasPrefix("confirmed_") == true
+                let isConfirmedReset = outlook.lastResetIsConfirmed == true
                 HStack(spacing: 10) {
                     ResetOutlookMetric(
                         title: language.text("Điểm dự báo 24h", "24h forecast score"),
@@ -2032,6 +2032,16 @@ private struct GlobalResetOutlookCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
+                if let scheduledResetAt = outlook.nextResetAt {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(language.text("Reset dự kiến", "Expected reset"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(formattedVietnamResetDate(scheduledResetAt, language: language.language))
+                            .font(.subheadline.weight(.semibold))
+                    }
+                }
+
                 if let summary = outlook.signalSummary, !summary.isEmpty {
                     Text(summary)
                         .font(.caption)
@@ -2041,7 +2051,7 @@ private struct GlobalResetOutlookCard: View {
                 }
 
                 HStack {
-                    Text(language.text("Điểm giảm theo độ cũ của tín hiệu; reset đã xác nhận là sự kiện đã xảy ra nên dự báo tương lai về 0. Quota tài khoản vẫn là xác nhận cuối cùng.", "Scores decay with signal age; a confirmed reset is a completed event, so its future forecast returns to 0. Account quota remains the final confirmation."))
+                    Text(language.text("Dự báo dựa trên thời điểm Tibo công bố hoặc tín hiệu nhịp lịch sử; reset đã xác nhận chỉ hiển thị làm mốc thời gian gần nhất. Quota tài khoản vẫn là xác nhận cuối cùng.", "Forecasts use Tibo’s stated delivery time or historical signal cadence; a confirmed reset is shown as the latest completed milestone. Account quota remains the final confirmation."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -2132,6 +2142,50 @@ private func formattedRelativeResetDate(
     relativeFormatter.locale = language.locale
     relativeFormatter.unitsStyle = .full
     return relativeFormatter.localizedString(for: date, relativeTo: referenceDate)
+}
+
+private func formattedVietnamResetDate(_ value: String, language: AppLanguage) -> String {
+    let isoFormatter = ISO8601DateFormatter()
+    isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    guard let date = isoFormatter.date(from: value) ?? ISO8601DateFormatter().date(from: value) else {
+        return value
+    }
+
+    let vietnamTimeZone = TimeZone(identifier: "Asia/Ho_Chi_Minh") ?? .current
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = vietnamTimeZone
+    let components = calendar.dateComponents([.hour, .weekday], from: date)
+
+    let posixLocale = Locale(identifier: "en_US_POSIX")
+    let timeFormatter = DateFormatter()
+    timeFormatter.locale = posixLocale
+    timeFormatter.timeZone = vietnamTimeZone
+    let dateFormatter = DateFormatter()
+    dateFormatter.locale = posixLocale
+    dateFormatter.timeZone = vietnamTimeZone
+    let symbolFormatter = DateFormatter()
+    symbolFormatter.locale = language.locale
+    symbolFormatter.timeZone = vietnamTimeZone
+
+    if language == .vietnamese {
+        timeFormatter.dateFormat = "HH:mm"
+        dateFormatter.dateFormat = "dd/MM"
+        let hour = components.hour ?? 0
+        let period = switch hour {
+        case 0..<12: "sáng"
+        case 12..<18: "chiều"
+        default: "tối"
+        }
+        let weekday = symbolFormatter.weekdaySymbols[(components.weekday ?? 1) - 1]
+        let weekdayPrefix = weekday.prefix(1).lowercased()
+        let formattedWeekday = weekdayPrefix + weekday.dropFirst()
+        return "khoảng \(timeFormatter.string(from: date)) \(period) \(formattedWeekday) \(dateFormatter.string(from: date)) giờ Việt Nam"
+    }
+
+    timeFormatter.dateFormat = "h:mm a"
+    dateFormatter.dateFormat = "MM/dd"
+    let weekday = symbolFormatter.weekdaySymbols[(components.weekday ?? 1) - 1]
+    return "around \(timeFormatter.string(from: date)) \(weekday), \(dateFormatter.string(from: date)) Vietnam time"
 }
 
 private struct ProviderStatusRow: View {

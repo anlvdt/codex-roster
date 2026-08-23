@@ -18,7 +18,7 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
 - Show the active account's quota in the menu bar and account quota/reset state in the sidebar.
 - Launch the OpenAI browser sign-in flow without reading passwords, verification codes, or browser cookies.
 - Close and relaunch ChatGPT/Codex Desktop after a confirmed account switch.
-- Refresh local Codex token statistics, public OpenAI Status, and reset signals read directly from [Tibo / @thsottiaux on X](https://x.com/thsottiaux).
+- Refresh local Codex token statistics, public OpenAI Status, and reset signals from [Tibo / @thsottiaux on X](https://x.com/thsottiaux), normalized through the independent [Codex Reset radar](https://codex-reset.com/) when X truncates long posts.
 - Automatically install, update, configure, and repair [Codex Router](https://github.com/duolahypercho/codex-router) from its checksum-verified official installer; no Router controls are required for native Codex use.
 - Offer Vietnamese and English; Vietnamese is the default.
 
@@ -107,7 +107,7 @@ codex-roster router doctor [--json]
 
 ### Privacy, status, and credits
 
-Saved account data remains on this Mac. OpenAI Status checks and reads of Tibo's public X profile never include account credentials, identifiers, saved sessions, or quota data. The 24h/48h values are recency-weighted public-signal scores, not statistical probabilities: scheduled signals decay across their horizon, while a confirmed reset is treated as a completed event and returns the future forecast to zero. Public reset posts are advisory; authenticated per-account quota returned by Codex remains the source of truth. Read [OpenAI's current ChatGPT and Codex pricing documentation](https://learn.chatgpt.com/docs/pricing) for plan and usage policy.
+Saved account data remains on this Mac. OpenAI Status, Tibo's public X profile, and Codex Reset radar requests never include account credentials, identifiers, saved sessions, or quota data. The 24h/48h values are public-signal forecast scores, not statistical probabilities: explicit delivery times anchor scheduled resets, unscheduled hints decay with age, and a confirmed reset remains visible as the latest completed milestone. Public reset posts are advisory; authenticated per-account quota returned by Codex remains the source of truth. Read [OpenAI's current ChatGPT and Codex pricing documentation](https://learn.chatgpt.com/docs/pricing) for plan and usage policy.
 
 Codex Roster is MIT licensed. It is maintained by [LE AN (@anlvdt)](https://github.com/anlvdt). See [AUTHORS.md](AUTHORS.md) and [CREDITS.md](CREDITS.md) for original-foundation, research, and license attribution.
 
@@ -128,7 +128,7 @@ swift build --package-path macos/NextAccount
 - Hiển thị quota tài khoản đang dùng trên menu bar; hiển thị quota và thời điểm reset ở sidebar.
 - Mở luồng đăng nhập thiết bị OpenAI mà không đọc mật khẩu, mã xác thực hay cookie trình duyệt.
 - Đóng rồi mở lại ChatGPT/Codex Desktop sau khi bạn xác nhận chuyển tài khoản.
-- Theo dõi token Codex cục bộ, trạng thái công khai OpenAI và tín hiệu reset đọc trực tiếp từ [Tibo / @thsottiaux trên X](https://x.com/thsottiaux).
+- Theo dõi token Codex cục bộ, trạng thái công khai OpenAI và tín hiệu reset từ [Tibo / @thsottiaux trên X](https://x.com/thsottiaux); dùng radar độc lập [Codex Reset](https://codex-reset.com/) để chuẩn hóa khi X cắt ngắn bài đăng dài.
 - Tự động cài, cập nhật, cấu hình và sửa [Codex Router](https://github.com/duolahypercho/codex-router) bằng installer chính thức đã xác minh checksum; dùng Codex native không cần thao tác Router.
 - Hỗ trợ Tiếng Việt và English; mặc định là Tiếng Việt.
 
@@ -189,6 +189,6 @@ open "build/Codex Roster.app"
 
 ### Riêng tư, trạng thái và ghi nhận
 
-Dữ liệu tài khoản lưu trên máy Mac. Kiểm tra OpenAI Status và đọc hồ sơ X công khai của Tibo không gửi credential, định danh tài khoản, phiên đã lưu hay dữ liệu quota. Giá trị 24h/48h là điểm tín hiệu công khai có trọng số theo độ mới, không phải xác suất thống kê: tín hiệu hẹn trước giảm dần trong cửa sổ tương ứng, còn reset đã xác nhận được xem là sự kiện hoàn tất nên dự báo tương lai trở về 0. Bài đăng reset công khai chỉ là tín hiệu tham khảo; quota có xác thực do Codex trả về cho từng tài khoản vẫn là nguồn xác nhận cuối cùng. Xem [tài liệu pricing và usage chính thức của ChatGPT/Codex](https://learn.chatgpt.com/docs/pricing) để biết chính sách gói và quota mới nhất.
+Dữ liệu tài khoản lưu trên máy Mac. Kiểm tra OpenAI Status, đọc hồ sơ X công khai của Tibo và truy vấn Codex Reset không gửi credential, định danh tài khoản, phiên đã lưu hay dữ liệu quota. Giá trị 24h/48h là điểm dự báo từ tín hiệu công khai, không phải xác suất thống kê: thời điểm giao rõ ràng sẽ neo tín hiệu hẹn trước, tín hiệu mơ hồ giảm theo độ mới, còn reset đã xác nhận được hiển thị như mốc hoàn tất gần nhất. Bài đăng reset công khai chỉ là tín hiệu tham khảo; quota có xác thực do Codex trả về cho từng tài khoản vẫn là nguồn xác nhận cuối cùng. Xem [tài liệu pricing và usage chính thức của ChatGPT/Codex](https://learn.chatgpt.com/docs/pricing) để biết chính sách gói và quota mới nhất.
 
 Codex Roster dùng giấy phép MIT, được duy trì bởi [LE AN (@anlvdt)](https://github.com/anlvdt). Xem [AUTHORS.md](AUTHORS.md) và [CREDITS.md](CREDITS.md) để biết ghi nhận tác giả, nguồn tham khảo và ranh giới giấy phép.

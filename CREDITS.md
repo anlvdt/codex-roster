@@ -4,7 +4,7 @@ Codex Roster is an independent native macOS application built for the Codex comm
 
 Except for the original MIT foundation explicitly identified below, Codex Roster does not include source code, visual assets, account data, credentials, or state from the referenced projects.
 
-## Reference audit — 2026-08-22
+## Reference audit — 2026-08-22, reset-radar review 2026-08-23
 
 | Source | Revision reviewed | Role in Codex Roster | License / boundary |
 | --- | --- | --- | --- |
@@ -14,6 +14,7 @@ Except for the original MIT foundation explicitly identified below, Codex Roster
 | [Ducksss/codex-profiles](https://github.com/Ducksss/codex-profiles) | `main` / `e8ca967` (package 0.8.0) | Profile, workspace, and local-state boundary research | MIT; no source imported |
 | [vyctorbrzezowski/codex-switchboard](https://github.com/vyctorbrzezowski/codex-switchboard) | `v1.0.10` / `296c0b3` | Local-first switching and shared-auth safety research | MIT; independently implemented |
 | [duolahypercho/codex-router](https://github.com/duolahypercho/codex-router) | `v0.4.0-beta.4` / `2376def` | Automated lifecycle through its documented CLI and verified official installer | MIT; separate installation and state |
+| [codex-reset.com](https://codex-reset.com/) | Live `/api/feed` checked `2026-08-23` | Public Tibo-post normalization research for long X posts that X truncates | Public website/API; no source/assets copied and no account data sent |
 
 The reviewed updates were applied selectively. Roster follows Router's documented status, provider-selection, guided-setup, and maintenance command boundaries and preserves the stricter local-first rule from current switching research: it does not refresh inactive accounts' OAuth refresh tokens in the background. Roster now coordinates provider visibility in its macOS UI, while Router-owned credentials, routing, catalog curation, provider spend, and provider quota remain outside Roster's data model.
 
@@ -41,4 +42,4 @@ Codex Roster integrates with [duolahypercho/codex-router](https://github.com/duo
 
 ## Public reset signal source
 
-Codex Roster reads the public profile of [Tibo / @thsottiaux on X](https://x.com/thsottiaux) directly and classifies reset, scheduled-reset, and banked-reset wording locally. It does not send account identifiers, credentials, saved sessions, or quota data to X. Public posts remain advisory; authenticated per-account quota returned by Codex is the final confirmation that a reset or banked credit reached an account.
+Codex Roster reads [Tibo / @thsottiaux on X](https://x.com/thsottiaux) and uses the independent [Codex Reset radar](https://codex-reset.com/) as a public-text normalization source when X truncates a long post. Classification remains local to Roster. Requests to either source do not include account identifiers, credentials, saved sessions, or quota data. Public posts remain advisory; authenticated per-account quota returned by Codex is the final confirmation that a reset or banked credit reached an account.

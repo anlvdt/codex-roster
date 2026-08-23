@@ -89,6 +89,20 @@ struct MergedModelsFile {
 }
 
 #[derive(Debug, Deserialize)]
+struct UserModelsFile {
+    #[serde(default)]
+    models: Vec<UserModelEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserModelEntry {
+    provider: String,
+    slug: String,
+    #[serde(default)]
+    listed: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct MergedModelEntry {
     #[serde(default)]
     slug: Option<String>,
@@ -96,10 +110,15 @@ struct MergedModelEntry {
     visibility: Option<String>,
 }
 
-/// Pure check: a model the picker marks visible but the published catalog does
-/// not list (missing entirely, or flagged with a non-`list` visibility) is the
-/// stale-catalog symptom that keeps a just-enabled model out of Codex's picker.
-fn catalog_omits_visible_models(picker_visible: &[String], catalog: &[MergedModelEntry]) -> bool {
+/// Prefer the provider's currently curated user models over the picker's
+/// historical visibility list. A curated model that is missing or hidden in
+/// the published catalog is the stale-catalog symptom we need to repair.
+fn catalog_omits_expected_provider_models(
+    provider_id: &str,
+    picker_visible: &[String],
+    user_models: &[UserModelEntry],
+    catalog: &[MergedModelEntry],
+) -> bool {
     let listed: std::collections::HashMap<&str, &str> = catalog
         .iter()
         .filter_map(|entry| {
@@ -109,33 +128,65 @@ fn catalog_omits_visible_models(picker_visible: &[String], catalog: &[MergedMode
             ))
         })
         .collect();
-    picker_visible
+    let curated_models = user_models
         .iter()
-        .any(|slug| listed.get(slug.as_str()).copied() != Some("list"))
+        .filter(|entry| entry.provider == provider_id && entry.listed)
+        .map(|entry| entry.slug.as_str())
+        .collect::<Vec<_>>();
+    let provider_prefix = format!("{provider_id}/");
+    let mut expected_models = if curated_models.is_empty() {
+        picker_visible
+            .iter()
+            .map(String::as_str)
+            .filter(|slug| slug.starts_with(&provider_prefix))
+            .collect::<Vec<_>>()
+    } else {
+        curated_models
+    }
+    .into_iter()
+    .peekable();
+    expected_models.peek().is_none()
+        || expected_models.any(|slug| listed.get(slug).copied() != Some("list"))
 }
 
-/// Read the router's picker and published catalog and report whether the
-/// catalog has fallen behind the picker (see [`catalog_omits_visible_models`]).
-/// Any read/parse failure is treated as "not stale" so a missing file never
-/// forces a needless republish.
-fn catalog_visibility_is_stale() -> bool {
+/// Read the router's current model sources and published catalog and report
+/// whether the catalog has fallen behind for the provider being connected (see
+/// [`catalog_omits_expected_provider_models`]). Missing or malformed state is
+/// stale because republishing is the router's recovery path for those files.
+fn catalog_visibility_is_stale(provider_id: &str) -> bool {
     let state = router_state_dir();
-    let Some(picker) = std::fs::read(state.join("model-picker.json"))
+    let picker = std::fs::read(state.join("model-picker.json"))
         .ok()
-        .and_then(|bytes| serde_json::from_slice::<ModelPickerFile>(&bytes).ok())
-    else {
-        return false;
-    };
-    if picker.visible.is_empty() {
-        return false;
+        .and_then(|bytes| serde_json::from_slice::<ModelPickerFile>(&bytes).ok());
+    let catalog = std::fs::read(state.join("merged-models.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<MergedModelsFile>(&bytes).ok());
+    let user_models = std::fs::read(state.join("user-models.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<UserModelsFile>(&bytes).ok());
+    catalog_state_is_stale(
+        provider_id,
+        picker.as_ref(),
+        user_models.as_ref(),
+        catalog.as_ref(),
+    )
+}
+
+fn catalog_state_is_stale(
+    provider_id: &str,
+    picker: Option<&ModelPickerFile>,
+    user_models: Option<&UserModelsFile>,
+    catalog: Option<&MergedModelsFile>,
+) -> bool {
+    match (picker, user_models, catalog) {
+        (Some(picker), Some(user_models), Some(catalog)) => catalog_omits_expected_provider_models(
+            provider_id,
+            &picker.visible,
+            &user_models.models,
+            &catalog.models,
+        ),
+        _ => true,
     }
-    let Some(catalog) = std::fs::read(state.join("merged-models.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<MergedModelsFile>(&bytes).ok())
-    else {
-        return false;
-    };
-    catalog_omits_visible_models(&picker.visible, &catalog.models)
 }
 
 /// After a provider is enabled the merged catalog can lag the picker — its
@@ -146,7 +197,7 @@ fn catalog_visibility_is_stale() -> bool {
 /// converged.
 fn reconcile_catalog_visibility(installation: &RouterInstallation, provider_id: &str) -> bool {
     for _ in 0..3 {
-        if !catalog_visibility_is_stale() {
+        if !catalog_visibility_is_stale(provider_id) {
             return true;
         }
         let _ = run_router_dynamic(
@@ -154,7 +205,7 @@ fn reconcile_catalog_visibility(installation: &RouterInstallation, provider_id: 
             &["providers", "enable", provider_id],
         );
     }
-    !catalog_visibility_is_stale()
+    !catalog_visibility_is_stale(provider_id)
 }
 
 impl RouterStatusOutput {
@@ -1135,22 +1186,103 @@ mod tests {
         let visible = vec![
             "grok-oauth/grok-4.6".to_owned(),
             "opencode-free/big-pickle".to_owned(),
+            "opencode-free/retired-model".to_owned(),
         ];
-        // Both listed → consistent.
+        let curated = [super::UserModelEntry {
+            provider: "opencode-free".to_owned(),
+            slug: "opencode-free/big-pickle".to_owned(),
+            listed: true,
+        }];
+        // The current curated model is listed → consistent, even though the
+        // picker still contains a retired model from the same provider.
         let good = [
             entry("grok-oauth/grok-4.6", "list"),
             entry("opencode-free/big-pickle", "list"),
         ];
-        assert!(!super::catalog_omits_visible_models(&visible, &good));
-        // One still flagged hidden → stale.
-        let hidden = [
+        assert!(!super::catalog_omits_expected_provider_models(
+            "opencode-free",
+            &visible,
+            &curated,
+            &good
+        ));
+        // An unrelated provider can be hidden without making this provider stale.
+        let unrelated_hidden = [
             entry("grok-oauth/grok-4.6", "hide"),
             entry("opencode-free/big-pickle", "list"),
         ];
-        assert!(super::catalog_omits_visible_models(&visible, &hidden));
-        // One missing from the catalog entirely → stale.
-        let missing = [entry("opencode-free/big-pickle", "list")];
-        assert!(super::catalog_omits_visible_models(&visible, &missing));
+        assert!(!super::catalog_omits_expected_provider_models(
+            "opencode-free",
+            &visible,
+            &curated,
+            &unrelated_hidden
+        ));
+        // An unrelated picker-visible model can be absent without making this
+        // provider stale.
+        let unrelated_missing = [entry("opencode-free/big-pickle", "list")];
+        assert!(!super::catalog_omits_expected_provider_models(
+            "opencode-free",
+            &visible,
+            &curated,
+            &unrelated_missing
+        ));
+        assert!(super::catalog_omits_expected_provider_models(
+            "grok-oauth",
+            &visible,
+            &curated,
+            &unrelated_missing
+        ));
+        let curated_hidden = [entry("opencode-free/big-pickle", "hide")];
+        assert!(super::catalog_omits_expected_provider_models(
+            "opencode-free",
+            &visible,
+            &curated,
+            &curated_hidden
+        ));
+        let curated_missing = [entry("grok-oauth/grok-4.6", "list")];
+        assert!(super::catalog_omits_expected_provider_models(
+            "opencode-free",
+            &visible,
+            &curated,
+            &curated_missing
+        ));
+        assert!(super::catalog_omits_expected_provider_models(
+            "missing-provider",
+            &visible,
+            &curated,
+            &good
+        ));
+
+        let picker = super::ModelPickerFile { visible };
+        let user_models = super::UserModelsFile {
+            models: curated.into(),
+        };
+        let catalog = super::MergedModelsFile {
+            models: good.into(),
+        };
+        assert!(!super::catalog_state_is_stale(
+            "opencode-free",
+            Some(&picker),
+            Some(&user_models),
+            Some(&catalog)
+        ));
+        assert!(super::catalog_state_is_stale(
+            "opencode-free",
+            None,
+            Some(&user_models),
+            Some(&catalog)
+        ));
+        assert!(super::catalog_state_is_stale(
+            "opencode-free",
+            Some(&picker),
+            None,
+            Some(&catalog)
+        ));
+        assert!(super::catalog_state_is_stale(
+            "opencode-free",
+            Some(&picker),
+            Some(&user_models),
+            None
+        ));
     }
 
     #[test]

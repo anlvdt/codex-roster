@@ -12,6 +12,8 @@ const NOTIFICATION_STATE_FILE: &str = "reset-notifications.json";
 const PROFILE_POST_MARKER: &str = "itemType=\"https://schema.org/SocialMediaPosting\"";
 const INITIAL_REPLAY_WINDOW: time::Duration = time::Duration::hours(6);
 const NOTIFICATION_SOURCE: &str = "x:thsottiaux";
+const MAX_SEEN_EVENT_IDS: usize = 512;
+const MAX_NOTIFICATIONS_PER_HOUR: usize = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResetOutlook {
@@ -77,6 +79,10 @@ struct NotificationState {
     seen_ids: HashSet<String>,
     #[serde(default)]
     source: String,
+    #[serde(default)]
+    notification_window_started_at: Option<String>,
+    #[serde(default)]
+    notifications_in_window: usize,
 }
 
 pub fn fetch_reset_outlook() -> Result<ResetOutlook> {
@@ -107,7 +113,6 @@ struct ResetFeedTweet {
     id: Option<String>,
     text: Option<String>,
     at: Option<String>,
-    url: Option<String>,
 }
 
 fn fetch_reset_posts(now: OffsetDateTime) -> Result<Vec<TiboPost>> {
@@ -159,10 +164,7 @@ fn fetch_feed_posts(now: OffsetDateTime) -> Result<Vec<TiboPost>> {
             let id = tweet.id.take()?;
             let created_at = tweet.at.take()?;
             let text = tweet.text.take()?;
-            let url = tweet
-                .url
-                .take()
-                .unwrap_or_else(|| format!("https://x.com/thsottiaux/status/{id}"));
+            let url = trusted_tibo_post_url(&id)?;
             Some(TiboPost {
                 id,
                 created_at,
@@ -237,12 +239,12 @@ fn parse_profile_posts(html: &str) -> Vec<TiboPost> {
             .unwrap_or(html.len());
         let block = &html[block_start..block_end];
 
-        if let (Some(id), Some(created_at), Some(text), Some(url)) = (
+        if let (Some(id), Some(created_at), Some(text)) = (
             meta_content(block, "identifier"),
             meta_content(block, "datePublished"),
             meta_content(block, "text"),
-            meta_content(block, "url"),
         ) && seen.insert(id.clone())
+            && let Some(url) = trusted_tibo_post_url(&id)
         {
             posts.push(TiboPost {
                 id,
@@ -256,6 +258,11 @@ fn parse_profile_posts(html: &str) -> Vec<TiboPost> {
 
     posts.sort_by(|left, right| right.created_at.cmp(&left.created_at));
     posts
+}
+
+fn trusted_tibo_post_url(id: &str) -> Option<String> {
+    (!id.is_empty() && id.chars().all(|character| character.is_ascii_digit()))
+        .then(|| format!("https://x.com/thsottiaux/status/{id}"))
 }
 
 fn meta_content(block: &str, property: &str) -> Option<String> {
@@ -319,13 +326,22 @@ fn decode_html_entities(value: &str) -> String {
 fn classify_post(text: &str) -> Option<SignalKind> {
     let text = text.to_ascii_lowercase();
     let mentions_reset = text.contains("reset");
-    let relevant_scope = mentions_reset
-        || text.contains("codex")
+    let starts_with_reset_signal = [
+        "reset will ",
+        "reset should ",
+        "reset lands ",
+        "reset has ",
+        "reset is ",
+    ]
+    .iter()
+    .any(|prefix| text.trim_start().starts_with(prefix));
+    let relevant_scope = text.contains("codex")
         || text.contains("chatgpt work")
         || text.contains("usage limit")
         || text.contains("rate limit")
         || text.contains("paid user")
-        || text.contains("banked reset");
+        || text.contains("banked reset")
+        || starts_with_reset_signal;
     if !mentions_reset || !relevant_scope {
         return None;
     }
@@ -442,7 +458,9 @@ fn build_reset_outlook(posts: &[TiboPost], now: OffsetDateTime) -> ResetOutlook 
             let age = now - announced_at;
             let delivery_at = scheduled_delivery_time(&post.text, announced_at);
             let delivery_in = delivery_at.map(|delivery| delivery - now);
-            next_reset_at = delivery_at.as_ref().map(|delivery| format_time(*delivery));
+            next_reset_at = delivery_at
+                .filter(|delivery| *delivery > now)
+                .map(format_time);
             let (score_24, score_48) = forecast_scores(kind, delivery_in, age);
             (
                 score_24,
@@ -455,7 +473,9 @@ fn build_reset_outlook(posts: &[TiboPost], now: OffsetDateTime) -> ResetOutlook 
             let age = now - announced_at;
             let delivery_at = scheduled_delivery_time(&post.text, announced_at);
             let delivery_in = delivery_at.map(|delivery| delivery - now);
-            next_reset_at = delivery_at.as_ref().map(|delivery| format_time(*delivery));
+            next_reset_at = delivery_at
+                .filter(|delivery| *delivery > now)
+                .map(format_time);
             let (score_24, score_48) = forecast_scores(kind, delivery_in, age);
             (
                 score_24,
@@ -478,7 +498,15 @@ fn build_reset_outlook(posts: &[TiboPost], now: OffsetDateTime) -> ResetOutlook 
     };
     let latest_confirmed = posts
         .iter()
-        .find(|post| classify_post(&post.text).is_some_and(SignalKind::is_confirmed));
+        .filter_map(|post| {
+            let kind = classify_post(&post.text)?;
+            let announced_at = parse_event_time(&post.created_at)?;
+            let age = now - announced_at;
+            (kind.is_confirmed() && age >= time::Duration::ZERO && age <= time::Duration::hours(48))
+                .then_some((post, announced_at))
+        })
+        .max_by_key(|(_, announced_at)| *announced_at)
+        .map(|(post, _)| post);
     let last_reset_at = latest_confirmed
         .or_else(|| latest_signal.map(|(post, _, _)| post))
         .or_else(|| posts.first())
@@ -556,14 +584,20 @@ fn scheduled_delivery_time(text: &str, announced_at: OffsetDateTime) -> Option<O
         return Some(announced_at + time::Duration::hours(24));
     };
     let uses_pacific = text.contains("pst") || text.contains("pdt");
-    let utc_offset = if uses_pacific {
+    let announced_utc_offset = if uses_pacific {
         pacific_utc_offset(announced_at)
     } else {
         time::Duration::ZERO
     };
-    let local_announced = announced_at + utc_offset;
+    let local_announced = announced_at + announced_utc_offset;
     let tomorrow = local_announced.date().next_day()?;
-    let delivery = PrimitiveDateTime::new(tomorrow, clock).assume_utc() - utc_offset;
+    let local_delivery = PrimitiveDateTime::new(tomorrow, clock).assume_utc();
+    let delivery_offset = if uses_pacific {
+        pacific_utc_offset(local_delivery - announced_utc_offset)
+    } else {
+        time::Duration::ZERO
+    };
+    let delivery = local_delivery - delivery_offset;
     Some(delivery)
 }
 
@@ -572,24 +606,35 @@ fn parse_clock_time(text: &str) -> Option<time::Time> {
         let mut cursor = 0;
         while let Some(relative_end) = text[cursor..].find(marker) {
             let end = cursor + relative_end;
-            let digits = text[..end]
-                .chars()
+            let prefix = text[..end].trim_end();
+            let token_start = prefix
+                .char_indices()
                 .rev()
-                .take_while(char::is_ascii_digit)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect::<String>();
+                .find(|(_, character)| !character.is_ascii_digit() && *character != ':')
+                .map_or(0, |(index, character)| index + character.len_utf8());
+            let clock = &prefix[token_start..];
             cursor = end + marker.len();
-            let Ok(hour) = digits.parse::<u8>() else {
+            let mut components = clock.split(':');
+            let Ok(hour) = components.next().unwrap_or_default().parse::<u8>() else {
                 continue;
             };
-            if hour > 23 {
+            let minute = match components.next() {
+                Some(value) => match value.parse::<u8>() {
+                    Ok(value) => value,
+                    Err(_) => continue,
+                },
+                None => 0,
+            };
+            if components.next().is_some() || hour > 23 || minute > 59 {
                 continue;
             }
             // Tibo's post uses "14pm"; treat a 24-hour value as authoritative.
-            let hour = if is_pm && hour < 13 { hour + 12 } else { hour };
-            return time::Time::from_hms(hour.min(23), 0, 0).ok();
+            let hour = if hour <= 12 {
+                if is_pm { hour % 12 + 12 } else { hour % 12 }
+            } else {
+                hour
+            };
+            return time::Time::from_hms(hour, minute, 0).ok();
         }
     }
 
@@ -597,17 +642,26 @@ fn parse_clock_time(text: &str) -> Option<time::Time> {
 }
 
 fn pacific_utc_offset(at: OffsetDateTime) -> time::Duration {
-    let observes_dst = matches!(
-        at.month(),
-        time::Month::April
-            | time::Month::May
-            | time::Month::June
-            | time::Month::July
-            | time::Month::August
-            | time::Month::September
-            | time::Month::October
-    );
+    let observes_dst =
+        pacific_dst_bounds(at.year()).is_some_and(|(start, end)| at >= start && at < end);
     time::Duration::hours(if observes_dst { -7 } else { -8 })
+}
+
+fn pacific_dst_bounds(year: i32) -> Option<(OffsetDateTime, OffsetDateTime)> {
+    let second_sunday_march = nth_sunday(year, time::Month::March, 2)?;
+    let first_sunday_november = nth_sunday(year, time::Month::November, 1)?;
+    let start = PrimitiveDateTime::new(second_sunday_march, time::Time::from_hms(10, 0, 0).ok()?)
+        .assume_utc();
+    let end = PrimitiveDateTime::new(first_sunday_november, time::Time::from_hms(9, 0, 0).ok()?)
+        .assume_utc();
+    Some((start, end))
+}
+
+fn nth_sunday(year: i32, month: time::Month, occurrence: u8) -> Option<time::Date> {
+    let first = time::Date::from_calendar_date(year, month, 1).ok()?;
+    let days_until_sunday = (7 + 6 - first.weekday().number_days_from_monday()) % 7;
+    let day = 1 + days_until_sunday + 7 * occurrence.saturating_sub(1);
+    time::Date::from_calendar_date(year, month, day).ok()
 }
 
 fn recency_weighted_score(base: u8, age: time::Duration, horizon: time::Duration) -> u8 {
@@ -680,7 +734,7 @@ fn format_time(value: OffsetDateTime) -> String {
 
 fn process_reset_events(
     app_data_dir: &Path,
-    mut events: Vec<ResetEvent>,
+    events: Vec<ResetEvent>,
     now: OffsetDateTime,
 ) -> Result<Vec<ResetEvent>> {
     fs::create_dir_all(app_data_dir)
@@ -691,42 +745,103 @@ fn process_reset_events(
         .and_then(|bytes| serde_json::from_slice::<NotificationState>(&bytes).ok())
         .filter(|state| state.source == NOTIFICATION_SOURCE);
 
+    let mut eligible_events = events
+        .iter()
+        .filter(|event| {
+            parse_event_time(&event.announced_at).is_some_and(|announced_at| announced_at <= now)
+        })
+        .collect::<Vec<_>>();
+    eligible_events.sort_by(|left, right| {
+        right
+            .announced_at
+            .cmp(&left.announced_at)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    eligible_events.truncate(MAX_SEEN_EVENT_IDS);
+
     let Some(mut state) = existing else {
-        let fresh = events
+        let fresh = eligible_events
             .iter()
             .filter(|event| {
-                parse_event_time(&event.announced_at)
-                    .is_some_and(|announced_at| now - announced_at <= INITIAL_REPLAY_WINDOW)
+                parse_event_time(&event.announced_at).is_some_and(|announced_at| {
+                    let age = now - announced_at;
+                    age >= time::Duration::ZERO && age <= INITIAL_REPLAY_WINDOW
+                })
             })
             .max_by(|left, right| left.announced_at.cmp(&right.announced_at))
-            .cloned()
+            .map(|event| (*event).clone())
             .into_iter()
             .collect::<Vec<_>>();
-        let state = NotificationState {
+        let mut state = NotificationState {
             initialized_at: format_time(now),
-            seen_ids: events.iter().map(|event| event.id.clone()).collect(),
+            seen_ids: HashSet::new(),
             source: NOTIFICATION_SOURCE.to_owned(),
+            notification_window_started_at: Some(format_time(now)),
+            notifications_in_window: fresh.len(),
         };
+        record_seen_event_ids(&mut state, &eligible_events);
         write_notification_state(&state_path, &state)?;
         return Ok(fresh);
     };
 
     let initialized_at = parse_event_time(&state.initialized_at).unwrap_or(now);
-    let mut fresh = events
+    let mut fresh = eligible_events
         .iter()
         .filter(|event| !state.seen_ids.contains(&event.id))
         .filter(|event| {
             parse_event_time(&event.announced_at)
-                .is_some_and(|announced_at| announced_at >= initialized_at)
+                .is_some_and(|announced_at| announced_at >= initialized_at && announced_at <= now)
         })
-        .cloned()
+        .map(|event| (*event).clone())
         .collect::<Vec<_>>();
     fresh.sort_by(|left, right| left.announced_at.cmp(&right.announced_at));
-    state
-        .seen_ids
-        .extend(events.drain(..).map(|event| event.id));
+    refresh_notification_window(&mut state, now);
+    let remaining_notifications =
+        MAX_NOTIFICATIONS_PER_HOUR.saturating_sub(state.notifications_in_window);
+    if fresh.len() > remaining_notifications {
+        fresh.drain(..fresh.len() - remaining_notifications);
+    }
+    state.notifications_in_window += fresh.len();
+    record_seen_event_ids(&mut state, &eligible_events);
     write_notification_state(&state_path, &state)?;
     Ok(fresh)
+}
+
+fn refresh_notification_window(state: &mut NotificationState, now: OffsetDateTime) {
+    let window_is_active = state
+        .notification_window_started_at
+        .as_deref()
+        .and_then(parse_event_time)
+        .is_some_and(|started_at| {
+            let age = now - started_at;
+            age >= time::Duration::ZERO && age < time::Duration::hours(1)
+        });
+    if !window_is_active {
+        state.notification_window_started_at = Some(format_time(now));
+        state.notifications_in_window = 0;
+    }
+}
+
+fn record_seen_event_ids(state: &mut NotificationState, events: &[&ResetEvent]) {
+    let mut current = events.to_vec();
+    current.sort_by(|left, right| right.announced_at.cmp(&left.announced_at));
+
+    let mut retained = current
+        .into_iter()
+        .map(|event| event.id.clone())
+        .take(MAX_SEEN_EVENT_IDS)
+        .collect::<HashSet<_>>();
+    if retained.len() < MAX_SEEN_EVENT_IDS {
+        let mut previous = state.seen_ids.iter().cloned().collect::<Vec<_>>();
+        previous.sort_unstable_by(|left, right| right.cmp(left));
+        for id in previous {
+            if retained.len() == MAX_SEEN_EVENT_IDS {
+                break;
+            }
+            retained.insert(id);
+        }
+    }
+    state.seen_ids = retained;
 }
 
 fn write_notification_state(path: &Path, state: &NotificationState) -> Result<()> {
@@ -746,6 +861,22 @@ mod tests {
         assert_eq!(posts.len(), 1);
         assert_eq!(posts[0].id, "2090964822422949999");
         assert_eq!(posts[0].text, "It's landed & ready: BANKED reset.");
+        assert_eq!(
+            posts[0].url,
+            "https://x.com/thsottiaux/status/2090964822422949999"
+        );
+    }
+
+    #[test]
+    fn canonicalizes_profile_links_and_rejects_invalid_post_ids() {
+        let html = r#"<main><article itemType="https://schema.org/SocialMediaPosting"><meta content="2090964822422949999" itemProp="identifier"/><meta content="2026-08-22T00:50:36.000Z" itemProp="datePublished"/><meta content="file:///etc/passwd" itemProp="url"/><meta content="Codex usage limits have reset." itemProp="text"/></article><article itemType="https://schema.org/SocialMediaPosting"><meta content="../escape" itemProp="identifier"/><meta content="2026-08-22T00:51:36.000Z" itemProp="datePublished"/><meta content="https://evil.example/phish" itemProp="url"/><meta content="Codex usage limits have reset." itemProp="text"/></article></main>"#;
+        let posts = parse_profile_posts(html);
+        assert_eq!(posts.len(), 1);
+        assert_eq!(
+            posts[0].url,
+            "https://x.com/thsottiaux/status/2090964822422949999"
+        );
+        assert!(trusted_tibo_post_url("../escape").is_none());
     }
 
     #[test]
@@ -767,6 +898,51 @@ mod tests {
             None
         );
         assert_eq!(classify_post("You would break the reset button?"), None);
+        assert_eq!(classify_post("I've reset my password."), None);
+        assert_eq!(classify_post("We have reset the staging database."), None);
+        assert_eq!(classify_post("Reset my password tomorrow."), None);
+    }
+
+    #[test]
+    fn parses_common_clock_formats_and_pacific_dst_boundaries() {
+        assert_eq!(
+            parse_clock_time("at 2 pm PST"),
+            time::Time::from_hms(14, 0, 0).ok()
+        );
+        assert_eq!(
+            parse_clock_time("at 2:30 p.m. PST"),
+            time::Time::from_hms(14, 30, 0).ok()
+        );
+        assert_eq!(parse_clock_time("at 12 am"), Some(time::Time::MIDNIGHT));
+        assert_eq!(
+            parse_clock_time("at 12 pm"),
+            time::Time::from_hms(12, 0, 0).ok()
+        );
+        assert_eq!(
+            parse_clock_time("around 14pm"),
+            time::Time::from_hms(14, 0, 0).ok()
+        );
+
+        let before_spring_forward = parse_event_time("2026-03-07T18:00:00Z").unwrap();
+        assert_eq!(
+            scheduled_delivery_time(
+                "Reset will land at 2 pm PST tomorrow.",
+                before_spring_forward
+            ),
+            parse_event_time("2026-03-08T21:00:00Z")
+        );
+        assert_eq!(
+            pacific_utc_offset(parse_event_time("2026-03-08T09:59:59Z").unwrap()),
+            time::Duration::hours(-8)
+        );
+        assert_eq!(
+            pacific_utc_offset(parse_event_time("2026-03-08T10:00:00Z").unwrap()),
+            time::Duration::hours(-7)
+        );
+        assert_eq!(
+            pacific_utc_offset(parse_event_time("2026-11-01T09:00:00Z").unwrap()),
+            time::Duration::hours(-8)
+        );
     }
 
     #[test]
@@ -880,8 +1056,10 @@ mod tests {
 
         let first = reset_event("first", "2026-08-02T12:00:00Z", "scheduled_global_reset");
         let second = reset_event("second", "2026-08-03T12:00:00Z", "confirmed_global_reset");
-        let fresh = process_reset_events(temp.path(), vec![second.clone(), first.clone()], started)
-            .expect("new reset signals");
+        let polled_at = parse_event_time("2026-08-04T00:00:00Z").unwrap();
+        let fresh =
+            process_reset_events(temp.path(), vec![second.clone(), first.clone()], polled_at)
+                .expect("new reset signals");
         assert_eq!(
             fresh
                 .iter()
@@ -890,9 +1068,89 @@ mod tests {
             vec!["first", "second"]
         );
         assert!(
-            process_reset_events(temp.path(), vec![first, second], started)
+            process_reset_events(temp.path(), vec![first, second], polled_at)
                 .expect("deduplicated")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn future_signals_wait_until_their_announcement_time() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let started = parse_event_time("2026-08-01T00:00:00Z").unwrap();
+        process_reset_events(temp.path(), Vec::new(), started).expect("initialize state");
+        let future = reset_event("future", "2026-08-01T01:00:00Z", "scheduled_global_reset");
+
+        assert!(
+            process_reset_events(temp.path(), vec![future.clone()], started)
+                .expect("future signal deferred")
+                .is_empty()
+        );
+        assert_eq!(
+            process_reset_events(
+                temp.path(),
+                vec![future],
+                parse_event_time("2026-08-01T01:00:00Z").unwrap(),
+            )
+            .expect("signal announced")
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn notification_state_and_fanout_are_bounded() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let started = parse_event_time("2026-08-01T00:00:00Z").unwrap();
+        process_reset_events(temp.path(), Vec::new(), started).expect("initialize state");
+        let events = (0..600)
+            .map(|index| {
+                reset_event(
+                    &format!("{index:04}"),
+                    "2026-08-01T01:00:00Z",
+                    "confirmed_global_reset",
+                )
+            })
+            .collect::<Vec<_>>();
+        let fresh = process_reset_events(
+            temp.path(),
+            events.clone(),
+            parse_event_time("2026-08-01T02:00:00Z").unwrap(),
+        )
+        .expect("bounded poll");
+        assert_eq!(fresh.len(), MAX_NOTIFICATIONS_PER_HOUR);
+
+        let state: NotificationState = serde_json::from_slice(
+            &fs::read(temp.path().join(NOTIFICATION_STATE_FILE)).expect("state file"),
+        )
+        .expect("state json");
+        assert_eq!(state.seen_ids.len(), MAX_SEEN_EVENT_IDS);
+        assert!(
+            process_reset_events(
+                temp.path(),
+                events,
+                parse_event_time("2026-08-01T02:01:00Z").unwrap(),
+            )
+            .expect("same oversized feed is deduplicated")
+            .is_empty()
+        );
+        let alternate_events = (600..1_200)
+            .map(|index| {
+                reset_event(
+                    &format!("{index:04}"),
+                    "2026-08-01T02:01:30Z",
+                    "confirmed_global_reset",
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            process_reset_events(
+                temp.path(),
+                alternate_events,
+                parse_event_time("2026-08-01T02:02:00Z").unwrap(),
+            )
+            .expect("hourly notification budget is exhausted")
+            .is_empty()
         );
     }
 

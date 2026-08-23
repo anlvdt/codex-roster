@@ -55,6 +55,9 @@ struct BackupTransferSheet: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
+                            .truncationMode(.middle)
+                            .layoutPriority(1)
+                            .help(selectedURL.lastPathComponent)
                     }
                 }
             }

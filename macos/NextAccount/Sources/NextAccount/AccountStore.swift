@@ -1736,6 +1736,25 @@ private struct GlobalResetEvent: Decodable {
     let kind: String
 }
 
+func trustedTiboSourceURL(_ value: String?) -> URL? {
+    guard let value,
+          let components = URLComponents(string: value),
+          components.scheme?.lowercased() == "https",
+          components.host?.lowercased() == "x.com",
+          components.user == nil,
+          components.password == nil,
+          components.port == nil,
+          components.query == nil,
+          components.fragment == nil else { return nil }
+    let path = components.path.split(separator: "/")
+    guard path.count == 3,
+          path[0].lowercased() == "thsottiaux",
+          path[1].lowercased() == "status",
+          !path[2].isEmpty,
+          path[2].allSatisfy(\.isNumber) else { return nil }
+    return components.url
+}
+
 private enum ResetNotifier {
     private static let delegate = ResetNotificationDelegate()
     private static let signalStateKey = "codexRoster.resetSignalNotificationState.v1"
@@ -1980,7 +1999,7 @@ private final class ResetNotificationDelegate: NSObject, UNUserNotificationCente
     ) {
         defer { completionHandler() }
         guard let value = response.notification.request.content.userInfo["url"] as? String,
-              let url = URL(string: value) else { return }
+              let url = trustedTiboSourceURL(value) else { return }
         NSWorkspace.shared.open(url)
     }
 }
@@ -2112,6 +2131,10 @@ struct SavedAccount: Identifiable, Decodable {
             && !hasDeferredAccessTokenRefresh
     }
 
+    var usageErrorBlocksActivation: Bool {
+        activationIsBlockedByUsageError(usageError)
+    }
+
     var lastVerifiedAt: Date? {
         usage?.fetchedAt?.value
     }
@@ -2126,6 +2149,18 @@ struct SavedAccount: Identifiable, Decodable {
 
     var primaryQuotaWindow: UsageWindow? {
         usage?.weekly ?? usage?.fiveHour
+    }
+
+    var paidSubscriptionActiveUntil: Date? {
+        let normalizedPlan = (planLabel ?? "").replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+        let planWords = normalizedPlan.split(whereSeparator: \.isWhitespace)
+        guard !planWords.isEmpty,
+              !planWords.contains(where: {
+                  $0.localizedCaseInsensitiveCompare("free") == .orderedSame
+                      || $0.localizedCaseInsensitiveCompare("go") == .orderedSame
+              }) else { return nil }
+        return usage?.subscriptionActiveUntil?.value
     }
 
     var quotaWindowsForSwitch: [UsageWindow] {
@@ -2149,6 +2184,14 @@ struct SavedAccount: Identifiable, Decodable {
             || (!quotaWindowsForSwitch.isEmpty && quotaWindowsForSwitch.allSatisfy { !$0.isDepleted })
     }
 
+    var canSwitchUsingBankedReset: Bool {
+        bankedResetSwitchIsAllowed(
+            planLabel: planLabel,
+            usageError: usageError,
+            availableCount: usage?.bankedResets?.availableCount ?? 0
+        )
+    }
+
     var switchQuotaScore: Int {
         primaryQuotaWindow?.remainingPercent ?? quotaWindowsForSwitch.map(\.remainingPercent).min() ?? -1
     }
@@ -2168,12 +2211,49 @@ struct SavedAccount: Identifiable, Decodable {
 
 }
 
+func bankedResetSwitchIsAllowed(
+    planLabel: String?,
+    usageError: String?,
+    availableCount: Int
+) -> Bool {
+    guard availableCount > 0 else { return false }
+    guard !activationIsBlockedByUsageError(usageError) else { return false }
+    let normalizedPlan = (planLabel ?? "").replacingOccurrences(of: "-", with: " ")
+        .replacingOccurrences(of: "_", with: " ")
+    let planWords = normalizedPlan.split(whereSeparator: \.isWhitespace)
+    guard !planWords.isEmpty else { return false }
+    return !planWords.contains {
+        $0.localizedCaseInsensitiveCompare("free") == .orderedSame
+            || $0.localizedCaseInsensitiveCompare("go") == .orderedSame
+    }
+}
+
+func activationIsBlockedByUsageError(_ usageError: String?) -> Bool {
+    let error = usageError?.lowercased() ?? ""
+    let requiresLogin = error.contains("login required")
+        || error.contains("usage authorization failed")
+        || error.contains("snapshot refresh token missing")
+        || error.contains("refresh_token_invalidated")
+        || error.contains("your session has ended")
+        || (error.contains("token refresh failed")
+            && (error.contains("invalid_grant")
+                || error.contains("refresh token")
+                || error.contains("log out")
+                || error.contains("sign in")))
+    let requiresLocalRecovery = error.contains("local recovery required")
+        || error.contains("decrypt")
+        || error.contains("credential key")
+        || error.contains("snapshot payload")
+    return requiresLogin || requiresLocalRecovery
+}
+
 struct AccountUsage: Decodable {
     let fetchedAt: RustDate?
     let fiveHour: UsageWindow?
     let weekly: UsageWindow?
     let credits: UsageCredits?
     let bankedResets: BankedResetSummary?
+    let subscriptionActiveUntil: RustDate?
 }
 
 struct UsageCredits: Decodable {

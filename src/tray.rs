@@ -671,6 +671,7 @@ mod tests {
             credits: None,
             banked_resets: None,
             plan_label: None,
+            subscription_active_until: None,
         });
 
         assert_eq!(
@@ -713,6 +714,7 @@ mod tests {
                 credits: None,
                 banked_resets: None,
                 plan_label: None,
+                subscription_active_until: None,
             }),
             usage_error: Some("Login required: Codex auth expired.".to_owned()),
         };
@@ -836,6 +838,7 @@ mod tests {
             credits: None,
             banked_resets: None,
             plan_label: None,
+            subscription_active_until: None,
         });
         let account = DisplayIdentity {
             email: "person@example.com".to_owned(),

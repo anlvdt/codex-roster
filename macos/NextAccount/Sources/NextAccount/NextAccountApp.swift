@@ -366,6 +366,8 @@ private struct AccountSidebar: View {
                                 Text(activeAccount.displayName)
                                     .font(.subheadline.weight(.medium))
                                     .lineLimit(1)
+                                    .layoutPriority(1)
+                                    .help(activeAccount.displayName)
                             }
                             Spacer(minLength: 4)
                             if let window = activeAccount.primaryQuotaWindow {
@@ -772,11 +774,11 @@ private struct BulkAccountManager: View {
     @State private var selectedAccountIDs: Set<UUID> = []
     @State private var confirmingDelete = false
     @State private var isExpanded = true
-    private let accountColumnWidth: CGFloat = 142
-    private let planColumnWidth: CGFloat = 58
-    private let sessionColumnWidth: CGFloat = 118
-    private let quotaColumnWidth: CGFloat = 90
-    private let resetColumnWidth: CGFloat = 92
+    private let accountColumnWidth: CGFloat = 156
+    private let planColumnWidth: CGFloat = 104
+    private let sessionColumnWidth: CGFloat = 106
+    private let quotaColumnWidth: CGFloat = 108
+    private let resetColumnWidth: CGFloat = 104
     private let actionColumnWidth: CGFloat = 84
 
     private func accounts(matching filter: BulkAccountFilter) -> [SavedAccount] {
@@ -1069,8 +1071,6 @@ private struct BulkAccountManager: View {
                 .frame(width: planColumnWidth, alignment: .leading)
             Text(language.text("Phiên", "Session"))
                 .frame(width: sessionColumnWidth, alignment: .leading)
-            Text("5h")
-                .frame(width: quotaColumnWidth, alignment: .leading)
             Text(language.text("Tuần", "Weekly"))
                 .frame(width: quotaColumnWidth, alignment: .leading)
             Text(language.text("Lượt reset", "Banked"))
@@ -1107,11 +1107,16 @@ private struct BulkAccountManager: View {
                         Text(account.displayName)
                             .font(.subheadline.weight(.semibold))
                             .lineLimit(1)
+                            .layoutPriority(1)
+                            .help(account.displayName)
                     }
                     Text(account.email)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .truncationMode(.middle)
+                        .layoutPriority(1)
+                        .help(account.email)
                 }
                 .contentShape(Rectangle())
             }
@@ -1119,10 +1124,16 @@ private struct BulkAccountManager: View {
             .frame(minWidth: accountColumnWidth, maxWidth: .infinity, alignment: .leading)
             .help(language.text("Mở chẩn đoán tài khoản", "Open account diagnostics"))
 
-            Text(account.planLabel ?? "—")
-                .font(.caption.weight(.medium))
-                .lineLimit(1)
-                .frame(width: planColumnWidth, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(account.planLabel ?? "—")
+                    .font(.caption.weight(.medium))
+                if let activeUntil = account.paidSubscriptionActiveUntil {
+                    Text(compactSubscriptionUntil(activeUntil, language: language.language))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(activeUntil < Date() ? Color.red : Color.secondary)
+                }
+            }
+            .frame(width: planColumnWidth, alignment: .leading)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(healthLabel(account))
@@ -1136,7 +1147,6 @@ private struct BulkAccountManager: View {
             }
             .frame(width: sessionColumnWidth, alignment: .leading)
 
-            quotaCell(account.usage?.fiveHour)
             quotaCell(account.usage?.weekly)
             bankedResetCell(account.usage?.bankedResets)
             primaryAction(for: account)
@@ -1155,10 +1165,10 @@ private struct BulkAccountManager: View {
                         .font(.caption.weight(.semibold).monospacedDigit())
                         .foregroundStyle(quotaTint(window.remainingPercent))
                     Spacer(minLength: 0)
-                    Text(window.relativeReset(in: language.language))
+                    Text(compactReset(window, language: language.language))
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 ProgressView(value: Double(window.displayRemainingPercent), total: 100)
                     .tint(quotaTint(window.remainingPercent))
@@ -1190,17 +1200,16 @@ private struct BulkAccountManager: View {
                     .font(.caption.monospacedDigit().weight(.semibold))
                     .foregroundStyle(count > 0 ? Color.accentColor : Color.secondary)
                 if let nearestExpiry, count > 0 {
-                    Text(nearestExpiry, style: .relative)
+                    Text(compactTimeRemaining(until: nearestExpiry, language: language.language))
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 } else {
                     Text(count > 0
                         ? language.text("Chưa có hạn", "No expiry")
                         : language.text("Không có lượt", "None"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
                 }
             }
             .frame(width: resetColumnWidth, alignment: .leading)
@@ -1298,12 +1307,12 @@ private struct BulkAccountManager: View {
     private func healthLabel(_ account: SavedAccount) -> String {
         if account.archived { return language.text("Đã lưu trữ", "Archived") }
         if account.usageError?.localizedCaseInsensitiveContains("[server_session_revoked]") == true {
-            return language.text("OpenAI đã thu hồi phiên", "Session revoked by OpenAI")
+            return language.text("Phiên bị thu hồi", "Session revoked")
         }
         if account.requiresLogin { return language.text("Cần đăng nhập", "Sign-in required") }
-        if account.requiresLocalRecovery { return language.text("Cần khôi phục local", "Local recovery") }
-        if account.hasTransientUsageError { return language.text("Tạm thời không khả dụng", "Temporarily unavailable") }
-        return language.text("Phiên khỏe", "Healthy session")
+        if account.requiresLocalRecovery { return language.text("Cần phục hồi", "Local recovery") }
+        if account.hasTransientUsageError { return language.text("Lỗi quota tạm thời", "Quota unavailable") }
+        return language.text("Khỏe", "Healthy")
     }
 
     private func healthIcon(_ account: SavedAccount) -> String {
@@ -1327,8 +1336,8 @@ private struct BulkAccountManager: View {
             return language.text("Chưa xác minh quota", "Quota not verified")
         }
         return language.text(
-            "Xác minh \(date.formatted(date: .abbreviated, time: .shortened))",
-            "Verified \(date.formatted(date: .abbreviated, time: .shortened))"
+            "Xác minh \(compactVerificationDate(date, language: language.language))",
+            "Verified \(compactVerificationDate(date, language: language.language))"
         )
     }
 }
@@ -1607,13 +1616,7 @@ private struct TokenDayColumn: View {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(Color.primary.opacity(0.08))
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [Color.accentColor.opacity(isLatest ? 1 : 0.80), Color.accentColor.opacity(isLatest ? 0.68 : 0.35)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
+                    .fill(Color.accentColor.opacity(isLatest ? 0.95 : 0.62))
                     .frame(height: barHeight)
             }
             .frame(width: 24, height: 78)
@@ -1682,10 +1685,14 @@ private struct AccountRow: View {
                     Text(account.displayName)
                         .font(.body.weight(.medium))
                         .lineLimit(1)
+                        .layoutPriority(1)
+                        .help(account.displayName)
                     Text(account.email)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .truncationMode(.middle)
+                        .layoutPriority(1)
                         .textSelection(.enabled)
                         .help(language.text("Nhấp đúp hoặc dùng menu để sao chép email", "Double-click or use the menu to copy email"))
                 }
@@ -1701,7 +1708,9 @@ private struct AccountRow: View {
             HStack(spacing: 8) {
                 SidebarQuotaMeter(account: account)
                 if let plan = account.planLabel {
-                    Text("GPT \(plan)")
+                    Text(account.paidSubscriptionActiveUntil.map {
+                        "GPT \(plan) · \(compactSubscriptionUntil($0, language: language.language))"
+                    } ?? "GPT \(plan)")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: true, vertical: false)
@@ -1783,13 +1792,10 @@ private struct SidebarQuotaMeter: View {
                         .foregroundStyle(tint(for: window.remainingPercent))
                         .fixedSize(horizontal: true, vertical: false)
                 }
-                Text(language.text(
-                    "Đặt lại \(window.resetAt.value.formatted(date: .abbreviated, time: .shortened))",
-                    "Resets \(window.resetAt.value.formatted(date: .abbreviated, time: .shortened))"
-                ))
+                Text(compactReset(window, language: language.language))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
             }
             .accessibilityLabel(language.text("Quota còn \(window.displayRemainingPercent) phần trăm, \(compactReset(window, language: language.language))", "\(window.displayRemainingPercent) percent quota remaining, \(compactReset(window, language: language.language))"))
         } else {
@@ -1815,6 +1821,34 @@ private func compactReset(_ window: UsageWindow, language: AppLanguage) -> Strin
     let hours = minutes / 60
     if hours > 0 { return language == .vietnamese ? "↺ \(hours) giờ" : "↺ \(hours)h" }
     return language == .vietnamese ? "↺ \(minutes) phút" : "↺ \(minutes)m"
+}
+
+private func compactSubscriptionUntil(_ date: Date, language: AppLanguage) -> String {
+    let value = date.formatted(
+        Date.FormatStyle(date: .numeric, time: .omitted).locale(language.locale)
+    )
+    return language == .vietnamese ? "đến \(value)" : "until \(value)"
+}
+
+private func compactVerificationDate(_ date: Date, language: AppLanguage) -> String {
+    let calendar = Calendar(identifier: .gregorian)
+    let style = calendar.isDateInToday(date)
+        ? Date.FormatStyle(date: .omitted, time: .shortened)
+        : Date.FormatStyle(date: .numeric, time: .omitted)
+    return date.formatted(style.locale(language.locale))
+}
+
+private func compactTimeRemaining(until date: Date, language: AppLanguage) -> String {
+    let minutes = max(0, Int(date.timeIntervalSinceNow / 60))
+    let days = minutes / 1_440
+    if days > 0 {
+        return language == .vietnamese ? "còn \(days) ngày" : "\(days)d left"
+    }
+    let hours = minutes / 60
+    if hours > 0 {
+        return language == .vietnamese ? "còn \(hours) giờ" : "\(hours)h left"
+    }
+    return language == .vietnamese ? "còn \(minutes) phút" : "\(minutes)m left"
 }
 
 private struct ProviderEmptyRow: View {
@@ -2046,7 +2080,7 @@ private struct GlobalResetOutlookCard: View {
                     Text(summary)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                 }
 
@@ -2089,7 +2123,7 @@ private struct GlobalResetOutlookCard: View {
     }
 
     private var outlookSourceURL: URL? {
-        store.resetOutlook?.sourceUrl.flatMap(URL.init(string:))
+        trustedTiboSourceURL(store.resetOutlook?.sourceUrl)
     }
 }
 
@@ -2510,10 +2544,10 @@ private struct AccountDetail: View {
 
                 SessionDiagnosticsPanel(account: account)
 
-                HStack(spacing: 16) {
-                    UsageCard(title: language.text("Quota hiện tại", "Current quota"), window: account.usage?.fiveHour)
-                    UsageCard(title: language.text("Quota theo chu kỳ", "Quota window"), window: account.usage?.weekly)
-                }
+                UsageCard(
+                    title: language.text("Quota theo chu kỳ", "Quota window"),
+                    window: account.usage?.weekly
+                )
 
                 if let resets = account.usage?.bankedResets {
                     BankedResetCard(summary: resets)
@@ -2603,6 +2637,12 @@ private struct AccountDetail: View {
                             }
                         }
                         GridRow { Text(language.text("Gói ChatGPT", "ChatGPT plan")).foregroundStyle(.secondary); Text(account.planLabel ?? language.text("Chưa có", "Not available")) }
+                        GridRow {
+                            Text(language.text("Gói hiệu lực đến", "Plan active until")).foregroundStyle(.secondary)
+                            Text(account.paidSubscriptionActiveUntil?.formatted(
+                                Date.FormatStyle(date: .long, time: .shortened).locale(language.language.locale)
+                            ) ?? language.text("Chưa có dữ liệu", "Not available"))
+                        }
                         GridRow { Text(language.text("Trạng thái", "Status")).foregroundStyle(.secondary); Text(account.usageStatus(in: language.language)) }
                         GridRow {
                             Text(language.text("Quota xác minh gần nhất", "Last quota verification")).foregroundStyle(.secondary)
@@ -2729,7 +2769,7 @@ private struct SessionDiagnosticsPanel: View {
             value: quotaTitle,
             detail: account.hasTransientUsageError
                 ? language.text("Snapshot không bị thay đổi", "Snapshot remains unchanged")
-                : language.text("Hai cửa sổ 5h và tuần", "5h and weekly windows"),
+                : language.text("Quota theo chu kỳ hiện tại", "Current quota window"),
             icon: account.hasTransientUsageError ? "wifi.exclamationmark" : "gauge.with.dots.needle.67percent",
             tint: account.hasTransientUsageError ? .yellow : .accentColor
         )
@@ -3155,8 +3195,8 @@ private struct MenuBarView: View {
     private var switchableAccounts: [SavedAccount] {
         store.accounts.filter {
             !store.isArchived($0)
-                && !$0.requiresLogin
-                && ($0.isUsableForSwitch || max(0, $0.usage?.bankedResets?.availableCount ?? 0) > 0)
+                && !$0.usageErrorBlocksActivation
+                && ($0.isUsableForSwitch || $0.canSwitchUsingBankedReset)
         }
     }
 
@@ -3698,11 +3738,13 @@ private struct MenuBarCurrentSession: View {
                 Text(account?.displayName ?? email ?? language.text("Chưa đăng nhập", "Not signed in"))
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
+                    .layoutPriority(1)
                 if let account, account.displayName != account.email {
                     Text(account.email)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .truncationMode(.middle)
                 }
                 HStack(spacing: 8) {
                     Label(
@@ -3779,10 +3821,14 @@ private struct MenuBarAccountRow: View {
                 Text(account.displayName)
                     .font(.subheadline.weight(.medium))
                     .lineLimit(1)
+                    .layoutPriority(1)
+                    .help(account.displayName)
                 Text(account.email)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .truncationMode(.middle)
+                    .layoutPriority(1)
             }
             Spacer(minLength: 4)
             if let resets = account.usage?.bankedResets, max(0, resets.availableCount) > 0 {
@@ -3835,11 +3881,10 @@ private struct MenuBarQuota: View {
             ProgressView(value: Double(window.displayRemainingPercent), total: 100)
                 .tint(tint)
                 .frame(width: 54)
-            Text(window.relativeReset(in: language.language))
+            Text(compactReset(window, language: language.language))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.88)
+                .fixedSize(horizontal: true, vertical: false)
         }
         .frame(width: 108, alignment: .trailing)
     }

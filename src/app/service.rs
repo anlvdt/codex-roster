@@ -1656,6 +1656,7 @@ mod tests {
             credits: None,
             banked_resets: None,
             plan_label: None,
+            subscription_active_until: None,
         };
 
         assert!(is_exhausted_for_switch(Some(&usage)));
@@ -1769,6 +1770,7 @@ mod tests {
             credits: None,
             banked_resets: None,
             plan_label: plan.map(str::to_owned),
+            subscription_active_until: None,
         };
         let account = |roster: Option<&str>, usage_plan: Option<&str>| crate::model::AccountView {
             id: Uuid::new_v4(),
@@ -1832,6 +1834,7 @@ mod tests {
             credits,
             banked_resets: None,
             plan_label: Some("Pro".to_owned()),
+            subscription_active_until: None,
         };
 
         let exhausted = usage(0, None);
@@ -1891,6 +1894,7 @@ mod tests {
             credits: None,
             banked_resets: None,
             plan_label: Some("Pro".to_owned()),
+            subscription_active_until: None,
         };
         assert!(is_exhausted_for_switch(Some(&depleted)));
         assert!(!is_usable_for_switch(Some(&depleted)));
@@ -1926,6 +1930,7 @@ mod tests {
                 credits: None,
             }),
             plan_label: Some(plan.to_owned()),
+            subscription_active_until: None,
         };
         let account = |email: &str, plan: &str, reset_count: i64| AccountView {
             id: Uuid::new_v4(),
@@ -1999,6 +2004,7 @@ mod tests {
                 credits: None,
                 banked_resets: None,
                 plan_label: Some(plan.to_owned()),
+                subscription_active_until: None,
             }),
             usage_error: None,
         };
@@ -2099,6 +2105,7 @@ mod tests {
             credits: None,
             banked_resets: None,
             plan_label: None,
+            subscription_active_until: None,
         };
 
         assert!(!cached_usage_is_fresh(Some(&usage), now));
@@ -2121,6 +2128,7 @@ mod tests {
             credits: None,
             banked_resets: None,
             plan_label: None,
+            subscription_active_until: None,
         };
 
         assert!(!cached_usage_is_fresh(Some(&usage), now));
@@ -2141,6 +2149,7 @@ mod tests {
             credits: None,
             banked_resets: None,
             plan_label: None,
+            subscription_active_until: None,
         };
 
         assert!(cached_usage_is_fresh(Some(&usage), now));
@@ -2235,6 +2244,7 @@ mod tests {
                 credits: None,
                 banked_resets: None,
                 plan_label: None,
+                subscription_active_until: None,
             }),
         )
         .expect("replace");
@@ -2296,6 +2306,7 @@ mod tests {
                 credits: None,
                 banked_resets: None,
                 plan_label: None,
+                subscription_active_until: None,
             }),
         )
         .expect("replace");

@@ -945,6 +945,7 @@ mod tests {
             credits: None,
             banked_resets: None,
             plan_label: None,
+            subscription_active_until: None,
         });
 
         let label = render_account_label(
@@ -975,6 +976,7 @@ mod tests {
             credits: None,
             banked_resets: None,
             plan_label: None,
+            subscription_active_until: None,
         });
         list.accounts[0].usage_error = Some("Login required: Codex auth expired.".to_owned());
 
@@ -1008,6 +1010,7 @@ mod tests {
             credits: None,
             banked_resets: None,
             plan_label: None,
+            subscription_active_until: None,
         });
         list.accounts[0].usage_error =
             Some("Usage unavailable: failed to query Codex usage".to_owned());

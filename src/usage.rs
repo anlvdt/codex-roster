@@ -156,8 +156,9 @@ pub fn fetch_usage(target: UsageTarget) -> Result<(UsageOutput, SnapshotBlob), F
             )
         })?,
     );
+    let subscription_active_until = subscription_active_until(auth.id_token.as_deref());
     let usage = response
-        .into_view(source, reset_credit_details)
+        .into_view(source, reset_credit_details, subscription_active_until)
         .map_err(|error| {
             FetchUsageError::new(
                 error,
@@ -344,6 +345,7 @@ impl UsageResponse {
         self,
         source: UsageSource,
         reset_credit_details: Option<ResetCreditDetailsResponse>,
+        subscription_active_until: Option<OffsetDateTime>,
     ) -> Result<AccountUsageView> {
         let now = OffsetDateTime::now_utc();
         let plan_label = normalize_plan_label(self.plan_type.as_deref());
@@ -374,6 +376,7 @@ impl UsageResponse {
             credits: self.credits.map(credits_view),
             banked_resets,
             plan_label,
+            subscription_active_until,
         })
     }
 }
@@ -670,6 +673,28 @@ fn access_token_expires_at(access_token: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::from_unix_timestamp(exp).ok()
 }
 
+fn subscription_active_until(id_token: Option<&str>) -> Option<OffsetDateTime> {
+    let mut parts = id_token?.split('.');
+    let _header = parts.next()?;
+    let payload = parts.next()?;
+    if payload.is_empty() {
+        return None;
+    }
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| {
+            let padding = "=".repeat((4 - payload.len() % 4) % 4);
+            URL_SAFE_NO_PAD.decode(format!("{payload}{padding}"))
+        })
+        .ok()?;
+    let claims: Value = serde_json::from_slice(&payload_bytes).ok()?;
+    claims
+        .get("https://api.openai.com/auth")?
+        .get("chatgpt_subscription_active_until")?
+        .as_str()
+        .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok())
+}
+
 fn window_view(window: &UsageWindow) -> Result<UsageWindowView> {
     let reset_at = OffsetDateTime::from_unix_timestamp(window.reset_at)
         .map_err(|error| anyhow!("invalid reset timestamp {}: {error}", window.reset_at))?;
@@ -937,12 +962,34 @@ mod tests {
         .expect("usage payload");
 
         let view = response
-            .into_view(UsageSource::LiveAccessToken, None)
+            .into_view(UsageSource::LiveAccessToken, None, None)
             .expect("usage view");
 
         let resets = view.banked_resets.expect("banked reset summary");
         assert_eq!(resets.available_count, 3);
         assert!(resets.credits.is_none());
+    }
+
+    #[test]
+    fn reads_chatgpt_subscription_period_from_id_token() {
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(
+            json!({
+                "https://api.openai.com/auth": {
+                    "chatgpt_plan_type": "plus",
+                    "chatgpt_subscription_active_until": "2026-09-25T10:31:08+00:00"
+                }
+            })
+            .to_string(),
+        );
+        let token = format!("{header}.{payload}.");
+
+        assert_eq!(
+            subscription_active_until(Some(&token)).map(|value| value.unix_timestamp()),
+            Some(1_790_332_268)
+        );
+        assert!(subscription_active_until(Some("invalid-token")).is_none());
+        assert!(subscription_active_until(None).is_none());
     }
 
     #[test]

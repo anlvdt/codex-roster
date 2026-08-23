@@ -314,6 +314,10 @@ pub struct AccountUsageView {
     /// auto-switch does not trust a stale Plus/Pro label when the API omitted it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_label: Option<String>,
+    /// End of the currently active ChatGPT subscription period reported by
+    /// OpenAI's ID-token claim. This is separate from OAuth token expiry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription_active_until: Option<OffsetDateTime>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

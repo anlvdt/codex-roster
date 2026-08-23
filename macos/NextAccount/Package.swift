@@ -12,5 +12,10 @@ let package = Package(
             name: "CodexRoster",
             path: "Sources/NextAccount"
         ),
+        .testTarget(
+            name: "CodexRosterTests",
+            dependencies: ["CodexRoster"],
+            path: "Tests/NextAccountTests"
+        ),
     ]
 )

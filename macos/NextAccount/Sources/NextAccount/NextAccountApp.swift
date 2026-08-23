@@ -168,7 +168,7 @@ struct CodexRosterApp: App {
     }
 
     private var menuBarTitle: String {
-        guard let remaining = store.accounts.first(where: \.isActive)?.primaryQuotaWindow?.remainingPercent else {
+        guard let remaining = store.accounts.first(where: \.isActive)?.primaryQuotaWindow?.displayRemainingPercent else {
             return "—"
         }
         return "\(remaining)%"
@@ -368,10 +368,10 @@ private struct AccountSidebar: View {
                                     .lineLimit(1)
                             }
                             Spacer(minLength: 4)
-                            if let remaining = activeAccount.primaryQuotaWindow?.remainingPercent {
-                                Text("\(remaining)%")
+                            if let window = activeAccount.primaryQuotaWindow {
+                                Text("\(window.displayRemainingPercent)%")
                                     .font(.caption.monospacedDigit().weight(.semibold))
-                                    .foregroundStyle(quotaTint(remaining))
+                                    .foregroundStyle(quotaTint(window.remainingPercent))
                             }
                         }
                     }
@@ -458,7 +458,7 @@ private struct AccountSidebar: View {
     }
 
     private func quotaTint(_ remainingPercent: Int) -> Color {
-        if remainingPercent == 0 { return .red }
+        if remainingPercent <= UsageWindow.exhaustedRemainingPercent { return .red }
         if remainingPercent < 20 { return .orange }
         if remainingPercent < 50 { return .yellow }
         return .green
@@ -733,6 +733,20 @@ private struct DashboardView: View {
             language.text("Đã tự động chuyển sang \(name) và mở lại ChatGPT.", "Automatically switched to \(name) and relaunched ChatGPT.")
         case .checkFailed:
             language.text("Không thể kiểm tra/chuyển quota tự động. Thử Kiểm tra & chuyển.", "Could not auto-check/switch quota. Try Check & switch.")
+        case .externalModelActive(let model):
+            if let model {
+                language.text(
+                    "Đang chạy model ngoài (\(model)) qua Codex Router — không tiêu quota OpenAI, nên Auto-switch giữ nguyên phiên.",
+                    "Running an external model (\(model)) via Codex Router — it does not use OpenAI quota, so Auto-switch is holding the session."
+                )
+            } else {
+                language.text(
+                    "Đang chạy model ngoài qua Codex Router — không tiêu quota OpenAI, nên Auto-switch giữ nguyên phiên.",
+                    "Running an external model via Codex Router — it does not use OpenAI quota, so Auto-switch is holding the session."
+                )
+            }
+        case .generationInProgress:
+            language.text("Codex đang tạo phản hồi; Auto-switch chờ xong lượt rồi mới chuyển.", "Codex is generating a response; Auto-switch is waiting for the turn to finish before switching.")
         }
     }
 }
@@ -862,13 +876,6 @@ private struct BulkAccountManager: View {
         DisclosureGroup(isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
-                    TextField(
-                        language.text("Tìm tên, email hoặc gói", "Search name, email, or plan"),
-                        text: $searchText
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    .frame(minWidth: 180, maxWidth: 300)
-
                     Spacer(minLength: 0)
 
                     Toggle(isOn: $hidesUnavailableAccounts) {
@@ -1144,7 +1151,7 @@ private struct BulkAccountManager: View {
         if let window {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 4) {
-                    Text("\(window.remainingPercent)%")
+                    Text("\(window.displayRemainingPercent)%")
                         .font(.caption.weight(.semibold).monospacedDigit())
                         .foregroundStyle(quotaTint(window.remainingPercent))
                     Spacer(minLength: 0)
@@ -1153,14 +1160,14 @@ private struct BulkAccountManager: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                ProgressView(value: Double(window.remainingPercent), total: 100)
+                ProgressView(value: Double(window.displayRemainingPercent), total: 100)
                     .tint(quotaTint(window.remainingPercent))
                     .controlSize(.mini)
             }
             .frame(width: quotaColumnWidth, alignment: .leading)
             .accessibilityLabel(language.text(
-                "Còn \(window.remainingPercent) phần trăm, đặt lại \(window.relativeReset(in: language.language))",
-                "\(window.remainingPercent) percent remaining, resets \(window.relativeReset(in: language.language))"
+                "Còn \(window.displayRemainingPercent) phần trăm, đặt lại \(window.relativeReset(in: language.language))",
+                "\(window.displayRemainingPercent) percent remaining, resets \(window.relativeReset(in: language.language))"
             ))
         } else {
             Text("—")
@@ -1236,9 +1243,27 @@ private struct BulkAccountManager: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.green)
         } else if account.isExhaustedForSwitch {
-            Text(language.text("Hết quota", "Quota empty"))
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.red)
+            let bankedResetCount = max(0, account.usage?.bankedResets?.availableCount ?? 0)
+            if bankedResetCount > 0 {
+                // A banked reset is not spendable quota until redeemed inside
+                // Codex, but the user must still be able to switch here to do
+                // that. Offer the switch instead of a dead "Hết quota" label.
+                Button(language.text("Chuyển", "Switch")) {
+                    store.activate(account, force: true)
+                }
+                .controlSize(.small)
+                .buttonStyle(.borderedProminent)
+                .tint(.accentColor)
+                .disabled(store.isBusyForActions)
+                .help(language.text(
+                    "Hết quota nhưng có banked reset — chuyển sang tài khoản này rồi redeem trong Codex.",
+                    "Out of quota but has a banked reset — switch here, then redeem it in Codex."
+                ))
+            } else {
+                Text(language.text("Hết quota", "Quota empty"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.red)
+            }
         } else {
             Button(language.text("Chuyển", "Switch")) {
                 store.activate(account, force: true)
@@ -1250,7 +1275,7 @@ private struct BulkAccountManager: View {
     }
 
     private func quotaTint(_ remainingPercent: Int) -> Color {
-        if remainingPercent == 0 { return .red }
+        if remainingPercent <= UsageWindow.exhaustedRemainingPercent { return .red }
         if remainingPercent < 20 { return .orange }
         if remainingPercent < 50 { return .yellow }
         return .green
@@ -1750,10 +1775,10 @@ private struct SidebarQuotaMeter: View {
         } else if let window = account.primaryQuotaWindow {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    ProgressView(value: Double(window.remainingPercent), total: 100)
+                    ProgressView(value: Double(window.displayRemainingPercent), total: 100)
                         .tint(tint(for: window.remainingPercent))
                         .frame(minWidth: 52, maxWidth: .infinity)
-                    Text("\(window.remainingPercent)%")
+                    Text("\(window.displayRemainingPercent)%")
                         .font(.caption.monospacedDigit().weight(.semibold))
                         .foregroundStyle(tint(for: window.remainingPercent))
                         .fixedSize(horizontal: true, vertical: false)
@@ -1766,7 +1791,7 @@ private struct SidebarQuotaMeter: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             }
-            .accessibilityLabel(language.text("Quota còn \(window.remainingPercent) phần trăm, \(compactReset(window, language: language.language))", "\(window.remainingPercent) percent quota remaining, \(compactReset(window, language: language.language))"))
+            .accessibilityLabel(language.text("Quota còn \(window.displayRemainingPercent) phần trăm, \(compactReset(window, language: language.language))", "\(window.displayRemainingPercent) percent quota remaining, \(compactReset(window, language: language.language))"))
         } else {
             Text(language.text("Chưa có quota", "Quota not checked"))
                 .font(.caption)
@@ -1775,7 +1800,8 @@ private struct SidebarQuotaMeter: View {
     }
 
     private func tint(for remaining: Int) -> Color {
-        remaining < 20 ? .orange : (remaining < 50 ? .yellow : .green)
+        if remaining <= UsageWindow.exhaustedRemainingPercent { return .red }
+        return remaining < 20 ? .orange : (remaining < 50 ? .yellow : .green)
     }
 }
 
@@ -2132,6 +2158,7 @@ private struct ProviderStatusRow: View {
 
     private var quotaTint: Color {
         guard let bestQuotaWindow else { return .secondary }
+        if bestQuotaWindow.remainingPercent <= UsageWindow.exhaustedRemainingPercent { return .red }
         if bestQuotaWindow.remainingPercent < 20 { return .orange }
         if bestQuotaWindow.remainingPercent < 50 { return .yellow }
         return .green
@@ -2165,11 +2192,11 @@ private struct ProviderStatusRow: View {
                         Text(language.text("Quota Codex", "Codex quota"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Text("\(bestQuotaWindow.remainingPercent)%")
+                        Text("\(bestQuotaWindow.displayRemainingPercent)%")
                             .font(.subheadline.monospacedDigit().weight(.bold))
                             .foregroundStyle(quotaTint)
                     }
-                    ProgressView(value: Double(bestQuotaWindow.remainingPercent), total: 100)
+                    ProgressView(value: Double(bestQuotaWindow.displayRemainingPercent), total: 100)
                         .tint(quotaTint)
                         .frame(width: 116)
                     Text(bestQuotaWindow.resetDescription(in: language.language))
@@ -2210,10 +2237,10 @@ private struct UsagePill: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
                 .help(language.text("Hãy đăng nhập lại trước khi dùng tài khoản đã lưu này.", "Sign in again before using this saved account."))
-        } else if let remaining = account.usage?.weekly?.remainingPercent {
-            Text("\(remaining)%")
+        } else if let window = account.usage?.weekly {
+            Text("\(window.displayRemainingPercent)%")
                 .font(.caption.monospacedDigit().weight(.semibold))
-                .foregroundStyle(remaining < 20 ? .orange : .secondary)
+                .foregroundStyle(window.isDepleted ? .red : (window.remainingPercent < 20 ? .orange : .secondary))
         } else if let plan = account.planLabel {
             Text(plan)
                 .font(.caption.weight(.medium))
@@ -2888,10 +2915,10 @@ private struct UsageCard: View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title).font(.headline)
             if let window {
-                Text(language.text("Còn \(window.remainingPercent)%", "\(window.remainingPercent)% remaining"))
+                Text(language.text("Còn \(window.displayRemainingPercent)%", "\(window.displayRemainingPercent)% remaining"))
                     .font(.title2.weight(.semibold))
-                ProgressView(value: Double(window.remainingPercent), total: 100)
-                    .tint(window.remainingPercent < 20 ? .orange : .accentColor)
+                ProgressView(value: Double(window.displayRemainingPercent), total: 100)
+                    .tint(window.isDepleted ? .red : (window.remainingPercent < 20 ? .orange : .accentColor))
                 Text(language.text("Đặt lại \(window.resetAt.value.formatted(date: .abbreviated, time: .shortened))", "Resets \(window.resetAt.value.formatted(date: .abbreviated, time: .shortened))"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -3509,6 +3536,10 @@ private struct MenuBarOperationStatus: View {
             return language.text("Đã chuyển sang \(name)", "Switched to \(name)")
         case .checkFailed:
             return language.text("Không thể kiểm tra/chuyển quota", "Quota check/switch failed")
+        case .externalModelActive:
+            return language.text("Đang dùng model ngoài — giữ nguyên phiên", "Using an external model — session held")
+        case .generationInProgress:
+            return language.text("Đang tạo phản hồi — chờ xong lượt", "Generating — waiting for the turn")
         }
     }
 
@@ -3517,7 +3548,8 @@ private struct MenuBarOperationStatus: View {
         if store.errorMessage != nil { return .orange }
         switch store.autoSwitchState {
         case .some(.switched): return .green
-        case .some(.closingDesktop), .some(.switchingAccount), .some(.relaunchingDesktop): return .secondary
+        case .some(.closingDesktop), .some(.switchingAccount), .some(.relaunchingDesktop),
+             .some(.externalModelActive), .some(.generationInProgress): return .secondary
         case .some(.waitingForLogin), .some(.allAccountsExhausted), .some(.bankedResetAvailable), .some(.desktopRelaunchFailed), .some(.waitingForProcesses), .some(.checkFailed): return .orange
         case .none: return .secondary
         }
@@ -3721,15 +3753,16 @@ private struct MenuBarQuota: View {
     let window: UsageWindow
 
     private var tint: Color {
-        window.remainingPercent < 20 ? .orange : (window.remainingPercent < 50 ? .yellow : .green)
+        if window.isDepleted { return .red }
+        return window.remainingPercent < 20 ? .orange : (window.remainingPercent < 50 ? .yellow : .green)
     }
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 3) {
-            Text("\(window.remainingPercent)%")
+            Text("\(window.displayRemainingPercent)%")
                 .font(.caption.monospacedDigit().weight(.bold))
                 .foregroundStyle(tint)
-            ProgressView(value: Double(window.remainingPercent), total: 100)
+            ProgressView(value: Double(window.displayRemainingPercent), total: 100)
                 .tint(tint)
                 .frame(width: 54)
             Text(window.relativeReset(in: language.language))

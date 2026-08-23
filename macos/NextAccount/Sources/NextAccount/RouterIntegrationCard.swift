@@ -8,6 +8,13 @@ struct RouterIntegrationCard: View {
 
     private var status: RouterStatusOutput? { router.status }
 
+    /// Prefer the URL the CLI reports; fall back to the known repository so the
+    /// link is present even before the first status check completes.
+    private var repositoryURL: URL {
+        status?.repositoryUrl
+            ?? URL(string: "https://github.com/duolahypercho/codex-router")!
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 12) {
@@ -25,6 +32,25 @@ struct RouterIntegrationCard: View {
                         Text("Codex Router")
                             .font(.headline)
                         RouterStatusBadge(title: statusTitle, tint: statusTint)
+                        Spacer(minLength: 8)
+                        Link(destination: repositoryURL) {
+                            Label("GitHub", systemImage: "arrow.up.forward.square")
+                                .labelStyle(.titleAndIcon)
+                                .font(.caption.weight(.semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .onHover { hovering in
+                            if hovering {
+                                NSCursor.pointingHand.push()
+                            } else {
+                                NSCursor.pop()
+                            }
+                        }
+                        .help(language.text(
+                            "Mở mã nguồn Codex Router trên GitHub",
+                            "Open the Codex Router source on GitHub"
+                        ))
                     }
                     Text(language.text(
                         "Dùng model ngoài qua Router, trong khi Roster tiếp tục quản lý tài khoản OpenAI và quota.",

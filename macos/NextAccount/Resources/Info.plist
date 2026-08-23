@@ -2,22 +2,22 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleDisplayName</key>
-    <string>Codex Roster</string>
-    <key>CFBundleExecutable</key>
-    <string>CodexRoster</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.codexroster.app</string>
-    <key>CFBundleIconFile</key>
-    <string>CodexRoster</string>
-    <key>CFBundleName</key>
-    <string>Codex Roster</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.2.42</string>
-    <key>CFBundleVersion</key>
-    <string>31</string>
+	<key>CFBundleDisplayName</key>
+	<string>Codex Roster</string>
+	<key>CFBundleExecutable</key>
+	<string>CodexRoster</string>
+	<key>CFBundleIconFile</key>
+	<string>CodexRoster</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.codexroster.app</string>
+	<key>CFBundleName</key>
+	<string>Codex Roster</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.2.43</string>
+	<key>CFBundleVersion</key>
+	<string>32</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>

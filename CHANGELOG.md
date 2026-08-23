@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.2.43 - 2026-08-23
+
+### Changed
+
+- Roster now offers a Switch button for a quota-exhausted account that still holds a banked reset, so it can be activated and the reset redeemed inside Codex, instead of showing only a dead "Quota empty" label.
+- Treat a quota window at 1% remaining (99% used) as empty in the roster too — matching the switching logic — so a window ChatGPT already blocks reads as out of quota and turns its meter red. Every quota surface — menu-bar percentage, the menu-bar popover session card, roster rows, provider summary, and account cards — now shows 0% (in red) for such a window instead of a misleading 1%.
+- Add a GitHub link to the Codex Router card so the router's source is one click away from the main view; the pointer now switches to a hand on hover.
+- Remove the account search field from the roster; the Hide-unavailable toggle remains.
+
+### Fixed
+
+- Auto-switch no longer interrupts a live Codex turn: it now reads the router's activity and holds the switch while a response is generating, and — when that turn runs on an external model via codex-router (whose quota is independent of the OpenAI account) — reports a distinct "using an external model" state instead of pointlessly closing ChatGPT and swapping accounts.
+- Stop the Codex Router card from flashing "Auto-recovering" and triggering a heavy reinstall on every launch. Roster now gives the router's local service a short grace period to finish starting after a restart before escalating to recovery, so a healthy router is no longer disrupted.
+
 ## v0.2.42 - 2026-08-23
 
 ### Fixed

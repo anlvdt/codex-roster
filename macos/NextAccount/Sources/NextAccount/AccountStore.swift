@@ -944,6 +944,22 @@ final class AccountStore: ObservableObject {
                 )
             case "ready":
                 guard !isBusyForActions else { return }
+                // Never switch the OpenAI account out from under a live Codex
+                // turn — and especially not when that turn runs on an external
+                // model via codex-router, whose quota is independent of the
+                // exhausted OpenAI account. Interrupting it would be pointless.
+                if let routerStatus = try? await cli.decode(
+                    RouterStatusOutput.self, arguments: ["router", "status"]
+                ), routerStatus.healthy {
+                    if routerStatus.activeExternalModel {
+                        autoSwitchState = .externalModelActive(model: routerStatus.activeModel)
+                        return
+                    }
+                    if routerStatus.activeGenerating {
+                        autoSwitchState = .generationInProgress
+                        return
+                    }
+                }
                 isSwitching = true
                 defer { isSwitching = false }
                 let previousAccountID = decision.activeAccountId
@@ -1223,6 +1239,13 @@ enum AutoSwitchState: Equatable {
     case waitingForProcesses
     case switched(String)
     case checkFailed
+    /// The active Codex session is generating through an external model via
+    /// codex-router, whose quota is independent of the OpenAI account, so the
+    /// switch is held to avoid interrupting it.
+    case externalModelActive(model: String?)
+    /// A Codex turn is generating right now; the switch is held so it is not
+    /// killed mid-response.
+    case generationInProgress
 }
 
 private struct AccountHubCLI {
@@ -2062,8 +2085,8 @@ struct SavedAccount: Identifiable, Decodable {
         if let usageError { return usageError }
         if let quota = primaryQuotaWindow {
             return language == .vietnamese
-                ? "Đã xác minh quota Codex · còn \(quota.remainingPercent)%"
-                : "Codex quota verified · \(quota.remainingPercent)% remaining"
+                ? "Đã xác minh quota Codex · còn \(quota.displayRemainingPercent)%"
+                : "Codex quota verified · \(quota.displayRemainingPercent)% remaining"
         }
         return language == .vietnamese ? "Chưa cập nhật quota Codex" : "Codex quota not checked"
     }
@@ -2116,12 +2139,12 @@ struct SavedAccount: Identifiable, Decodable {
     }
 
     var isExhaustedForSwitch: Bool {
-        !hasUsableCredits && quotaWindowsForSwitch.contains { $0.remainingPercent == 0 }
+        !hasUsableCredits && quotaWindowsForSwitch.contains { $0.isDepleted }
     }
 
     var isUsableForSwitch: Bool {
         hasUsableCredits
-            || (!quotaWindowsForSwitch.isEmpty && quotaWindowsForSwitch.allSatisfy { $0.remainingPercent > 0 })
+            || (!quotaWindowsForSwitch.isEmpty && quotaWindowsForSwitch.allSatisfy { !$0.isDepleted })
     }
 
     var switchQuotaScore: Int {
@@ -2177,8 +2200,21 @@ struct BankedResetCredit: Identifiable, Decodable {
 }
 
 struct UsageWindow: Decodable {
+    /// OpenAI floors `used_percent` server-side, so a window ChatGPT already
+    /// blocks reads back as 1% remaining rather than a clean 0%. Treat anything
+    /// at or below this remaining threshold as depleted. Mirrors the Rust
+    /// `EXHAUSTED_REMAINING_PERCENT`.
+    static let exhaustedRemainingPercent = 1
+
     let remainingPercent: Int
     let resetAt: RustDate
+
+    var isDepleted: Bool { remainingPercent <= Self.exhaustedRemainingPercent }
+
+    /// Remaining quota to show the user. A depleted window (≤1%, which ChatGPT
+    /// already blocks) reads as 0 so the UI never implies spendable quota that
+    /// isn't there.
+    var displayRemainingPercent: Int { isDepleted ? 0 : remainingPercent }
 
     func relativeReset(in language: AppLanguage) -> String {
         let formatter = RelativeDateTimeFormatter()
@@ -2287,6 +2323,9 @@ struct RouterStatusOutput: Decodable {
     let installation: String?
     let detail: String?
     let repositoryUrl: URL
+    let activeGenerating: Bool
+    let activeExternalModel: Bool
+    let activeModel: String?
 }
 
 struct RouterProviderOutput: Decodable, Identifiable, Equatable {
@@ -2331,6 +2370,13 @@ final class RouterStore: ObservableObject {
     private static let maintenanceDefaultsKey = "routerLastAutomaticMaintenanceAt"
     private static let maintenanceInterval: TimeInterval = 6 * 60 * 60
     private static let healthCheckInterval: Duration = .seconds(5 * 60)
+    // After a Mac/app restart the router's launchd service takes a few seconds
+    // to come up, so the first status check reports `healthy: false` even though
+    // nothing is broken. Poll a short grace window before escalating to the
+    // heavy `router install` recovery, otherwise every restart kicks off a
+    // reinstall that can disrupt the catalog and enabled providers.
+    private static let healthGraceRetries = 6
+    private static let healthGraceDelay: Duration = .seconds(2)
 
     func startAutomation() {
         guard automationTask == nil else { return }
@@ -2423,11 +2469,25 @@ final class RouterStore: ObservableObject {
         isWorking = true
         defer { isWorking = false }
         do {
-            let current = try await cli.decode(
+            var current = try await cli.decode(
                 RouterStatusOutput.self,
                 arguments: ["router", "status"]
             )
             status = current
+            // Give a just-booted service time to become healthy on its own
+            // before treating it as broken. Only a still-unhealthy service after
+            // the grace window is escalated to recovery below.
+            if !current.healthy && current.installed {
+                for _ in 0..<Self.healthGraceRetries {
+                    try? await Task.sleep(for: Self.healthGraceDelay)
+                    current = try await cli.decode(
+                        RouterStatusOutput.self,
+                        arguments: ["router", "status"]
+                    )
+                    status = current
+                    if current.healthy { break }
+                }
+            }
             if current.healthy {
                 try await loadProviders()
             } else {

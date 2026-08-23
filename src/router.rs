@@ -28,6 +28,52 @@ pub struct RouterStatusOutput {
     pub installation: Option<&'static str>,
     pub detail: Option<String>,
     pub repository_url: &'static str,
+    /// A Codex turn is currently generating through the router.
+    pub active_generating: bool,
+    /// The in-progress turn is served by a non-OpenAI (external) provider, so
+    /// the active OpenAI account's quota is irrelevant to it.
+    pub active_external_model: bool,
+    /// Model slug of the in-progress turn, for display.
+    pub active_model: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RouterActivityEnvelope {
+    activity: Option<RouterActivity>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RouterActivity {
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default, rename = "activeCount")]
+    active_count: i64,
+    #[serde(default)]
+    active: Vec<RouterActiveSession>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RouterActiveSession {
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// The `codex-router status` command prints several JSON objects, one per line.
+/// Find the one carrying the live `activity` block and report whether a turn is
+/// generating and whether it runs on an external (non-OpenAI) provider.
+fn parse_router_activity(stdout: &[u8]) -> Option<RouterActivity> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<RouterActivityEnvelope>(line.trim()).ok())
+        .find_map(|envelope| envelope.activity)
+}
+
+/// A provider id names an external model unless it is the native OpenAI route.
+fn provider_is_external(provider: &str) -> bool {
+    let normalized = provider.trim();
+    !normalized.is_empty() && !normalized.eq_ignore_ascii_case("openai")
 }
 
 impl RouterStatusOutput {
@@ -104,6 +150,9 @@ pub fn status() -> RouterStatusOutput {
                     .to_owned(),
             ),
             repository_url: REPOSITORY_URL,
+            active_generating: false,
+            active_external_model: false,
+            active_model: None,
         };
     };
 
@@ -111,8 +160,26 @@ pub fn status() -> RouterStatusOutput {
         .ok()
         .filter(Output::status_success)
         .and_then(|output| first_line(&output.stdout));
-    let healthy = run_router(&installation.executable, ["status"])
-        .is_ok_and(|output| output.status.success());
+    let status_output = run_router(&installation.executable, ["status"]).ok();
+    let healthy = status_output
+        .as_ref()
+        .is_some_and(|output| output.status.success());
+    let activity = status_output
+        .as_ref()
+        .and_then(|output| parse_router_activity(&output.stdout));
+    let active_generating = activity.as_ref().is_some_and(|activity| {
+        activity.active_count > 0
+            || activity
+                .state
+                .as_deref()
+                .is_some_and(|state| state.eq_ignore_ascii_case("generating"))
+    });
+    let external_session = activity.as_ref().and_then(|activity| {
+        activity
+            .active
+            .iter()
+            .find(|session| session.provider.as_deref().is_some_and(provider_is_external))
+    });
 
     RouterStatusOutput {
         installed: true,
@@ -128,6 +195,16 @@ pub fn status() -> RouterStatusOutput {
         }
         .to_owned()),
         repository_url: REPOSITORY_URL,
+        active_generating,
+        active_external_model: external_session.is_some(),
+        active_model: external_session
+            .and_then(|session| session.model.clone())
+            .or_else(|| {
+                activity
+                    .as_ref()
+                    .and_then(|activity| activity.active.first())
+                    .and_then(|session| session.model.clone())
+            }),
     }
 }
 
@@ -920,6 +997,40 @@ mod tests {
         assert!(provider_requires_explicit_consent("opencode-free"));
         assert!(!provider_requires_explicit_consent("openrouter"));
         assert_eq!(provider_connection_kind("kilo-free"), "anonymous");
+    }
+
+    #[test]
+    fn parses_external_generation_from_router_status_lines() {
+        // codex-router status prints one JSON object per line; only one carries
+        // the live activity block.
+        let stdout = concat!(
+            "{\"mode\":\"router\",\"model\":\"gpt-5.6-sol\"}\n",
+            "{\"installed\":true,\"loaded\":true,\"state\":\"running\"}\n",
+            "{\"ok\":true,\"service\":\"codex-router\",\"activity\":{\"state\":\"generating\",\"activeCount\":1,\"active\":[{\"provider\":\"opencode-free\",\"model\":\"opencode-free/x-preview-f-free\"}]}}\n",
+        );
+        let activity = super::parse_router_activity(stdout.as_bytes()).expect("activity present");
+        assert_eq!(activity.active_count, 1);
+        assert_eq!(activity.state.as_deref(), Some("generating"));
+        let session = &activity.active[0];
+        assert!(super::provider_is_external(session.provider.as_deref().unwrap()));
+        assert_eq!(session.model.as_deref(), Some("opencode-free/x-preview-f-free"));
+    }
+
+    #[test]
+    fn native_openai_session_is_not_external() {
+        assert!(!super::provider_is_external("openai"));
+        assert!(!super::provider_is_external("OpenAI"));
+        assert!(!super::provider_is_external(""));
+        assert!(super::provider_is_external("kilo-free"));
+        assert!(super::provider_is_external("opencode-free"));
+    }
+
+    #[test]
+    fn idle_router_reports_no_activity() {
+        let stdout = "{\"ok\":true,\"activity\":{\"state\":\"idle\",\"activeCount\":0,\"active\":[]}}\n";
+        let activity = super::parse_router_activity(stdout.as_bytes()).expect("activity present");
+        assert_eq!(activity.active_count, 0);
+        assert!(activity.active.is_empty());
     }
 
     #[test]

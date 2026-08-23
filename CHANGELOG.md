@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.42 - 2026-08-23
+
+### Fixed
+
+- Treat a quota window that reads back at 99% used (1% remaining) as exhausted for switching decisions. OpenAI floors `used_percent` server-side, so a window ChatGPT already blocks reported 1% remaining and kept auto-switch and banked-reset handling from ever running.
+- Connect external-model providers that do not publish a machine-readable free catalog (such as Kilo Free and OpenCode Free) by falling back to the secure interactive model picker, so their models actually reach Codex instead of leaving the catalog empty.
+
 ## v0.2.41 - 2026-08-22
 
 ### Added

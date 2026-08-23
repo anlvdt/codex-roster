@@ -332,7 +332,10 @@ pub fn connect_provider(
                 output_detail(&output)
             );
         }
-        let needs_interactive_curation = !provider.requires_explicit_consent
+        // `mut` is only taken on macOS, where the consent fallback below flips it
+        // after opening the Terminal curator; other targets read it unchanged.
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+        let mut needs_interactive_curation = !provider.requires_explicit_consent
             && String::from_utf8_lossy(&output.stdout).contains("curate-models");
         #[cfg(target_os = "macos")]
         if needs_interactive_curation {
@@ -352,7 +355,22 @@ pub fn connect_provider(
             if curated.status.success() {
                 " Its current free model catalog was synchronized."
             } else {
-                " The provider is enabled; its live free catalog could not be refreshed yet."
+                // Anonymous providers such as kilo-free/opencode-free do not
+                // publish a machine-readable free-model catalog, so `--free-only`
+                // adds nothing and Codex never sees their models. Their free
+                // models are only enumerable through the interactive curator, so
+                // fall back to the secure Terminal picker instead of silently
+                // leaving the catalog empty.
+                #[cfg(target_os = "macos")]
+                {
+                    launch_model_curation(&installation.executable, provider.id.as_str())?;
+                    needs_interactive_curation = true;
+                    " Its secure model picker opened in Terminal so you can choose which models reach Codex."
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    " The provider is enabled; run `codex-router curate-models <id> --apply` in Terminal to choose which models reach Codex."
+                }
             }
         } else {
             #[cfg(target_os = "macos")]

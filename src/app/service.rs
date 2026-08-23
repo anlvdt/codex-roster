@@ -1238,8 +1238,20 @@ fn quota_windows(
         .flatten()
 }
 
+/// The Codex usage API reports `used_percent` as a server-side floored integer,
+/// so a window that ChatGPT already blocks reads back as `used_percent = 99`
+/// (`remaining_percent = 1`) rather than a clean 100/0. Treat anything at or
+/// below this remaining threshold as depleted so a still-blocked account is not
+/// mistaken for one that has quota to spend.
+const EXHAUSTED_REMAINING_PERCENT: u8 = 1;
+
+fn window_is_depleted(remaining_percent: u8) -> bool {
+    remaining_percent <= EXHAUSTED_REMAINING_PERCENT
+}
+
 fn is_exhausted_for_switch(usage: Option<&AccountUsageView>) -> bool {
-    !has_usable_credits(usage) && quota_windows(usage).any(|window| window.remaining_percent == 0)
+    !has_usable_credits(usage)
+        && quota_windows(usage).any(|window| window_is_depleted(window.remaining_percent))
 }
 
 fn is_usable_for_switch(usage: Option<&AccountUsageView>) -> bool {
@@ -1247,7 +1259,10 @@ fn is_usable_for_switch(usage: Option<&AccountUsageView>) -> bool {
         return true;
     }
     let windows = quota_windows(usage).collect::<Vec<_>>();
-    !windows.is_empty() && windows.iter().all(|window| window.remaining_percent > 0)
+    !windows.is_empty()
+        && windows
+            .iter()
+            .all(|window| !window_is_depleted(window.remaining_percent))
 }
 
 fn has_usable_credits(usage: Option<&AccountUsageView>) -> bool {
@@ -1454,7 +1469,8 @@ fn cached_usage_is_fresh(
         // scheduled time, hiding restored quota. Only accounts that still have
         // quota in every reported window skip the refetch.
         now - usage.fetched_at < time::Duration::minutes(15)
-            && quota_windows(Some(usage)).all(|window| window.remaining_percent > 0)
+            && quota_windows(Some(usage))
+                .all(|window| !window_is_depleted(window.remaining_percent))
     })
 }
 
@@ -1854,6 +1870,42 @@ mod tests {
         );
         assert!(is_exhausted_for_switch(Some(&empty_credits)));
         assert!(!is_usable_for_switch(Some(&empty_credits)));
+    }
+
+    #[test]
+    fn floored_ninety_nine_percent_window_counts_as_exhausted() {
+        // OpenAI floors `used_percent`, so a window ChatGPT already blocks reads
+        // back as 99/1 instead of 100/0. It must not be treated as spendable
+        // quota, otherwise the switcher stalls on an account that cannot serve
+        // another request.
+        let now = OffsetDateTime::now_utc();
+        let depleted = AccountUsageView {
+            source: UsageSource::SavedAccessToken,
+            fetched_at: now,
+            five_hour: Some(UsageWindowView {
+                used_percent: 99,
+                remaining_percent: 1,
+                reset_at: now,
+            }),
+            weekly: None,
+            credits: None,
+            banked_resets: None,
+            plan_label: Some("Pro".to_owned()),
+        };
+        assert!(is_exhausted_for_switch(Some(&depleted)));
+        assert!(!is_usable_for_switch(Some(&depleted)));
+        assert!(!cached_usage_is_fresh(Some(&depleted), now));
+
+        let usable = AccountUsageView {
+            five_hour: Some(UsageWindowView {
+                used_percent: 98,
+                remaining_percent: 2,
+                reset_at: now,
+            }),
+            ..depleted
+        };
+        assert!(!is_exhausted_for_switch(Some(&usable)));
+        assert!(is_usable_for_switch(Some(&usable)));
     }
 
     #[test]

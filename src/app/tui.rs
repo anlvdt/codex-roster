@@ -316,31 +316,7 @@ fn render_account_label(account: &AccountView, widths: AccountLabelWidths) -> St
         width = widths.plan
     );
 
-    let (remaining, reset) = if account
-        .usage_error
-        .as_deref()
-        .is_some_and(usage_error_requires_login)
-    {
-        (
-            usage_error_label(account.usage_error.as_deref().unwrap_or_default()).to_owned(),
-            String::new(),
-        )
-    } else if let Some(usage) = &account.usage
-        && let Some(weekly) = &usage.weekly
-    {
-        if weekly.reset_at <= OffsetDateTime::now_utc() {
-            ("Weekly Remaining: passed".to_owned(), String::new())
-        } else {
-            (
-                format!("Weekly Remaining: {}%", weekly.remaining_percent),
-                format!("Reset: {}", format_local_reset_at(weekly.reset_at)),
-            )
-        }
-    } else if let Some(error) = &account.usage_error {
-        (usage_error_label(error).to_owned(), String::new())
-    } else {
-        (String::new(), String::new())
-    };
+    let (remaining, reset) = account_usage_labels(account);
     let remaining = format!("{:<width$}", remaining, width = widths.remaining);
     let reset = format!("{:<width$}", reset, width = widths.reset);
 
@@ -349,6 +325,49 @@ fn render_account_label(account: &AccountView, widths: AccountLabelWidths) -> St
         .filter(|part| !part.trim().is_empty())
         .collect::<Vec<_>>()
         .join("  ")
+}
+
+fn account_usage_labels(account: &AccountView) -> (String, String) {
+    if account
+        .usage_error
+        .as_deref()
+        .is_some_and(usage_error_requires_login)
+    {
+        return (
+            usage_error_label(account.usage_error.as_deref().unwrap_or_default()).to_owned(),
+            String::new(),
+        );
+    }
+
+    if let Some(usage) = &account.usage {
+        let now = OffsetDateTime::now_utc();
+        let mut remaining = Vec::new();
+        let mut resets = Vec::new();
+        for (label, window) in [
+            ("5h", usage.five_hour.as_ref()),
+            ("Weekly", usage.weekly.as_ref()),
+        ] {
+            let Some(window) = window else { continue };
+            if window.reset_at <= now {
+                remaining.push(format!("{label} Remaining: passed"));
+            } else {
+                remaining.push(format!("{label} Remaining: {}%", window.remaining_percent));
+                resets.push(format!(
+                    "{label} Reset: {}",
+                    format_local_reset_at(window.reset_at)
+                ));
+            }
+        }
+        if !remaining.is_empty() {
+            return (remaining.join(" | "), resets.join(" | "));
+        }
+    }
+
+    account
+        .usage_error
+        .as_deref()
+        .map(|error| (usage_error_label(error).to_owned(), String::new()))
+        .unwrap_or_default()
 }
 
 fn account_label_widths(accounts: &[&AccountView]) -> AccountLabelWidths {
@@ -362,33 +381,9 @@ fn account_label_widths(accounts: &[&AccountView]) -> AccountLabelWidths {
                 .map(|plan| format!("Plan: {plan}").len())
                 .unwrap_or(0),
         );
-        let (remaining, reset) = if account
-            .usage_error
-            .as_deref()
-            .is_some_and(usage_error_requires_login)
-        {
-            (
-                usage_error_label(account.usage_error.as_deref().unwrap_or_default()).len(),
-                0,
-            )
-        } else if let Some(usage) = &account.usage
-            && let Some(weekly) = &usage.weekly
-        {
-            if weekly.reset_at <= OffsetDateTime::now_utc() {
-                ("Weekly Remaining: passed".len(), 0)
-            } else {
-                (
-                    format!("Weekly Remaining: {}%", weekly.remaining_percent).len(),
-                    format!("Reset: {}", format_local_reset_at(weekly.reset_at)).len(),
-                )
-            }
-        } else if let Some(error) = &account.usage_error {
-            (usage_error_label(error).len(), 0)
-        } else {
-            (0, 0)
-        };
-        widths.remaining = widths.remaining.max(remaining);
-        widths.reset = widths.reset.max(reset);
+        let (remaining, reset) = account_usage_labels(account);
+        widths.remaining = widths.remaining.max(remaining.len());
+        widths.reset = widths.reset.max(reset.len());
     }
     widths
 }
@@ -936,7 +931,11 @@ mod tests {
         list.accounts[0].usage = Some(AccountUsageView {
             source: UsageSource::SavedAccessToken,
             fetched_at: OffsetDateTime::UNIX_EPOCH,
-            five_hour: None,
+            five_hour: Some(UsageWindowView {
+                used_percent: 39,
+                remaining_percent: 61,
+                reset_at,
+            }),
             weekly: Some(UsageWindowView {
                 used_percent: 77,
                 remaining_percent: 23,
@@ -953,7 +952,13 @@ mod tests {
             account_label_widths(&[&list.accounts[0]]),
         );
 
-        assert!(label.contains(&format!("Reset: {}", format_local_reset_at(reset_at))));
+        assert!(label.contains("5h Remaining: 61%"));
+        assert!(label.contains("Weekly Remaining: 23%"));
+        assert!(label.contains(&format!("5h Reset: {}", format_local_reset_at(reset_at))));
+        assert!(label.contains(&format!(
+            "Weekly Reset: {}",
+            format_local_reset_at(reset_at)
+        )));
     }
 
     #[test]

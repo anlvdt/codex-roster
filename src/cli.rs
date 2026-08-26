@@ -819,20 +819,29 @@ fn render_account_summary(account: &AccountView) -> String {
             " [{}]",
             usage_error_label(account.usage_error.as_deref().unwrap_or_default()).to_lowercase()
         ));
-    } else if let Some(usage) = &account.usage
-        && let Some(weekly) = &usage.weekly
-    {
-        if weekly.reset_at <= OffsetDateTime::now_utc() {
-            line.push_str(" [weekly reset passed]");
-        } else {
-            line.push_str(&format!(
-                " [weekly remaining: {}%, reset {}]",
-                weekly.remaining_percent,
-                weekly.reset_at.date()
-            ));
+    } else {
+        let mut rendered_window = false;
+        if let Some(usage) = &account.usage {
+            for (label, window) in [
+                ("5h", usage.five_hour.as_ref()),
+                ("weekly", usage.weekly.as_ref()),
+            ] {
+                let Some(window) = window else { continue };
+                rendered_window = true;
+                if window.reset_at <= OffsetDateTime::now_utc() {
+                    line.push_str(&format!(" [{label} reset passed]"));
+                } else {
+                    line.push_str(&format!(
+                        " [{label} remaining: {}%, reset {}]",
+                        window.remaining_percent,
+                        window.reset_at.date()
+                    ));
+                }
+            }
         }
-    } else if let Some(error) = &account.usage_error {
-        line.push_str(&format!(" [{}]", usage_error_label(error).to_lowercase()));
+        if !rendered_window && let Some(error) = &account.usage_error {
+            line.push_str(&format!(" [{}]", usage_error_label(error).to_lowercase()));
+        }
     }
     line
 }

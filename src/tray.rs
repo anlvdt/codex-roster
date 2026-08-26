@@ -495,19 +495,36 @@ fn account_usage_labels(account: &AccountView) -> (String, String) {
             usage_error_label(account.usage_error.as_deref().unwrap_or_default()).to_owned(),
             String::new(),
         )
-    } else if let Some(usage) = &account.usage
-        && let Some(weekly) = &usage.weekly
-    {
-        if weekly.reset_at <= OffsetDateTime::now_utc() {
-            ("Weekly Remaining: passed".to_owned(), String::new())
+    } else if let Some(usage) = &account.usage {
+        let now = OffsetDateTime::now_utc();
+        let mut remaining = Vec::new();
+        let mut resets = Vec::new();
+        for (label, window) in [
+            ("5h", usage.five_hour.as_ref()),
+            ("Weekly", usage.weekly.as_ref()),
+        ] {
+            let Some(window) = window else { continue };
+            if window.reset_at <= now {
+                remaining.push(format!("{label} Remaining: passed"));
+            } else {
+                remaining.push(format!(
+                    "{label} Remaining: {}%",
+                    format_remaining_percent(window.remaining_percent)
+                ));
+                resets.push(format!(
+                    "{label} Reset: {}",
+                    format_local_reset_at(window.reset_at)
+                ));
+            }
+        }
+        if remaining.is_empty() {
+            account
+                .usage_error
+                .as_deref()
+                .map(|error| (usage_error_label(error).to_owned(), String::new()))
+                .unwrap_or_default()
         } else {
-            (
-                format!(
-                    "Weekly Remaining: {}%",
-                    format_remaining_percent(weekly.remaining_percent)
-                ),
-                format!("Reset: {}", format_local_reset_at(weekly.reset_at)),
-            )
+            (remaining.join(" | "), resets.join(" | "))
         }
     } else if let Some(error) = &account.usage_error {
         (usage_error_label(error).to_owned(), String::new())
@@ -662,7 +679,11 @@ mod tests {
         account.usage = Some(AccountUsageView {
             source: UsageSource::SavedAccessToken,
             fetched_at: OffsetDateTime::UNIX_EPOCH,
-            five_hour: None,
+            five_hour: Some(UsageWindowView {
+                used_percent: 36,
+                remaining_percent: 64,
+                reset_at,
+            }),
             weekly: Some(UsageWindowView {
                 used_percent: 83,
                 remaining_percent: 17,
@@ -677,8 +698,9 @@ mod tests {
         assert_eq!(
             tray_account_label(&account, tray_label_widths(&[&account])),
             format!(
-                "person@example.com{}Plan: Pro  Weekly Remaining: \u{2007}17%  Reset: {}",
+                "person@example.com{}Plan: Pro  5h Remaining: \u{2007}64% | Weekly Remaining: \u{2007}17%  5h Reset: {} | Weekly Reset: {}",
                 tray_detail_separator(),
+                format_local_reset_at(reset_at),
                 format_local_reset_at(reset_at)
             )
         );
@@ -852,7 +874,7 @@ mod tests {
         assert_eq!(
             active_account_label(&account, Some(&saved_account), widths),
             format!(
-                "person@example.com{}Plan: ProLite  Weekly Remaining: \u{2007}17%  Reset: {}",
+                "person@example.com{}Plan: ProLite  Weekly Remaining: \u{2007}17%  Weekly Reset: {}",
                 tray_detail_separator(),
                 format_local_reset_at(reset_at)
             )

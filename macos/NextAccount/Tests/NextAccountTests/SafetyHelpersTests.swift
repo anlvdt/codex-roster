@@ -75,3 +75,35 @@ import Testing
     let legacy = try decoder.decode(AccountUsage.self, from: Data("{}".utf8))
     #expect(legacy.subscriptionActiveUntil == nil)
 }
+
+@Test func fiveHourQuotaRemainsPrimaryAndWeeklyStaysIndependent() throws {
+    let decoder = JSONDecoder()
+    decoder.keyDecodingStrategy = .convertFromSnakeCase
+    let usage = try decoder.decode(
+        AccountUsage.self,
+        from: Data(#"""
+        {
+            "five_hour":{"remaining_percent":74,"reset_at":[2099,132,10,0,0,0,0,0,0]},
+            "weekly":{"remaining_percent":22,"reset_at":[2099,136,10,0,0,0,0,0,0]}
+        }
+        """#.utf8)
+    )
+    let account = SavedAccount(
+        id: UUID(),
+        provider: "open_ai",
+        email: "person@example.com",
+        name: nil,
+        customLabel: nil,
+        planLabel: "Pro",
+        environment: "macos",
+        isActive: true,
+        archived: false,
+        usage: usage,
+        usageError: nil
+    )
+
+    #expect(account.primaryQuotaWindow?.remainingPercent == 74)
+    #expect(account.switchQuotaScore == 22)
+    #expect(account.usageStatus(in: .vietnamese).contains("5 giờ còn 74%"))
+    #expect(account.usageStatus(in: .vietnamese).contains("tuần còn 22%"))
+}

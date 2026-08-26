@@ -971,6 +971,33 @@ mod tests {
     }
 
     #[test]
+    fn usage_keeps_five_hour_and_weekly_windows_distinct() {
+        let response: UsageResponse = serde_json::from_value(json!({
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 25,
+                    "reset_at": 1_893_456_000_i64
+                },
+                "secondary_window": {
+                    "used_percent": 60,
+                    "reset_at": 1_893_888_000_i64
+                }
+            }
+        }))
+        .expect("usage payload");
+
+        let view = response
+            .into_view(UsageSource::LiveAccessToken, None, None)
+            .expect("usage view");
+
+        assert_eq!(
+            view.five_hour.expect("five-hour window").remaining_percent,
+            75
+        );
+        assert_eq!(view.weekly.expect("weekly window").remaining_percent, 40);
+    }
+
+    #[test]
     fn reads_chatgpt_subscription_period_from_id_token() {
         let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#);
         let payload = URL_SAFE_NO_PAD.encode(

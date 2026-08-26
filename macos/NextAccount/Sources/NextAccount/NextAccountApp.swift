@@ -370,10 +370,18 @@ private struct AccountSidebar: View {
                                     .help(activeAccount.displayName)
                             }
                             Spacer(minLength: 4)
-                            if let window = activeAccount.primaryQuotaWindow {
-                                Text("\(window.displayRemainingPercent)%")
-                                    .font(.caption.monospacedDigit().weight(.semibold))
-                                    .foregroundStyle(quotaTint(window.remainingPercent))
+                            if activeAccount.primaryQuotaWindow != nil {
+                                VStack(alignment: .trailing, spacing: 1) {
+                                    if let window = activeAccount.usage?.fiveHour {
+                                        Text("5h \(window.displayRemainingPercent)%")
+                                            .foregroundStyle(quotaTint(window.remainingPercent))
+                                    }
+                                    if let window = activeAccount.usage?.weekly {
+                                        Text(language.text("Tuần \(window.displayRemainingPercent)%", "Week \(window.displayRemainingPercent)%"))
+                                            .foregroundStyle(quotaTint(window.remainingPercent))
+                                    }
+                                }
+                                .font(.caption2.monospacedDigit().weight(.semibold))
                             }
                         }
                     }
@@ -1071,7 +1079,7 @@ private struct BulkAccountManager: View {
                 .frame(width: planColumnWidth, alignment: .leading)
             Text(language.text("Phiên", "Session"))
                 .frame(width: sessionColumnWidth, alignment: .leading)
-            Text(language.text("Tuần", "Weekly"))
+            Text(language.text("5 giờ / Tuần", "5-hour / Weekly"))
                 .frame(width: quotaColumnWidth, alignment: .leading)
             Text(language.text("Lượt reset", "Banked"))
                 .frame(width: resetColumnWidth, alignment: .leading)
@@ -1147,7 +1155,7 @@ private struct BulkAccountManager: View {
             }
             .frame(width: sessionColumnWidth, alignment: .leading)
 
-            quotaCell(account.usage?.weekly)
+            quotaCell(account)
             bankedResetCell(account.usage?.bankedResets)
             primaryAction(for: account)
                 .frame(width: actionColumnWidth, alignment: .trailing)
@@ -1157,34 +1165,48 @@ private struct BulkAccountManager: View {
     }
 
     @ViewBuilder
-    private func quotaCell(_ window: UsageWindow?) -> some View {
-        if let window {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 4) {
-                    Text("\(window.displayRemainingPercent)%")
-                        .font(.caption.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(quotaTint(window.remainingPercent))
-                    Spacer(minLength: 0)
-                    Text(compactReset(window, language: language.language))
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: true, vertical: false)
+    private func quotaCell(_ account: SavedAccount) -> some View {
+        if account.primaryQuotaWindow != nil {
+            VStack(alignment: .leading, spacing: 4) {
+                if let window = account.usage?.fiveHour {
+                    comparisonQuotaLine(
+                        language.text("5 giờ", "5-hour"),
+                        window: window
+                    )
                 }
-                ProgressView(value: Double(window.displayRemainingPercent), total: 100)
-                    .tint(quotaTint(window.remainingPercent))
-                    .controlSize(.mini)
+                if let window = account.usage?.weekly {
+                    comparisonQuotaLine(
+                        language.text("Tuần", "Weekly"),
+                        window: window
+                    )
+                }
             }
             .frame(width: quotaColumnWidth, alignment: .leading)
-            .accessibilityLabel(language.text(
-                "Còn \(window.displayRemainingPercent) phần trăm, đặt lại \(window.relativeReset(in: language.language))",
-                "\(window.displayRemainingPercent) percent remaining, resets \(window.relativeReset(in: language.language))"
-            ))
         } else {
             Text("—")
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.tertiary)
                 .frame(width: quotaColumnWidth, alignment: .leading)
         }
+    }
+
+    private func comparisonQuotaLine(_ label: String, window: UsageWindow) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Text("\(window.displayRemainingPercent)%")
+                .fontWeight(.semibold)
+                .foregroundStyle(quotaTint(window.remainingPercent))
+            Spacer(minLength: 0)
+            Text(compactReset(window, language: language.language))
+                .foregroundStyle(.secondary)
+        }
+        .font(.caption2.monospacedDigit())
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityLabel(language.text(
+            "\(label) còn \(window.displayRemainingPercent) phần trăm, đặt lại \(window.relativeReset(in: language.language))",
+            "\(label) \(window.displayRemainingPercent) percent remaining, resets \(window.relativeReset(in: language.language))"
+        ))
     }
 
     @ViewBuilder
@@ -1781,28 +1803,42 @@ private struct SidebarQuotaMeter: View {
             Label(language.text("Quota tạm thời lỗi", "Quota temporarily unavailable"), systemImage: "wifi.exclamationmark")
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.yellow)
-        } else if let window = account.primaryQuotaWindow {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    ProgressView(value: Double(window.displayRemainingPercent), total: 100)
-                        .tint(tint(for: window.remainingPercent))
-                        .frame(minWidth: 52, maxWidth: .infinity)
-                    Text("\(window.displayRemainingPercent)%")
-                        .font(.caption.monospacedDigit().weight(.semibold))
-                        .foregroundStyle(tint(for: window.remainingPercent))
-                        .fixedSize(horizontal: true, vertical: false)
+        } else if account.primaryQuotaWindow != nil {
+            VStack(alignment: .leading, spacing: 3) {
+                if let window = account.usage?.fiveHour {
+                    quotaLine(language.text("5 giờ", "5-hour"), window: window)
                 }
-                Text(compactReset(window, language: language.language))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: true, vertical: false)
+                if let window = account.usage?.weekly {
+                    quotaLine(language.text("Tuần", "Weekly"), window: window)
+                }
             }
-            .accessibilityLabel(language.text("Quota còn \(window.displayRemainingPercent) phần trăm, \(compactReset(window, language: language.language))", "\(window.displayRemainingPercent) percent quota remaining, \(compactReset(window, language: language.language))"))
         } else {
             Text(language.text("Chưa có quota", "Quota not checked"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    private func quotaLine(_ label: String, window: UsageWindow) -> some View {
+        HStack(spacing: 5) {
+            Text(label)
+                .frame(width: 40, alignment: .leading)
+                .foregroundStyle(.secondary)
+            ProgressView(value: Double(window.displayRemainingPercent), total: 100)
+                .tint(tint(for: window.remainingPercent))
+                .frame(minWidth: 46, maxWidth: .infinity)
+            Text("\(window.displayRemainingPercent)%")
+                .font(.caption2.monospacedDigit().weight(.semibold))
+                .foregroundStyle(tint(for: window.remainingPercent))
+            Text(compactReset(window, language: language.language))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityLabel(language.text(
+            "\(label) còn \(window.displayRemainingPercent) phần trăm, \(compactReset(window, language: language.language))",
+            "\(label) \(window.displayRemainingPercent) percent remaining, \(compactReset(window, language: language.language))"
+        ))
     }
 
     private func tint(for remaining: Int) -> Color {
@@ -2240,15 +2276,20 @@ private struct ProviderStatusRow: View {
         accounts.filter(\.requiresLogin).count
     }
 
-    private var bestQuotaWindow: UsageWindow? {
-        readyAccounts.compactMap(\.primaryQuotaWindow).max { $0.remainingPercent < $1.remainingPercent }
+    private var bestQuotaAccount: SavedAccount? {
+        readyAccounts.max { $0.switchQuotaScore < $1.switchQuotaScore }
     }
 
-    private var quotaTint: Color {
-        guard let bestQuotaWindow else { return .secondary }
-        if bestQuotaWindow.remainingPercent <= UsageWindow.exhaustedRemainingPercent { return .red }
-        if bestQuotaWindow.remainingPercent < 20 { return .orange }
-        if bestQuotaWindow.remainingPercent < 50 { return .yellow }
+    private var bestFiveHourWindow: UsageWindow? { bestQuotaAccount?.usage?.fiveHour }
+
+    private var bestWeeklyWindow: UsageWindow? {
+        bestQuotaAccount?.usage?.weekly
+    }
+
+    private func quotaTint(_ window: UsageWindow) -> Color {
+        if window.remainingPercent <= UsageWindow.exhaustedRemainingPercent { return .red }
+        if window.remainingPercent < 20 { return .orange }
+        if window.remainingPercent < 50 { return .yellow }
         return .green
     }
 
@@ -2274,24 +2315,16 @@ private struct ProviderStatusRow: View {
 
             Spacer(minLength: 12)
 
-            if let bestQuotaWindow {
+            if bestFiveHourWindow != nil || bestWeeklyWindow != nil {
                 VStack(alignment: .trailing, spacing: 5) {
-                    HStack(spacing: 5) {
-                        Text(language.text("Quota Codex", "Codex quota"))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text("\(bestQuotaWindow.displayRemainingPercent)%")
-                            .font(.subheadline.monospacedDigit().weight(.bold))
-                            .foregroundStyle(quotaTint)
+                    if let window = bestFiveHourWindow {
+                        providerQuotaLine(language.text("5 giờ", "5-hour"), window: window)
                     }
-                    ProgressView(value: Double(bestQuotaWindow.displayRemainingPercent), total: 100)
-                        .tint(quotaTint)
-                        .frame(width: 116)
-                    Text(bestQuotaWindow.resetDescription(in: language.language))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    if let window = bestWeeklyWindow {
+                        providerQuotaLine(language.text("Tuần", "Weekly"), window: window)
+                    }
                 }
-                .frame(width: 140, alignment: .trailing)
+                .frame(width: 166, alignment: .trailing)
             } else if !accounts.isEmpty {
                 Text(language.text("Chưa có quota", "Quota not checked"))
                     .font(.caption)
@@ -2314,6 +2347,19 @@ private struct ProviderStatusRow: View {
         }
         .padding(.vertical, 14)
     }
+
+    private func providerQuotaLine(_ label: String, window: UsageWindow) -> some View {
+        HStack(spacing: 5) {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Text("\(window.displayRemainingPercent)%")
+                .fontWeight(.bold)
+                .foregroundStyle(quotaTint(window))
+            Text(compactReset(window, language: language.language))
+                .foregroundStyle(.secondary)
+        }
+        .font(.caption.monospacedDigit())
+    }
 }
 
 private struct UsagePill: View {
@@ -2325,15 +2371,26 @@ private struct UsagePill: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
                 .help(language.text("Hãy đăng nhập lại trước khi dùng tài khoản đã lưu này.", "Sign in again before using this saved account."))
-        } else if let window = account.usage?.weekly {
-            Text("\(window.displayRemainingPercent)%")
-                .font(.caption.monospacedDigit().weight(.semibold))
-                .foregroundStyle(window.isDepleted ? .red : (window.remainingPercent < 20 ? .orange : .secondary))
+        } else if account.primaryQuotaWindow != nil {
+            HStack(spacing: 6) {
+                if let window = account.usage?.fiveHour {
+                    usageText("5h", window: window)
+                }
+                if let window = account.usage?.weekly {
+                    usageText(language.text("Tuần", "Week"), window: window)
+                }
+            }
         } else if let plan = account.planLabel {
             Text(plan)
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
         }
+    }
+
+    private func usageText(_ label: String, window: UsageWindow) -> some View {
+        Text("\(label) \(window.displayRemainingPercent)%")
+            .font(.caption.monospacedDigit().weight(.semibold))
+            .foregroundStyle(window.isDepleted ? .red : (window.remainingPercent < 20 ? .orange : .secondary))
     }
 }
 
@@ -2544,10 +2601,16 @@ private struct AccountDetail: View {
 
                 SessionDiagnosticsPanel(account: account)
 
-                UsageCard(
-                    title: language.text("Quota theo chu kỳ", "Quota window"),
-                    window: account.usage?.weekly
-                )
+                HStack(alignment: .top, spacing: 12) {
+                    UsageCard(
+                        title: language.text("Quota 5 giờ", "5-hour quota"),
+                        window: account.usage?.fiveHour
+                    )
+                    UsageCard(
+                        title: language.text("Quota tuần", "Weekly quota"),
+                        window: account.usage?.weekly
+                    )
+                }
 
                 if let resets = account.usage?.bankedResets {
                     BankedResetCard(summary: resets)
@@ -2769,7 +2832,7 @@ private struct SessionDiagnosticsPanel: View {
             value: quotaTitle,
             detail: account.hasTransientUsageError
                 ? language.text("Snapshot không bị thay đổi", "Snapshot remains unchanged")
-                : language.text("Quota theo chu kỳ hiện tại", "Current quota window"),
+                : language.text("Tách riêng cửa sổ 5 giờ và tuần", "Separate 5-hour and weekly windows"),
             icon: account.hasTransientUsageError ? "wifi.exclamationmark" : "gauge.with.dots.needle.67percent",
             tint: account.hasTransientUsageError ? .yellow : .accentColor
         )
@@ -3788,8 +3851,8 @@ private struct MenuBarCurrentSession: View {
             .help(chatGPTRunning
                 ? language.text("Đồng bộ lại ChatGPT theo phiên này", "Resync ChatGPT with this session")
                 : language.text("Mở ChatGPT theo phiên này", "Open ChatGPT with this session"))
-            if let quota = account?.primaryQuotaWindow {
-                MenuBarQuota(window: quota)
+            if let account, account.primaryQuotaWindow != nil {
+                MenuBarQuota(account: account)
             }
         }
         .padding(10)
@@ -3845,8 +3908,8 @@ private struct MenuBarAccountRow: View {
                         "\(max(0, resets.availableCount)) banked resets available"
                     ))
             }
-            if let quota = account.primaryQuotaWindow {
-                MenuBarQuota(window: quota)
+            if account.primaryQuotaWindow != nil {
+                MenuBarQuota(account: account)
             } else {
                 Text(language.text("Chưa có quota", "No quota"))
                     .font(.caption2)
@@ -3866,27 +3929,41 @@ private struct MenuBarAccountRow: View {
 
 private struct MenuBarQuota: View {
     @EnvironmentObject private var language: LanguageStore
-    let window: UsageWindow
+    let account: SavedAccount
 
-    private var tint: Color {
+    private func tint(_ window: UsageWindow) -> Color {
         if window.isDepleted { return .red }
         return window.remainingPercent < 20 ? .orange : (window.remainingPercent < 50 ? .yellow : .green)
     }
 
     var body: some View {
-        VStack(alignment: .trailing, spacing: 3) {
-            Text("\(window.displayRemainingPercent)%")
-                .font(.caption.monospacedDigit().weight(.bold))
-                .foregroundStyle(tint)
-            ProgressView(value: Double(window.displayRemainingPercent), total: 100)
-                .tint(tint)
-                .frame(width: 54)
-            Text(compactReset(window, language: language.language))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: true, vertical: false)
+        VStack(alignment: .trailing, spacing: 4) {
+            if let window = account.usage?.fiveHour {
+                quotaLine(language.text("5 giờ", "5-hour"), window: window)
+            }
+            if let window = account.usage?.weekly {
+                quotaLine(language.text("Tuần", "Weekly"), window: window)
+            }
         }
-        .frame(width: 108, alignment: .trailing)
+        .frame(width: 148, alignment: .trailing)
+    }
+
+    private func quotaLine(_ label: String, window: UsageWindow) -> some View {
+        HStack(spacing: 5) {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Text("\(window.displayRemainingPercent)%")
+                .fontWeight(.bold)
+                .foregroundStyle(tint(window))
+            Text(compactReset(window, language: language.language))
+                .foregroundStyle(.secondary)
+        }
+        .font(.caption2.monospacedDigit())
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityLabel(language.text(
+            "\(label) còn \(window.displayRemainingPercent) phần trăm, \(compactReset(window, language: language.language))",
+            "\(label) \(window.displayRemainingPercent) percent remaining, \(compactReset(window, language: language.language))"
+        ))
     }
 }
 

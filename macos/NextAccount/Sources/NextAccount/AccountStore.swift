@@ -2104,10 +2104,22 @@ struct SavedAccount: Identifiable, Decodable {
                 : "Access token will refresh safely on the next switch"
         }
         if let usageError { return usageError }
-        if let quota = primaryQuotaWindow {
+        let windowSummaries = [
+            usage?.fiveHour.map {
+                language == .vietnamese
+                    ? "5 giờ còn \($0.displayRemainingPercent)%"
+                    : "5-hour \($0.displayRemainingPercent)% remaining"
+            },
+            usage?.weekly.map {
+                language == .vietnamese
+                    ? "tuần còn \($0.displayRemainingPercent)%"
+                    : "weekly \($0.displayRemainingPercent)% remaining"
+            },
+        ].compactMap { $0 }
+        if !windowSummaries.isEmpty {
             return language == .vietnamese
-                ? "Đã xác minh quota Codex · còn \(quota.displayRemainingPercent)%"
-                : "Codex quota verified · \(quota.displayRemainingPercent)% remaining"
+                ? "Đã xác minh quota Codex · \(windowSummaries.joined(separator: " · "))"
+                : "Codex quota verified · \(windowSummaries.joined(separator: " · "))"
         }
         return language == .vietnamese ? "Chưa cập nhật quota Codex" : "Codex quota not checked"
     }
@@ -2148,7 +2160,9 @@ struct SavedAccount: Identifiable, Decodable {
     }
 
     var primaryQuotaWindow: UsageWindow? {
-        usage?.weekly ?? usage?.fiveHour
+        // OpenAI reports the rolling five-hour allowance as `primary_window`.
+        // Weekly is a separate, longer-lived cap and must not replace it in UI.
+        usage?.fiveHour ?? usage?.weekly
     }
 
     var paidSubscriptionActiveUntil: Date? {
@@ -2193,7 +2207,7 @@ struct SavedAccount: Identifiable, Decodable {
     }
 
     var switchQuotaScore: Int {
-        primaryQuotaWindow?.remainingPercent ?? quotaWindowsForSwitch.map(\.remainingPercent).min() ?? -1
+        quotaWindowsForSwitch.map(\.remainingPercent).min() ?? -1
     }
 
     /// Lower rank sorts first: Pro → Plus → Team/Business → Free → unknown.

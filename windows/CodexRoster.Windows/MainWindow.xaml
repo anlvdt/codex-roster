@@ -288,12 +288,12 @@
                                             </StackPanel>
                                             <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="4">
                                                 <TextBlock Text="{x:Bind SecondaryQuotaLabel}" Style="{StaticResource BodyStrongTextBlockStyle}" Foreground="{StaticResource RosterInkBrush}" Visibility="{x:Bind SecondaryQuotaVisibility}" />
-                                                <TextBlock Text="Cửa sổ ngắn" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                                                <TextBlock Text="Cửa sổ dài" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" Visibility="{x:Bind SecondaryQuotaVisibility}" />
                                             </StackPanel>
                                             <StackPanel Grid.Column="2" VerticalAlignment="Center" Spacing="4">
                                                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="6">
                                                     <TextBlock Text="{x:Bind QuotaLabel}" FontSize="17" FontWeight="SemiBold" Foreground="{StaticResource RosterInkBrush}" />
-                                                    <TextBlock Text="tuần" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
+                                                    <TextBlock Text="{x:Bind QuotaWindowLabel}" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />
                                                 </StackPanel>
                                                 <ProgressBar Value="{x:Bind QuotaPercent}" Maximum="100" Visibility="{x:Bind QuotaMeterVisibility}" Height="5" />
                                                 <TextBlock Text="{x:Bind ResetLabel}" HorizontalAlignment="Right" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{StaticResource RosterMutedBrush}" />

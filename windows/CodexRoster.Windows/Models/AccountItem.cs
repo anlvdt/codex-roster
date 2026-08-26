@@ -18,8 +18,8 @@ public sealed class AccountItem(AccountDto account)
         && !RequiresLocalRecovery(account.UsageError)
         && !IsDeferredAccessTokenRefresh(account.UsageError);
     public bool HasQuota { get; } = account.Usage?.Weekly is not null || account.Usage?.FiveHour is not null;
-    public int QuotaPercent { get; } = account.Usage?.Weekly?.RemainingPercent
-        ?? account.Usage?.FiveHour?.RemainingPercent
+    public int QuotaPercent { get; } = account.Usage?.FiveHour?.RemainingPercent
+        ?? account.Usage?.Weekly?.RemainingPercent
         ?? 0;
     public bool IsUsableForSwitch { get; } = IsUsable(account);
     public bool IsReady { get; } = !account.Archived
@@ -27,7 +27,8 @@ public sealed class AccountItem(AccountDto account)
             || IsDeferredAccessTokenRefresh(account.UsageError))
         && IsUsable(account);
     public string QuotaLabel { get; } = FormatQuota(account);
-    public string ResetLabel { get; } = FormatReset(account.Usage?.Weekly ?? account.Usage?.FiveHour, account.UsageError);
+    public string QuotaWindowLabel { get; } = account.Usage?.FiveHour is not null ? "5 giờ" : "tuần";
+    public string ResetLabel { get; } = FormatReset(account.Usage?.FiveHour ?? account.Usage?.Weekly, account.UsageError);
     public string SecondaryQuotaLabel { get; } = FormatSecondaryQuota(account);
     public string SidebarStatus { get; } = FormatSidebarStatus(account);
     public string HealthLabel { get; } = FormatHealth(account);
@@ -70,7 +71,7 @@ public sealed class AccountItem(AccountDto account)
     {
         if (RequiresLogin(account.UsageError)) return "Cần đăng nhập";
         if (RequiresLocalRecovery(account.UsageError)) return "Cần khôi phục";
-        var quota = account.Usage?.Weekly ?? account.Usage?.FiveHour;
+        var quota = account.Usage?.FiveHour ?? account.Usage?.Weekly;
         return quota is null ? "Chưa có quota" : $"{quota.RemainingPercent}%";
     }
 
@@ -80,7 +81,7 @@ public sealed class AccountItem(AccountDto account)
         var weekly = account.Usage?.Weekly;
         var fiveHour = account.Usage?.FiveHour;
         if (weekly is null || fiveHour is null) return string.Empty;
-        return $"5 giờ: {fiveHour.RemainingPercent}%";
+        return $"Tuần: {weekly.RemainingPercent}%";
     }
 
     private static string FormatReset(UsageWindowDto? quota, string? error)
@@ -113,13 +114,16 @@ public sealed class AccountItem(AccountDto account)
         if (RequiresLocalRecovery(account.UsageError)) return "Cần khôi phục local";
         if (IsDeferredAccessTokenRefresh(account.UsageError) && account.Usage is null) return "Chờ làm mới khi chuyển";
         if (!string.IsNullOrWhiteSpace(account.UsageError) && account.Usage is null) return "Quota tạm thời lỗi";
-        var quota = account.Usage?.Weekly ?? account.Usage?.FiveHour;
+        var fiveHour = account.Usage?.FiveHour;
+        var weekly = account.Usage?.Weekly;
+        var quota = fiveHour ?? weekly;
         if (quota is null) return "Chưa kiểm tra quota";
+        var label = fiveHour is not null ? "5 giờ" : "Tuần";
         var remaining = quota.ResetAt - DateTimeOffset.Now;
-        if (remaining <= TimeSpan.Zero) return $"{quota.RemainingPercent}% · đang reset";
-        if (remaining.TotalDays >= 1) return $"{quota.RemainingPercent}% · reset {quota.ResetAt.ToLocalTime():dd/MM}";
-        if (remaining.TotalHours >= 1) return $"{quota.RemainingPercent}% · reset {quota.ResetAt.ToLocalTime():HH:mm}";
-        return $"{quota.RemainingPercent}% · reset sớm";
+        if (remaining <= TimeSpan.Zero) return $"{label} {quota.RemainingPercent}% · đang reset";
+        if (remaining.TotalDays >= 1) return $"{label} {quota.RemainingPercent}% · reset {quota.ResetAt.ToLocalTime():dd/MM}";
+        if (remaining.TotalHours >= 1) return $"{label} {quota.RemainingPercent}% · reset {quota.ResetAt.ToLocalTime():HH:mm}";
+        return $"{label} {quota.RemainingPercent}% · reset sớm";
     }
 
     private static string FormatHealth(AccountDto account)

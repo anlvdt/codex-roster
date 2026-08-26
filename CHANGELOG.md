@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.2.45 - 2026-08-26
+
+### Changed
+
+- Restore the rolling 5-hour Codex allowance as the primary quota and display it separately from the weekly allowance across the macOS app, menu bar, CLI, TUI, tray, and retained Windows source. Each window now has its own label and reset time instead of being collapsed into one ambiguous percentage.
+- Rank account-switch candidates by their most constrained reported quota window while continuing to require every reported window to remain usable before an automatic switch.
+- Show banked-reset counts in the macOS menu bar and keep reset forecasts anchored to explicitly stated delivery times.
+
+### Fixed
+
+- Keep the 5-hour (`primary_window`) and weekly (`secondary_window`) usage payloads distinct through decoding, cached status, and presentation, with regression coverage for both windows.
+- Harden account switching, cached-quota refresh, subscription metadata, and reset tracking so stale or exhausted usage cannot be mistaken for immediately usable quota.
+- Republish a stale Codex Router model catalog automatically after connecting a provider, and surface a restart instruction when the picker still lags.
+
 ## v0.2.44 - 2026-08-23
 
 ### Fixed

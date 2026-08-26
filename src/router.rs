@@ -843,6 +843,12 @@ fn run_router<const N: usize>(path: &Path, arguments: [&str; N]) -> Result<Outpu
     let mut command = Command::new(path);
 
     command.args(arguments).env("MODEL_ROUTER_TARGET", "codex");
+    // The router is a Node script that shells out to `node`/`python3`. When the
+    // app is launched from Finder/Dock its PATH omits Homebrew, so those tools
+    // are missing and even read-only `status`/`--version` calls fail. Mirror the
+    // PATH augmentation used by the maintenance/dynamic runners.
+    #[cfg(target_os = "macos")]
+    command.env("PATH", augmented_router_path());
     command
         .output()
         .with_context(|| format!("failed to run {}", path.display()))

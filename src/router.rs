@@ -437,7 +437,10 @@ pub fn install() -> Result<RouterActionOutput> {
             let repair = run_router_maintenance(&installation.executable, &["doctor", "--fix"])
                 .context("failed to repair the Codex Router service")?;
             if !repair.status.success() {
-                bail!("Codex Router could not repair its local service automatically");
+                bail!(
+                    "Codex Router could not repair its local service automatically: {}",
+                    output_detail(&repair)
+                );
             }
         } else {
             configure_native_mode(&installation)?;
@@ -449,7 +452,10 @@ pub fn install() -> Result<RouterActionOutput> {
             let repair = run_router_maintenance(&installation.executable, &["doctor", "--fix"])
                 .context("failed to run the final Codex Router repair")?;
             if !repair.status.success() || !status().healthy {
-                bail!("Codex Router was installed but its local service is not healthy yet");
+                bail!(
+                    "Codex Router was installed but its local service is not healthy yet: {}",
+                    output_detail(&repair)
+                );
             }
         }
         Ok(RouterActionOutput {

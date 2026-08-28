@@ -65,6 +65,8 @@ final class AccountStore: ObservableObject {
     @Published private(set) var autoStartUsageWindows = false
     @Published private(set) var tokenUsage: TokenUsageSummary?
     @Published private(set) var resetOutlook: ResetOutlook?
+    @Published private(set) var resetTimeline: [ResetTimelineEvent]?
+    @Published private(set) var resetJuice: ResetJuice?
     @Published private(set) var openAIStatus: OpenAIServiceStatus?
     @Published private(set) var autoSwitchWhenExhausted: Bool
     @Published private(set) var autoSwitchState: AutoSwitchState?
@@ -585,6 +587,8 @@ final class AccountStore: ObservableObject {
         Task { await self.resumeAddAccountSessionIfNeeded() }
         refresh()
         refreshResetOutlook(silently: true)
+        refreshResetTimeline(silently: true)
+        refreshResetJuice(silently: true)
         startAutoSwitchMonitoring()
         startQuotaMonitoring()
     }
@@ -881,6 +885,27 @@ final class AccountStore: ObservableObject {
         }
     }
 
+    func refreshResetTimeline(silently: Bool = false) {
+        Task {
+            do {
+                let timeline = try await cli.decode([ResetTimelineEvent].self, arguments: ["reset-timeline"])
+                resetTimeline = timeline
+            } catch {
+                if !silently { errorMessage = error.localizedDescription }
+            }
+        }
+    }
+
+    func refreshResetJuice(silently: Bool = false) {
+        Task {
+            do {
+                resetJuice = try await cli.decode(ResetJuice.self, arguments: ["reset-juice"])
+            } catch {
+                if !silently { errorMessage = error.localizedDescription }
+            }
+        }
+    }
+
     private func load() async throws {
         async let status: StatusOutput = cli.decode(StatusOutput.self, arguments: ["status"])
         async let accounts: AccountListOutput = cli.decode(AccountListOutput.self, arguments: ["list"])
@@ -925,8 +950,13 @@ final class AccountStore: ObservableObject {
             let decision: AutoSwitchOutput = try await cli.decode(AutoSwitchOutput.self, arguments: ["auto-switch"])
             switch decision.status {
             case "active_has_quota":
+                let wasExhausted = autoSwitchAllExhaustedNotified
                 autoSwitchAllExhaustedNotified = false
                 autoSwitchState = nil
+                // Notify user when quota recovers after being exhausted
+                if wasExhausted {
+                    ResetNotifier.showQuotaRecovered()
+                }
             case "waiting_for_login":
                 autoSwitchState = .waitingForLogin
             case "all_accounts_exhausted":
@@ -1000,12 +1030,20 @@ final class AccountStore: ObservableObject {
                     return
                 }
                 autoSwitchState = .relaunchingDesktop
-                let launched = await relaunch.launchAndConfirm()
-                let accepted: Bool
+                var launched = await relaunch.launchAndConfirm()
+                var accepted: Bool
                 if launched, let candidateID = applied.candidateAccountId {
                     accepted = await waitForDesktopAcceptance(accountID: candidateID)
                 } else {
                     accepted = false
+                }
+                // Retry relaunch up to 2 times if it fails
+                for _ in 1...2 where !accepted {
+                    try? await Task.sleep(for: .seconds(1))
+                    launched = await relaunch.launchAndConfirm()
+                    if launched, let candidateID = applied.candidateAccountId {
+                        accepted = await waitForDesktopAcceptance(accountID: candidateID)
+                    }
                 }
                 guard accepted else {
                     do {
@@ -1722,10 +1760,15 @@ struct ResetOutlook: Decodable {
     let chance48Hours: Int
     let confidence: String
     let windowLabel: String
+    let windowTimezone: String?
+    let windowStartHour: Int?
+    let windowEndHour: Int?
     let signalKind: String?
     let signalSummary: String?
     let sourceUrl: String?
     let sourceFreshness: String?
+    let cadenceDays: Double?
+    let cadenceAccelerating: Bool?
 }
 
 private struct GlobalResetEvent: Decodable {
@@ -1734,6 +1777,35 @@ private struct GlobalResetEvent: Decodable {
     let summary: String
     let url: String
     let kind: String
+}
+
+struct ResetTimelineEvent: Decodable, Identifiable {
+    let id: String
+    let date: String
+    let eventType: String
+    let summary: String
+    let url: String
+    let announcedAt: String
+    let scope: String?
+    let confidence: String?
+    let resetKind: String?
+}
+
+struct ResetJuice: Decodable {
+    let status: String
+    let model: String?
+    let checkedAt: String?
+    let verifiedEfforts: Int?
+    let efforts: [ResetJuiceEffort]
+}
+
+struct ResetJuiceEffort: Decodable, Identifiable {
+    let effort: String
+    let current: Int
+    let previous: Int
+    let delta: Int
+    let verificationState: String?
+    var id: String { effort }
 }
 
 func trustedTiboSourceURL(_ value: String?) -> URL? {
@@ -1828,6 +1900,18 @@ private enum ResetNotifier {
         )
     }
 
+    static func showQuotaRecovered() {
+        enqueue(
+            identifier: "codex-roster-quota-recovered-\(Int(Date().timeIntervalSince1970))",
+            title: AppLanguage.text("\u{2705} Quota đã phục hồi", "\u{2705} Quota recovered"),
+            subtitle: AppLanguage.text("Tài khoản có thể sử dụng lại", "Account is usable again"),
+            body: AppLanguage.text(
+                "Quota Codex đã được đặt lại. Bạn có thể tiếp tục sử dụng.",
+                "Codex quota has been reset. You can continue using it."
+            )
+        )
+    }
+
     private static func showNewBankedResets(
         for account: SavedAccount,
         accountKey: String,
@@ -1849,23 +1933,27 @@ private enum ResetNotifier {
             .compactMap { $0.expiresAt?.value }
             .min()
         var body = AppLanguage.text(
-            "Tài khoản có thêm \(newlyGranted) lượt đặt lại quota Codex.",
+            "\(account.displayName) có thêm \(newlyGranted) lượt đặt lại quota Codex.",
             newlyGranted == 1
-                ? "This account received 1 Codex quota reset."
-                : "This account received \(newlyGranted) Codex quota resets."
+                ? "\(account.displayName) received 1 Codex quota reset."
+                : "\(account.displayName) received \(newlyGranted) Codex quota resets."
         )
         if let title = unseenCredits.first?.title, !title.isEmpty {
             body += " \(title)"
         }
         if let nearestExpiry {
             body += AppLanguage.text(
-                " Hết hạn \(nearestExpiry.formatted(date: .abbreviated, time: .shortened)).",
-                " Expires \(nearestExpiry.formatted(date: .abbreviated, time: .shortened))."
+                " Hạn: \(nearestExpiry.formatted(date: .abbreviated, time: .shortened)).",
+                " Expires: \(nearestExpiry.formatted(date: .abbreviated, time: .shortened))."
             )
         }
+        body += AppLanguage.text(
+            "\(availableCount) lượt khả dụng.",
+            " \(availableCount) available."
+        )
         enqueue(
             identifier: "codex-roster-banked-\(accountKey)-\(unseenCredits.first?.id ?? String(availableCount))",
-            title: AppLanguage.text("Bạn vừa nhận banked reset", "Banked reset received"),
+            title: AppLanguage.text("\u{1F389} Banked reset đã đến!", "\u{1F389} Banked reset received!"),
             subtitle: account.displayName,
             body: body
         )
@@ -1888,8 +1976,8 @@ private enum ResetNotifier {
         }.joined(separator: " · ")
         enqueue(
             identifier: "codex-roster-quota-reset-\(accountKey)-\(Int(current.fetchedAt.timeIntervalSince1970))",
-            title: AppLanguage.text("Quota Codex vừa được đặt lại", "Codex quota reset detected"),
-            subtitle: account.displayName,
+            title: AppLanguage.text("\u{2705} \(account.displayName) reset quota", "\u{2705} \(account.displayName) quota reset"),
+            subtitle: AppLanguage.text("Quota Codex đã được đặt lại", "Codex quota has been reset"),
             body: detail
         )
     }

@@ -149,7 +149,7 @@ struct CodexRosterApp: App {
         } label: {
             Label(menuBarTitle, systemImage: "person.3.sequence.fill")
                 .labelStyle(.titleAndIcon)
-                .accessibilityLabel("Codex Roster \(menuBarTitle)")
+                .accessibilityLabel(menuBarAccessibilityLabel)
         }
         .menuBarExtraStyle(.window)
 
@@ -165,6 +165,13 @@ struct CodexRosterApp: App {
                 .environmentObject(language)
                 .environment(\.locale, language.language.locale)
         }
+    }
+
+    private var menuBarAccessibilityLabel: String {
+        guard let remaining = store.accounts.first(where: \.isActive)?.primaryQuotaWindow?.displayRemainingPercent else {
+            return "Codex Roster"
+        }
+        return "Codex Roster \(remaining)% quota"
     }
 
     private var menuBarTitle: String {
@@ -546,17 +553,9 @@ private struct DashboardView: View {
                     reloginAll: reloginAll
                 )
 
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: 16) {
-                        OpenAIStatusCard()
-                            .frame(maxWidth: .infinity, alignment: .topLeading)
-                        GlobalResetOutlookCard()
-                            .frame(maxWidth: .infinity, alignment: .topLeading)
-                    }
-                    VStack(alignment: .leading, spacing: 12) {
-                        OpenAIStatusCard()
-                        GlobalResetOutlookCard()
-                    }
+                VStack(alignment: .leading, spacing: 12) {
+                    OpenAIStatusCard()
+                    GlobalResetOutlookCard()
                 }
 
                 TokenUsageOverview()
@@ -1226,10 +1225,19 @@ private struct BulkAccountManager: View {
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: true, vertical: false)
+                } else if count > 0 {
+                    if let lastGranted = summary.credits?.first(where: { $0.status == "available" })?.grantedAt.value {
+                        Text(formatRelativeTime(lastGranted, language: language.language))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
+                    } else {
+                        Text(language.text("Chưa có hạn", "No expiry"))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 } else {
-                    Text(count > 0
-                        ? language.text("Chưa có hạn", "No expiry")
-                        : language.text("Không có lượt", "None"))
+                    Text(language.text("Không có lượt", "None"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -1403,7 +1411,6 @@ private struct DashboardHero: View {
                     .foregroundStyle(.tint)
                 Text(currentAccount ?? language.text("Chưa đăng nhập", "Not signed in"))
                     .font(.body.weight(.semibold))
-                    .lineLimit(2)
                     .textSelection(.enabled)
                 Text(language.text("Theo ~/.codex · không khởi động lại khi đăng nhập", "From ~/.codex · no restart during sign-in"))
                     .font(.caption2)
@@ -1422,7 +1429,7 @@ private struct DashboardHero: View {
                     .controlSize(.small)
                 }
             }
-            .frame(width: 245, alignment: .leading)
+            .frame(minWidth: 245, maxWidth: .infinity, alignment: .leading)
             .padding(16)
             .background(.background.opacity(0.55), in: RoundedRectangle(cornerRadius: 14))
         }
@@ -2066,50 +2073,104 @@ private struct GlobalResetOutlookCard: View {
 
             if let outlook = store.resetOutlook {
                 let isConfirmedReset = outlook.lastResetIsConfirmed == true
-                HStack(spacing: 10) {
+                let urgencyColor = forecastColor(max(outlook.chance24Hours, outlook.chance48Hours), high: .orange)
+
+                // Forecast scores with color-coded urgency
+                HStack(spacing: 12) {
                     ResetOutlookMetric(
-                        title: language.text("Điểm dự báo 24h", "24h forecast score"),
+                        title: language.text("24 giờ", "24 hours"),
                         value: "\(outlook.chance24Hours)%",
-                        tint: .accentColor
+                        tint: forecastColor(outlook.chance24Hours)
                     )
                     ResetOutlookMetric(
-                        title: language.text("Điểm dự báo 48h", "48h forecast score"),
+                        title: language.text("48 giờ", "48 hours"),
                         value: "\(outlook.chance48Hours)%",
-                        tint: .accentColor
+                        tint: forecastColor(outlook.chance48Hours)
                     )
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(isConfirmedReset
-                            ? language.text("Lần reset gần nhất", "Last reset")
-                            : language.text("Tín hiệu Tibo gần nhất", "Latest Tibo signal"))
+                    ResetOutlookMetric(
+                        title: language.text("Giờ thường reset", "Reset window"),
+                        value: formatWindowForVietnam(outlook),
+                        tint: .secondary
+                    )
+                }
+
+                // Confidence indicator
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(urgencyColor)
+                        .frame(width: 8, height: 8)
+                    Text(language.text(
+                        "Độ tin cậy: \(localizedConfidence(outlook.confidence))",
+                        "Confidence: \(localizedConfidence(outlook.confidence))"
+                    ))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    if isConfirmedReset {
+                        Text("·")
+                            .foregroundStyle(.tertiary)
+                        Text(language.text("Đã xác nhận", "Confirmed"))
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.green)
+                    }
+                }
+
+                // Cadence info
+                if let cadenceDays = outlook.cadenceDays {
+                    HStack(spacing: 4) {
+                        Image(systemName: "clock.badge.checkmark")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.blue)
+                        Text(language.text(
+                            "Nhịp reset: ~\(String(format: "%.1f", cadenceDays)) ngày",
+                            "Reset cadence: ~\(String(format: "%.1f", cadenceDays)) days"
+                        ))
+                        if outlook.cadenceAccelerating == true {
+                            Text(language.text("(tăng nhanh)", "(accelerating)"))
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
+                // Last reset / signal
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(isConfirmedReset
+                        ? language.text("Lần reset gần nhất", "Last reset")
+                        : language.text("Tín hiệu gần nhất", "Latest signal"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(formattedResetDate(outlook.lastResetAt, language: language.language))
                             .font(.subheadline.weight(.semibold))
                         TimelineView(.periodic(from: .now, by: 60)) { context in
-                            let relativeTime = formattedRelativeResetDate(
+                            Text(formattedRelativeResetDate(
                                 outlook.lastResetAt,
                                 relativeTo: context.date,
                                 language: language.language
-                            )
-                            Text(language.text(
-                                "\(relativeTime) · Độ tin cậy: \(localizedConfidence(outlook.confidence))",
-                                "\(relativeTime) · Confidence: \(localizedConfidence(outlook.confidence))"
                             ))
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.tertiary)
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
+                // Expected reset
                 if let scheduledResetAt = outlook.nextResetAt {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
                         Text(language.text("Reset dự kiến", "Expected reset"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Text(formattedVietnamResetDate(scheduledResetAt, language: language.language))
                             .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.orange)
                     }
+                    .padding(.vertical, 4)
+                    .padding(.horizontal, 8)
+                    .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
                 }
 
                 if let summary = outlook.signalSummary, !summary.isEmpty {
@@ -2120,8 +2181,47 @@ private struct GlobalResetOutlookCard: View {
                         .textSelection(.enabled)
                 }
 
+                // Recent Reset Timeline
+                if let timeline = store.resetTimeline, !timeline.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(language.text("Lịch sử reset", "Reset history"))
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                        ForEach(timeline.prefix(2)) { event in
+                            HStack {
+                                Text(event.date)
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.tertiary)
+                                Text(event.summary.prefix(50).description)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+                }
+
+                // Juice Levels
+                if let juice = store.resetJuice, !juice.efforts.isEmpty {
+                    HStack(spacing: 12) {
+                        Text(language.text("Effort", "Effort"))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        ForEach(juice.efforts.prefix(4)) { effort in
+                            HStack(spacing: 2) {
+                                Text(effort.effort.prefix(1).uppercased())
+                                    .font(.caption2.weight(.medium))
+                                    .foregroundStyle(.secondary)
+                                Text("\(effort.current)")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(effort.delta > 0 ? .green : effort.delta < 0 ? .red : .secondary)
+                            }
+                        }
+                    }
+                }
+
                 HStack {
-                    Text(language.text("Dự báo dựa trên thời điểm Tibo công bố hoặc tín hiệu nhịp lịch sử; reset đã xác nhận chỉ hiển thị làm mốc thời gian gần nhất. Quota tài khoản vẫn là xác nhận cuối cùng.", "Forecasts use Tibo’s stated delivery time or historical signal cadence; a confirmed reset is shown as the latest completed milestone. Account quota remains the final confirmation."))
+                    Text(language.text("Quota tài khoản là xác nhận cuối cùng.", "Account quota is the final confirmation."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -2146,6 +2246,15 @@ private struct GlobalResetOutlookCard: View {
         }
         .padding(16)
         .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: 15))
+    }
+
+    private func forecastColor(_ percent: Int, high: Color = .orange) -> Color {
+        switch percent {
+        case 0..<20: return .green
+        case 20..<50: return high
+        case 50..<75: return .orange
+        default: return .red
+        }
     }
 
     private func localizedConfidence(_ value: String) -> String {
@@ -2196,6 +2305,35 @@ private func formattedResetDate(_ value: String, language: AppLanguage) -> Strin
             .minute()
             .locale(language.locale)
     )
+}
+
+private func formatWindowForVietnam(_ outlook: ResetOutlook) -> String {
+    // API returns UTC time window (e.g., 11 PM - 2 AM UTC)
+    // Convert to Vietnam time (UTC+7)
+    let vnOffset = 7
+    guard let startHour = outlook.windowStartHour, let endHour = outlook.windowEndHour else {
+        return outlook.windowLabel
+    }
+    let startVN = (startHour + vnOffset) % 24
+    let endVN = (endHour + vnOffset) % 24
+    return "\(formatHour(startVN)) - \(formatHour(endVN))"
+}
+
+private func formatHour(_ hour: Int) -> String {
+    switch hour {
+    case 0: return "12 AM"
+    case 12: return "12 PM"
+    case 1..<12: return "\(hour) AM"
+    default: return "\(hour - 12) PM"
+    }
+}
+
+private func formatRelativeTime(_ date: Date, language: AppLanguage) -> String {
+    let relativeFormatter = RelativeDateTimeFormatter()
+    relativeFormatter.locale = language.locale
+    relativeFormatter.unitsStyle = .abbreviated
+    let relativeTime = relativeFormatter.localizedString(for: date, relativeTo: Date())
+    return AppLanguage.text("Nhận \(relativeTime)", "Received \(relativeTime)")
 }
 
 private func formattedRelativeResetDate(

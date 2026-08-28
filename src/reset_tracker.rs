@@ -4,10 +4,11 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use time::{OffsetDateTime, PrimitiveDateTime};
+use time::OffsetDateTime;
 
 const X_PROFILE_ENDPOINT: &str = "https://x.com/thsottiaux?lang=en";
 const RESET_FEED_ENDPOINT: &str = "https://codex-reset.com/api/feed";
+const FORECAST_ENDPOINT: &str = "https://codex-reset.com/api/forecast";
 const NOTIFICATION_STATE_FILE: &str = "reset-notifications.json";
 const PROFILE_POST_MARKER: &str = "itemType=\"https://schema.org/SocialMediaPosting\"";
 const INITIAL_REPLAY_WINDOW: time::Duration = time::Duration::hours(6);
@@ -25,10 +26,15 @@ pub struct ResetOutlook {
     pub chance_48_hours: u8,
     pub confidence: String,
     pub window_label: String,
+    pub window_timezone: Option<String>,
+    pub window_start_hour: Option<u32>,
+    pub window_end_hour: Option<u32>,
     pub signal_kind: String,
     pub signal_summary: String,
     pub source_url: String,
     pub source_freshness: String,
+    pub cadence_days: Option<f64>,
+    pub cadence_accelerating: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -68,6 +74,7 @@ impl SignalKind {
         }
     }
 
+    #[allow(dead_code)]
     fn is_confirmed(self) -> bool {
         matches!(self, Self::ConfirmedBanked | Self::ConfirmedReset)
     }
@@ -85,11 +92,124 @@ struct NotificationState {
     notifications_in_window: usize,
 }
 
+// ---------------------------------------------------------------------------
+// Outlook: delegate to the Codex Reset forecast API
+// ---------------------------------------------------------------------------
+
 pub fn fetch_reset_outlook() -> Result<ResetOutlook> {
     let now = OffsetDateTime::now_utc();
-    let posts = fetch_reset_posts(now)?;
-    Ok(build_reset_outlook(&posts, now))
+    let forecast = fetch_forecast()?;
+    let feed_signal = fetch_feed_signal_metadata(now);
+
+    let (signal_kind, signal_summary, source_url, last_reset_is_confirmed) = match feed_signal {
+        Some(signal) => {
+            let kind = signal
+                .kind
+                .as_deref()
+                .map(map_feed_signal_kind)
+                .unwrap_or("none");
+            let confirmed = signal
+                .reset_verification_status
+                .as_deref()
+                .is_some_and(|status| status == "confirmed")
+                || signal.active == Some(true);
+            (
+                kind.to_owned(),
+                signal.summary.clone().unwrap_or_default(),
+                signal
+                    .url
+                    .clone()
+                    .unwrap_or_else(|| X_PROFILE_ENDPOINT.to_owned()),
+                confirmed,
+            )
+        }
+        None => (
+            "none".to_owned(),
+            "No actionable reset signal in Tibo's latest public posts.".to_owned(),
+            X_PROFILE_ENDPOINT.to_owned(),
+            false,
+        ),
+    };
+
+    Ok(ResetOutlook {
+        updated_at: forecast.updated_at,
+        last_reset_at: forecast.last_reset_at,
+        next_reset_at: None,
+        last_reset_is_confirmed,
+        chance_24_hours: forecast.probabilities.rounded_24h,
+        chance_48_hours: forecast.probabilities.rounded_48h,
+        confidence: forecast.confidence,
+        window_label: forecast.time_window.label,
+        window_timezone: forecast.time_window.timezone,
+        window_start_hour: forecast.time_window.start_hour,
+        window_end_hour: forecast.time_window.end_hour,
+        signal_kind,
+        signal_summary,
+        source_url,
+        source_freshness: "codex_reset_forecast_api".to_owned(),
+        cadence_days: forecast.cadence.as_ref().and_then(|c| c.recent_median_days),
+        cadence_accelerating: forecast.cadence.as_ref().and_then(|c| c.accelerating),
+    })
 }
+
+fn map_feed_signal_kind(kind: &str) -> &'static str {
+    match kind {
+        "confirmed" => "confirmed_global_reset",
+        "scheduled" => "scheduled_global_reset",
+        "candidate" => "reset_hint",
+        _ => "none",
+    }
+}
+
+fn fetch_forecast() -> Result<ForecastResponse> {
+    let mut response = ureq::get(FORECAST_ENDPOINT)
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (compatible; CodexRoster/0.2; +https://github.com/anlvdt/codex-roster)",
+        )
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(6)))
+        .build()
+        .call()
+        .context("failed to contact the Codex Reset forecast API")?;
+    if response.status().as_u16() >= 400 {
+        bail!("Codex Reset forecast API returned HTTP {}", response.status());
+    }
+    let forecast = response
+        .body_mut()
+        .read_json::<ForecastResponse>()
+        .context("failed to decode the Codex Reset forecast response")?;
+    Ok(forecast)
+}
+
+fn fetch_feed_signal_metadata(now: OffsetDateTime) -> Option<ResetFeedSignal> {
+    let mut response = ureq::get(RESET_FEED_ENDPOINT)
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (compatible; CodexRoster/0.2; +https://github.com/anlvdt/codex-roster)",
+        )
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(6)))
+        .build()
+        .call()
+        .ok()?;
+    if response.status().as_u16() >= 400 {
+        return None;
+    }
+    let feed = response.body_mut().read_json::<ResetFeed>().ok()?;
+    if feed.stale {
+        return None;
+    }
+    let fetched_at = parse_event_time(&feed.fetched_at)?;
+    if (now - fetched_at).abs() > time::Duration::minutes(15) {
+        return None;
+    }
+    feed.signal
+}
+
+// ---------------------------------------------------------------------------
+// Reset events: feed / X profile scraping for desktop notifications
+// ---------------------------------------------------------------------------
 
 /// Return new reset or banked-reset signals published directly by Tibo on X.
 /// A first poll replays only very recent actionable signals so an app started
@@ -106,6 +226,20 @@ struct ResetFeed {
     #[serde(default)]
     stale: bool,
     fetched_at: String,
+    #[serde(default)]
+    signal: Option<ResetFeedSignal>,
+}
+
+#[derive(Deserialize)]
+struct ResetFeedSignal {
+    #[allow(dead_code)]
+    tweet_id: Option<String>,
+    summary: Option<String>,
+    url: Option<String>,
+    kind: Option<String>,
+    active: Option<bool>,
+    #[serde(default)]
+    reset_verification_status: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -113,6 +247,190 @@ struct ResetFeedTweet {
     id: Option<String>,
     text: Option<String>,
     at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ForecastResponse {
+    updated_at: String,
+    probabilities: ForecastProbabilities,
+    confidence: String,
+    last_reset_at: String,
+    time_window: ForecastTimeWindow,
+    #[serde(default)]
+    cadence: Option<ForecastCadence>,
+}
+
+#[derive(Deserialize)]
+struct ForecastProbabilities {
+    rounded_24h: u8,
+    rounded_48h: u8,
+}
+
+#[derive(Deserialize)]
+struct ForecastTimeWindow {
+    label: String,
+    timezone: Option<String>,
+    start_hour: Option<u32>,
+    end_hour: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct ForecastCadence {
+    recent_median_days: Option<f64>,
+    accelerating: Option<bool>,
+}
+
+// ---------------------------------------------------------------------------
+// Reset Timeline
+// ---------------------------------------------------------------------------
+
+const TIMELINE_ENDPOINT: &str = "https://codex-reset.com/api/timeline";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResetTimeline {
+    pub updated_at: String,
+    pub events: Vec<ResetTimelineEvent>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResetTimelineEvent {
+    pub id: String,
+    pub date: String,
+    pub event_type: String,
+    pub summary: String,
+    pub url: String,
+    pub announced_at: String,
+    pub scope: Option<String>,
+    pub confidence: Option<String>,
+    pub reset_kind: Option<String>,
+    pub audience: Option<Vec<String>>,
+}
+
+pub fn fetch_reset_timeline() -> Result<ResetTimeline> {
+    let mut response = ureq::get(TIMELINE_ENDPOINT)
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (compatible; CodexRoster/0.2; +https://github.com/anlvdt/codex-roster)",
+        )
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(6)))
+        .build()
+        .call()
+        .context("failed to contact the Codex Reset timeline API")?;
+    if response.status().as_u16() >= 400 {
+        bail!("Codex Reset timeline API returned HTTP {}", response.status());
+    }
+    let timeline = response
+        .body_mut()
+        .read_json::<ResetTimeline>()
+        .context("failed to decode the Codex Reset timeline response")?;
+    Ok(timeline)
+}
+
+// ---------------------------------------------------------------------------
+// Reset Status History
+// ---------------------------------------------------------------------------
+
+const STATUS_HISTORY_ENDPOINT: &str = "https://codex-reset.com/api/status-history";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResetStatusHistory {
+    pub current: ResetStatusCurrent,
+    pub surfaces: Vec<ResetStatusSurface>,
+    pub incidents: Vec<ResetStatusIncident>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResetStatusCurrent {
+    pub indicator: String,
+    pub description: String,
+    pub codex: String,
+    pub degraded: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResetStatusSurface {
+    pub id: String,
+    pub label: String,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResetStatusIncident {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub impact: Option<String>,
+    pub started_at: String,
+    pub resolved_at: Option<String>,
+    pub codex_related: bool,
+}
+
+pub fn fetch_reset_status_history() -> Result<ResetStatusHistory> {
+    let mut response = ureq::get(STATUS_HISTORY_ENDPOINT)
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (compatible; CodexRoster/0.2; +https://github.com/anlvdt/codex-roster)",
+        )
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(6)))
+        .build()
+        .call()
+        .context("failed to contact the Codex Reset status-history API")?;
+    if response.status().as_u16() >= 400 {
+        bail!("Codex Reset status-history API returned HTTP {}", response.status());
+    }
+    let status = response
+        .body_mut()
+        .read_json::<ResetStatusHistory>()
+        .context("failed to decode the Codex Reset status-history response")?;
+    Ok(status)
+}
+
+// ---------------------------------------------------------------------------
+// Reset Juice (quota effort tiers)
+// ---------------------------------------------------------------------------
+
+const JUICE_ENDPOINT: &str = "https://codex-reset.com/api/juice";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResetJuice {
+    pub status: String,
+    pub model: Option<String>,
+    pub checked_at: Option<String>,
+    pub verified_efforts: Option<u32>,
+    pub efforts: Vec<ResetJuiceEffort>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResetJuiceEffort {
+    pub effort: String,
+    pub current: u32,
+    pub previous: u32,
+    pub delta: i32,
+    pub verified_at: Option<String>,
+    pub verification_state: Option<String>,
+}
+
+pub fn fetch_reset_juice() -> Result<ResetJuice> {
+    let mut response = ureq::get(JUICE_ENDPOINT)
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (compatible; CodexRoster/0.2; +https://github.com/anlvdt/codex-roster)",
+        )
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(6)))
+        .build()
+        .call()
+        .context("failed to contact the Codex Reset juice API")?;
+    if response.status().as_u16() >= 400 {
+        bail!("Codex Reset juice API returned HTTP {}", response.status());
+    }
+    let juice = response
+        .body_mut()
+        .read_json::<ResetJuice>()
+        .context("failed to decode the Codex Reset juice response")?;
+    Ok(juice)
 }
 
 fn fetch_reset_posts(now: OffsetDateTime) -> Result<Vec<TiboPost>> {
@@ -435,277 +753,6 @@ fn classify_post(text: &str) -> Option<SignalKind> {
     is_hint.then_some(SignalKind::Hint)
 }
 
-fn build_reset_outlook(posts: &[TiboPost], now: OffsetDateTime) -> ResetOutlook {
-    let latest_signal = posts
-        .iter()
-        .filter_map(|post| {
-            let kind = classify_post(&post.text)?;
-            let announced_at = parse_event_time(&post.created_at)?;
-            let age = now - announced_at;
-            (age >= time::Duration::ZERO && age <= time::Duration::hours(48)).then_some((
-                post,
-                kind,
-                announced_at,
-            ))
-        })
-        .max_by_key(|(_, _, announced_at)| *announced_at);
-
-    let mut next_reset_at = None;
-    let (chance_24_hours, chance_48_hours, confidence, window_label) = match latest_signal {
-        Some((_, SignalKind::ConfirmedBanked, _)) => (0, 0, "high", "Banked reset confirmed"),
-        Some((_, SignalKind::ConfirmedReset, _)) => (0, 0, "high", "Global reset confirmed"),
-        Some((post, kind @ SignalKind::ScheduledBanked, announced_at)) => {
-            let age = now - announced_at;
-            let delivery_at = scheduled_delivery_time(&post.text, announced_at);
-            let delivery_in = delivery_at.map(|delivery| delivery - now);
-            next_reset_at = delivery_at
-                .filter(|delivery| *delivery > now)
-                .map(format_time);
-            let (score_24, score_48) = forecast_scores(kind, delivery_in, age);
-            (
-                score_24,
-                score_48,
-                forecast_confidence(kind, age, delivery_in),
-                "Banked reset scheduled",
-            )
-        }
-        Some((post, kind @ SignalKind::ScheduledReset, announced_at)) => {
-            let age = now - announced_at;
-            let delivery_at = scheduled_delivery_time(&post.text, announced_at);
-            let delivery_in = delivery_at.map(|delivery| delivery - now);
-            next_reset_at = delivery_at
-                .filter(|delivery| *delivery > now)
-                .map(format_time);
-            let (score_24, score_48) = forecast_scores(kind, delivery_in, age);
-            (
-                score_24,
-                score_48,
-                forecast_confidence(kind, age, delivery_in),
-                "Global reset scheduled",
-            )
-        }
-        Some((_, kind @ SignalKind::Hint, announced_at)) => {
-            let age = now - announced_at;
-            let (score_24, score_48) = forecast_scores(kind, None, age);
-            (
-                score_24,
-                score_48,
-                forecast_confidence(kind, age, None),
-                "Tibo hint detected",
-            )
-        }
-        None => (0, 0, "low", "No current Tibo signal"),
-    };
-    let latest_confirmed = posts
-        .iter()
-        .filter_map(|post| {
-            let kind = classify_post(&post.text)?;
-            let announced_at = parse_event_time(&post.created_at)?;
-            let age = now - announced_at;
-            (kind.is_confirmed() && age >= time::Duration::ZERO && age <= time::Duration::hours(48))
-                .then_some((post, announced_at))
-        })
-        .max_by_key(|(_, announced_at)| *announced_at)
-        .map(|(post, _)| post);
-    let last_reset_at = latest_confirmed
-        .or_else(|| latest_signal.map(|(post, _, _)| post))
-        .or_else(|| posts.first())
-        .map(|post| post.created_at.clone())
-        .unwrap_or_else(|| format_time(now));
-    let (signal_kind, signal_summary, source_url) = latest_signal.map_or_else(
-        || {
-            (
-                "none".to_owned(),
-                "No actionable reset signal in Tibo's latest public posts.".to_owned(),
-                X_PROFILE_ENDPOINT.to_owned(),
-            )
-        },
-        |(post, kind, _)| {
-            (
-                kind.as_str().to_owned(),
-                post.text.clone(),
-                post.url.clone(),
-            )
-        },
-    );
-
-    ResetOutlook {
-        updated_at: format_time(now),
-        last_reset_at,
-        next_reset_at,
-        last_reset_is_confirmed: latest_confirmed.is_some(),
-        chance_24_hours,
-        chance_48_hours,
-        confidence: confidence.to_owned(),
-        window_label: window_label.to_owned(),
-        signal_kind,
-        signal_summary,
-        source_url,
-        source_freshness: "live_public_reset_sources".to_owned(),
-    }
-}
-
-fn forecast_scores(
-    kind: SignalKind,
-    delivery_in: Option<time::Duration>,
-    age: time::Duration,
-) -> (u8, u8) {
-    let (base_24, base_48) = match kind {
-        SignalKind::ScheduledBanked => (95, 100),
-        SignalKind::ScheduledReset => (90, 98),
-        SignalKind::Hint => (55, 75),
-        SignalKind::ConfirmedBanked | SignalKind::ConfirmedReset => return (0, 0),
-    };
-    match delivery_in {
-        Some(lead) if lead <= time::Duration::ZERO => (0, 0),
-        Some(lead) if lead <= time::Duration::hours(24) => (base_24, base_48),
-        Some(lead) if lead <= time::Duration::hours(48) => (20, base_48),
-        Some(_) => (10, base_48 / 2),
-        None => (
-            recency_weighted_score(base_24, age, time::Duration::hours(24)),
-            recency_weighted_score(base_48, age, time::Duration::hours(48)),
-        ),
-    }
-}
-
-fn scheduled_delivery_time(text: &str, announced_at: OffsetDateTime) -> Option<OffsetDateTime> {
-    let text = text.to_ascii_lowercase();
-    if text.contains("next 30 minutes") {
-        return Some(announced_at + time::Duration::minutes(30));
-    }
-    if text.contains("in the next hour") || text.contains("within the hour") {
-        return Some(announced_at + time::Duration::hours(1));
-    }
-    if !text.contains("tomorrow") {
-        return None;
-    }
-
-    let Some(clock) = parse_clock_time(&text) else {
-        return Some(announced_at + time::Duration::hours(24));
-    };
-    let uses_pacific = text.contains("pst") || text.contains("pdt");
-    let announced_utc_offset = if uses_pacific {
-        pacific_utc_offset(announced_at)
-    } else {
-        time::Duration::ZERO
-    };
-    let local_announced = announced_at + announced_utc_offset;
-    let tomorrow = local_announced.date().next_day()?;
-    let local_delivery = PrimitiveDateTime::new(tomorrow, clock).assume_utc();
-    let delivery_offset = if uses_pacific {
-        pacific_utc_offset(local_delivery - announced_utc_offset)
-    } else {
-        time::Duration::ZERO
-    };
-    let delivery = local_delivery - delivery_offset;
-    Some(delivery)
-}
-
-fn parse_clock_time(text: &str) -> Option<time::Time> {
-    for (marker, is_pm) in [("p.m.", true), ("a.m.", false), ("pm", true), ("am", false)] {
-        let mut cursor = 0;
-        while let Some(relative_end) = text[cursor..].find(marker) {
-            let end = cursor + relative_end;
-            let prefix = text[..end].trim_end();
-            let token_start = prefix
-                .char_indices()
-                .rev()
-                .find(|(_, character)| !character.is_ascii_digit() && *character != ':')
-                .map_or(0, |(index, character)| index + character.len_utf8());
-            let clock = &prefix[token_start..];
-            cursor = end + marker.len();
-            let mut components = clock.split(':');
-            let Ok(hour) = components.next().unwrap_or_default().parse::<u8>() else {
-                continue;
-            };
-            let minute = match components.next() {
-                Some(value) => match value.parse::<u8>() {
-                    Ok(value) => value,
-                    Err(_) => continue,
-                },
-                None => 0,
-            };
-            if components.next().is_some() || hour > 23 || minute > 59 {
-                continue;
-            }
-            // Tibo's post uses "14pm"; treat a 24-hour value as authoritative.
-            let hour = if hour <= 12 {
-                if is_pm { hour % 12 + 12 } else { hour % 12 }
-            } else {
-                hour
-            };
-            return time::Time::from_hms(hour, minute, 0).ok();
-        }
-    }
-
-    None
-}
-
-fn pacific_utc_offset(at: OffsetDateTime) -> time::Duration {
-    let observes_dst =
-        pacific_dst_bounds(at.year()).is_some_and(|(start, end)| at >= start && at < end);
-    time::Duration::hours(if observes_dst { -7 } else { -8 })
-}
-
-fn pacific_dst_bounds(year: i32) -> Option<(OffsetDateTime, OffsetDateTime)> {
-    let second_sunday_march = nth_sunday(year, time::Month::March, 2)?;
-    let first_sunday_november = nth_sunday(year, time::Month::November, 1)?;
-    let start = PrimitiveDateTime::new(second_sunday_march, time::Time::from_hms(10, 0, 0).ok()?)
-        .assume_utc();
-    let end = PrimitiveDateTime::new(first_sunday_november, time::Time::from_hms(9, 0, 0).ok()?)
-        .assume_utc();
-    Some((start, end))
-}
-
-fn nth_sunday(year: i32, month: time::Month, occurrence: u8) -> Option<time::Date> {
-    let first = time::Date::from_calendar_date(year, month, 1).ok()?;
-    let days_until_sunday = (7 + 6 - first.weekday().number_days_from_monday()) % 7;
-    let day = 1 + days_until_sunday + 7 * occurrence.saturating_sub(1);
-    time::Date::from_calendar_date(year, month, day).ok()
-}
-
-fn recency_weighted_score(base: u8, age: time::Duration, horizon: time::Duration) -> u8 {
-    if age < time::Duration::ZERO || age >= horizon {
-        return 0;
-    }
-    let total_seconds = horizon.whole_seconds();
-    let remaining_seconds = (horizon - age).whole_seconds();
-    ((i64::from(base) * remaining_seconds + total_seconds / 2) / total_seconds) as u8
-}
-
-fn forecast_confidence(
-    kind: SignalKind,
-    age: time::Duration,
-    delivery_in: Option<time::Duration>,
-) -> &'static str {
-    if let Some(lead) = delivery_in
-        && lead > time::Duration::ZERO
-        && lead <= time::Duration::hours(24)
-    {
-        return "high";
-    }
-    if let Some(lead) = delivery_in
-        && lead > time::Duration::ZERO
-        && lead <= time::Duration::hours(48)
-    {
-        return "medium";
-    }
-    match kind {
-        SignalKind::ScheduledBanked | SignalKind::ScheduledReset
-            if age <= time::Duration::hours(12) =>
-        {
-            "high"
-        }
-        SignalKind::Hint if age <= time::Duration::hours(12) => "medium",
-        SignalKind::ScheduledBanked | SignalKind::ScheduledReset
-            if age <= time::Duration::hours(24) =>
-        {
-            "medium"
-        }
-        _ => "low",
-    }
-}
-
 fn reset_events(posts: &[TiboPost]) -> Vec<ResetEvent> {
     posts
         .iter()
@@ -904,111 +951,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_common_clock_formats_and_pacific_dst_boundaries() {
-        assert_eq!(
-            parse_clock_time("at 2 pm PST"),
-            time::Time::from_hms(14, 0, 0).ok()
-        );
-        assert_eq!(
-            parse_clock_time("at 2:30 p.m. PST"),
-            time::Time::from_hms(14, 30, 0).ok()
-        );
-        assert_eq!(parse_clock_time("at 12 am"), Some(time::Time::MIDNIGHT));
-        assert_eq!(
-            parse_clock_time("at 12 pm"),
-            time::Time::from_hms(12, 0, 0).ok()
-        );
-        assert_eq!(
-            parse_clock_time("around 14pm"),
-            time::Time::from_hms(14, 0, 0).ok()
-        );
-
-        let before_spring_forward = parse_event_time("2026-03-07T18:00:00Z").unwrap();
-        assert_eq!(
-            scheduled_delivery_time(
-                "Reset will land at 2 pm PST tomorrow.",
-                before_spring_forward
-            ),
-            parse_event_time("2026-03-08T21:00:00Z")
-        );
-        assert_eq!(
-            pacific_utc_offset(parse_event_time("2026-03-08T09:59:59Z").unwrap()),
-            time::Duration::hours(-8)
-        );
-        assert_eq!(
-            pacific_utc_offset(parse_event_time("2026-03-08T10:00:00Z").unwrap()),
-            time::Duration::hours(-7)
-        );
-        assert_eq!(
-            pacific_utc_offset(parse_event_time("2026-11-01T09:00:00Z").unwrap()),
-            time::Duration::hours(-8)
-        );
-    }
-
-    #[test]
-    fn confirmed_reset_completes_the_future_forecast() {
-        let now = parse_event_time("2026-08-22T02:00:00Z").unwrap();
-        let posts = vec![post(
-            "landed",
-            "2026-08-22T00:50:36Z",
-            "The banked reset has landed for ChatGPT Work and Codex.",
-        )];
-        let outlook = build_reset_outlook(&posts, now);
-        assert_eq!(outlook.chance_24_hours, 0);
-        assert_eq!(outlook.chance_48_hours, 0);
-        assert_eq!(outlook.signal_kind, "confirmed_banked_reset");
-        assert!(outlook.last_reset_is_confirmed);
-        assert_eq!(outlook.source_url, "https://x.com/thsottiaux/status/landed");
-    }
-
-    #[test]
-    fn latest_scheduled_reset_wins_over_confirmed_banked_reset() {
-        let posts = vec![
-            post(
-                "scheduled-global",
-                "2026-08-23T06:29:05Z",
-                "Reset will land around 14pm PST tomorrow.",
-            ),
-            post(
-                "confirmed-banked",
-                "2026-08-22T00:50:36Z",
-                "The banked reset has landed for ChatGPT Work and Codex.",
-            ),
-        ];
-        let outlook =
-            build_reset_outlook(&posts, parse_event_time("2026-08-23T07:20:00Z").unwrap());
-
-        assert_eq!(outlook.signal_kind, "scheduled_global_reset");
-        assert_eq!((outlook.chance_24_hours, outlook.chance_48_hours), (90, 98));
-        assert_eq!(outlook.confidence, "high");
-        assert_eq!(outlook.last_reset_at, "2026-08-22T00:50:36Z");
-        assert!(outlook.last_reset_is_confirmed);
-        assert_eq!(
-            outlook.next_reset_at.as_deref(),
-            Some("2026-08-23T21:00:00Z")
-        );
-        assert_eq!(
-            outlook.source_url,
-            "https://x.com/thsottiaux/status/scheduled-global"
-        );
-    }
-
-    #[test]
-    fn outlook_rejects_future_dated_and_stale_signals() {
-        let now = parse_event_time("2026-08-22T00:00:00Z").unwrap();
-        for created_at in ["2026-08-22T00:00:01Z", "2026-08-19T23:59:59Z"] {
-            let posts = vec![post(
-                "invalid-time",
-                created_at,
-                "The banked reset will land tomorrow for paid Codex users.",
-            )];
-            let outlook = build_reset_outlook(&posts, now);
-            assert_eq!((outlook.chance_24_hours, outlook.chance_48_hours), (0, 0));
-            assert_eq!(outlook.signal_kind, "none");
-        }
-    }
-
-    #[test]
     fn first_poll_replays_only_recent_signals_then_deduplicates() {
         let temp = tempfile::tempdir().expect("temp dir");
         let now = parse_event_time("2026-08-22T02:00:00Z").unwrap();
@@ -1152,15 +1094,6 @@ mod tests {
             .expect("hourly notification budget is exhausted")
             .is_empty()
         );
-    }
-
-    fn post(id: &str, created_at: &str, text: &str) -> TiboPost {
-        TiboPost {
-            id: id.to_owned(),
-            created_at: created_at.to_owned(),
-            text: text.to_owned(),
-            url: format!("https://x.com/thsottiaux/status/{id}"),
-        }
     }
 
     fn reset_event(id: &str, announced_at: &str, kind: &str) -> ResetEvent {

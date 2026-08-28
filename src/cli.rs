@@ -169,6 +169,21 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Return the full reset timeline from codex-reset.com.
+    ResetTimeline {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Return OpenAI status history from codex-reset.com (Codex-specific incidents).
+    ResetStatusHistory {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Return quota effort tiers ("juice") from codex-reset.com.
+    ResetJuice {
+        #[arg(long)]
+        json: bool,
+    },
     OpenAiStatus {
         #[arg(long)]
         json: bool,
@@ -605,6 +620,48 @@ pub fn run() -> Result<()> {
             } else {
                 for event in events {
                     println!("Global reset {}: {}", event.announced_at, event.summary);
+                }
+            }
+            Ok(())
+        }
+        Some(Command::ResetTimeline { json }) => {
+            let timeline = crate::reset_tracker::fetch_reset_timeline()?;
+            if json {
+                print_json(&timeline)?;
+            } else {
+                println!("Reset Timeline ({} events):", timeline.events.len());
+                for event in timeline.events.iter().take(10) {
+                    println!("  {} [{}] {}", event.date, event.event_type, event.summary.chars().take(60).collect::<String>());
+                }
+            }
+            Ok(())
+        }
+        Some(Command::ResetStatusHistory { json }) => {
+            let status = crate::reset_tracker::fetch_reset_status_history()?;
+            if json {
+                print_json(&status)?;
+            } else {
+                println!("Codex Status: {}", status.current.description);
+                for surface in &status.surfaces {
+                    println!("  {}: {}", surface.label, surface.status);
+                }
+                if !status.incidents.is_empty() {
+                    println!("Recent incidents:");
+                    for incident in status.incidents.iter().take(3) {
+                        println!("  {} [{}]", incident.name, incident.status);
+                    }
+                }
+            }
+            Ok(())
+        }
+        Some(Command::ResetJuice { json }) => {
+            let juice = crate::reset_tracker::fetch_reset_juice()?;
+            if json {
+                print_json(&juice)?;
+            } else {
+                println!("Quota Juice ({} tiers):", juice.efforts.len());
+                for effort in &juice.efforts {
+                    println!("  {}: {} (delta: {})", effort.effort, effort.current, effort.delta);
                 }
             }
             Ok(())

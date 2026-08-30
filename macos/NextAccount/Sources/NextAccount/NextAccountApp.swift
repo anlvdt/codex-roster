@@ -92,6 +92,17 @@ struct CodexRosterApp: App {
     }
 
     var body: some Scene {
+        Window("Codex Roster Notch", id: "notch") {
+            NotchWindowView()
+                .environmentObject(store)
+                .environmentObject(language)
+                .environmentObject(updater)
+                .environment(\.locale, language.language.locale)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
+        .defaultPosition(.top)
+
         Window("Codex Roster", id: "dashboard") {
             ContentView()
                 .environmentObject(store)
@@ -136,23 +147,6 @@ struct CodexRosterApp: App {
             }
         }
 
-        MenuBarExtra {
-            MenuBarView()
-                .environmentObject(store)
-                .environmentObject(language)
-                .environmentObject(updater)
-                .environment(\.locale, language.language.locale)
-                .task {
-                    store.startCoreMonitoring()
-                    updater.startAutomaticChecks(currentVersion: AppInfo.shortVersion)
-                }
-        } label: {
-            Label(menuBarTitle, systemImage: "person.3.sequence.fill")
-                .labelStyle(.titleAndIcon)
-                .accessibilityLabel(menuBarAccessibilityLabel)
-        }
-        .menuBarExtraStyle(.window)
-
         Window(language.text("Giới thiệu", "About"), id: "about") {
             AboutView()
                 .environmentObject(language)
@@ -167,19 +161,6 @@ struct CodexRosterApp: App {
         }
     }
 
-    private var menuBarAccessibilityLabel: String {
-        guard let remaining = store.accounts.first(where: \.isActive)?.primaryQuotaWindow?.displayRemainingPercent else {
-            return "Codex Roster"
-        }
-        return "Codex Roster \(remaining)% quota"
-    }
-
-    private var menuBarTitle: String {
-        guard let remaining = store.accounts.first(where: \.isActive)?.primaryQuotaWindow?.displayRemainingPercent else {
-            return "—"
-        }
-        return "\(remaining)%"
-    }
 }
 
 struct ContentView: View {
@@ -611,7 +592,7 @@ private struct DashboardView: View {
                             set: { store.setLaunchAtLogin($0) }
                         ))
                         .disabled(store.isWorking)
-                        Text(language.text("Duy trì menu bar và các kiểm tra tự động sau khi bạn đăng nhập vào máy Mac.", "Keeps the menu bar and automatic checks available after you sign in to your Mac."))
+                        Text(language.text("Duy trì notch và các kiểm tra tự động sau khi bạn đăng nhập vào máy Mac.", "Keeps the notch and automatic checks available after you sign in to your Mac."))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         HStack {
@@ -3375,7 +3356,7 @@ private struct BankedResetCreditRow: View {
     }
 }
 
-private struct MenuBarView: View {
+struct MenuBarView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @EnvironmentObject private var updater: GitHubUpdater
@@ -4157,14 +4138,14 @@ private struct AboutView: View {
                 HStack(spacing: 10) {
                     AboutMetric(icon: "lock.shield.fill", title: "Local-first", detail: language.text("Dữ liệu ở trên Mac", "Data stays on this Mac"))
                     AboutMetric(icon: "waveform.path.ecg", title: language.text("Tín hiệu live", "Live signals"), detail: language.text("Quota · reset · dịch vụ", "Quota · reset · service"))
-                    AboutMetric(icon: "macbook", title: "macOS", detail: language.text("Menu bar native", "Native menu bar"))
+                    AboutMetric(icon: "macbook", title: "macOS", detail: language.text("Notch native", "Native notch"))
                 }
 
                 HStack(alignment: .top, spacing: 14) {
                     AboutPanel(title: language.text("Tóm tắt", "Overview"), icon: "person.3.sequence.fill") {
                         AboutBullet(icon: "person.crop.circle", text: language.text("Nhìn ngay phiên đang dùng, quota, thời điểm reset và banked reset.", "See the active session, quota, reset time, and banked resets at a glance."))
                         AboutBullet(icon: "antenna.radiowaves.left.and.right", text: language.text("Theo dõi live trạng thái OpenAI và tín hiệu reset công khai của Tibo.", "Monitor OpenAI service health and Tibo's public reset signals live."))
-                        AboutBullet(icon: "arrow.left.arrow.right.circle", text: language.text("Chuyển nhanh từ menu bar đến tài khoản còn quota hoặc có banked reset.", "Quick-switch from the menu bar to accounts with usable quota or banked resets."))
+                        AboutBullet(icon: "arrow.left.arrow.right.circle", text: language.text("Chuyển nhanh từ notch đến tài khoản còn quota hoặc có banked reset.", "Quick-switch from the notch to accounts with usable quota or banked resets."))
                     }
 
                     AboutPanel(title: language.text("Quyền riêng tư", "Privacy"), icon: "hand.raised.fill") {
@@ -4203,7 +4184,7 @@ private struct AboutView: View {
                     }
                     AboutFeatureGroup(title: language.text("Quota & chuyển tài khoản", "Quota & switching")) {
                         AboutBullet(icon: "gauge.with.dots.needle.50percent", text: language.text("Theo dõi quota Codex, thời điểm reset và gói ChatGPT; làm mới tài khoản đang dùng mỗi phút hoặc kiểm tra toàn bộ theo yêu cầu.", "Track Codex quota, reset timing, and ChatGPT plan; refresh the active account every minute or check every account on demand."))
-                        AboutBullet(icon: "arrow.left.arrow.right.circle", text: language.text("Chuyển nhanh từ menu bar; bao gồm tài khoản 0% đang giữ banked reset.", "Quick-switch from the menu bar; includes 0% accounts holding a banked reset."))
+                        AboutBullet(icon: "arrow.left.arrow.right.circle", text: language.text("Chuyển nhanh từ notch; bao gồm tài khoản 0% đang giữ banked reset.", "Quick-switch from the notch; includes 0% accounts holding a banked reset."))
                         AboutBullet(icon: "arrow.triangle.2.circlepath", text: language.text("Tự động chuyển khi hết quota (tùy chọn): đóng ChatGPT nếu cần, đổi phiên ~/.codex, rồi mở lại Desktop để khớp Roster; không lặp khi mọi tài khoản đều hết quota.", "Optional auto-switch when exhausted: close ChatGPT if needed, switch ~/.codex, then relaunch Desktop to match Roster; never loops when every account is exhausted."))
                         AboutBullet(icon: "arrow.clockwise.icloud", text: language.text("Nút “Mở lại ChatGPT theo phiên này” đóng rồi mở Desktop để khớp ~/.codex ngay.", "“Relaunch ChatGPT with this session” quits and reopens Desktop to match ~/.codex immediately."))
                     }
@@ -4214,7 +4195,7 @@ private struct AboutView: View {
                         AboutBullet(icon: "arrow.counterclockwise", text: language.text("Khôi phục danh sách hoặc phiên sao lưu gần nhất sau khi xác nhận.", "Restore the latest account list or saved sessions after confirmation."))
                     }
                     AboutFeatureGroup(title: language.text("Trải nghiệm hệ thống", "System experience")) {
-                        AboutBullet(icon: "menubar.rectangle", text: language.text("Menu bar hiển thị quota hiện tại, chuyển nhanh, trạng thái dịch vụ, refresh, mở dashboard và thoát ứng dụng.", "Menu bar shows current quota, quick switching, service state, refresh, dashboard access, and quit."))
+                        AboutBullet(icon: "macbook", text: language.text("Notch hiển thị quota hiện tại, chuyển nhanh, trạng thái dịch vụ, refresh, mở dashboard và thoát ứng dụng.", "The notch shows current quota, quick switching, service state, refresh, dashboard access, and quit."))
                         AboutBullet(icon: "power", text: language.text("Tùy chọn mở Codex Roster khi đăng nhập macOS; hỗ trợ phím tắt, Dark Mode và song ngữ Việt–Anh (mặc định Tiếng Việt).", "Optionally launch at macOS sign-in; supports keyboard shortcuts, Dark Mode, and Vietnamese–English (Vietnamese by default)."))
                         AboutBullet(icon: "desktopcomputer", text: language.text("macOS là nền tảng duy nhất đang được phát triển và phát hành; app Windows và Linux hiện tạm dừng, mã nguồn được giữ lại để bảo trì trong tương lai.", "macOS is the only actively developed and released platform; Windows and Linux apps are paused, with source retained for future maintenance."))
                     }
@@ -4269,7 +4250,7 @@ private struct AboutView: View {
                         )
                         ReferenceLink(
                             title: "steipete / CodexBar",
-                            detail: language.text("Tham khảo UX menu bar, trạng thái quota và cách trình bày thời điểm reset; triển khai độc lập.", "Reference for menu-bar UX, quota states, and reset-time presentation; independently implemented."),
+                            detail: language.text("Tham khảo UX notch, trạng thái quota và cách trình bày thời điểm reset; triển khai độc lập.", "Reference for notch UX, quota states, and reset-time presentation; independently implemented."),
                             badge: "MIT · UI/UX reference",
                             url: codexBarURL
                         )

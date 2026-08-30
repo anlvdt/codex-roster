@@ -15,7 +15,7 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
 ### What it does
 
 - Save, label, archive, restore, and safely switch OpenAI / Codex account snapshots.
-- Show the active account's quota in the menu bar and account quota/reset state in the sidebar.
+- Show the active account's quota in the MacBook notch and account quota/reset state in the sidebar.
 - Launch the OpenAI browser sign-in flow without reading passwords, verification codes, or browser cookies.
 - Close and relaunch ChatGPT/Codex Desktop after a confirmed account switch.
 - Refresh local Codex token statistics, public OpenAI Status, and reset signals from [Tibo / @thsottiaux on X](https://x.com/thsottiaux), normalized through the independent [Codex Reset radar](https://codex-reset.com/) when X truncates long posts.
@@ -38,7 +38,7 @@ Codex exposes two independent usage windows: `primary_window` is the rolling **5
 
 A banked rate-limit reset is reported separately from immediately usable quota. Roster identifies the account and reset count instead of silently consuming an irreversible reset or switching to an account that is still at `0%`; redeem the reset explicitly in Codex, then the next background check can use the refreshed quota.
 
-Account lists can be sorted by ChatGPT plan (Pro → Plus → Free), remaining quota, display name, or email. The menu bar shows up to five quick-switch candidates using the same sort order.
+Account lists can be sorted by ChatGPT plan (Pro → Plus → Free), remaining quota, display name, or email. The notch panel shows quick-switch candidates using the same sort order.
 
 ### Backup and recovery
 
@@ -64,7 +64,7 @@ Never share a snapshot file, password, browser cookie, access token, or refresh 
 
 Download the latest macOS ZIP from [Releases](https://github.com/anlvdt/codex-roster/releases), unzip it, and move **Codex Roster.app** to Applications. macOS may require you to approve the first launch because the application is independently distributed.
 
-The menu bar checks stable GitHub Releases at launch and every six hours. When an update is available, select **Update** there; the ZIP's GitHub SHA-256 digest is verified before the app replaces itself and reopens.
+The notch panel checks stable GitHub Releases at launch and every six hours. When an update is available, select **Update** there; the ZIP's GitHub SHA-256 digest is verified before the app replaces itself and reopens.
 
 Build locally:
 
@@ -127,7 +127,7 @@ swift build --package-path macos/NextAccount
 ### Ứng dụng làm gì
 
 - Lưu, đặt tên, lưu trữ, khôi phục và chuyển an toàn các phiên tài khoản OpenAI / Codex.
-- Hiển thị quota tài khoản đang dùng trên menu bar; hiển thị quota và thời điểm reset ở sidebar.
+- Hiển thị quota tài khoản đang dùng tại notch MacBook; hiển thị quota và thời điểm reset ở sidebar.
 - Mở luồng đăng nhập thiết bị OpenAI mà không đọc mật khẩu, mã xác thực hay cookie trình duyệt.
 - Đóng rồi mở lại ChatGPT/Codex Desktop sau khi bạn xác nhận chuyển tài khoản.
 - Theo dõi token Codex cục bộ, trạng thái công khai OpenAI và tín hiệu reset từ [Tibo / @thsottiaux trên X](https://x.com/thsottiaux); dùng radar độc lập [Codex Reset](https://codex-reset.com/) để chuẩn hóa khi X cắt ngắn bài đăng dài.
@@ -150,7 +150,7 @@ Chế độ **Tự động chuyển khi hết quota** là tùy chọn. App theo 
 
 Banked rate-limit reset được tách khỏi quota có thể dùng ngay. Roster sẽ nêu rõ account và số reset thay vì tự tiêu một reset không thể hoàn tác hoặc chuyển sang account vẫn `0%`; sau khi bạn redeem reset trong Codex, lần kiểm tra nền kế tiếp có thể dùng quota vừa được khôi phục.
 
-Danh sách tài khoản có thể sắp xếp theo gói ChatGPT (Pro → Plus → Free), quota còn lại, tên hiển thị hoặc email. Menu bar hiện tối đa năm ứng viên chuyển nhanh theo cùng thứ tự sắp xếp.
+Danh sách tài khoản có thể sắp xếp theo gói ChatGPT (Pro → Plus → Free), quota còn lại, tên hiển thị hoặc email. Bảng notch hiển thị các ứng viên chuyển nhanh theo cùng thứ tự sắp xếp.
 
 ### Sao lưu và khôi phục
 
@@ -176,7 +176,7 @@ Không gửi file snapshot, mật khẩu backup, cookie trình duyệt, access t
 
 Tải ZIP macOS mới nhất từ [Releases](https://github.com/anlvdt/codex-roster/releases), giải nén rồi kéo **Codex Roster.app** vào Applications. Lần mở đầu, macOS có thể yêu cầu bạn cho phép vì ứng dụng được phát hành độc lập.
 
-Menu bar tự kiểm tra GitHub Releases ổn định khi khởi động và mỗi sáu giờ. Khi có bản mới, chọn **Cập nhật** tại đó; ứng dụng xác thực SHA-256 do GitHub công bố trước khi tự thay thế và mở lại.
+Bảng notch tự kiểm tra GitHub Releases ổn định khi khởi động và mỗi sáu giờ. Khi có bản mới, chọn **Cập nhật** tại đó; ứng dụng xác thực SHA-256 do GitHub công bố trước khi tự thay thế và mở lại.
 
 Tự build:
 

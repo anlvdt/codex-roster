@@ -51,7 +51,7 @@ OpenAI Docs xác nhận ChatGPT/Codex có thể kết nối remote MCP và khuy�
 
 ## Trạng thái gỡ bỏ trong Codex Roster
 
-Subsystem ChatGPT Web for Codex đã được loại khỏi module Rust, CLI command, Swift store/card, auto-sync hooks, asset đăng nhập, bước đóng gói macOS và README. Các chức năng quản lý ChatGPT/Codex Desktop, quota, account switching và Codex Router không bị thay đổi.
+Subsystem ChatGPT Web for Codex và tích hợp Codex Router đã được loại khỏi module Rust, CLI command, Swift store/card, auto-sync hooks, asset đăng nhập, bước đóng gói macOS và README. Các chức năng quản lý ChatGPT/Codex Desktop, quota và account switching không bị thay đổi.
 
 Kiểm chứng:
 

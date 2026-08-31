@@ -19,14 +19,7 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
 - Launch the OpenAI browser sign-in flow without reading passwords, verification codes, or browser cookies.
 - Close and relaunch ChatGPT/Codex Desktop after a confirmed account switch.
 - Refresh local Codex token statistics, public OpenAI Status, and reset signals from [Tibo / @thsottiaux on X](https://x.com/thsottiaux), normalized through the independent [Codex Reset radar](https://codex-reset.com/) when X truncates long posts.
-- Automatically install, update, configure, and repair [Codex Router](https://github.com/duolahypercho/codex-router) from its checksum-verified official installer; no Router controls are required for native Codex use.
 - Offer Vietnamese and English; Vietnamese is the default.
-
-### Optional external-model routing
-
-Codex Router remains an independent installation and keeps ownership of its provider credentials, service, model catalog, and Codex configuration. Roster never reads API keys or copies Router state. On macOS, Roster downloads the official `v0.4.0-beta.4` installer, verifies its pinned SHA-256 checksum, prepares locked dependencies, enables native-only mode without asking for a provider key, repairs an unhealthy service, and checks for maintenance updates every six hours. Existing checkout, Homebrew, and `PATH` installations are detected automatically.
-
-Use **Add external models** on the Router card to connect, enable, or hide providers without typing commands. Roster preserves every already-enabled provider and native GPT entry while Router performs the credential-safe OAuth/API-key prompt in Terminal. Hiding a provider does not delete its credential or curated models. Anonymous remote providers require an explicit warning confirmation before Roster enables them; they are never selected silently.
 
 ### Quota and automatic switching
 
@@ -34,7 +27,7 @@ Use **Add external models** on the Router card to connect, enable, or hide provi
 
 Codex exposes two independent usage windows: `primary_window` is the rolling **5-hour** allowance and `secondary_window` is the **weekly** allowance. Roster labels and displays both instead of collapsing them into one percentage. An account is immediately usable only while every reported window still has quota; a healthy 5-hour window does not override an exhausted weekly limit, and vice versa.
 
-**Auto-switch when quota is exhausted** is opt-in. It refreshes the active Codex account (`~/.codex`), prefers candidate quota cached within about 15 minutes, and revalidates the chosen candidate on apply (`--account-id`). It switches only when the active account is at `0%` and another saved account has usable quota in every reported window. On macOS, when ChatGPT/Codex Desktop is open, auto-switch closes it, applies the new `~/.codex` session, then relaunches Desktop so the UI matches Roster. If every account is exhausted, it leaves the current session untouched.
+**Auto-switch when quota is exhausted** is opt-in. It refreshes the active Codex account (`~/.codex`), prefers candidate quota cached within about 15 minutes, and revalidates the chosen candidate on apply (`--account-id`). It switches only when the active account is at `0%` and another saved account has usable quota in every reported window. On macOS, it waits while the active ChatGPT session is still writing Codex rollout events; once idle, it closes Desktop, applies the new `~/.codex` session, then relaunches Desktop so the UI matches Roster. If every account is exhausted, it leaves the current session untouched.
 
 A banked rate-limit reset is reported separately from immediately usable quota. Roster identifies the account and reset count instead of silently consuming an irreversible reset or switching to an account that is still at `0%`; redeem the reset explicitly in Codex, then the next background check can use the refreshed quota.
 
@@ -99,12 +92,6 @@ codex-roster auto-switch [--enable|--disable|--status|--apply] [--json]
 codex-roster token-usage [--json]
 codex-roster reset-outlook [--json]
 codex-roster open-ai-status [--json]
-codex-roster router status [--json]
-codex-roster router providers [--json]
-codex-roster router connect PROVIDER_ID [--allow-anonymous] [--json]
-codex-roster router disable PROVIDER_ID [--json]
-codex-roster router open [--json]
-codex-roster router doctor [--json]
 ```
 
 ### Privacy, status, and credits
@@ -131,14 +118,7 @@ swift build --package-path macos/NextAccount
 - Mở luồng đăng nhập thiết bị OpenAI mà không đọc mật khẩu, mã xác thực hay cookie trình duyệt.
 - Đóng rồi mở lại ChatGPT/Codex Desktop sau khi bạn xác nhận chuyển tài khoản.
 - Theo dõi token Codex cục bộ, trạng thái công khai OpenAI và tín hiệu reset từ [Tibo / @thsottiaux trên X](https://x.com/thsottiaux); dùng radar độc lập [Codex Reset](https://codex-reset.com/) để chuẩn hóa khi X cắt ngắn bài đăng dài.
-- Tự động cài, cập nhật, cấu hình và sửa [Codex Router](https://github.com/duolahypercho/codex-router) bằng installer chính thức đã xác minh checksum; dùng Codex native không cần thao tác Router.
 - Hỗ trợ Tiếng Việt và English; mặc định là Tiếng Việt.
-
-### Định tuyến model ngoài (tùy chọn)
-
-Codex Router vẫn là ứng dụng độc lập và tự quản lý credential provider, dịch vụ, model catalog cùng cấu hình Codex. Roster không đọc API key hay sao chép state của Router. Trên macOS, Roster tải installer chính thức `v0.4.0-beta.4`, xác minh SHA-256, chuẩn bị dependency đã khóa, bật chế độ native không cần provider key, tự sửa service lỗi và kiểm tra bảo trì mỗi sáu giờ. Các bản cài checkout chuẩn, Homebrew và `PATH` vẫn được nhận diện tự động.
-
-Dùng **Thêm model ngoài** trên thẻ Router để kết nối, bật hoặc ẩn provider mà không cần gõ lệnh. Roster luôn hợp nhất provider mới với danh sách đang bật và giữ nguyên native GPT; Router tự mở luồng OAuth/API key bảo mật trong Terminal. Ẩn provider không xoá credential hay model đã chọn. Gateway anonymous chỉ được bật sau khi người dùng xác nhận cảnh báo prompt sẽ rời khỏi máy.
 
 ### Quota và tự động chuyển
 
@@ -146,7 +126,7 @@ Dùng **Thêm model ngoài** trên thẻ Router để kết nối, bật hoặc 
 
 Codex trả về hai cửa sổ sử dụng độc lập: `primary_window` là quota cuốn chiếu **5 giờ**, còn `secondary_window` là quota **tuần**. Roster hiển thị và gắn nhãn riêng cho cả hai thay vì gộp thành một phần trăm. Tài khoản chỉ dùng được ngay khi mọi cửa sổ được trả về đều còn quota; quota 5 giờ còn không thể bù cho quota tuần đã hết và ngược lại.
 
-Chế độ **Tự động chuyển khi hết quota** là tùy chọn. App theo dõi phiên Codex tại `~/.codex` (không đọc cookie đăng nhập riêng trong ChatGPT). Khi hết `0%`, macOS sẽ đóng ChatGPT/Codex nếu cần, chuyển phiên, rồi mở lại Desktop để khớp Roster. Nếu mọi tài khoản đều hết quota, phiên hiện tại không bị thay đổi.
+Chế độ **Tự động chuyển khi hết quota** là tùy chọn. App theo dõi phiên Codex tại `~/.codex` (không đọc cookie đăng nhập riêng trong ChatGPT). Khi hết `0%`, app chờ nếu phiên ChatGPT đang ghi hoạt động Codex; sau khi phiên yên, macOS sẽ đóng ChatGPT/Codex nếu cần, chuyển phiên, rồi mở lại Desktop để khớp Roster. Nếu mọi tài khoản đều hết quota, phiên hiện tại không bị thay đổi.
 
 Banked rate-limit reset được tách khỏi quota có thể dùng ngay. Roster sẽ nêu rõ account và số reset thay vì tự tiêu một reset không thể hoàn tác hoặc chuyển sang account vẫn `0%`; sau khi bạn redeem reset trong Codex, lần kiểm tra nền kế tiếp có thể dùng quota vừa được khôi phục.
 

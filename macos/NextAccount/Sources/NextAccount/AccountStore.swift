@@ -49,6 +49,45 @@ enum AccountActivationSafety {
     }
 }
 
+enum CodexActivityDetector {
+    static let quietPeriod: TimeInterval = 20
+
+    static func isTurnActive(now: Date = .now) -> Bool {
+        guard ChatGPTDesktop.isRunning,
+              let latest = latestSessionWrite(now: now) else { return false }
+        let age = now.timeIntervalSince(latest)
+        return age >= -2 && age <= quietPeriod
+    }
+
+    private static func latestSessionWrite(now: Date) -> Date? {
+        let sessions = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/sessions", isDirectory: true)
+        let calendar = Calendar.current
+        let candidateDays = [now, calendar.date(byAdding: .day, value: -1, to: now)].compactMap { $0 }
+        var latest: Date?
+        for day in candidateDays {
+            let parts = calendar.dateComponents([.year, .month, .day], from: day)
+            guard let year = parts.year, let month = parts.month, let day = parts.day else { continue }
+            let directory = sessions
+                .appendingPathComponent(String(format: "%04d", year), isDirectory: true)
+                .appendingPathComponent(String(format: "%02d", month), isDirectory: true)
+                .appendingPathComponent(String(format: "%02d", day), isDirectory: true)
+            guard let files = try? FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            for file in files where file.pathExtension == "jsonl" {
+                guard let values = try? file.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
+                      values.isRegularFile == true,
+                      let modified = values.contentModificationDate else { continue }
+                if latest == nil || modified > latest! { latest = modified }
+            }
+        }
+        return latest
+    }
+}
+
 enum NewAccountLoginState: Equatable {
     case idle
     case waiting
@@ -974,21 +1013,9 @@ final class AccountStore: ObservableObject {
                 )
             case "ready":
                 guard !isBusyForActions else { return }
-                // Never switch the OpenAI account out from under a live Codex
-                // turn — and especially not when that turn runs on an external
-                // model via codex-router, whose quota is independent of the
-                // exhausted OpenAI account. Interrupting it would be pointless.
-                if let routerStatus = try? await cli.decode(
-                    RouterStatusOutput.self, arguments: ["router", "status"]
-                ), routerStatus.healthy {
-                    if routerStatus.activeExternalModel {
-                        autoSwitchState = .externalModelActive(model: routerStatus.activeModel)
-                        return
-                    }
-                    if routerStatus.activeGenerating {
-                        autoSwitchState = .generationInProgress
-                        return
-                    }
+                guard !CodexActivityDetector.isTurnActive() else {
+                    autoSwitchState = .generationInProgress
+                    return
                 }
                 isSwitching = true
                 defer { isSwitching = false }
@@ -1277,12 +1304,6 @@ enum AutoSwitchState: Equatable {
     case waitingForProcesses
     case switched(String)
     case checkFailed
-    /// The active Codex session is generating through an external model via
-    /// codex-router, whose quota is independent of the OpenAI account, so the
-    /// switch is held to avoid interrupting it.
-    case externalModelActive(model: String?)
-    /// A Codex turn is generating right now; the switch is held so it is not
-    /// killed mid-response.
     case generationInProgress
 }
 
@@ -1835,6 +1856,24 @@ private enum ResetNotifier {
         var seenCreditIDs: Set<String> = []
         var availableCountByAccount: [String: Int] = [:]
         var usageByAccount: [String: UsageObservation] = [:]
+        var pendingResetByWindow: [String: PendingReset] = [:]
+
+        private enum CodingKeys: String, CodingKey {
+            case seenCreditIDs
+            case availableCountByAccount
+            case usageByAccount
+            case pendingResetByWindow
+        }
+
+        init() {}
+
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            seenCreditIDs = try values.decodeIfPresent(Set<String>.self, forKey: .seenCreditIDs) ?? []
+            availableCountByAccount = try values.decodeIfPresent([String: Int].self, forKey: .availableCountByAccount) ?? [:]
+            usageByAccount = try values.decodeIfPresent([String: UsageObservation].self, forKey: .usageByAccount) ?? [:]
+            pendingResetByWindow = try values.decodeIfPresent([String: PendingReset].self, forKey: .pendingResetByWindow) ?? [:]
+        }
     }
 
     private struct UsageObservation: Codable, Equatable {
@@ -1852,6 +1891,13 @@ private enum ResetNotifier {
         let label: String
         let previousRemaining: Int
         let currentRemaining: Int
+    }
+
+    private struct PendingReset: Codable, Equatable {
+        let previousRemaining: Int
+        let candidateRemaining: Int
+        let candidateResetAt: Date
+        let observedAt: Date
     }
 
     static func prepare() {
@@ -1969,7 +2015,17 @@ private enum ResetNotifier {
         guard let previous = state.usageByAccount[accountKey],
               current.fetchedAt > previous.fetchedAt else { return }
 
-        let changes = resetChanges(previous: previous, current: current)
+        let changes = confirmedResetChanges(
+            accountKey: accountKey,
+            current: current,
+            state: &state
+        )
+        recordResetCandidates(
+            accountKey: accountKey,
+            previous: previous,
+            current: current,
+            state: &state
+        )
         guard !changes.isEmpty else { return }
         let detail = changes.map { change in
             "\(change.label) \(change.previousRemaining)% → \(change.currentRemaining)%"
@@ -1980,6 +2036,63 @@ private enum ResetNotifier {
             subtitle: AppLanguage.text("Quota Codex đã được đặt lại", "Codex quota has been reset"),
             body: detail
         )
+    }
+
+    private static func confirmedResetChanges(
+        accountKey: String,
+        current: UsageObservation,
+        state: inout SignalState
+    ) -> [WindowResetChange] {
+        var changes: [WindowResetChange] = []
+        for (key, label, window) in resetWindows(accountKey: accountKey, observation: current) {
+            guard let window, let pending = state.pendingResetByWindow[key] else { continue }
+            guard current.fetchedAt > pending.observedAt else { continue }
+            if window.remainingPercent >= pending.candidateRemaining - 1,
+               window.resetAt >= pending.candidateResetAt {
+                changes.append(WindowResetChange(
+                    label: label,
+                    previousRemaining: pending.previousRemaining,
+                    currentRemaining: window.remainingPercent
+                ))
+                state.pendingResetByWindow.removeValue(forKey: key)
+            } else if window.remainingPercent < pending.candidateRemaining - 5 {
+                state.pendingResetByWindow.removeValue(forKey: key)
+            }
+        }
+        return changes
+    }
+
+    private static func recordResetCandidates(
+        accountKey: String,
+        previous: UsageObservation,
+        current: UsageObservation,
+        state: inout SignalState
+    ) {
+        let previousWindows = resetWindows(accountKey: accountKey, observation: previous)
+        let currentWindows = resetWindows(accountKey: accountKey, observation: current)
+        for index in currentWindows.indices {
+            let (key, _, currentWindow) = currentWindows[index]
+            let previousWindow = previousWindows[index].window
+            guard state.pendingResetByWindow[key] == nil,
+                  resetChange(label: "", previous: previousWindow, current: currentWindow) != nil,
+                  let currentWindow else { continue }
+            state.pendingResetByWindow[key] = PendingReset(
+                previousRemaining: previousWindow?.remainingPercent ?? 0,
+                candidateRemaining: currentWindow.remainingPercent,
+                candidateResetAt: currentWindow.resetAt,
+                observedAt: current.fetchedAt
+            )
+        }
+    }
+
+    private static func resetWindows(
+        accountKey: String,
+        observation: UsageObservation
+    ) -> [(key: String, label: String, window: WindowObservation?)] {
+        [
+            ("\(accountKey):five-hour", AppLanguage.text("5 giờ", "5-hour"), observation.fiveHour),
+            ("\(accountKey):weekly", AppLanguage.text("Tuần", "Weekly"), observation.weekly),
+        ]
     }
 
     private static func usageObservation(for account: SavedAccount) -> UsageObservation? {
@@ -1995,28 +2108,6 @@ private enum ResetNotifier {
         )
     }
 
-    private static func resetChanges(
-        previous: UsageObservation,
-        current: UsageObservation
-    ) -> [WindowResetChange] {
-        var changes: [WindowResetChange] = []
-        if let change = resetChange(
-            label: AppLanguage.text("5 giờ", "5-hour"),
-            previous: previous.fiveHour,
-            current: current.fiveHour
-        ) {
-            changes.append(change)
-        }
-        if let change = resetChange(
-            label: AppLanguage.text("Tuần", "Weekly"),
-            previous: previous.weekly,
-            current: current.weekly
-        ) {
-            changes.append(change)
-        }
-        return changes
-    }
-
     private static func resetChange(
         label: String,
         previous: WindowObservation?,
@@ -2025,7 +2116,8 @@ private enum ResetNotifier {
         guard let previous, let current else { return nil }
         let restoredPercent = current.remainingPercent - previous.remainingPercent
         guard restoredPercent >= 5,
-              current.resetAt > previous.resetAt || previous.remainingPercent == 0 else {
+              current.resetAt > previous.resetAt
+                  || previous.remainingPercent <= UsageWindow.exhaustedRemainingPercent else {
             return nil
         }
         return WindowResetChange(
@@ -2495,254 +2587,5 @@ enum AIProvider: String, CaseIterable, Identifiable {
 
     var icon: String {
         "sparkles"
-    }
-}
-
-struct RouterStatusOutput: Decodable {
-    let installed: Bool
-    let healthy: Bool
-    let configured: Bool
-    let state: String
-    let version: String?
-    let installation: String?
-    let detail: String?
-    let repositoryUrl: URL
-    let activeGenerating: Bool
-    let activeExternalModel: Bool
-    let activeModel: String?
-}
-
-struct RouterProviderOutput: Decodable, Identifiable, Equatable {
-    let id: String
-    let name: String
-    let visible: Bool
-    let configured: Bool
-    let connectionKind: String
-    let requiresExplicitConsent: Bool
-}
-
-private struct RouterProvidersOutput: Decodable {
-    let providers: [RouterProviderOutput]
-}
-
-private struct RouterActionOutput: Decodable {
-    let ok: Bool
-    let action: String
-    let message: String
-}
-
-private struct RouterProviderActionOutput: Decodable {
-    let ok: Bool
-    let action: String
-    let providerId: String
-    let message: String
-    let pendingUserAction: Bool
-}
-
-@MainActor
-final class RouterStore: ObservableObject {
-    @Published private(set) var status: RouterStatusOutput?
-    @Published private(set) var providers: [RouterProviderOutput] = []
-    @Published private(set) var isRefreshing = false
-    @Published private(set) var isWorking = false
-    @Published private(set) var providerActionId: String?
-    @Published private(set) var notice: String?
-
-    private let cli = AccountHubCLI()
-    private var automationTask: Task<Void, Never>?
-    private var providerPollingTask: Task<Void, Never>?
-    private static let maintenanceDefaultsKey = "routerLastAutomaticMaintenanceAt"
-    private static let maintenanceInterval: TimeInterval = 6 * 60 * 60
-    private static let healthCheckInterval: Duration = .seconds(5 * 60)
-    // After a Mac/app restart the router's launchd service takes a few seconds
-    // to come up, so the first status check reports `healthy: false` even though
-    // nothing is broken. Poll a short grace window before escalating to the
-    // heavy `router install` recovery, otherwise every restart kicks off a
-    // reinstall that can disrupt the catalog and enabled providers.
-    private static let healthGraceRetries = 6
-    private static let healthGraceDelay: Duration = .seconds(2)
-
-    func startAutomation() {
-        guard automationTask == nil else { return }
-        automationTask = Task { [weak self] in
-            while !Task.isCancelled {
-                await self?.reconcile()
-                try? await Task.sleep(for: Self.healthCheckInterval)
-            }
-        }
-    }
-
-    func refresh(silently: Bool = false) {
-        guard !isRefreshing, !isWorking else { return }
-        isRefreshing = true
-        if !silently { notice = nil }
-        Task {
-            defer { isRefreshing = false }
-            do {
-                status = try await cli.decode(
-                    RouterStatusOutput.self,
-                    arguments: ["router", "status"]
-                )
-                if status?.healthy == true {
-                    try await loadProviders()
-                } else {
-                    providers = []
-                }
-            } catch {
-                if !silently { notice = error.localizedDescription }
-            }
-        }
-    }
-
-    func connect(_ provider: RouterProviderOutput, allowAnonymous: Bool = false) {
-        guard !isWorking, !isRefreshing else { return }
-        isWorking = true
-        providerActionId = provider.id
-        notice = nil
-        Task {
-            var arguments = ["router", "connect", provider.id]
-            if allowAnonymous { arguments.append("--allow-anonymous") }
-            do {
-                let output = try await cli.decode(
-                    RouterProviderActionOutput.self,
-                    arguments: arguments
-                )
-                notice = output.message
-                try await refreshRouterState()
-                isWorking = false
-                if output.pendingUserAction {
-                    startProviderPolling(providerId: output.providerId)
-                } else {
-                    providerActionId = nil
-                }
-            } catch {
-                notice = error.localizedDescription
-                isWorking = false
-                providerActionId = nil
-            }
-        }
-    }
-
-    func disable(_ provider: RouterProviderOutput) {
-        guard !isWorking, !isRefreshing else { return }
-        isWorking = true
-        providerActionId = provider.id
-        notice = nil
-        Task {
-            do {
-                let output = try await cli.decode(
-                    RouterProviderActionOutput.self,
-                    arguments: ["router", "disable", provider.id]
-                )
-                notice = output.message
-                try await refreshRouterState()
-            } catch {
-                notice = error.localizedDescription
-            }
-            isWorking = false
-            providerActionId = nil
-        }
-    }
-
-    func isActing(on provider: RouterProviderOutput) -> Bool {
-        providerActionId == provider.id
-    }
-
-    private func reconcile() async {
-        guard !isWorking, !isRefreshing else { return }
-        isWorking = true
-        defer { isWorking = false }
-        do {
-            var current = try await cli.decode(
-                RouterStatusOutput.self,
-                arguments: ["router", "status"]
-            )
-            status = current
-            // Give a just-booted service time to become healthy on its own
-            // before treating it as broken. Only a still-unhealthy service after
-            // the grace window is escalated to recovery below.
-            if !current.healthy && current.installed {
-                for _ in 0..<Self.healthGraceRetries {
-                    try? await Task.sleep(for: Self.healthGraceDelay)
-                    current = try await cli.decode(
-                        RouterStatusOutput.self,
-                        arguments: ["router", "status"]
-                    )
-                    status = current
-                    if current.healthy { break }
-                }
-            }
-            if current.healthy {
-                try await loadProviders()
-            } else {
-                providers = []
-            }
-            let lastMaintenance = UserDefaults.standard.object(
-                forKey: Self.maintenanceDefaultsKey
-            ) as? Date
-            let maintenanceDue = lastMaintenance.map {
-                Date().timeIntervalSince($0) >= Self.maintenanceInterval
-            } ?? true
-            guard !current.healthy || !current.configured || maintenanceDue else {
-                notice = nil
-                return
-            }
-            let _: RouterActionOutput = try await cli.decode(
-                RouterActionOutput.self,
-                arguments: ["router", "install"]
-            )
-            notice = nil
-            UserDefaults.standard.set(Date(), forKey: Self.maintenanceDefaultsKey)
-            status = try await cli.decode(
-                RouterStatusOutput.self,
-                arguments: ["router", "status"]
-            )
-            if status?.healthy == true {
-                try await loadProviders()
-            }
-        } catch {
-            notice = error.localizedDescription
-        }
-    }
-
-    private func loadProviders() async throws {
-        providers = try await cli.decode(
-            RouterProvidersOutput.self,
-            arguments: ["router", "providers"]
-        ).providers
-    }
-
-    private func refreshRouterState() async throws {
-        status = try await cli.decode(
-            RouterStatusOutput.self,
-            arguments: ["router", "status"]
-        )
-        if status?.healthy == true {
-            try await loadProviders()
-        }
-    }
-
-    private func startProviderPolling(providerId: String) {
-        providerPollingTask?.cancel()
-        providerPollingTask = Task { [weak self] in
-            for _ in 0..<40 {
-                guard !Task.isCancelled else { return }
-                try? await Task.sleep(for: .seconds(3))
-                guard let self else { return }
-                do {
-                    try await self.refreshRouterState()
-                    if self.providers.first(where: { $0.id == providerId })?.visible == true {
-                        self.notice = "Provider connected. Native GPT models remain available."
-                        self.providerActionId = nil
-                        self.providerPollingTask = nil
-                        return
-                    }
-                } catch {
-                    // The background health loop will retry without interrupting account work.
-                }
-            }
-            self?.providerActionId = nil
-            self?.providerPollingTask = nil
-        }
     }
 }

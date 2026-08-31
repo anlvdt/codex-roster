@@ -55,7 +55,7 @@ struct NotchWindowView: View {
         .animation(panelAnimation, value: isExpanded)
         .task {
             store.startCoreMonitoring()
-            let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.45"
+            let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.46"
             updater.startAutomaticChecks(currentVersion: version)
         }
         .onDisappear {

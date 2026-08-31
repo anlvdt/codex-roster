@@ -778,7 +778,7 @@ fn format_last_refresh(value: OffsetDateTime) -> String {
 /// refresh token is present, rotate the tokens now and hand back the refreshed
 /// snapshot so the caller can persist it and restore fresh auth.
 ///
-/// This mirrors how Codex CLI and peer switchers (e.g. codex-router) refresh
+/// This mirrors how Codex CLI and peer switchers refresh
 /// during a switch: it lets Codex Desktop/CLI start from a valid access token
 /// instead of running its own refresh, which can loop on `refresh_token_reused`
 /// and force a login.

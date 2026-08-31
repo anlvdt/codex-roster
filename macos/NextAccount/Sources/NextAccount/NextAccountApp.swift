@@ -166,7 +166,6 @@ struct CodexRosterApp: App {
 struct ContentView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
-    @StateObject private var router = RouterStore()
     @State private var selection: UUID?
     @State private var accountForDeletion: SavedAccount?
     @State private var accountForEditing: SavedAccount?
@@ -182,7 +181,6 @@ struct ContentView: View {
             detailContent
         }
         .toolbar { AccountToolbar(showingAddAccount: $showingAddAccount) }
-        .task { router.startAutomation() }
         .onReceive(NotificationCenter.default.publisher(for: .showAddAccount)) { _ in
             showingAddAccount = true
         }
@@ -285,7 +283,6 @@ struct ContentView: View {
             )
         } else {
             DashboardView(
-                router: router,
                 selection: $selection,
                 relogin: presentRelogin,
                 reloginAll: startReloginQueue
@@ -477,7 +474,6 @@ private struct AccountSidebar: View {
 private struct DashboardView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
-    @ObservedObject var router: RouterStore
     @Binding var selection: UUID?
     let relogin: (SavedAccount) -> Void
     let reloginAll: ([SavedAccount]) -> Void
@@ -525,8 +521,6 @@ private struct DashboardView: View {
                     selection: $selection,
                     reloginAll: { reloginAll(reloginAccounts) }
                 )
-
-                RouterIntegrationCard(router: router)
 
                 BulkAccountManager(
                     selection: $selection,
@@ -723,20 +717,8 @@ private struct DashboardView: View {
             language.text("Đã tự động chuyển sang \(name) và mở lại ChatGPT.", "Automatically switched to \(name) and relaunched ChatGPT.")
         case .checkFailed:
             language.text("Không thể kiểm tra/chuyển quota tự động. Thử Kiểm tra & chuyển.", "Could not auto-check/switch quota. Try Check & switch.")
-        case .externalModelActive(let model):
-            if let model {
-                language.text(
-                    "Đang chạy model ngoài (\(model)) qua Codex Router — không tiêu quota OpenAI, nên Auto-switch giữ nguyên phiên.",
-                    "Running an external model (\(model)) via Codex Router — it does not use OpenAI quota, so Auto-switch is holding the session."
-                )
-            } else {
-                language.text(
-                    "Đang chạy model ngoài qua Codex Router — không tiêu quota OpenAI, nên Auto-switch giữ nguyên phiên.",
-                    "Running an external model via Codex Router — it does not use OpenAI quota, so Auto-switch is holding the session."
-                )
-            }
         case .generationInProgress:
-            language.text("Codex đang tạo phản hồi; Auto-switch chờ xong lượt rồi mới chuyển.", "Codex is generating a response; Auto-switch is waiting for the turn to finish before switching.")
+            language.text("Codex đang tạo phản hồi; Auto-switch chờ phiên yên trước khi chuyển.", "Codex is generating a response; Auto-switch is waiting for the session to become idle.")
         }
     }
 }
@@ -3814,10 +3796,8 @@ private struct MenuBarOperationStatus: View {
             return language.text("Đã chuyển sang \(name)", "Switched to \(name)")
         case .checkFailed:
             return language.text("Không thể kiểm tra/chuyển quota", "Quota check/switch failed")
-        case .externalModelActive:
-            return language.text("Đang dùng model ngoài — giữ nguyên phiên", "Using an external model — session held")
         case .generationInProgress:
-            return language.text("Đang tạo phản hồi — chờ xong lượt", "Generating — waiting for the turn")
+            return language.text("Đang tạo phản hồi — chờ phiên yên", "Generating — waiting for idle")
         }
     }
 
@@ -3827,7 +3807,7 @@ private struct MenuBarOperationStatus: View {
         switch store.autoSwitchState {
         case .some(.switched): return .green
         case .some(.closingDesktop), .some(.switchingAccount), .some(.relaunchingDesktop),
-             .some(.externalModelActive), .some(.generationInProgress): return .secondary
+             .some(.generationInProgress): return .secondary
         case .some(.waitingForLogin), .some(.allAccountsExhausted), .some(.bankedResetAvailable), .some(.desktopRelaunchFailed), .some(.waitingForProcesses), .some(.checkFailed): return .orange
         case .none: return .secondary
         }
@@ -4098,7 +4078,6 @@ private struct AboutView: View {
     private let cockpitToolsURL = URL(string: "https://github.com/jlcodes99/cockpit-tools")!
     private let codexProfilesURL = URL(string: "https://github.com/Ducksss/codex-profiles")!
     private let codexSwitchboardURL = URL(string: "https://github.com/vyctorbrzezowski/codex-switchboard")!
-    private let codexRouterURL = URL(string: "https://github.com/duolahypercho/codex-router")!
     private let tiboXURL = URL(string: "https://x.com/thsottiaux")!
     private let openAIBrandURL = URL(string: "https://openai.com/brand/")!
     private let codexPricingURL = URL(string: "https://learn.chatgpt.com/docs/pricing")!
@@ -4151,7 +4130,6 @@ private struct AboutView: View {
                     AboutPanel(title: language.text("Quyền riêng tư", "Privacy"), icon: "hand.raised.fill") {
                         AboutBullet(icon: "internaldrive", text: language.text("Snapshot tài khoản và backup được lưu cục bộ trên máy này.", "Account snapshots and backups are stored locally on this Mac."))
                         AboutBullet(icon: "eye.slash", text: language.text("Không đọc mật khẩu, mã xác thực hoặc cookie trình duyệt.", "Never reads passwords, verification codes, or browser cookies."))
-                        AboutBullet(icon: "point.3.connected.trianglepath.dotted", text: language.text("Roster tự cài, cập nhật và sửa Codex Router; Router vẫn sở hữu credential và state riêng.", "Roster installs, updates, and repairs Codex Router automatically; Router still owns its credentials and state."))
                     }
                 }
 
@@ -4271,12 +4249,6 @@ private struct AboutView: View {
                             detail: language.text("Tham khảo nguyên tắc chuyển phiên local-first và an toàn shared-auth; triển khai độc lập.", "Reference for local-first switching and shared-auth safety; independently implemented."),
                             badge: "MIT · safety reference",
                             url: codexSwitchboardURL
-                        )
-                        ReferenceLink(
-                            title: "duolahypercho / codex-router",
-                            detail: language.text("Tích hợp tùy chọn qua CLI công khai; Router tự quản lý provider, credential và state riêng.", "Optional integration through its public CLI; Router retains ownership of providers, credentials, and state."),
-                            badge: "MIT · external integration",
-                            url: codexRouterURL
                         )
                         ReferenceLink(
                             title: "Tibo / @thsottiaux",

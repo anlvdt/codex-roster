@@ -173,7 +173,10 @@ fn fetch_forecast() -> Result<ForecastResponse> {
         .call()
         .context("failed to contact the Codex Reset forecast API")?;
     if response.status().as_u16() >= 400 {
-        bail!("Codex Reset forecast API returned HTTP {}", response.status());
+        bail!(
+            "Codex Reset forecast API returned HTTP {}",
+            response.status()
+        );
     }
     let forecast = response
         .body_mut()
@@ -318,7 +321,10 @@ pub fn fetch_reset_timeline() -> Result<ResetTimeline> {
         .call()
         .context("failed to contact the Codex Reset timeline API")?;
     if response.status().as_u16() >= 400 {
-        bail!("Codex Reset timeline API returned HTTP {}", response.status());
+        bail!(
+            "Codex Reset timeline API returned HTTP {}",
+            response.status()
+        );
     }
     let timeline = response
         .body_mut()
@@ -378,7 +384,10 @@ pub fn fetch_reset_status_history() -> Result<ResetStatusHistory> {
         .call()
         .context("failed to contact the Codex Reset status-history API")?;
     if response.status().as_u16() >= 400 {
-        bail!("Codex Reset status-history API returned HTTP {}", response.status());
+        bail!(
+            "Codex Reset status-history API returned HTTP {}",
+            response.status()
+        );
     }
     let status = response
         .body_mut()

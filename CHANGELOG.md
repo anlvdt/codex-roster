@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.2.46 - 2026-08-31
+
+### Removed
+
+- Remove the Codex Router integration, including its Rust module and CLI commands, macOS dashboard card and automation, provider management, external-model activity handling, and related documentation.
+
+### Changed
+
+- Cache local Codex token-log aggregates with per-file append cursors, rebuilding safely when a rollout is truncated or replaced instead of rescanning all session history on every refresh.
+- Hold Auto-switch while the active ChatGPT session is still writing Codex rollout events, without relying on an external router or provider.
+- Confirm early quota resets with a second account-scoped observation and persist pending confirmations per quota window across app relaunches.
+
 ## v0.2.45 - 2026-08-26
 
 ### Changed

@@ -194,56 +194,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Inspect or open the optional Codex Router integration.
-    Router {
-        #[command(subcommand)]
-        command: RouterCommand,
-    },
     #[cfg(windows)]
     /// Run the lightweight notification-area companion.
     Tray,
-}
-
-#[derive(Subcommand)]
-enum RouterCommand {
-    Status {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Open the verified official Codex Router installer in Terminal.
-    Install {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Open Codex Router's credential-safe local Control Center.
-    Open {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Run Codex Router's read-only installation doctor.
-    Doctor {
-        #[arg(long)]
-        json: bool,
-    },
-    /// List external providers known to the managed Codex Router installation.
-    Providers {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Connect or enable one provider while preserving native GPT and other providers.
-    Connect {
-        provider_id: String,
-        #[arg(long)]
-        allow_anonymous: bool,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Hide one provider without deleting credentials or native GPT models.
-    Disable {
-        provider_id: String,
-        #[arg(long)]
-        json: bool,
-    },
 }
 
 pub fn run() -> Result<()> {
@@ -631,7 +584,12 @@ pub fn run() -> Result<()> {
             } else {
                 println!("Reset Timeline ({} events):", timeline.events.len());
                 for event in timeline.events.iter().take(10) {
-                    println!("  {} [{}] {}", event.date, event.event_type, event.summary.chars().take(60).collect::<String>());
+                    println!(
+                        "  {} [{}] {}",
+                        event.date,
+                        event.event_type,
+                        event.summary.chars().take(60).collect::<String>()
+                    );
                 }
             }
             Ok(())
@@ -661,7 +619,10 @@ pub fn run() -> Result<()> {
             } else {
                 println!("Quota Juice ({} tiers):", juice.efforts.len());
                 for effort in &juice.efforts {
-                    println!("  {}: {} (delta: {})", effort.effort, effort.current, effort.delta);
+                    println!(
+                        "  {}: {} (delta: {})",
+                        effort.effort, effort.current, effort.delta
+                    );
                 }
             }
             Ok(())
@@ -694,92 +655,6 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
-        Some(Command::Router { command }) => match command {
-            RouterCommand::Status { json } => {
-                let status = crate::router::status();
-                if json {
-                    print_json(&status)?;
-                } else {
-                    println!("Codex Router: {}", status.state_label());
-                    if let Some(version) = status.version {
-                        println!("Version: {version}");
-                    }
-                    if let Some(detail) = status.detail {
-                        println!("Detail: {detail}");
-                    }
-                }
-                Ok(())
-            }
-            RouterCommand::Install { json } => {
-                let output = crate::router::install()?;
-                if json {
-                    print_json(&output)?;
-                } else {
-                    println!("{}", output.message);
-                }
-                Ok(())
-            }
-            RouterCommand::Open { json } => {
-                let output = crate::router::open_control_center()?;
-                if json {
-                    print_json(&output)?;
-                } else {
-                    println!("{}", output.message);
-                }
-                Ok(())
-            }
-            RouterCommand::Doctor { json } => {
-                let output = crate::router::doctor()?;
-                if json {
-                    print_json(&output)?;
-                } else {
-                    println!("{}", output.message);
-                }
-                Ok(())
-            }
-            RouterCommand::Providers { json } => {
-                let output = crate::router::providers()?;
-                if json {
-                    print_json(&output)?;
-                } else {
-                    for provider in output.providers {
-                        println!(
-                            "{}\t{}\t{}",
-                            if provider.visible { "SHOW" } else { "HIDE" },
-                            if provider.configured {
-                                "ready"
-                            } else {
-                                "needs connection"
-                            },
-                            provider.name
-                        );
-                    }
-                }
-                Ok(())
-            }
-            RouterCommand::Connect {
-                provider_id,
-                allow_anonymous,
-                json,
-            } => {
-                let output = crate::router::connect_provider(&provider_id, allow_anonymous)?;
-                if json {
-                    print_json(&output)?;
-                } else {
-                    println!("{}", output.message);
-                }
-                Ok(())
-            }
-            RouterCommand::Disable { provider_id, json } => {
-                let output = crate::router::disable_provider(&provider_id)?;
-                if json {
-                    print_json(&output)?;
-                } else {
-                    println!("{}", output.message);
-                }
-                Ok(())
-            }
-        },
         #[cfg(windows)]
         Some(Command::Tray) => {
             crate::app::spawn_auto_start_usage_windows_worker(app.env().clone());

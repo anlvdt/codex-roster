@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.2.47 - 2026-09-01
+
+### Added
+
+- Add local Codex token analytics across active and archived rollout logs: total, input, output, cached-input, cache-write, and reasoning token detail; daily history; and model/project rankings.
+
+### Changed
+
+- Parse appended session rows incrementally, include cumulative-token fallback for newer Codex log shapes, and ignore unrelated JSONL files.
+- Credit Tokentab and CodeBurn as independently researched MIT references; no source code, assets, prompts, pricing, or session contents were copied.
+
 ## v0.2.46 - 2026-08-31
 
 ### Removed

@@ -4,7 +4,7 @@ Codex Roster is an independent native macOS application built for the Codex comm
 
 Except for the original MIT foundation explicitly identified below, Codex Roster does not include source code, visual assets, account data, credentials, or state from the referenced projects.
 
-## Reference audit — 2026-08-31
+## Reference audit — 2026-09-01
 
 | Source | Revision reviewed | Role in Codex Roster | License / boundary |
 | --- | --- | --- | --- |
@@ -14,8 +14,14 @@ Except for the original MIT foundation explicitly identified below, Codex Roster
 | [Ducksss/codex-profiles](https://github.com/Ducksss/codex-profiles) | `v0.9.1` / `76dfc39` | Profile, workspace, diagnostics, and local-state boundary research | MIT; no source imported |
 | [vyctorbrzezowski/codex-switchboard](https://github.com/vyctorbrzezowski/codex-switchboard) | `v1.0.10` / `296c0b3` | Local-first switching and shared-auth safety research | MIT; independently implemented |
 | [codex-reset.com](https://codex-reset.com/) | Live `/api/feed` schema v1 checked 2026-08-31 | Public Tibo-post normalization research for long X posts that X truncates | Public website/API; no source/assets copied and no account data sent |
+| [damejan80/tokentab](https://github.com/damejan80/tokentab) | `80358bc` reviewed 2026-09-01 | Local Codex session-log and aggregate-report research | MIT; independently reimplemented |
+| [getagentseal/codeburn](https://github.com/getagentseal/codeburn) | `f4e9ece` reviewed 2026-09-01 | Codex cache-accounting, cumulative-token fallback, and session-file validation research | MIT; independently reimplemented |
 
 The reviewed updates were applied selectively. Roster preserves the stricter local-first rule from current switching research: it does not refresh inactive accounts' OAuth refresh tokens in the background.
+
+## Tokentab and CodeBurn
+
+We reviewed [Tokentab](https://github.com/damejan80/tokentab) and [CodeBurn](https://github.com/getagentseal/codeburn) for local, session-log based token accounting. Codex Roster independently reimplements only the appropriate Codex-specific ideas: incremental session parsing, model/project grouping, archived-session inclusion, cache-read/cache-write accounting, and cumulative usage fallback. No source code, pricing data, UI assets, prompts, or session contents were copied. Both projects are MIT licensed.
 
 ## Original foundation
 

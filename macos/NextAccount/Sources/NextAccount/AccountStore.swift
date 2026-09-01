@@ -1767,9 +1767,30 @@ struct TokenUsageSummary: Decodable {
     let last30Days: UInt64
     let last365Days: UInt64
     let allTime: UInt64
+    let inputTokens: UInt64
+    let outputTokens: UInt64
+    let cachedInputTokens: UInt64
+    let cacheWriteInputTokens: UInt64
+    let reasoningOutputTokens: UInt64
+    let cacheHitPercent: UInt8
     let daily: [TokenUsageDay]
+    let byModel: [TokenUsageBreakdown]
+    let byProject: [TokenUsageBreakdown]
     let sessionsScanned: Int
     let tokenEvents: Int
+}
+
+struct TokenUsageBreakdown: Identifiable, Decodable {
+    let label: String
+    let tokens: UInt64
+    let inputTokens: UInt64
+    let outputTokens: UInt64
+    let cachedInputTokens: UInt64
+    let cacheWriteInputTokens: UInt64
+    let reasoningOutputTokens: UInt64
+    let tokenEvents: Int
+
+    var id: String { label }
 }
 
 struct ResetOutlook: Decodable {

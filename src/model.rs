@@ -288,7 +288,15 @@ pub struct TokenUsageSummaryOutput {
     pub last_30_days: u64,
     pub last_365_days: u64,
     pub all_time: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub cache_write_input_tokens: u64,
+    pub reasoning_output_tokens: u64,
+    pub cache_hit_percent: u8,
     pub daily: Vec<TokenUsageDayOutput>,
+    pub by_model: Vec<TokenUsageBreakdownOutput>,
+    pub by_project: Vec<TokenUsageBreakdownOutput>,
     pub sessions_scanned: usize,
     pub token_events: usize,
 }
@@ -297,6 +305,18 @@ pub struct TokenUsageSummaryOutput {
 pub struct TokenUsageDayOutput {
     pub date: String,
     pub tokens: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TokenUsageBreakdownOutput {
+    pub label: String,
+    pub tokens: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub cache_write_input_tokens: u64,
+    pub reasoning_output_tokens: u64,
+    pub token_events: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

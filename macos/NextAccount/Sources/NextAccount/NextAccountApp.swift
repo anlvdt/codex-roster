@@ -1456,6 +1456,8 @@ private struct TokenUsageOverview: View {
                     .padding(.vertical, 8)
                     .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
 
+                    TokenUsageDetails(summary: summary)
+
                     HStack {
                         Text(language.text(
                             "Bao gồm token context và cache; không dùng để tính chi phí.",
@@ -1488,6 +1490,90 @@ private struct TokenUsageOverview: View {
                 }
                 .font(.subheadline)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+}
+
+private struct TokenUsageDetails: View {
+    @EnvironmentObject private var language: LanguageStore
+    let summary: TokenUsageSummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(language.text("Phân bổ token", "Token breakdown"))
+                .font(.subheadline.weight(.semibold))
+
+            HStack(spacing: 10) {
+                TokenBreakdownMetric(title: language.text("Input", "Input"), tokens: summary.inputTokens)
+                TokenBreakdownMetric(title: language.text("Output", "Output"), tokens: summary.outputTokens)
+                TokenBreakdownMetric(title: language.text("Cache", "Cache"), tokens: summary.cachedInputTokens)
+                TokenBreakdownMetric(title: language.text("Lý luận", "Reasoning"), tokens: summary.reasoningOutputTokens)
+            }
+
+            HStack(spacing: 6) {
+                Text(language.text("Cache hit", "Cache hit"))
+                Text("\(summary.cacheHitPercent)%")
+                    .fontWeight(.semibold)
+                Text("·")
+                    .foregroundStyle(.tertiary)
+                Text(language.text("Tạo cache", "Cache write"))
+                Text(compactTokenCount(summary.cacheWriteInputTokens, in: language.language))
+                    .fontWeight(.semibold)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            if !summary.byModel.isEmpty {
+                TokenUsageRanking(title: language.text("Theo model", "By model"), entries: summary.byModel)
+            }
+            if !summary.byProject.isEmpty {
+                TokenUsageRanking(title: language.text("Theo dự án", "By project"), entries: summary.byProject)
+            }
+        }
+        .padding(14)
+        .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+private struct TokenBreakdownMetric: View {
+    @EnvironmentObject private var language: LanguageStore
+    let title: String
+    let tokens: UInt64
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(compactTokenCount(tokens, in: language.language))
+                .font(.subheadline.monospacedDigit().weight(.semibold))
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct TokenUsageRanking: View {
+    @EnvironmentObject private var language: LanguageStore
+    let title: String
+    let entries: [TokenUsageBreakdown]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+            ForEach(entries.prefix(3)) { entry in
+                HStack(spacing: 8) {
+                    Text(entry.label)
+                        .lineLimit(1)
+                    Spacer()
+                    Text(compactTokenCount(entry.tokens, in: language.language))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                .font(.subheadline)
             }
         }
     }

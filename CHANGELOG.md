@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.48 - 2026-09-05
+
+### Added
+
+- Add optional VibeCafe usage integration using the official `@vibe-cafe/vibe-usage` collector/API contract, including automatic 30-minute sync and seven-day token, estimated-cost, session, and active-time totals across CLI/TUI and the macOS Status UI.
+
+### Changed
+
+- Credit VibeCafe and `vibe-cafe/vibe-usage` in the About screen and project attribution, while keeping VibeCafe usage/cost statistics distinct from OpenAI quota and banked-reset credits.
+
 ## v0.2.47 - 2026-09-01
 
 ### Added

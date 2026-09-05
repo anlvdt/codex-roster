@@ -1,5 +1,6 @@
 use std::io::Read;
 use std::path::PathBuf;
+use std::process::Command as ProcessCommand;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -160,6 +161,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run the optional VibeCafe usage collector for Codex and other AI tools.
+    VibeUsage {
+        #[command(subcommand)]
+        command: Option<VibeUsageCommand>,
+    },
     ResetOutlook {
         #[arg(long)]
         json: bool,
@@ -199,6 +205,21 @@ enum Command {
     Tray,
 }
 
+#[derive(Subcommand)]
+enum VibeUsageCommand {
+    /// Authenticate and configure the VibeCafe collector.
+    Init,
+    /// Upload newly discovered local usage.
+    Sync,
+    /// Print an aggregated usage report.
+    Summary {
+        #[arg(long, default_value_t = 7)]
+        days: u16,
+    },
+    /// Show collector configuration and detected tools.
+    Status,
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let env = env::detect()?;
@@ -221,6 +242,16 @@ pub fn run() -> Result<()> {
                     None => println!("Current account: not logged in"),
                 }
                 println!("Saved accounts: {}", status.saved_accounts);
+                if let Some(usage) = status.vibe_usage {
+                    println!(
+                        "VibeCafe ({}d): {} tokens, ${:.2} estimated, {} sessions, {:.1}h active",
+                        usage.days,
+                        usage.total_tokens,
+                        usage.estimated_cost_usd,
+                        usage.sessions,
+                        usage.active_seconds as f64 / 3600.0
+                    );
+                }
                 if !status.process_warnings.is_empty() {
                     print_process_summary("Codex processes", &status.process_warnings);
                 }
@@ -551,6 +582,15 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::VibeUsage { command }) => {
+            let command = command.unwrap_or(VibeUsageCommand::Sync);
+            let should_refresh_cache = matches!(command, VibeUsageCommand::Sync);
+            run_vibe_usage(command)?;
+            if should_refresh_cache {
+                crate::vibe_usage::fetch_and_cache(&app.env().home_dir, &app.env().app_data_dir)?;
+            }
+            Ok(())
+        }
         Some(Command::ResetOutlook { json }) => {
             let outlook = crate::reset_tracker::fetch_reset_outlook()?;
             if json {
@@ -660,6 +700,7 @@ pub fn run() -> Result<()> {
             crate::app::spawn_auto_start_usage_windows_worker(app.env().clone());
             crate::app::spawn_auto_switch_worker(app.env().clone());
             crate::app::spawn_usage_refresh_worker(app.env().clone());
+            crate::app::spawn_vibe_usage_worker(app.env().clone());
             crate::tray::hide_console_window();
             let _ = crate::tray::run(&app)?;
             Ok(())
@@ -696,6 +737,7 @@ where
     crate::app::spawn_auto_start_usage_windows_worker(app.env().clone());
     crate::app::spawn_auto_switch_worker(app.env().clone());
     crate::app::spawn_usage_refresh_worker(app.env().clone());
+    crate::app::spawn_vibe_usage_worker(app.env().clone());
     #[cfg(windows)]
     {
         loop {
@@ -831,6 +873,26 @@ fn print_token_usage_summary(output: &TokenUsageSummaryOutput) {
         "Scanned {} sessions / {} token events",
         output.sessions_scanned, output.token_events
     );
+}
+
+fn run_vibe_usage(command: VibeUsageCommand) -> Result<()> {
+    let mut args = vec!["--yes".to_owned(), "@vibe-cafe/vibe-usage".to_owned()];
+    match command {
+        VibeUsageCommand::Init => args.push("init".to_owned()),
+        VibeUsageCommand::Sync => args.push("sync".to_owned()),
+        VibeUsageCommand::Summary { days } => {
+            args.extend(["summary".to_owned(), "--days".to_owned(), days.to_string()]);
+        }
+        VibeUsageCommand::Status => args.push("status".to_owned()),
+    }
+    let status = ProcessCommand::new("npx")
+        .args(args)
+        .status()
+        .context("failed to launch npx; install Node.js 20+ to use `vibe-usage`")?;
+    if !status.success() {
+        bail!("vibe-usage exited with status {status}");
+    }
+    Ok(())
 }
 
 fn print_usage_summary(usage: &AccountUsageView) {

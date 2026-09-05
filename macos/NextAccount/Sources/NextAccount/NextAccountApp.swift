@@ -1441,6 +1441,23 @@ private struct TokenUsageOverview: View {
                 .foregroundStyle(.secondary)
             if let summary = store.tokenUsage {
                 VStack(alignment: .leading, spacing: 14) {
+                    if let vibe = store.status?.vibeUsage {
+                        HStack(spacing: 10) {
+                            TokenMetric(title: "VibeCafe 7d", tokens: vibe.totalTokens)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(language.text("Chi phí ước tính", "Estimated cost"))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(String(format: "$%.2f", vibe.estimatedCostUsd))
+                                    .font(.title3.weight(.semibold))
+                                Text("\(vibe.sessions) sessions · \(String(format: "%.1f", Double(vibe.activeSeconds) / 3600))h")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                        }
+                        Divider()
+                    }
                     HStack(spacing: 10) {
                         TokenMetric(title: language.text("Hôm nay", "Today"), tokens: summary.today)
                         TokenMetric(title: language.text("7 ngày", "7 days"), tokens: summary.last7Days)
@@ -4164,6 +4181,7 @@ private struct AboutView: View {
     private let cockpitToolsURL = URL(string: "https://github.com/jlcodes99/cockpit-tools")!
     private let codexProfilesURL = URL(string: "https://github.com/Ducksss/codex-profiles")!
     private let codexSwitchboardURL = URL(string: "https://github.com/vyctorbrzezowski/codex-switchboard")!
+    private let vibeUsageURL = URL(string: "https://github.com/vibe-cafe/vibe-usage")!
     private let tiboXURL = URL(string: "https://x.com/thsottiaux")!
     private let openAIBrandURL = URL(string: "https://openai.com/brand/")!
     private let codexPricingURL = URL(string: "https://learn.chatgpt.com/docs/pricing")!
@@ -4335,6 +4353,12 @@ private struct AboutView: View {
                             detail: language.text("Tham khảo nguyên tắc chuyển phiên local-first và an toàn shared-auth; triển khai độc lập.", "Reference for local-first switching and shared-auth safety; independently implemented."),
                             badge: "MIT · safety reference",
                             url: codexSwitchboardURL
+                        )
+                        ReferenceLink(
+                            title: "VibeCafe / @vibe-cafe/vibe-usage",
+                            detail: language.text("Nguồn collector và API usage tùy chọn cho thống kê VibeCafe 7 ngày; Codex Roster tích hợp theo endpoint/format công khai và không nhập mã nguồn upstream.", "Optional collector and usage API source for VibeCafe 7-day statistics; Codex Roster integrates against the public endpoint/format without importing upstream source code."),
+                            badge: "MIT · usage integration",
+                            url: vibeUsageURL
                         )
                         ReferenceLink(
                             title: "Tibo / @thsottiaux",

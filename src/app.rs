@@ -14,9 +14,9 @@ pub(crate) use auto_start::{
 pub use auto_switch_monitor::spawn_auto_switch_worker;
 #[cfg(windows)]
 pub(crate) use auto_switch_monitor::{run_auto_switch_check_now, subscribe_auto_switch_checks};
-pub use usage_refresh::spawn_usage_refresh_worker;
 #[cfg(windows)]
 pub(crate) use usage_refresh::subscribe_usage_refresh_checks;
+pub use usage_refresh::{spawn_usage_refresh_worker, spawn_vibe_usage_worker};
 
 use crate::env::AppEnv;
 use crate::model::{

@@ -16,6 +16,7 @@ Except for the original MIT foundation explicitly identified below, Codex Roster
 | [codex-reset.com](https://codex-reset.com/) | Live `/api/feed` schema v1 checked 2026-08-31 | Public Tibo-post normalization research for long X posts that X truncates | Public website/API; no source/assets copied and no account data sent |
 | [damejan80/tokentab](https://github.com/damejan80/tokentab) | `80358bc` reviewed 2026-09-01 | Local Codex session-log and aggregate-report research | MIT; independently reimplemented |
 | [getagentseal/codeburn](https://github.com/getagentseal/codeburn) | `f4e9ece` reviewed 2026-09-01 | Codex cache-accounting, cumulative-token fallback, and session-file validation research | MIT; independently reimplemented |
+| [vibe-cafe/vibe-usage](https://github.com/vibe-cafe/vibe-usage) | `@vibe-cafe/vibe-usage@0.10.21` reviewed 2026-09-05 | Optional VibeCafe collector/API integration for 7-day tokens, estimated cost, sessions, and active time | MIT; public endpoint/response format integrated independently, no upstream source imported |
 
 The reviewed updates were applied selectively. Roster preserves the stricter local-first rule from current switching research: it does not refresh inactive accounts' OAuth refresh tokens in the background.
 
@@ -44,3 +45,7 @@ We also reviewed [vyctorbrzezowski/codex-switchboard](https://github.com/vyctorb
 ## Public reset signal source
 
 Codex Roster reads [Tibo / @thsottiaux on X](https://x.com/thsottiaux) and uses the independent [Codex Reset radar](https://codex-reset.com/) as a public-text normalization source when X truncates a long post. Classification remains local to Roster. Requests to either source do not include account identifiers, credentials, saved sessions, or quota data. Public posts remain advisory; authenticated per-account quota returned by Codex is the final confirmation that a reset or banked credit reached an account.
+
+## VibeCafe usage integration
+
+Codex Roster optionally interoperates with [VibeCafe's `@vibe-cafe/vibe-usage`](https://github.com/vibe-cafe/vibe-usage) collector and its public usage API contract. The integration reads the configured VibeCafe endpoint, requests the official seven-day usage response, and presents aggregate tokens, estimated cost, session count, and active time separately from OpenAI quota and banked-reset credits. The upstream package is MIT licensed; Codex Roster implements the integration independently and does not import `vibe-usage` source code or UI assets.

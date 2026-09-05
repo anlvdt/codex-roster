@@ -17,6 +17,7 @@ use super::App;
 /// Kept short enough that an off-schedule ChatGPT reset surfaces on the roster
 /// within a couple of minutes, but only stale accounts actually hit the network.
 pub const USAGE_REFRESH_POLL_SECONDS: u64 = 120;
+pub const VIBE_USAGE_SYNC_POLL_SECONDS: u64 = 1800;
 
 static USAGE_REFRESH_RUN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static USAGE_REFRESH_CHECK_LISTENERS: OnceLock<Mutex<Vec<Sender<()>>>> = OnceLock::new();
@@ -44,6 +45,33 @@ pub fn spawn_usage_refresh_worker(env: AppEnv) {
                     }
                     notify_usage_refresh_checked();
                     thread::sleep(StdDuration::from_secs(USAGE_REFRESH_POLL_SECONDS));
+                }
+            });
+    });
+}
+
+/// Periodically sync local Codex usage to VibeCafe when the user has configured
+/// the optional collector. A missing Node.js/package is intentionally silent.
+pub fn spawn_vibe_usage_worker(env: AppEnv) {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    STARTED.get_or_init(|| {
+        let _ = thread::Builder::new()
+            .name("vibe-usage".to_owned())
+            .spawn(move || {
+                loop {
+                    if !crate::vibe_usage::is_configured(&env.home_dir) {
+                        thread::sleep(StdDuration::from_secs(VIBE_USAGE_SYNC_POLL_SECONDS));
+                        continue;
+                    }
+                    let sync_ok = std::process::Command::new("npx")
+                        .args(["--yes", "@vibe-cafe/vibe-usage", "sync"])
+                        .status()
+                        .is_ok_and(|status| status.success());
+                    if sync_ok {
+                        let _ =
+                            crate::vibe_usage::fetch_and_cache(&env.home_dir, &env.app_data_dir);
+                    }
+                    thread::sleep(StdDuration::from_secs(VIBE_USAGE_SYNC_POLL_SECONDS));
                 }
             });
     });

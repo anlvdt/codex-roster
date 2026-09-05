@@ -181,6 +181,8 @@ pub struct StatusOutput {
     pub current_account_saved_id: Option<Uuid>,
     pub saved_accounts: usize,
     pub process_warnings: Vec<RunningCodexProcess>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vibe_usage: Option<crate::vibe_usage::VibeUsageSummary>,
 }
 
 #[derive(Clone, Debug, Serialize)]

@@ -131,6 +131,7 @@ final class AccountStore: ObservableObject {
     private let accountSortModeKey = "codexRoster.accountSortMode"
     private var autoSwitchTask: Task<Void, Never>?
     private var quotaRefreshTask: Task<Void, Never>?
+    private var vibeUsageTask: Task<Void, Never>?
     private var autoSwitchAllExhaustedNotified = false
     private var isInteractiveLoginInProgress = false
     private var isAddAccountSession = false
@@ -630,6 +631,21 @@ final class AccountStore: ObservableObject {
         refreshResetJuice(silently: true)
         startAutoSwitchMonitoring()
         startQuotaMonitoring()
+        startVibeUsageMonitoring()
+    }
+
+    private func startVibeUsageMonitoring() {
+        guard vibeUsageTask == nil else { return }
+        vibeUsageTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if (try? await self.cli.data(arguments: ["vibe-usage", "sync"])) != nil,
+                   let refreshed = try? await self.cli.decode(StatusOutput.self, arguments: ["status"]) {
+                    self.status = refreshed
+                }
+                try? await Task.sleep(for: .seconds(1800))
+            }
+        }
     }
 
     private func startResetNotificationMonitoring() {
@@ -1713,16 +1729,28 @@ struct StatusOutput: Decodable {
     let currentAccount: AccountIdentity?
     let currentAccountSavedId: UUID?
     let processWarnings: [RunningProcess]
+    let vibeUsage: VibeUsageSummary?
 
     init(
         currentAccount: AccountIdentity?,
         currentAccountSavedId: UUID? = nil,
-        processWarnings: [RunningProcess]
+        processWarnings: [RunningProcess],
+        vibeUsage: VibeUsageSummary? = nil
     ) {
         self.currentAccount = currentAccount
         self.currentAccountSavedId = currentAccountSavedId
         self.processWarnings = processWarnings
+        self.vibeUsage = vibeUsage
     }
+}
+
+struct VibeUsageSummary: Decodable {
+    let days: UInt8
+    let totalTokens: UInt64
+    let estimatedCostUsd: Double
+    let sessions: Int
+    let activeSeconds: UInt64
+    let fetchedAt: RustDate
 }
 
 private struct SaveOutput: Decodable {

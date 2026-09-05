@@ -735,6 +735,17 @@ fn interactive_status_lines(status: &StatusOutput) -> Vec<String> {
         None => lines.push("Current account: not logged in".to_owned()),
     }
     lines.push(format!("Saved accounts: {}", status.saved_accounts));
+    if let Some(usage) = &status.vibe_usage {
+        lines.push(format!(
+            "VibeCafe ({}d): {} tokens · ${:.2} estimated · {} sessions · {:.1}h active",
+            usage.days,
+            usage.total_tokens,
+            usage.estimated_cost_usd,
+            usage.sessions,
+            usage.active_seconds as f64 / 3600.0
+        ));
+        lines.push(format!("VibeCafe updated: {}", usage.fetched_at));
+    }
     if !status.process_warnings.is_empty() {
         lines.extend(process_summary_lines(
             "Codex processes",
@@ -891,6 +902,7 @@ mod tests {
             current_account_saved_id: current_saved_id,
             saved_accounts: usize::from(current_saved_id.is_some()),
             process_warnings: Vec::new(),
+            vibe_usage: None,
         }
     }
 
@@ -1189,6 +1201,7 @@ mod tests {
             current_account_saved_id: None,
             saved_accounts: 1,
             process_warnings: Vec::new(),
+            vibe_usage: None,
         };
         let menu = build_menu(
             InteractiveMode::Persistent,

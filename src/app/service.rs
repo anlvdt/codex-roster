@@ -54,6 +54,7 @@ where
             current_account_saved_id: current_saved_id,
             saved_accounts: saved_accounts.len(),
             process_warnings: crate::process::detect_running_codex_processes(),
+            vibe_usage: crate::vibe_usage::load_cached(&self.env.app_data_dir),
         })
     }
 

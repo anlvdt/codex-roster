@@ -14,7 +14,7 @@ struct NotchWindowView: View {
     @State private var collapseTask: Task<Void, Never>?
 
     private let compactWidth: CGFloat = 356
-    private let expandedWidth: CGFloat = 404
+    private let expandedWidth: CGFloat = 436
 
     private var activeAccount: SavedAccount? {
         store.accounts.first { $0.isActive && !store.isArchived($0) }

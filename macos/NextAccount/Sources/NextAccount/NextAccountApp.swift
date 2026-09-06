@@ -461,6 +461,12 @@ private struct DashboardView: View {
 
     var body: some View {
         GeometryReader { geometry in
+            let contentWidth = max(0, min(geometry.size.width - 48, 1_240))
+            // Two columns once the window is wide enough, so the secondary
+            // cards stop stretching a short paragraph across 1,240 points.
+            let pairLayout = contentWidth >= 940
+                ? AnyLayout(HStackLayout(alignment: .top, spacing: 12))
+                : AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
             ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 DashboardHero(
@@ -481,156 +487,159 @@ private struct DashboardView: View {
                     reloginAll: reloginAll
                 )
 
-                VStack(alignment: .leading, spacing: 12) {
+                pairLayout {
                     OpenAIStatusCard()
                     GlobalResetOutlookCard()
                 }
 
                 TokenUsageOverview()
 
-                DisclosureGroup(isExpanded: $automationExpanded) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Toggle(language.text("Tự động kiểm tra cửa sổ quota đến hạn", "Automatically check due quota windows"), isOn: Binding(
-                            get: { store.autoStartUsageWindows },
-                            set: { store.setAutoStartUsageWindows($0) }
-                        ))
-                        .disabled(store.isWorking)
-                        Text(language.text(
-                            "Kiểm tra các cửa sổ quota tuần đã đến hạn theo lịch nền. Việc này không đăng nhập lại các tài khoản không hoạt động; theo dõi quota live vẫn chạy riêng khi app hoạt động.",
-                            "Checks due weekly quota windows in the background. It does not sign into inactive accounts; live quota monitoring runs separately while the app is active."
-                        ))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        if store.isRefreshingQuotaInBackground {
-                            HStack(spacing: 6) {
-                                ProgressView()
-                                    .controlSize(.small)
-                                Text(language.text("Đang cập nhật quota…", "Updating quota…"))
-                            }
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        } else if let lastQuotaRefreshAt = store.lastQuotaRefreshAt {
+                pairLayout {
+                    DisclosureGroup(isExpanded: $automationExpanded) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Toggle(language.text("Tự động kiểm tra cửa sổ quota đến hạn", "Automatically check due quota windows"), isOn: Binding(
+                                get: { store.autoStartUsageWindows },
+                                set: { store.setAutoStartUsageWindows($0) }
+                            ))
+                            .disabled(store.isWorking)
                             Text(language.text(
-                                "Đã cập nhật \(lastQuotaRefreshAt.formatted(date: .omitted, time: .shortened))",
-                                "Updated \(lastQuotaRefreshAt.formatted(date: .omitted, time: .shortened))"
+                                "Kiểm tra các cửa sổ quota tuần đã đến hạn theo lịch nền. Việc này không đăng nhập lại các tài khoản không hoạt động; theo dõi quota live vẫn chạy riêng khi app hoạt động.",
+                                "Checks due weekly quota windows in the background. It does not sign into inactive accounts; live quota monitoring runs separately while the app is active."
                             ))
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        }
-                        Divider()
-                        Toggle(language.text("Tự động chuyển khi hết quota", "Auto-switch when quota is exhausted"), isOn: Binding(
-                            get: { store.autoSwitchWhenExhausted },
-                            set: { store.setAutoSwitchWhenExhausted($0) }
-                        ))
-                        .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
-                        Text(language.text(
-                            "Khi tài khoản Codex (~/.codex) còn 0%: tìm tài khoản còn quota → force-quit ChatGPT → chuyển phiên → mở lại Desktop. Nhãn phiên theo ~/.codex, không đọc cookie đăng nhập riêng trong ChatGPT.",
-                            "When the Codex account (~/.codex) hits 0%: find an account with quota → force-quit ChatGPT → switch session → relaunch Desktop. The session label follows ~/.codex and does not read a separate ChatGPT cookie login."
-                        ))
+                            if store.isRefreshingQuotaInBackground {
+                                HStack(spacing: 6) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                    Text(language.text("Đang cập nhật quota…", "Updating quota…"))
+                                }
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            } else if let lastQuotaRefreshAt = store.lastQuotaRefreshAt {
+                                Text(language.text(
+                                    "Đã cập nhật \(lastQuotaRefreshAt.formatted(date: .omitted, time: .shortened))",
+                                    "Updated \(lastQuotaRefreshAt.formatted(date: .omitted, time: .shortened))"
+                                ))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            }
+                            Divider()
+                            Toggle(language.text("Tự động chuyển khi hết quota", "Auto-switch when quota is exhausted"), isOn: Binding(
+                                get: { store.autoSwitchWhenExhausted },
+                                set: { store.setAutoSwitchWhenExhausted($0) }
+                            ))
+                            .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
+                            Text(language.text(
+                                "Khi tài khoản Codex (~/.codex) còn 0%: tìm tài khoản còn quota → force-quit ChatGPT → chuyển phiên → mở lại Desktop. Nhãn phiên theo ~/.codex, không đọc cookie đăng nhập riêng trong ChatGPT.",
+                                "When the Codex account (~/.codex) hits 0%: find an account with quota → force-quit ChatGPT → switch session → relaunch Desktop. The session label follows ~/.codex and does not read a separate ChatGPT cookie login."
+                            ))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if let autoSwitchState = store.autoSwitchState {
+                                Text(autoSwitchStatusText(autoSwitchState))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Toggle(language.text("Mở Codex Roster khi đăng nhập macOS", "Open Codex Roster at login"), isOn: Binding(
+                                get: { store.launchAtLoginEnabled },
+                                set: { store.setLaunchAtLogin($0) }
+                            ))
+                            .disabled(store.isWorking)
+                            Text(language.text("Duy trì notch và các kiểm tra tự động sau khi bạn đăng nhập vào máy Mac.", "Keeps the notch and automatic checks available after you sign in to your Mac."))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            HStack {
+                                Button(language.text("Kiểm tra ngay", "Run refresh check now")) {
+                                    store.runUsageWindowCheck()
+                                }
+                                .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
+                                if store.autoSwitchWhenExhausted {
+                                    Button(language.text("Kiểm tra & chuyển", "Check & switch")) {
+                                        store.runAutoSwitchCheck()
+                                    }
+                                    .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
+                                }
+                                Spacer()
+                                Button(language.text("Khôi phục tài khoản cũ", "Recover older accounts")) {
+                                    store.recoverLegacySnapshots()
+                                }
+                                .disabled(store.isWorking)
+                            }
+                            .controlSize(.small)
+                            Button(language.text("Khôi phục phiên sao lưu", "Restore saved sessions")) {
+                                confirmingFullBackupRestore = true
+                            }
+                            .controlSize(.small)
+                            .disabled(store.isWorking)
+                            Text(language.text("Tự động giữ 5 bản sao đầy đủ được mã hóa bằng khóa trong Keychain của máy này; khôi phục xong có thể đăng nhập lại Codex.", "Keeps 5 full backups encrypted with this Mac's Keychain key; restored accounts can sign in to Codex again."))
+                            Text(language.text(
+                                "Nếu macOS hỏi quyền Keychain cho \"com.codexroster.app\", hãy Allow / Always Allow — đó là khóa mã hóa cục bộ, không phải mật khẩu OpenAI. Xem Giới thiệu để biết thêm.",
+                                "If macOS asks for Keychain access to \"com.codexroster.app\", choose Allow / Always Allow — that is the local encryption key, not your OpenAI password. See About for details."
+                            ))
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        if let autoSwitchState = store.autoSwitchState {
-                            Text(autoSwitchStatusText(autoSwitchState))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                        Toggle(language.text("Mở Codex Roster khi đăng nhập macOS", "Open Codex Roster at login"), isOn: Binding(
-                            get: { store.launchAtLoginEnabled },
-                            set: { store.setLaunchAtLogin($0) }
-                        ))
-                        .disabled(store.isWorking)
-                        Text(language.text("Duy trì notch và các kiểm tra tự động sau khi bạn đăng nhập vào máy Mac.", "Keeps the notch and automatic checks available after you sign in to your Mac."))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        .padding(.top, 8)
+                    } label: {
                         HStack {
-                            Button(language.text("Kiểm tra ngay", "Run refresh check now")) {
-                                store.runUsageWindowCheck()
-                            }
-                            .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
-                            if store.autoSwitchWhenExhausted {
-                                Button(language.text("Kiểm tra & chuyển", "Check & switch")) {
-                                    store.runAutoSwitchCheck()
-                                }
-                                .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
-                            }
+                            Label(language.text("Tự động hóa", "Automation"), systemImage: "gearshape.2")
+                                .font(.subheadline.weight(.semibold))
                             Spacer()
-                            Button(language.text("Khôi phục tài khoản cũ", "Recover older accounts")) {
-                                store.recoverLegacySnapshots()
-                            }
-                            .disabled(store.isWorking)
-                        }
-                        .controlSize(.small)
-                        Button(language.text("Khôi phục phiên sao lưu", "Restore saved sessions")) {
-                            confirmingFullBackupRestore = true
-                        }
-                        .controlSize(.small)
-                        .disabled(store.isWorking)
-                        Text(language.text("Tự động giữ 5 bản sao đầy đủ được mã hóa bằng khóa trong Keychain của máy này; khôi phục xong có thể đăng nhập lại Codex.", "Keeps 5 full backups encrypted with this Mac's Keychain key; restored accounts can sign in to Codex again."))
-                        Text(language.text(
-                            "Nếu macOS hỏi quyền Keychain cho \"com.codexroster.app\", hãy Allow / Always Allow — đó là khóa mã hóa cục bộ, không phải mật khẩu OpenAI. Xem Giới thiệu để biết thêm.",
-                            "If macOS asks for Keychain access to \"com.codexroster.app\", choose Allow / Always Allow — that is the local encryption key, not your OpenAI password. See About for details."
-                        ))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.top, 8)
-                } label: {
-                    HStack {
-                        Label(language.text("Tự động hóa", "Automation"), systemImage: "gearshape.2")
-                            .font(.subheadline.weight(.semibold))
-                        Spacer()
-                        Text(store.autoStartUsageWindows
-                            ? language.text("Cửa sổ quota · bật", "Quota windows · on")
-                            : language.text("Cửa sổ quota · tắt", "Quota windows · off"))
-                            .font(.caption)
-                            .foregroundStyle(store.autoStartUsageWindows ? Color.green : Color.secondary)
-                    }
-                }
-                .padding(14)
-                .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: 13))
-                .confirmationDialog(
-                    language.text("Khôi phục phiên sao lưu?", "Restore saved sessions?"),
-                    isPresented: $confirmingFullBackupRestore,
-                    titleVisibility: .visible
-                ) {
-                    Button(language.text("Khôi phục", "Restore"), role: .destructive) {
-                        store.restoreLatestFullBackup()
-                    }
-                    Button(language.text("Hủy", "Cancel"), role: .cancel) {}
-                } message: {
-                    Text(language.text("Danh sách hiện tại sẽ được thay bằng bản sao tự động gần nhất trên máy này.", "The current account list will be replaced by this Mac's most recent automatic backup."))
-                }
-
-                GroupBox(language.text("An toàn phiên Codex", "Codex session safety")) {
-                    VStack(alignment: .leading, spacing: 9) {
-                        Label(language.text(
-                            "Roster không xoay refresh token của phiên đang dùng",
-                            "Roster does not rotate the active session refresh token"
-                        ), systemImage: "lock.shield.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.green)
-                        Text(language.text(
-                            "Codex là chủ sở hữu duy nhất của live session. Kiểm tra quota nền chỉ dùng access token hiện có; nếu token hết hạn, app giữ kết quả đã xác minh gần nhất thay vì mạo hiểm làm bạn bị đăng xuất.",
-                            "Codex is the sole owner of the live session. Background quota checks only use its current access token; if it expires, the app keeps the last verified result instead of risking a sign-out."
-                        ))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        if store.hasRunningCodexProcesses {
-                            Label(language.text("\(store.status?.processWarnings.count ?? 0) tiến trình Codex đang chạy", "\(store.status?.processWarnings.count ?? 0) Codex processes are running"), systemImage: "exclamationmark.triangle.fill")
+                            Text(store.autoStartUsageWindows
+                                ? language.text("Cửa sổ quota · bật", "Quota windows · on")
+                                : language.text("Cửa sổ quota · tắt", "Quota windows · off"))
                                 .font(.caption)
-                                .foregroundStyle(.orange)
-                        } else {
-                            Label(language.text("Sẵn sàng chuyển tài khoản", "Ready to switch accounts"), systemImage: "checkmark.circle.fill")
-                                .font(.caption)
-                                .foregroundStyle(.green)
+                                .foregroundStyle(store.autoStartUsageWindows ? Color.green : Color.secondary)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+                    .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: 13))
+                    .confirmationDialog(
+                        language.text("Khôi phục phiên sao lưu?", "Restore saved sessions?"),
+                        isPresented: $confirmingFullBackupRestore,
+                        titleVisibility: .visible
+                    ) {
+                        Button(language.text("Khôi phục", "Restore"), role: .destructive) {
+                            store.restoreLatestFullBackup()
+                        }
+                        Button(language.text("Hủy", "Cancel"), role: .cancel) {}
+                    } message: {
+                        Text(language.text("Danh sách hiện tại sẽ được thay bằng bản sao tự động gần nhất trên máy này.", "The current account list will be replaced by this Mac's most recent automatic backup."))
+                    }
+
+                    GroupBox(language.text("An toàn phiên Codex", "Codex session safety")) {
+                        VStack(alignment: .leading, spacing: 9) {
+                            Label(language.text(
+                                "Roster không xoay refresh token của phiên đang dùng",
+                                "Roster does not rotate the active session refresh token"
+                            ), systemImage: "lock.shield.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.green)
+                            Text(language.text(
+                                "Codex là chủ sở hữu duy nhất của live session. Kiểm tra quota nền chỉ dùng access token hiện có; nếu token hết hạn, app giữ kết quả đã xác minh gần nhất thay vì mạo hiểm làm bạn bị đăng xuất.",
+                                "Codex is the sole owner of the live session. Background quota checks only use its current access token; if it expires, the app keeps the last verified result instead of risking a sign-out."
+                            ))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            if store.hasRunningCodexProcesses {
+                                Label(language.text("\(store.status?.processWarnings.count ?? 0) tiến trình Codex đang chạy", "\(store.status?.processWarnings.count ?? 0) Codex processes are running"), systemImage: "exclamationmark.triangle.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                            } else {
+                                Label(language.text("Sẵn sàng chuyển tài khoản", "Ready to switch accounts"), systemImage: "checkmark.circle.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.green)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
             }
-            .frame(width: max(0, min(geometry.size.width - 48, 1_240)), alignment: .leading)
+            .frame(width: contentWidth, alignment: .leading)
             .padding(.vertical, 24)
             .frame(maxWidth: .infinity, alignment: .top)
             }
@@ -2310,6 +2319,7 @@ private struct OpenAIStatusCard: View {
                 .foregroundStyle(.secondary)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
         .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: 15))
     }
@@ -2517,6 +2527,7 @@ private struct GlobalResetOutlookCard: View {
                 .foregroundStyle(.secondary)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
         .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: 15))
     }
@@ -3918,7 +3929,7 @@ struct MenuBarView: View {
             .padding(.vertical, 2)
         }
         .padding(14)
-        .frame(width: 356, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear {
             refreshMenuBar()
         }
@@ -4500,7 +4511,8 @@ private struct MenuBarQuota: View {
                 quotaLine(language.text("Tuần", "Weekly"), window: window)
             }
         }
-        .frame(width: 148, alignment: .trailing)
+        .fixedSize(horizontal: true, vertical: false)
+        .frame(minWidth: 132, alignment: .trailing)
     }
 
     private func quotaLine(_ label: String, window: UsageWindow) -> some View {

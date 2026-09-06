@@ -10,7 +10,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **codex-roster** (3227 symbols, 9273 relationships, 287 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **codex-roster** (3190 symbols, 8940 relationships, 285 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
@@ -51,3 +51,6 @@ This project is indexed by GitNexus as **codex-roster** (3227 symbols, 9273 rela
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
+## Agent execution policy
+
+Follow the user's requested action through completion. Ask only when missing information would materially change scope, behavior, policy, data handling, credentials, or an irreversible external action. Otherwise choose the simplest reasonable interpretation, state the assumption, and continue. Complete authorized work and verification before requesting approval; approval should be the final step for deployment, publication, merging, or external writes. Do not add approval gates for reversible edits, read-only review, routine testing, or implementation choices.

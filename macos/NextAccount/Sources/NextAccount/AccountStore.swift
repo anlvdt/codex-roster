@@ -107,6 +107,7 @@ final class AccountStore: ObservableObject {
     @Published private(set) var resetTimeline: [ResetTimelineEvent]?
     @Published private(set) var resetJuice: ResetJuice?
     @Published private(set) var openAIStatus: OpenAIServiceStatus?
+    @Published private(set) var providerStates: [ProviderState] = []
     @Published private(set) var autoSwitchWhenExhausted: Bool
     @Published private(set) var autoSwitchState: AutoSwitchState?
     @Published private(set) var isCheckingAutoSwitch = false
@@ -117,6 +118,7 @@ final class AccountStore: ObservableObject {
     @Published private(set) var isLoadingTokenUsage = false
     @Published private(set) var isLoadingResetOutlook = false
     @Published private(set) var isLoadingOpenAIStatus = false
+    @Published private(set) var isLoadingProviderStatus = false
     @Published private(set) var isRefreshingQuotaInBackground = false
     @Published private(set) var lastQuotaRefreshAt: Date?
     @Published private(set) var accountSortMode: AccountSortMode
@@ -934,6 +936,20 @@ final class AccountStore: ObservableObject {
             defer { isLoadingOpenAIStatus = false }
             do {
                 openAIStatus = try await cli.decode(OpenAIServiceStatus.self, arguments: ["open-ai-status"])
+            } catch {
+                if !silently { errorMessage = error.localizedDescription }
+            }
+        }
+    }
+
+    func refreshProviderStatus(silently: Bool = false) {
+        guard !isLoadingProviderStatus else { return }
+        isLoadingProviderStatus = true
+        Task {
+            defer { isLoadingProviderStatus = false }
+            do {
+                let output = try await cli.decode(ProviderStatusOutput.self, arguments: ["providers", "status"])
+                providerStates = output.providers
             } catch {
                 if !silently { errorMessage = error.localizedDescription }
             }
@@ -1784,6 +1800,21 @@ struct AccountListOutput: Decodable {
     let accounts: [SavedAccount]
 }
 
+struct ProviderStatusOutput: Decodable {
+    let providers: [ProviderState]
+}
+
+struct ProviderState: Identifiable, Decodable {
+    let provider: AIProvider
+    let available: Bool
+    let identity: AccountIdentity?
+    let savedAccounts: Int
+    let currentAccountSavedId: UUID?
+    let usageError: String?
+
+    var id: AIProvider { provider }
+}
+
 struct ActivateOutput: Decodable {
     let account: SavedAccount
     let previousAccountId: UUID?
@@ -2625,16 +2656,38 @@ struct AutoSwitchOutput: Decodable {
     let bankedResetCount: Int?
 }
 
-enum AIProvider: String, CaseIterable, Identifiable {
+enum AIProvider: String, CaseIterable, Identifiable, Decodable {
     case openAI = "open_ai"
+    case claude
+    case cursor
+    case grok
 
     var id: String { rawValue }
 
     var name: String {
-        "OpenAI / Codex"
+        switch self {
+        case .openAI: "OpenAI / Codex"
+        case .claude: "Claude Code"
+        case .cursor: "Cursor"
+        case .grok: "Grok Build"
+        }
+    }
+
+    var compactName: String {
+        switch self {
+        case .openAI: "Codex"
+        case .claude: "Claude"
+        case .cursor: "Cursor"
+        case .grok: "Grok"
+        }
     }
 
     var icon: String {
-        "sparkles"
+        switch self {
+        case .openAI: "sparkles"
+        case .claude: "brain.head.profile"
+        case .cursor: "cursorarrow"
+        case .grok: "bolt.fill"
+        }
     }
 }

@@ -2029,9 +2029,12 @@ private struct ProviderOverview: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("OpenAI / Codex", systemImage: "sparkles")
+            Label(language.text("AI providers", "AI providers"), systemImage: "square.grid.2x2")
                 .font(.headline)
-            Text(language.text("Tình trạng đăng nhập và quota Codex của các tài khoản đã lưu.", "Sign-in health and Codex quota for saved accounts."))
+            Text(language.text(
+                "Tình trạng phiên và tài khoản đã lưu của OpenAI, Claude, Cursor và Grok.",
+                "Live sessions and saved-account health across OpenAI, Claude, Cursor, and Grok."
+            ))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             VStack(spacing: 0) {
@@ -2042,6 +2045,9 @@ private struct ProviderOverview: View {
             }
             .padding(.horizontal, 16)
             .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 15))
+        }
+        .onAppear {
+            store.refreshProviderStatus(silently: true)
         }
     }
 }
@@ -2472,6 +2478,18 @@ private struct ProviderStatusRow: View {
         store.accounts.filter { $0.aiProvider == provider && !store.isArchived($0) }
     }
 
+    private var providerState: ProviderState? {
+        store.providerStates.first { $0.provider == provider }
+    }
+
+    private var savedCount: Int {
+        provider == .openAI ? accounts.count : (providerState?.savedAccounts ?? 0)
+    }
+
+    private var hasLiveSession: Bool {
+        providerState?.available ?? (provider == .openAI && accounts.contains(where: \.isActive))
+    }
+
     private var readyAccounts: [SavedAccount] {
         store.sortedAccounts(accounts.filter { !$0.requiresLogin })
     }
@@ -2501,19 +2519,32 @@ private struct ProviderStatusRow: View {
         HStack(spacing: 14) {
             Image(systemName: provider.icon)
                 .font(.title3)
-                .foregroundStyle(accounts.isEmpty ? Color.secondary : Color.accentColor)
+                .foregroundStyle(savedCount == 0 && !hasLiveSession ? Color.secondary : Color.accentColor)
                 .frame(width: 26)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(provider.name).font(.subheadline.weight(.semibold))
-                if accounts.isEmpty {
-                    Text(language.text("Chưa có tài khoản đã lưu", "No saved accounts"))
+                if provider == .openAI {
+                    if accounts.isEmpty {
+                        Text(language.text("Chưa có tài khoản đã lưu", "No saved accounts"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text(language.text("\(readyAccounts.count) sẵn sàng · \(attentionCount) cần đăng nhập", "\(readyAccounts.count) ready · \(attentionCount) need sign-in"))
+                            .font(.caption)
+                            .foregroundStyle(attentionCount == 0 ? Color.secondary : Color.orange)
+                    }
+                } else if providerState == nil && store.isLoadingProviderStatus {
+                    Text(language.text("Đang kiểm tra phiên local…", "Checking local session…"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    Text(language.text("\(readyAccounts.count) sẵn sàng · \(attentionCount) cần đăng nhập", "\(readyAccounts.count) ready · \(attentionCount) need sign-in"))
+                    Text(language.text(
+                        "\(savedCount) đã lưu · \(hasLiveSession ? "phiên live" : "chưa có phiên live")",
+                        "\(savedCount) saved · \(hasLiveSession ? "live session" : "no live session")"
+                    ))
                         .font(.caption)
-                        .foregroundStyle(attentionCount == 0 ? Color.secondary : Color.orange)
+                        .foregroundStyle(hasLiveSession ? Color.secondary : Color.orange)
                 }
             }
 
@@ -2529,24 +2560,29 @@ private struct ProviderStatusRow: View {
                     }
                 }
                 .frame(width: 166, alignment: .trailing)
-            } else if !accounts.isEmpty {
+            } else if provider == .openAI && !accounts.isEmpty {
                 Text(language.text("Chưa có quota", "Quota not checked"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            if !accounts.isEmpty {
+            if provider == .openAI && !accounts.isEmpty {
                 Button(language.text("Xem", "View")) {
                     selection = readyAccounts.first?.id ?? accounts.first?.id
                 }
                 .controlSize(.small)
-                if provider == .openAI {
-                    Button(language.text("Cập nhật", "Refresh")) {
-                        store.refreshUsage(scope: .activeOnly)
-                    }
-                    .controlSize(.small)
-                    .disabled(store.isWorking)
+                Button(language.text("Cập nhật", "Refresh")) {
+                    store.refreshUsage(scope: .activeOnly)
                 }
+                .controlSize(.small)
+                .disabled(store.isWorking)
+            } else if provider != .openAI {
+                Label(
+                    hasLiveSession ? language.text("Live", "Live") : language.text("Offline", "Offline"),
+                    systemImage: hasLiveSession ? "checkmark.circle.fill" : "circle"
+                )
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(hasLiveSession ? Color.green : Color.secondary)
             }
         }
         .padding(.vertical, 14)
@@ -3479,15 +3515,28 @@ struct MenuBarView: View {
         store.accounts.first { $0.isActive && !store.isArchived($0) }
     }
 
+    private var totalSavedProviderAccounts: Int {
+        guard !store.providerStates.isEmpty else { return store.accounts.count }
+        return store.providerStates.reduce(0) { $0 + $1.savedAccounts }
+    }
+
+    private var liveProviderCount: Int {
+        store.providerStates.filter(\.available).count
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            MenuBarHeader(savedCount: store.accounts.count, attentionCount: attentionCount)
+            MenuBarHeader(
+                savedCount: totalSavedProviderAccounts,
+                liveProviderCount: liveProviderCount,
+                attentionCount: attentionCount
+            )
+
+            MenuBarProviderStrip()
 
             if store.isBusyForActions || store.isCheckingAutoSwitch || store.errorMessage != nil || store.autoSwitchState != nil {
                 MenuBarOperationStatus()
             }
-
-            MenuBarLiveSignals()
 
             if store.isPendingLogin {
                 HStack(spacing: 7) {
@@ -3509,8 +3558,6 @@ struct MenuBarView: View {
                 .padding(.vertical, 7)
                 .background(Color.blue.opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
             }
-
-            MenuBarUpdateStatus()
 
             MenuBarCurrentSession(
                 account: activeAccount,
@@ -3592,6 +3639,9 @@ struct MenuBarView: View {
                 .buttonStyle(.plain)
                 .menuBarInteractive(cornerRadius: 9)
             }
+
+            MenuBarLiveSignals()
+            MenuBarUpdateStatus()
 
             Divider()
                 .padding(.top, 4)
@@ -3704,6 +3754,7 @@ struct MenuBarView: View {
 
     private func refreshMenuBar() {
         store.refreshAccountsInBackground()
+        store.refreshProviderStatus(silently: true)
         store.refreshOpenAIStatus(silently: true)
         store.refreshResetOutlook(silently: true)
     }
@@ -3954,6 +4005,7 @@ private enum AppInfo {
 private struct MenuBarHeader: View {
     @EnvironmentObject private var language: LanguageStore
     let savedCount: Int
+    let liveProviderCount: Int
     let attentionCount: Int
 
     var body: some View {
@@ -3966,7 +4018,10 @@ private struct MenuBarHeader: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Codex Roster")
                     .font(.headline)
-                Text(language.text("OpenAI / Codex · \(savedCount) đã lưu", "OpenAI / Codex · \(savedCount) saved"))
+                Text(language.text(
+                    "\(liveProviderCount)/4 provider live · \(savedCount) đã lưu",
+                    "\(liveProviderCount)/4 providers live · \(savedCount) saved"
+                ))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -3981,6 +4036,90 @@ private struct MenuBarHeader: View {
                     .help(language.text("Tài khoản cần đăng nhập", "Accounts needing sign-in"))
             }
         }
+    }
+}
+
+private struct MenuBarProviderStrip: View {
+    @EnvironmentObject private var store: AccountStore
+    @EnvironmentObject private var language: LanguageStore
+
+    private var liveCount: Int {
+        store.providerStates.filter(\.available).count
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text(language.text("Providers", "Providers"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if store.isLoadingProviderStatus && store.providerStates.isEmpty {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    Text(language.text("\(liveCount)/4 live", "\(liveCount)/4 live"))
+                        .font(.caption2.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(liveCount > 0 ? Color.green : Color.secondary)
+                }
+            }
+
+            HStack(spacing: 6) {
+                ForEach(AIProvider.allCases) { provider in
+                    providerBadge(provider)
+                }
+            }
+        }
+        .padding(9)
+        .background(.quaternary.opacity(0.58), in: RoundedRectangle(cornerRadius: 11))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11)
+                .stroke(Color.primary.opacity(0.07), lineWidth: 1)
+        }
+    }
+
+    private func providerBadge(_ provider: AIProvider) -> some View {
+        let state = store.providerStates.first { $0.provider == provider }
+        let isLive = state?.available == true
+        let savedCount = state?.savedAccounts ?? (provider == .openAI ? store.accounts.count : 0)
+
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 4) {
+                Image(systemName: provider.icon)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(isLive ? Color.primary : Color.secondary)
+                Spacer(minLength: 0)
+                Circle()
+                    .fill(isLive ? Color.green : Color.secondary.opacity(0.55))
+                    .frame(width: 6, height: 6)
+            }
+            Text(provider.compactName)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+            Text(language.text("\(savedCount) lưu", "\(savedCount) saved"))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 7)
+        .background(Color.primary.opacity(isLive ? 0.075 : 0.035), in: RoundedRectangle(cornerRadius: 8))
+        .help(providerHelp(provider, state: state))
+    }
+
+    private func providerHelp(_ provider: AIProvider, state: ProviderState?) -> String {
+        guard let state else {
+            return language.text("Đang kiểm tra \(provider.name)", "Checking \(provider.name)")
+        }
+        if let email = state.identity?.email, state.available {
+            return language.text("\(provider.name) đang live: \(email)", "\(provider.name) live: \(email)")
+        }
+        if let error = state.usageError, !error.isEmpty {
+            return error
+        }
+        return language.text("\(provider.name) chưa có phiên local đang hoạt động", "No active local \(provider.name) session")
     }
 }
 

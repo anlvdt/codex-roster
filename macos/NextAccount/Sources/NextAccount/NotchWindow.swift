@@ -13,8 +13,8 @@ struct NotchWindowView: View {
     @State private var hoverTask: Task<Void, Never>?
     @State private var collapseTask: Task<Void, Never>?
 
-    private let compactWidth: CGFloat = 334
-    private let expandedWidth: CGFloat = 392
+    private let compactWidth: CGFloat = 356
+    private let expandedWidth: CGFloat = 404
 
     private var activeAccount: SavedAccount? {
         store.accounts.first { $0.isActive && !store.isArchived($0) }
@@ -42,10 +42,16 @@ struct NotchWindowView: View {
             }
         }
         .frame(width: panelWidth)
-        .background(Color.black.opacity(0.96), in: notchShape)
+        .background {
+            notchShape
+                .fill(.ultraThinMaterial)
+                .overlay {
+                    notchShape.fill(Color.black.opacity(isExpanded ? 0.76 : 0.88))
+                }
+        }
         .overlay {
             notchShape
-                .stroke(Color.white.opacity(isExpanded ? 0.12 : 0.07), lineWidth: 1)
+                .stroke(Color.white.opacity(isExpanded ? 0.16 : 0.09), lineWidth: 1)
         }
         .clipShape(notchShape)
         .shadow(color: .black.opacity(isExpanded ? 0.34 : 0.18), radius: isExpanded ? 24 : 10, y: 10)
@@ -55,6 +61,7 @@ struct NotchWindowView: View {
         .animation(panelAnimation, value: isExpanded)
         .task {
             store.startCoreMonitoring()
+            store.refreshProviderStatus(silently: true)
             let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.46"
             updater.startAutomaticChecks(currentVersion: version)
         }
@@ -75,14 +82,19 @@ struct NotchWindowView: View {
                 expand()
             }
         } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 9) {
+                NotchAccountIdentity(
+                    account: activeAccount,
+                    providerStates: store.providerStates
+                )
+
+                Spacer(minLength: 2)
+
                 NotchQuotaMetric(
                     title: language.text("5H", "5h"),
                     window: activeAccount?.usage?.fiveHour,
                     alignment: .leading
                 )
-
-                Spacer(minLength: 126)
 
                 NotchQuotaMetric(
                     title: language.text("7N", "7d"),
@@ -92,11 +104,12 @@ struct NotchWindowView: View {
 
                 Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                     .font(.caption2.weight(.bold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 10)
+                    .foregroundStyle(.primary.opacity(0.78))
+                    .frame(width: 20, height: 20)
+                    .background(Color.white.opacity(0.08), in: Circle())
             }
-            .padding(.horizontal, 13)
-            .frame(height: 38)
+            .padding(.horizontal, 11)
+            .frame(height: 44)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -183,6 +196,54 @@ struct NotchWindowView: View {
                 isExpanded = false
             }
         }
+    }
+}
+
+private struct NotchAccountIdentity: View {
+    @EnvironmentObject private var language: LanguageStore
+    let account: SavedAccount?
+    let providerStates: [ProviderState]
+
+    private var provider: AIProvider {
+        account?.aiProvider ?? .openAI
+    }
+
+    private var liveProviderCount: Int {
+        providerStates.filter(\.available).count
+    }
+
+    var body: some View {
+        HStack(spacing: 7) {
+            ZStack(alignment: .bottomTrailing) {
+                Image(systemName: provider.icon)
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 26, height: 26)
+                    .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
+
+                Circle()
+                    .fill(account == nil ? Color.secondary : Color.green)
+                    .frame(width: 7, height: 7)
+                    .overlay(Circle().stroke(Color.black.opacity(0.8), lineWidth: 1.5))
+                    .offset(x: 2, y: 2)
+            }
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(account?.displayName ?? "Codex Roster")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+
+                Text(account == nil
+                    ? language.text("\(liveProviderCount)/4 provider live", "\(liveProviderCount)/4 providers live")
+                    : provider.compactName)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .frame(width: 108, alignment: .leading)
+        .accessibilityElement(children: .combine)
     }
 }
 

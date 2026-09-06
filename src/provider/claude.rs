@@ -272,6 +272,19 @@ impl ProviderAdapter for ClaudeAdapter {
         })
     }
 
+    fn try_read_live_identity_noninteractive(
+        &self,
+        env: &AppEnv,
+    ) -> Result<Option<DisplayIdentity>> {
+        let path = credentials_path(env);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read Claude credentials at {}", path.display()))?;
+        Ok(identity_from_json(&raw))
+    }
+
     fn identity_from_snapshot(&self, snapshot: &SnapshotBlob) -> Result<DisplayIdentity> {
         for name in ["claude_credentials.json", "claude_keychain.txt"] {
             if let Some(raw) = snapshot_text(snapshot, name)?

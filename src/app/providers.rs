@@ -26,16 +26,17 @@ where
         let mut providers = Vec::with_capacity(AiProvider::ALL.len());
         for provider in AiProvider::ALL {
             let adapter = adapter(provider);
-            let (live, live_error) = match adapter.try_read_live_auth(&self.env) {
-                Ok(live) => (live, None),
-                Err(error) => (None, Some(error.to_string())),
-            };
+            let (live_identity, live_error) =
+                match adapter.try_read_live_identity_noninteractive(&self.env) {
+                    Ok(live) => (live, None),
+                    Err(error) => (None, Some(error.to_string())),
+                };
             let (saved_accounts, current_account_saved_id) = if provider == AiProvider::OpenAi {
                 let accounts = openai_accounts
                     .iter()
                     .filter(|account| account.provider == AiProvider::OpenAi)
                     .collect::<Vec<_>>();
-                let active_id = live.as_ref().and_then(|bundle| {
+                let active_id = live_identity.as_ref().and_then(|identity| {
                     accounts
                         .iter()
                         .find(|account| {
@@ -45,26 +46,26 @@ where
                                 name: account.name.clone(),
                                 plan_label: account.plan_label.clone(),
                             }
-                            .matches(&bundle.identity)
+                            .matches(identity)
                         })
                         .map(|account| account.id)
                 });
                 (accounts.len(), active_id)
             } else {
                 let accounts = store.list(&self.env.kind, Some(provider))?;
-                let active_id = live.as_ref().and_then(|bundle| {
+                let active_id = live_identity.as_ref().and_then(|identity| {
                     accounts
                         .iter()
-                        .find(|account| account.identity.matches(&bundle.identity))
+                        .find(|account| account.identity.matches(identity))
                         .map(|account| account.id)
                 });
                 (accounts.len(), active_id)
             };
             providers.push(ProviderStateView {
                 provider,
-                available: live.is_some(),
+                available: live_identity.is_some(),
                 capabilities: adapter.capabilities().to_vec(),
-                identity: live.map(|bundle| bundle.identity),
+                identity: live_identity,
                 saved_accounts,
                 current_account_saved_id,
                 usage: None,
@@ -108,10 +109,9 @@ where
             }
             let live_identity = live_identities.entry(account.provider).or_insert_with(|| {
                 adapter(account.provider)
-                    .try_read_live_auth(&self.env)
+                    .try_read_live_identity_noninteractive(&self.env)
                     .ok()
                     .flatten()
-                    .map(|bundle| bundle.identity)
             });
             let is_active = live_identity
                 .as_ref()

@@ -20,6 +20,12 @@ pub trait ProviderAdapter: Sync {
     fn capabilities(&self) -> &'static [ProviderCapability];
     fn try_read_live_auth(&self, env: &AppEnv) -> Result<Option<ProviderAuthBundle>>;
     fn read_live_auth(&self, env: &AppEnv) -> Result<ProviderAuthBundle>;
+    fn try_read_live_identity_noninteractive(
+        &self,
+        env: &AppEnv,
+    ) -> Result<Option<DisplayIdentity>> {
+        Ok(self.try_read_live_auth(env)?.map(|bundle| bundle.identity))
+    }
     fn identity_from_snapshot(&self, snapshot: &SnapshotBlob) -> Result<DisplayIdentity>;
     fn restore_snapshot(&self, env: &AppEnv, snapshot: &SnapshotBlob) -> Result<()>;
     fn fetch_usage(&self, snapshot: &SnapshotBlob) -> Result<ProviderUsageView>;

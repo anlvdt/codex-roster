@@ -1,5 +1,6 @@
 mod auto_start;
 mod auto_switch_monitor;
+mod providers;
 mod service;
 mod tui;
 mod usage_refresh;

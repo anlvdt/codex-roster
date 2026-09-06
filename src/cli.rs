@@ -10,8 +10,10 @@ use uuid::Uuid;
 use crate::app::{App, InteractiveExit, InteractiveMode};
 use crate::env;
 use crate::model::{
-    AccountUsageView, AccountView, AutoStartUsageWindowsRunOutput,
-    AutoStartUsageWindowsStatusOutput, RunningCodexProcess, TokenUsageSummaryOutput, UsageOutput,
+    AccountUsageView, AccountView, AiProvider, AutoStartUsageWindowsRunOutput,
+    AutoStartUsageWindowsStatusOutput, ProviderAccountView, ProviderStatusOutput,
+    ProviderUsageOutput, ProviderUsageStatus, ProviderUsageView, RunningCodexProcess,
+    TokenUsageSummaryOutput, UsageOutput,
 };
 use crate::openai_status::fetch_openai_status;
 use crate::process::format_process_table;
@@ -40,6 +42,11 @@ enum Command {
     List {
         #[arg(long)]
         json: bool,
+    },
+    /// Inspect and manage accounts for Codex, Claude Code, Cursor, and Grok Build.
+    Providers {
+        #[command(subcommand)]
+        command: Option<ProviderCommand>,
     },
     Save {
         #[arg(long)]
@@ -220,6 +227,43 @@ enum VibeUsageCommand {
     Status,
 }
 
+#[derive(Subcommand)]
+enum ProviderCommand {
+    /// Show live availability, identity, capabilities, and saved-account counts.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// List saved accounts, optionally scoped to one provider.
+    List {
+        #[arg(long, value_parser = parse_ai_provider)]
+        provider: Option<AiProvider>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Save the provider's currently authenticated account.
+    Save {
+        #[arg(value_parser = parse_ai_provider)]
+        provider: AiProvider,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Activate a saved account. The provider is inferred from the account ID.
+    Activate {
+        account_id: Uuid,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Fetch provider usage for the live account or a saved account ID.
+    Usage {
+        #[arg(value_parser = parse_ai_provider)]
+        provider: AiProvider,
+        account_id: Option<Uuid>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let env = env::detect()?;
@@ -267,6 +311,77 @@ pub fn run() -> Result<()> {
             } else {
                 for account in list.accounts {
                     println!("{}", render_account_summary(&account));
+                }
+            }
+            Ok(())
+        }
+        Some(Command::Providers { command }) => {
+            match command.unwrap_or(ProviderCommand::Status { json: false }) {
+                ProviderCommand::Status { json } => {
+                    let output = app.providers_status()?;
+                    if json {
+                        print_json(&output)?;
+                    } else {
+                        print_provider_status(&output);
+                    }
+                }
+                ProviderCommand::List { provider, json } => {
+                    let output = app.provider_list(provider)?;
+                    if json {
+                        print_json(&output)?;
+                    } else if output.accounts.is_empty() {
+                        match provider {
+                            Some(provider) => {
+                                println!("No saved {provider} accounts in {}.", output.environment)
+                            }
+                            None => {
+                                println!("No saved provider accounts in {}.", output.environment)
+                            }
+                        }
+                    } else {
+                        for account in &output.accounts {
+                            println!("{}", render_provider_account_summary(account));
+                        }
+                    }
+                }
+                ProviderCommand::Save { provider, json } => {
+                    let output = app.provider_save_current(provider)?;
+                    if json {
+                        print_json(&output)?;
+                    } else {
+                        println!(
+                            "Saved {} account {} ({})",
+                            output.account.provider, output.account.email, output.account.id
+                        );
+                    }
+                }
+                ProviderCommand::Activate { account_id, json } => {
+                    let output = app.provider_activate(account_id)?;
+                    if json {
+                        print_json(&output)?;
+                    } else {
+                        println!(
+                            "Activated {} account {} ({})",
+                            output.account.provider, output.account.email, output.account.id
+                        );
+                        if output.requires_relaunch {
+                            println!(
+                                "Relaunch the provider app for the new session to take effect."
+                            );
+                        }
+                    }
+                }
+                ProviderCommand::Usage {
+                    provider,
+                    account_id,
+                    json,
+                } => {
+                    let output = app.provider_usage(provider, account_id)?;
+                    if json {
+                        print_json(&output)?;
+                    } else {
+                        print_provider_usage_output(&output);
+                    }
                 }
             }
             Ok(())
@@ -827,6 +942,146 @@ fn print_usage_output(output: &UsageOutput) {
         println!("Plan: {plan}");
     }
     print_usage_summary(&output.usage);
+}
+
+fn parse_ai_provider(value: &str) -> std::result::Result<AiProvider, String> {
+    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "openai" | "open_ai" | "codex" => Ok(AiProvider::OpenAi),
+        "claude" | "claude_code" | "anthropic" => Ok(AiProvider::Claude),
+        "cursor" => Ok(AiProvider::Cursor),
+        "grok" | "grok_build" | "xai" => Ok(AiProvider::Grok),
+        _ => Err(format!(
+            "unknown provider {value:?}; expected one of: openai, claude, cursor, grok"
+        )),
+    }
+}
+
+fn print_provider_status(output: &ProviderStatusOutput) {
+    println!("Environment: {}", output.environment);
+    for provider in &output.providers {
+        let identity = provider
+            .identity
+            .as_ref()
+            .map(|identity| identity.email.as_str())
+            .unwrap_or("not logged in");
+        let capabilities = provider
+            .capabilities
+            .iter()
+            .map(|capability| format!("{:?}", capability).to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "{}: {} · saved={} · identity={} · capabilities={}",
+            provider.provider,
+            if provider.available {
+                "available"
+            } else {
+                "unavailable"
+            },
+            provider.saved_accounts,
+            identity,
+            capabilities
+        );
+    }
+}
+
+fn render_provider_account_summary(account: &ProviderAccountView) -> String {
+    let mut line = format!(
+        "{} {} {}{}",
+        account.id,
+        account.provider,
+        account.email,
+        if account.is_active { " [active]" } else { "" }
+    );
+    if let Some(plan) = &account.plan_label {
+        line.push_str(&format!(" [{plan}]"));
+    }
+    if let Some(usage) = &account.usage {
+        append_provider_usage_summary(&mut line, usage);
+    } else if let Some(error) = &account.usage_error {
+        line.push_str(&format!(" [usage: {error}]"));
+    }
+    line
+}
+
+fn append_provider_usage_summary(line: &mut String, usage: &ProviderUsageView) {
+    if usage.status != ProviderUsageStatus::Ok {
+        line.push_str(&format!(" [usage: {:?}]", usage.status).to_ascii_lowercase());
+    }
+    if let Some(window) = usage
+        .headline_window
+        .as_ref()
+        .and_then(|key| usage.windows.iter().find(|window| &window.key == key))
+        .or_else(|| usage.windows.first())
+    {
+        if let Some(remaining) = window.remaining_percent {
+            line.push_str(&format!(" [{} remaining: {remaining}%]", window.label));
+        } else if window.used.is_some() || window.limit.is_some() {
+            line.push_str(&format!(
+                " [{}: {} / {} {}]",
+                window.label,
+                window
+                    .used
+                    .map_or_else(|| "?".to_owned(), |value| value.to_string()),
+                window
+                    .limit
+                    .map_or_else(|| "?".to_owned(), |value| value.to_string()),
+                window.unit.as_deref().unwrap_or("")
+            ));
+        }
+    }
+}
+
+fn print_provider_usage_output(output: &ProviderUsageOutput) {
+    println!("Environment: {}", output.environment);
+    println!("Provider: {}", output.usage.provider);
+    println!("Account: {}", output.account.email);
+    if let Some(plan) = output
+        .usage
+        .plan_label
+        .as_ref()
+        .or(output.account.plan_label.as_ref())
+    {
+        println!("Plan: {plan}");
+    }
+    println!(
+        "Status: {}",
+        format!("{:?}", output.usage.status).to_ascii_lowercase()
+    );
+    println!(
+        "Fidelity: {}",
+        format!("{:?}", output.usage.fidelity).to_ascii_lowercase()
+    );
+    println!("Fetched at: {}", output.usage.fetched_at);
+    for window in &output.usage.windows {
+        match (window.remaining_percent, window.used, window.limit) {
+            (Some(remaining), _, _) => {
+                print!("{} remaining: {remaining}%", window.label);
+            }
+            (_, Some(used), Some(limit)) => {
+                print!(
+                    "{}: {used} / {limit} {}",
+                    window.label,
+                    window.unit.as_deref().unwrap_or("")
+                );
+            }
+            (_, Some(used), None) => {
+                print!(
+                    "{}: {used} {}",
+                    window.label,
+                    window.unit.as_deref().unwrap_or("")
+                );
+            }
+            _ => print!("{}", window.label),
+        }
+        if let Some(reset_at) = window.reset_at {
+            print!(" (reset {reset_at})");
+        }
+        println!();
+    }
+    if let Some(detail) = &output.usage.detail {
+        println!("Detail: {detail}");
+    }
 }
 
 fn print_auto_start_usage_windows_status(output: &AutoStartUsageWindowsStatusOutput) {

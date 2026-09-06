@@ -6,11 +6,14 @@ pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 pub const METADATA_SCHEMA_VERSION: u32 = 1;
 pub const AUTH_FILES: [&str; 2] = ["auth.json", "cap_sid"];
 
-#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum AiProvider {
     #[default]
     OpenAi,
+    Claude,
+    Cursor,
+    Grok,
 }
 
 impl<'de> Deserialize<'de> for AiProvider {
@@ -18,14 +21,41 @@ impl<'de> Deserialize<'de> for AiProvider {
     where
         D: serde::Deserializer<'de>,
     {
-        let _ = String::deserialize(deserializer)?;
-        Ok(Self::OpenAi)
+        let value = String::deserialize(deserializer)?;
+        match value.trim().to_ascii_lowercase().as_str() {
+            "open_ai" | "openai" | "codex" => Ok(Self::OpenAi),
+            "claude" | "anthropic" => Ok(Self::Claude),
+            "cursor" => Ok(Self::Cursor),
+            "grok" | "grok_build" | "xai" => Ok(Self::Grok),
+            _ => Err(serde::de::Error::unknown_variant(
+                &value,
+                &["open_ai", "claude", "cursor", "grok"],
+            )),
+        }
     }
 }
 
 impl std::fmt::Display for AiProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("OpenAI / Codex")
+        f.write_str(match self {
+            Self::OpenAi => "OpenAI / Codex",
+            Self::Claude => "Claude Code",
+            Self::Cursor => "Cursor",
+            Self::Grok => "Grok Build",
+        })
+    }
+}
+
+impl AiProvider {
+    pub const ALL: [Self; 4] = [Self::OpenAi, Self::Claude, Self::Cursor, Self::Grok];
+
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::OpenAi => "open_ai",
+            Self::Claude => "claude",
+            Self::Cursor => "cursor",
+            Self::Grok => "grok",
+        }
     }
 }
 
@@ -81,7 +111,7 @@ impl DisplayIdentity {
 
 #[cfg(test)]
 mod tests {
-    use super::{AiProvider, DisplayIdentity};
+    use super::{AiProvider, DisplayIdentity, EnvironmentKind, SavedAccountMetadata};
 
     fn identity(email: &str, subject: Option<&str>) -> DisplayIdentity {
         DisplayIdentity {
@@ -112,21 +142,62 @@ mod tests {
     }
 
     #[test]
-    fn legacy_provider_tags_normalize_to_openai() {
-        let provider: AiProvider = serde_json::from_str("\"cursor\"").expect("legacy provider");
-        assert_eq!(provider, AiProvider::OpenAi);
+    fn provider_tags_decode_explicitly() {
+        let provider: AiProvider = serde_json::from_str("\"cursor\"").expect("provider");
+        assert_eq!(provider, AiProvider::Cursor);
+        let legacy_openai: AiProvider = serde_json::from_str("\"codex\"").expect("legacy openai");
+        assert_eq!(legacy_openai, AiProvider::OpenAi);
+        let xai: AiProvider = serde_json::from_str("\"xai\"").expect("xai alias");
+        assert_eq!(xai, AiProvider::Grok);
         assert_eq!(
-            serde_json::to_string(&provider).expect("serialize provider"),
+            serde_json::to_string(&legacy_openai).expect("serialize provider"),
             "\"open_ai\""
         );
+        assert!(serde_json::from_str::<AiProvider>("\"future_provider\"").is_err());
     }
+
+    #[test]
+    fn legacy_saved_account_provider_tags_normalize_to_openai() {
+        let metadata = SavedAccountMetadata {
+            id: uuid::Uuid::nil(),
+            environment: EnvironmentKind::Macos,
+            provider: AiProvider::OpenAi,
+            email: "person@example.com".to_owned(),
+            subject: Some("subject-1".to_owned()),
+            name: None,
+            custom_label: None,
+            plan_label: None,
+            secret_key: "secret-key".to_owned(),
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+            updated_at: time::OffsetDateTime::UNIX_EPOCH,
+            last_activated_at: None,
+            archived: false,
+            cached_usage: None,
+            cached_usage_error: None,
+        };
+        let mut value = serde_json::to_value(metadata).expect("serialize legacy metadata");
+        value["provider"] = serde_json::Value::String("cursor".to_owned());
+
+        let decoded: SavedAccountMetadata =
+            serde_json::from_value(value).expect("deserialize legacy metadata");
+
+        assert_eq!(decoded.provider, AiProvider::OpenAi);
+    }
+}
+
+fn deserialize_legacy_openai_provider<'de, D>(deserializer: D) -> Result<AiProvider, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let _ = String::deserialize(deserializer)?;
+    Ok(AiProvider::OpenAi)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SavedAccountMetadata {
     pub id: Uuid,
     pub environment: EnvironmentKind,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_legacy_openai_provider")]
     pub provider: AiProvider,
     pub email: String,
     pub subject: Option<String>,
@@ -340,6 +411,142 @@ pub struct AccountUsageView {
     /// OpenAI's ID-token claim. This is separate from OAuth token expiry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscription_active_until: Option<OffsetDateTime>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCapability {
+    ReadIdentity,
+    MonitorUsage,
+    LocalActivity,
+    TokenHistory,
+    SnapshotAuth,
+    SwitchAccount,
+    AutoSwitch,
+    RelaunchApp,
+    ApiBilling,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderUsageStatus {
+    Ok,
+    Stale,
+    NeedsAuth,
+    AccessDenied,
+    CredentialExpired,
+    RateLimited,
+    Unsupported,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageFidelity {
+    Official,
+    Derived,
+    Manual,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ProviderUsageWindowView {
+    pub key: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<OffsetDateTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ProviderUsageView {
+    pub provider: AiProvider,
+    pub fetched_at: OffsetDateTime,
+    pub status: ProviderUsageStatus,
+    pub fidelity: UsageFidelity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headline_window: Option<String>,
+    #[serde(default)]
+    pub windows: Vec<ProviderUsageWindowView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderStateView {
+    pub provider: AiProvider,
+    pub available: bool,
+    pub capabilities: Vec<ProviderCapability>,
+    pub identity: Option<DisplayIdentity>,
+    pub saved_accounts: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_account_saved_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ProviderUsageView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderStatusOutput {
+    pub environment: EnvironmentKind,
+    pub providers: Vec<ProviderStateView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderUsageOutput {
+    pub environment: EnvironmentKind,
+    pub account: DisplayIdentity,
+    pub usage: ProviderUsageView,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderAccountView {
+    pub id: Uuid,
+    pub provider: AiProvider,
+    pub email: String,
+    pub subject: Option<String>,
+    pub name: Option<String>,
+    pub custom_label: Option<String>,
+    pub plan_label: Option<String>,
+    pub environment: EnvironmentKind,
+    pub is_active: bool,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+    pub last_activated_at: Option<OffsetDateTime>,
+    pub usage: Option<ProviderUsageView>,
+    pub usage_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderListOutput {
+    pub environment: EnvironmentKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<AiProvider>,
+    pub accounts: Vec<ProviderAccountView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderSaveOutput {
+    pub account: ProviderAccountView,
+    pub action: SaveAction,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderActivateOutput {
+    pub account: ProviderAccountView,
+    pub previous_account_id: Option<Uuid>,
+    pub requires_relaunch: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -12,6 +12,8 @@ pub mod model;
 pub mod openai_status;
 pub mod operation_lock;
 pub mod process;
+pub mod provider;
+pub mod provider_store;
 pub mod repository;
 pub mod reset_tracker;
 pub mod secrets;

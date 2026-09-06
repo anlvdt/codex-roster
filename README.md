@@ -15,6 +15,7 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
 ### What it does
 
 - Save, label, archive, restore, and safely switch OpenAI / Codex account snapshots.
+- Inspect, save, restore, switch, and monitor supported Claude Code, Cursor, and Grok Build accounts through the provider CLI. Provider snapshots are stored separately from the legacy OpenAI roster so identical emails cannot collide across providers.
 - Show the active account's quota in the MacBook notch and account quota/reset state in the sidebar.
 - Launch the OpenAI browser sign-in flow without reading passwords, verification codes, or browser cookies.
 - Close and relaunch ChatGPT/Codex Desktop after a confirmed account switch.
@@ -78,6 +79,8 @@ open "build/Codex Roster.app"
 
 The app bundles `codex-roster`. For development, set `CODEX_ROSTER_CLI_PATH` to another build.
 
+The existing top-level commands continue to manage the OpenAI / Codex roster. Multi-provider commands live under `providers` and currently support `open_ai`/`openai`/`codex`, `claude`/`anthropic`, `cursor`, and `grok`/`xai` aliases. Claude Code and Cursor expose official usage windows when their local credentials are available. Grok Build reads its own local auth and reports Build credits separately from xAI API/team billing. Account switching is scoped to the selected provider; cross-provider automatic routing is not enabled.
+
 ```text
 codex-roster status [--json]
 codex-roster list [--json]
@@ -95,6 +98,12 @@ codex-roster token-usage [--json]
 codex-roster vibe-usage [init|sync|summary|status]
 codex-roster reset-outlook [--json]
 codex-roster open-ai-status [--json]
+
+codex-roster providers status [--json]
+codex-roster providers list [--provider PROVIDER] [--json]
+codex-roster providers save PROVIDER [--json]
+codex-roster providers activate ACCOUNT_ID [--json]
+codex-roster providers usage PROVIDER [ACCOUNT_ID] [--json]
 ```
 
 ### Privacy, status, and credits
@@ -117,6 +126,7 @@ swift build --package-path macos/NextAccount
 ### Ứng dụng làm gì
 
 - Lưu, đặt tên, lưu trữ, khôi phục và chuyển an toàn các phiên tài khoản OpenAI / Codex.
+- Qua CLI provider, có thể kiểm tra, lưu, khôi phục, chuyển và theo dõi tài khoản Claude Code, Cursor và Grok Build. Snapshot của các provider này được lưu tách khỏi roster OpenAI cũ để cùng một email ở nhiều provider không bị đụng nhau.
 - Hiển thị quota tài khoản đang dùng tại notch MacBook; hiển thị quota và thời điểm reset ở sidebar.
 - Mở luồng đăng nhập thiết bị OpenAI mà không đọc mật khẩu, mã xác thực hay cookie trình duyệt.
 - Đóng rồi mở lại ChatGPT/Codex Desktop sau khi bạn xác nhận chuyển tài khoản.
@@ -174,6 +184,18 @@ open "build/Codex Roster.app"
 - **macOS:** đang được phát triển, chạy CI, đóng gói và phát hành.
 - **Windows:** giữ lại mã nguồn desktop và script maintenance, nhưng tạm dừng feature, CI đóng gói, preview và release.
 - **Linux:** chưa phát triển bản desktop. Mã Rust dùng chung chỉ được giữ để bảo toàn khả năng mở rộng trong tương lai.
+
+### CLI đa provider
+
+Các lệnh cấp cao hiện có vẫn quản lý roster OpenAI / Codex. Nhóm `providers` hỗ trợ alias `open_ai`/`openai`/`codex`, `claude`/`anthropic`, `cursor`, và `grok`/`xai`. Claude Code và Cursor đọc credential cục bộ do chính ứng dụng đó quản lý để lấy usage chính thức. Grok Build đọc auth riêng và hiển thị credit của Grok Build tách biệt với billing xAI API/team. Việc chuyển tài khoản chỉ diễn ra trong đúng provider; chưa bật tự động định tuyến chéo provider.
+
+```text
+codex-roster providers status [--json]
+codex-roster providers list [--provider PROVIDER] [--json]
+codex-roster providers save PROVIDER [--json]
+codex-roster providers activate ACCOUNT_ID [--json]
+codex-roster providers usage PROVIDER [ACCOUNT_ID] [--json]
+```
 
 ### Riêng tư, trạng thái và ghi nhận
 

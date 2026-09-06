@@ -34,7 +34,7 @@ Về pháp lý, repo dùng MIT nên có thể tích hợp hoặc sửa mã, vớ
 
 - **Ranh giới sản phẩm không khớp:** Codex Roster quản lý account/quota/session; DevSpace là remote coding gateway.
 - **Rủi ro quyền truy cập cao:** DevSpace ghi rõ file tools bị giới hạn bởi workspace, nhưng shell command chạy với toàn quyền user local. Worktree chỉ là ranh giới workflow, không phải security boundary. [Security Model](https://github.com/Waishnav/devspace/blob/e4ef98997aa82a7a59fd0a820809409337cd8bce/docs/security.md)
-- **Phụ thuộc nặng:** bản `1.0.8` yêu cầu Node `>=22.19 <27`, npm, Git và Bash; native PowerShell/cmd chưa được hỗ trợ. Điều này không khớp hoàn toàn với ứng dụng Windows native của Roster. [package.json](https://github.com/Waishnav/devspace/blob/e4ef98997aa82a7a59fd0a820809409337cd8bce/package.json), [README](https://github.com/Waishnav/devspace)
+- **Phụ thuộc nặng:** bản `1.0.8` yêu cầu Node `>=22.19 <27`, npm, Git và Bash. Roster hiện chỉ còn macOS nên ràng buộc shell không phải vấn đề, nhưng toolchain Node/npm vẫn là phụ thuộc mới nằm ngoài stack Rust + Swift hiện tại. [package.json](https://github.com/Waishnav/devspace/blob/e4ef98997aa82a7a59fd0a820809409337cd8bce/package.json), [README](https://github.com/Waishnav/devspace)
 - **Tín hiệu supply-chain cần xử lý:** kiểm tra local ngày 30/08/2026 bằng `npm audit --omit=dev` trên lockfile của commit trên báo 12 package records có advisory, gồm 4 mức high. Đây là tín hiệu triage, không phải kết luận rằng DevSpace đang bị khai thác.
 - **Độ bền môi trường:** typecheck pass. Test suite ban đầu fail trên macOS/Node 26.7.0 do Unix socket path trong thư mục tạm quá dài; chạy lại với `TMPDIR=/tmp` thì pass. Cần CI rõ ràng cho toàn bộ dải Node được công bố hỗ trợ.
 

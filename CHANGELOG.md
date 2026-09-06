@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Removed
+
+- Drop Windows and Linux support entirely. Codex Roster is now a macOS-only project: the Windows WinUI app, `windows-native`/Linux keyring targets, `tray`/`windows_shell` modules and all `#[cfg(windows)]` branches, Windows/Linux build scripts, and the Linux release target have been removed. The crate now builds and ships for macOS only.
+
 ## v0.2.48 - 2026-09-05
 
 ### Added

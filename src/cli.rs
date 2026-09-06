@@ -207,9 +207,6 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    #[cfg(windows)]
-    /// Run the lightweight notification-area companion.
-    Tray,
 }
 
 #[derive(Subcommand)]
@@ -810,16 +807,6 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
-        #[cfg(windows)]
-        Some(Command::Tray) => {
-            crate::app::spawn_auto_start_usage_windows_worker(app.env().clone());
-            crate::app::spawn_auto_switch_worker(app.env().clone());
-            crate::app::spawn_usage_refresh_worker(app.env().clone());
-            crate::app::spawn_vibe_usage_worker(app.env().clone());
-            crate::tray::hide_console_window();
-            let _ = crate::tray::run(&app)?;
-            Ok(())
-        }
     }
 }
 
@@ -844,35 +831,12 @@ fn run_interactive_app<S>(app: &App<S>) -> Result<()>
 where
     S: crate::secrets::SecretStore,
 {
-    #[cfg(windows)]
-    if crate::windows_shell::launch_if_bundled() {
-        return Ok(());
-    }
-
     crate::app::spawn_auto_start_usage_windows_worker(app.env().clone());
     crate::app::spawn_auto_switch_worker(app.env().clone());
     crate::app::spawn_usage_refresh_worker(app.env().clone());
     crate::app::spawn_vibe_usage_worker(app.env().clone());
-    #[cfg(windows)]
-    {
-        loop {
-            match app.interactive(InteractiveMode::Persistent, false)? {
-                InteractiveExit::Quit => return Ok(()),
-                InteractiveExit::SendToTray => {
-                    crate::tray::hide_console_window();
-                    match crate::tray::run(app)? {
-                        crate::tray::TrayExit::ShowTui => crate::tray::show_console_window(),
-                        crate::tray::TrayExit::Quit => return Ok(()),
-                    }
-                }
-            }
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        match app.interactive(InteractiveMode::Persistent, false)? {
-            InteractiveExit::Quit => Ok(()),
-        }
+    match app.interactive(InteractiveMode::Persistent, false)? {
+        InteractiveExit::Quit => Ok(()),
     }
 }
 

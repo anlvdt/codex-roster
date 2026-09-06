@@ -70,6 +70,20 @@ pub fn is_force_skippable_process(process: &RunningCodexProcess) -> bool {
     matches!(process.origin.as_deref(), Some("desktop") | Some("plugin"))
         || is_desktop_like_process(process)
         || is_desktop_main_process(process)
+        || is_background_server_process(process)
+}
+
+/// Background server subcommands (`codex app-server`, `codex mcp`) are
+/// non-interactive daemons, not a live coding session. The Desktop backend
+/// runs `app-server`, and third-party tools (e.g. codex-chatgpt-web) keep one
+/// long-lived against the shared `~/.codex` home. They never hold a foreground
+/// login the way an interactive `codex` / `codex exec` session does, so
+/// `--force` may step past them exactly as it already does for the plugin and
+/// Desktop-owned app-server. Without this, such a daemon makes account
+/// switching impossible even with `--force`.
+fn is_background_server_process(process: &RunningCodexProcess) -> bool {
+    is_codex_bin_name(&process.executable.to_ascii_lowercase())
+        && matches!(process.role.as_str(), "app-server" | "mcp" | "mcp-server")
 }
 
 fn is_desktop_like_process(process: &RunningCodexProcess) -> bool {
@@ -466,10 +480,12 @@ mod tests {
             summary: None,
             origin: Some("desktop".to_owned()),
         }));
+        // Interactive CLI subcommands still block: forcing past a live coding
+        // session can rotate a single-use refresh token out from under it.
         assert!(!is_force_skippable_process(&RunningCodexProcess {
             pid: 4,
             executable: "codex".to_owned(),
-            role: "app-server".to_owned(),
+            role: "exec".to_owned(),
             summary: None,
             origin: Some("cli".to_owned()),
         }));
@@ -479,6 +495,22 @@ mod tests {
             role: "app-server".to_owned(),
             summary: None,
             origin: Some("desktop".to_owned()),
+        }));
+        // A standalone `codex app-server` (e.g. codex-chatgpt-web) is a
+        // background daemon, not a coding session, so `--force` may skip it.
+        assert!(is_force_skippable_process(&RunningCodexProcess {
+            pid: 6,
+            executable: "codex".to_owned(),
+            role: "app-server".to_owned(),
+            summary: None,
+            origin: Some("cli".to_owned()),
+        }));
+        assert!(is_force_skippable_process(&RunningCodexProcess {
+            pid: 7,
+            executable: "codex".to_owned(),
+            role: "mcp".to_owned(),
+            summary: None,
+            origin: Some("cli".to_owned()),
         }));
     }
 

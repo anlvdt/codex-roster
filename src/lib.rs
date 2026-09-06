@@ -20,9 +20,5 @@ pub mod secrets;
 pub mod settings;
 mod time_display;
 pub mod token_usage;
-#[cfg(windows)]
-pub mod tray;
 pub mod usage;
 pub mod vibe_usage;
-#[cfg(windows)]
-mod windows_shell;

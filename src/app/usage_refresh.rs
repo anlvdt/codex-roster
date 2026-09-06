@@ -1,6 +1,4 @@
 use std::sync::mpsc::Sender;
-#[cfg(windows)]
-use std::sync::mpsc::{self, Receiver};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration as StdDuration;
@@ -21,17 +19,6 @@ pub const VIBE_USAGE_SYNC_POLL_SECONDS: u64 = 1800;
 
 static USAGE_REFRESH_RUN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static USAGE_REFRESH_CHECK_LISTENERS: OnceLock<Mutex<Vec<Sender<()>>>> = OnceLock::new();
-
-#[cfg(windows)]
-pub(crate) fn subscribe_usage_refresh_checks() -> Receiver<()> {
-    let (sender, receiver) = mpsc::channel();
-    let mut listeners = USAGE_REFRESH_CHECK_LISTENERS
-        .get_or_init(|| Mutex::new(Vec::new()))
-        .lock()
-        .expect("usage-refresh listener lock poisoned");
-    listeners.push(sender);
-    receiver
-}
 
 pub fn spawn_usage_refresh_worker(env: AppEnv) {
     static STARTED: OnceLock<()> = OnceLock::new();

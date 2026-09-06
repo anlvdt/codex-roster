@@ -8,7 +8,7 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
 
 > “Codex”, “ChatGPT”, “OpenAI”, and related marks belong to OpenAI and are used only to describe compatibility. See the [OpenAI brand guidelines](https://openai.com/brand/).
 
-> **Platform focus:** macOS is the only actively developed and released desktop app. Windows and Linux desktop work is paused; their existing source is retained for possible future maintenance.
+> **Platform:** macOS only. Windows and Linux support has been removed.
 
 ## English
 
@@ -69,11 +69,9 @@ zsh scripts/build-macos-app.sh
 open "build/Codex Roster.app"
 ```
 
-### Platform status
+### Platform
 
-- **macOS:** active product development, CI, packaging, and releases.
-- **Windows:** desktop source and maintenance build scripts are retained, but feature work, CI packaging, previews, and releases are paused.
-- **Linux:** no active desktop distribution. Shared Rust source remains in the repository only to preserve future portability.
+macOS only. Codex Roster is a native macOS app; the crate builds and ships for macOS (Apple Silicon and Intel). Windows and Linux support has been removed.
 
 ### CLI
 
@@ -179,11 +177,9 @@ zsh scripts/build-macos-app.sh
 open "build/Codex Roster.app"
 ```
 
-### Trạng thái nền tảng
+### Nền tảng
 
-- **macOS:** đang được phát triển, chạy CI, đóng gói và phát hành.
-- **Windows:** giữ lại mã nguồn desktop và script maintenance, nhưng tạm dừng feature, CI đóng gói, preview và release.
-- **Linux:** chưa phát triển bản desktop. Mã Rust dùng chung chỉ được giữ để bảo toàn khả năng mở rộng trong tương lai.
+Chỉ macOS. Codex Roster là ứng dụng macOS native; crate build và phát hành cho macOS (Apple Silicon và Intel). Hỗ trợ Windows và Linux đã được gỡ bỏ.
 
 ### CLI đa provider
 

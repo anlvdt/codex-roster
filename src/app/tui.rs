@@ -223,8 +223,6 @@ where
                         }
                     }
                 }
-                #[cfg(windows)]
-                InteractiveAction::SendToTray => return Ok(InteractiveExit::SendToTray),
                 InteractiveAction::Quit => break,
             }
         }
@@ -240,8 +238,6 @@ pub(crate) enum InteractiveAction {
     DeletePrompt,
     ShowStatus,
     SetAutoStartUsageWindows(bool),
-    #[cfg(windows)]
-    SendToTray,
     Quit,
 }
 
@@ -470,11 +466,6 @@ pub(crate) fn build_menu(
         actions.push(InteractiveItem {
             label: "Show status".to_owned(),
             action: InteractiveAction::ShowStatus,
-        });
-        #[cfg(windows)]
-        actions.push(InteractiveItem {
-            label: "Send to Tray".to_owned(),
-            action: InteractiveAction::SendToTray,
         });
     }
     actions.push(InteractiveItem {

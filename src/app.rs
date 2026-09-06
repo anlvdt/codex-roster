@@ -8,15 +8,7 @@ mod usage_refresh;
 use uuid::Uuid;
 
 pub use auto_start::spawn_auto_start_usage_windows_worker;
-#[cfg(windows)]
-pub(crate) use auto_start::{
-    run_auto_start_usage_windows_check_now, subscribe_auto_start_usage_windows_checks,
-};
 pub use auto_switch_monitor::spawn_auto_switch_worker;
-#[cfg(windows)]
-pub(crate) use auto_switch_monitor::{run_auto_switch_check_now, subscribe_auto_switch_checks};
-#[cfg(windows)]
-pub(crate) use usage_refresh::subscribe_usage_refresh_checks;
 pub use usage_refresh::{spawn_usage_refresh_worker, spawn_vibe_usage_worker};
 
 use crate::env::AppEnv;
@@ -41,8 +33,6 @@ pub enum InteractiveMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InteractiveExit {
     Quit,
-    #[cfg(windows)]
-    SendToTray,
 }
 
 fn account_view(

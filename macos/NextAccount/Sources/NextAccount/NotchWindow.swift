@@ -96,12 +96,6 @@ struct NotchWindowView: View {
                     alignment: .leading
                 )
 
-                NotchQuotaMetric(
-                    title: language.text("7N", "7d"),
-                    window: activeAccount?.usage?.weekly,
-                    alignment: .trailing
-                )
-
                 Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(.primary.opacity(0.78))
@@ -229,11 +223,6 @@ private struct NotchAccountIdentity: View {
             }
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(account?.displayName ?? "Codex Roster")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-
                 Text(account == nil
                     ? language.text("\(liveProviderCount)/4 provider live", "\(liveProviderCount)/4 providers live")
                     : provider.compactName)
@@ -255,10 +244,10 @@ private struct NotchQuotaMetric: View {
 
     private var tint: Color {
         guard let window else { return .secondary }
-        if window.isDepleted { return .red }
-        if window.remainingPercent < 20 { return .orange }
-        if window.remainingPercent < 50 { return .yellow }
-        return .green
+        return Color.quotaTint(
+            remainingPercent: window.remainingPercent,
+            exhaustedAt: UsageWindow.exhaustedRemainingPercent
+        )
     }
 
     var body: some View {

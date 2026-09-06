@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Rebuild the Overview account list as a state board. Every account now resolves to a single triage state (needs action / in use / ready / resting / archived) computed in one place, and the sidebar signals, the new next-action banner, and the board all read from it. The dense comparison table and its separate filter tabs are replaced by per-state sections of account cards with inline quota bars, banked-reset badges, and one primary action each; bulk selection (refresh, sign in, archive, restore, remove) moves behind a **Select** toggle. Every quota color now comes from one shared ramp instead of four copies.
+
 ### Removed
 
 - Drop Windows and Linux support entirely. Codex Roster is now a macOS-only project: the Windows WinUI app, `windows-native`/Linux keyring targets, `tray`/`windows_shell` modules and all `#[cfg(windows)]` branches, Windows/Linux build scripts, and the Linux release target have been removed. The crate now builds and ships for macOS only.

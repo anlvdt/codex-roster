@@ -34,7 +34,17 @@ Codex exposes two independent usage windows: `primary_window` is the rolling **5
 
 A banked rate-limit reset is reported separately from immediately usable quota. Roster identifies the account and reset count instead of silently consuming an irreversible reset or switching to an account that is still at `0%`; redeem the reset explicitly in Codex, then the next background check can use the refreshed quota.
 
-Account lists can be sorted by ChatGPT plan (Pro → Plus → Free), remaining quota, display name, or email. The notch panel shows quick-switch candidates using the same sort order.
+The Overview groups every account into one of five states and leads with the single next action worth taking (switch, redeem a banked reset, sign in again, retry a quota read, or nothing at all):
+
+| State | Meaning |
+| --- | --- |
+| **Needs action** | Sign-in expired, local recovery required, or a quota read failed. |
+| **In use** | The current `~/.codex` session. |
+| **Ready** | Session healthy and quota available — switchable right now. |
+| **Resting** | Out of quota, waiting to reset. Still switchable when it holds a banked reset to redeem in Codex. |
+| **Archived** | Set aside and excluded from auto-switch. |
+
+The sidebar signals, the Overview banner, and the account board all read from the same state, so they can never disagree. Accounts can be sorted by ChatGPT plan (Pro → Plus → Free), remaining quota, display name, or email. The notch panel shows quick-switch candidates using the same sort order.
 
 ### Backup and recovery
 
@@ -142,7 +152,17 @@ Chế độ **Tự động chuyển khi hết quota** là tùy chọn. App theo 
 
 Banked rate-limit reset được tách khỏi quota có thể dùng ngay. Roster sẽ nêu rõ account và số reset thay vì tự tiêu một reset không thể hoàn tác hoặc chuyển sang account vẫn `0%`; sau khi bạn redeem reset trong Codex, lần kiểm tra nền kế tiếp có thể dùng quota vừa được khôi phục.
 
-Danh sách tài khoản có thể sắp xếp theo gói ChatGPT (Pro → Plus → Free), quota còn lại, tên hiển thị hoặc email. Bảng notch hiển thị các ứng viên chuyển nhanh theo cùng thứ tự sắp xếp.
+Màn hình Tổng quan chia mọi tài khoản vào một trong năm trạng thái và nêu sẵn việc nên làm tiếp theo (chuyển tài khoản, redeem banked reset, đăng nhập lại, thử lại quota, hoặc không cần làm gì):
+
+| Trạng thái | Ý nghĩa |
+| --- | --- |
+| **Cần xử lý** | Phiên hết hạn, cần phục hồi cục bộ, hoặc không đọc được quota. |
+| **Đang dùng** | Phiên `~/.codex` hiện tại. |
+| **Sẵn sàng** | Phiên khỏe và còn quota — chuyển sang được ngay. |
+| **Đang nghỉ** | Hết quota, đang chờ đặt lại. Vẫn chuyển được nếu còn banked reset để redeem trong Codex. |
+| **Đã lưu trữ** | Đã cất đi, không tham gia tự động chuyển. |
+
+Tín hiệu ở sidebar, thanh gợi ý và bảng trạng thái đều đọc từ cùng một nguồn nên không thể lệch nhau. Tài khoản có thể sắp xếp theo gói ChatGPT (Pro → Plus → Free), quota còn lại, tên hiển thị hoặc email. Bảng notch hiển thị các ứng viên chuyển nhanh theo cùng thứ tự sắp xếp.
 
 ### Sao lưu và khôi phục
 

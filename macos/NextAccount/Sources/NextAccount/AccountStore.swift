@@ -2,7 +2,94 @@ import AppKit
 import Darwin
 import Foundation
 import ServiceManagement
+import SwiftUI
 import UserNotifications
+
+/// Priority buckets for the triage board, ordered by how urgently the user must
+/// act. `rawValue` order is the display order (most urgent first).
+enum AccountTriage: Int, CaseIterable {
+    case needsAction  // sign-in / recovery / transient error — user must act
+    case active       // the live ~/.codex session
+    case ready        // healthy quota, ready to switch to
+    case resting      // out of quota (may hold a banked reset)
+    case archived     // set aside
+
+    var id: Int { rawValue }
+
+    /// SF Symbol shown on the bucket header and on each card badge.
+    var systemImage: String {
+        switch self {
+        case .needsAction: return "exclamationmark.triangle.fill"
+        case .active: return "checkmark.circle.fill"
+        case .ready: return "bolt.circle.fill"
+        case .resting: return "moon.zzz.fill"
+        case .archived: return "archivebox"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .needsAction: return .orange
+        case .active: return .green
+        case .ready: return .accentColor
+        case .resting: return .secondary
+        case .archived: return .secondary
+        }
+    }
+
+    func title(in language: AppLanguage) -> String {
+        switch self {
+        case .needsAction:
+            return language == .vietnamese ? "Cần xử lý" : "Needs action"
+        case .active:
+            return language == .vietnamese ? "Đang dùng" : "In use"
+        case .ready:
+            return language == .vietnamese ? "Sẵn sàng" : "Ready"
+        case .resting:
+            return language == .vietnamese ? "Đang nghỉ" : "Resting"
+        case .archived:
+            return language == .vietnamese ? "Đã lưu trữ" : "Archived"
+        }
+    }
+
+    /// One line explaining what the bucket means, so the board teaches the
+    /// state model instead of relying on color alone.
+    func subtitle(in language: AppLanguage) -> String {
+        switch self {
+        case .needsAction:
+            return language == .vietnamese
+                ? "Cần bạn đăng nhập lại hoặc kiểm tra trước khi dùng được."
+                : "Needs you to sign in again or check before it can be used."
+        case .active:
+            return language == .vietnamese
+                ? "Phiên ~/.codex hiện tại."
+                : "The current ~/.codex session."
+        case .ready:
+            return language == .vietnamese
+                ? "Còn quota, chuyển sang được ngay."
+                : "Has quota and can be switched to right now."
+        case .resting:
+            return language == .vietnamese
+                ? "Hết quota, đang chờ đặt lại (hoặc còn banked reset để redeem)."
+                : "Out of quota, waiting to reset (or holding a banked reset to redeem)."
+        case .archived:
+            return language == .vietnamese
+                ? "Đã cất đi, không tham gia tự động chuyển."
+                : "Set aside and excluded from auto-switch."
+        }
+    }
+}
+
+extension Color {
+    /// Shared quota color ramp used by every quota indicator (sidebar, board,
+    /// notch) so the thresholds never drift apart.
+    static func quotaTint(remainingPercent: Int, exhaustedAt: Int) -> Color {
+        if remainingPercent <= exhaustedAt { return .red }
+        if remainingPercent < 20 { return .orange }
+        if remainingPercent < 50 { return .yellow }
+        return .green
+    }
+}
 
 enum AccountSortMode: String, CaseIterable, Identifiable {
     case planThenQuota
@@ -135,6 +222,7 @@ final class AccountStore: ObservableObject {
     private var quotaRefreshTask: Task<Void, Never>?
     private var vibeUsageTask: Task<Void, Never>?
     private var autoSwitchAllExhaustedNotified = false
+    private var autoSwitchCooldownUntil: Date?
     private var isInteractiveLoginInProgress = false
     private var isAddAccountSession = false
     private var expectedReloginEmail: String?
@@ -625,6 +713,7 @@ final class AccountStore: ObservableObject {
     func startCoreMonitoring() {
         guard !coreBootstrapStarted else { return }
         coreBootstrapStarted = true
+        ensureAutomaticFullBackup()
         startResetNotificationMonitoring()
         Task { await self.resumeAddAccountSessionIfNeeded() }
         refresh()
@@ -1010,6 +1099,10 @@ final class AccountStore: ObservableObject {
 
     private func checkAutoSwitchWhenExhausted() async {
         guard autoSwitchWhenExhausted, !isBusyForActions, !isCheckingAutoSwitch, !shouldDeferBackgroundWork else { return }
+        if let cooldownUntil = autoSwitchCooldownUntil,
+           Date.now < cooldownUntil {
+            return
+        }
         isCheckingAutoSwitch = true
         defer { isCheckingAutoSwitch = false }
         guard !isInteractiveLoginInProgress, !isPendingLogin else {
@@ -1123,11 +1216,13 @@ final class AccountStore: ObservableObject {
                         )
                     }
                     autoSwitchState = .checkFailed
+                    autoSwitchCooldownUntil = Date.now.addingTimeInterval(60)
                     return
                 }
                 try await reloadAccountsAfterSwitch()
                 autoSwitchState = .switched(applied.candidateDisplayName ?? candidateName)
                 autoSwitchAllExhaustedNotified = false
+                autoSwitchCooldownUntil = Date.now.addingTimeInterval(30)
             default:
                 autoSwitchState = .checkFailed
             }
@@ -2468,6 +2563,25 @@ struct SavedAccount: Identifiable, Decodable {
 
     var switchQuotaScore: Int {
         quotaWindowsForSwitch.map(\.remainingPercent).min() ?? -1
+    }
+
+    /// Single source of truth for where an account belongs in the triage board.
+    /// Every view (sidebar, hero, board) derives grouping from this instead of
+    /// re-implementing the same filter chain.
+    var triage: AccountTriage {
+        if archived { return .archived }
+        if requiresLogin || requiresLocalRecovery || hasTransientUsageError {
+            return .needsAction
+        }
+        if isActive { return .active }
+        if isUsableForSwitch { return .ready }
+        return .resting
+    }
+
+    /// A `.resting` account can still be switched to when it holds a banked
+    /// reset to redeem inside Codex; otherwise it is truly idle.
+    var restingHasBankedReset: Bool {
+        canSwitchUsingBankedReset
     }
 
     /// Lower rank sorts first: Pro → Plus → Team/Business → Free → unknown.

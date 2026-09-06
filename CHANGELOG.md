@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.3.1 - 2026-09-07
+
+### Fixed
+
+- Stop the notch popup from clipping quota percentages. The quota block was caged in a fixed 148pt frame while its lines refused to shrink, so a longer line (notably in Vietnamese, e.g. "Tuần 100% ↺ 6 ngày") overflowed and the notch's clip shape cut the percentage off. The block now takes the width it needs, the account name column yields instead, and the popup fills the notch panel rather than pinning itself to 356pt inside it.
+
+### Changed
+
+- Lay the Overview out in two columns once the window is wide enough (>= 940pt of content): OpenAI status beside the reset outlook, automation beside session safety. Narrow windows still get a single column.
+
 ## v0.3.0 - 2026-09-07
 
 ### Changed

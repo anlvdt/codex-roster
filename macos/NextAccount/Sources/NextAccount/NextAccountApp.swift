@@ -3866,7 +3866,7 @@ struct MenuBarView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.large)
-                .menuBarInteractive()
+                .pointingHandCursor()
                 .disabled(store.isBusyForActions || store.isLoadingOpenAIStatus || store.isLoadingResetOutlook)
                 .help(language.text("Làm mới tài khoản và tín hiệu live", "Refresh accounts and live signals"))
 
@@ -3877,7 +3877,7 @@ struct MenuBarView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .menuBarInteractive()
+                .pointingHandCursor()
                 .help(language.text("Mở bảng điều khiển đầy đủ.", "Open the full dashboard."))
 
                 Menu {

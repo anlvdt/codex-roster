@@ -155,7 +155,8 @@ struct CodexRosterApp: App {
         .defaultSize(width: 560, height: 720)
 
         Settings {
-            AboutView()
+            AutomationSettingsView()
+                .environmentObject(store)
                 .environmentObject(language)
                 .environment(\.locale, language.language.locale)
         }
@@ -167,6 +168,8 @@ struct ContentView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @State private var selection: UUID?
+    /// Owned here so the sidebar signal rows and the board render one filter.
+    @State private var triageFocus: AccountTriage?
     @State private var accountForDeletion: SavedAccount?
     @State private var accountForEditing: SavedAccount?
     @State private var accountForRelogin: SavedAccount?
@@ -176,7 +179,7 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            AccountSidebar(selection: $selection)
+            AccountSidebar(selection: $selection, focus: $triageFocus)
         } detail: {
             detailContent
         }
@@ -284,6 +287,7 @@ struct ContentView: View {
         } else {
             DashboardView(
                 selection: $selection,
+                focus: $triageFocus,
                 relogin: presentRelogin,
                 reloginAll: startReloginQueue
             )
@@ -329,6 +333,9 @@ private struct AccountSidebar: View {
     @EnvironmentObject private var language: LanguageStore
     @Environment(\.openWindow) private var openWindow
     @Binding var selection: UUID?
+    @Binding var focus: AccountTriage?
+    @State private var showingServiceStatus = false
+    @State private var showingSessionSafety = false
 
     var body: some View {
         List(selection: $selection) {
@@ -338,64 +345,34 @@ private struct AccountSidebar: View {
                 }
                 .buttonStyle(.plain)
             }
-            Section {
-                if let activeAccount {
-                    Button { selection = activeAccount.id } label: {
-                        HStack(spacing: 9) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(.green)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(language.text("Đang sử dụng", "Active session"))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Text(activeAccount.displayName)
-                                    .font(.subheadline.weight(.medium))
-                                    .lineLimit(1)
-                                    .layoutPriority(1)
-                                    .help(activeAccount.displayName)
-                            }
-                            Spacer(minLength: 4)
-                            if activeAccount.primaryQuotaWindow != nil {
-                                VStack(alignment: .trailing, spacing: 1) {
-                                    if let window = activeAccount.usage?.fiveHour {
-                                        Text("5h \(window.displayRemainingPercent)%")
-                                            .foregroundStyle(quotaTint(window.remainingPercent))
-                                    }
-                                    if let window = activeAccount.usage?.weekly {
-                                        Text(language.text("Tuần \(window.displayRemainingPercent)%", "Week \(window.displayRemainingPercent)%"))
-                                            .foregroundStyle(quotaTint(window.remainingPercent))
-                                    }
-                                }
-                                .font(.caption2.monospacedDigit().weight(.semibold))
-                            }
-                        }
-                    }
-                    .buttonStyle(.plain)
+            if let activeAccount {
+                Section {
+                    activeSessionCard(activeAccount)
+                } header: {
+                    Text(language.text("Phiên Codex", "Codex session"))
                 }
+            }
+            Section {
                 ForEach(AccountTriage.allCases, id: \.self) { bucket in
                     let count = count(for: bucket)
-                    // The active session already has its own row above, and the
-                    // two set-aside buckets only earn a row once they exist.
-                    if bucket != .active, count > 0 || bucket == .ready || bucket == .needsAction {
-                        sidebarSignal(
-                            bucket.title(in: language.language),
-                            count: count,
-                            icon: bucket.systemImage,
-                            tint: bucket.tint
-                        )
+                    // The two set-aside buckets only earn a row once they exist;
+                    // ready and needs-action stay put so the filter never moves.
+                    if count > 0 || bucket == .ready || bucket == .needsAction {
+                        signalRow(bucket, count: count)
                     }
                 }
             } header: {
                 Text(language.text("Tín hiệu", "Signals"))
-            } footer: {
-                Text(language.text(
-                    "Danh sách và bộ lọc nằm trong Tổng quan.",
-                    "The account list and filters live in Overview."
-                ))
+            }
+            Section {
+                serviceStatusRow
+                sessionSafetyRow
+            } header: {
+                Text(language.text("Hệ thống", "System"))
             }
         }
         .navigationTitle("Codex Roster")
-        .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 260)
+        .navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 290)
         .safeAreaInset(edge: .bottom) {
             Button(action: openAboutWindow) {
                 Label(language.text("Giới thiệu", "About"), systemImage: "heart.text.square")
@@ -409,33 +386,175 @@ private struct AccountSidebar: View {
         }
     }
 
+    // MARK: - Live session
+
+    private func activeSessionCard(_ account: SavedAccount) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Button { selection = account.id } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(account.displayName)
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                        if account.email != account.displayName {
+                            Text(account.email)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(language.text("Mở chi tiết \(account.displayName)", "Open \(account.displayName)"))
+
+            SidebarQuotaMeter(account: account)
+
+            Text(language.text("Theo ~/.codex", "From ~/.codex"))
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 3)
+    }
+
+    // MARK: - Signals double as the account filter
+
+    private func signalRow(_ bucket: AccountTriage, count: Int) -> some View {
+        let isFocused = focus == bucket
+        return Button {
+            focus = isFocused ? nil : bucket
+            // Filtering only means anything on the board, so surface it.
+            selection = nil
+        } label: {
+            HStack(spacing: 9) {
+                Image(systemName: bucket.systemImage)
+                    .foregroundStyle(bucket.tint)
+                Text(bucket.title(in: language.language))
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 4)
+                Text("\(count)")
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(
+                isFocused ? bucket.tint.opacity(0.18) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 7)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7)
+                    .strokeBorder(isFocused ? bucket.tint.opacity(0.5) : .clear, lineWidth: 1)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isFocused ? [.isSelected] : [])
+        .help(language.text(
+            "Lọc danh sách theo \(bucket.title(in: language.language))",
+            "Filter the list by \(bucket.title(in: language.language))"
+        ))
+    }
+
+    // MARK: - System rows
+
+    private var serviceStatusRow: some View {
+        Button { showingServiceStatus.toggle() } label: {
+            HStack(spacing: 9) {
+                Image(systemName: serviceStatusIcon)
+                    .foregroundStyle(serviceStatusTint)
+                Text(serviceStatusTitle)
+                    .font(.caption)
+                    .lineLimit(2)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(language.text("Xem chi tiết trạng thái dịch vụ OpenAI", "Show OpenAI service status details"))
+        .popover(isPresented: $showingServiceStatus, arrowEdge: .trailing) {
+            OpenAIStatusCard()
+                .environmentObject(store)
+                .environmentObject(language)
+                .frame(width: 330)
+                .padding(6)
+        }
+    }
+
+    private var sessionSafetyRow: some View {
+        let isBlocked = store.hasRunningCodexProcesses
+        return Button { showingSessionSafety.toggle() } label: {
+            HStack(spacing: 9) {
+                Image(systemName: isBlocked ? "exclamationmark.triangle.fill" : "lock.shield.fill")
+                    .foregroundStyle(isBlocked ? Color.orange : Color.green)
+                Text(isBlocked
+                    ? language.text(
+                        "\(store.status?.processWarnings.count ?? 0) tiến trình Codex đang chạy",
+                        "\(store.status?.processWarnings.count ?? 0) Codex processes running"
+                    )
+                    : language.text("Sẵn sàng chuyển tài khoản", "Ready to switch accounts"))
+                    .font(.caption)
+                    .lineLimit(2)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(language.text("Vì sao chuyển phiên là an toàn", "Why switching sessions is safe"))
+        .popover(isPresented: $showingSessionSafety, arrowEdge: .trailing) {
+            VStack(alignment: .leading, spacing: 9) {
+                Label(language.text(
+                    "Roster không xoay refresh token của phiên đang dùng",
+                    "Roster does not rotate the active session refresh token"
+                ), systemImage: "lock.shield.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.green)
+                Text(language.text(
+                    "Codex là chủ sở hữu duy nhất của live session. Kiểm tra quota nền chỉ dùng access token hiện có; nếu token hết hạn, app giữ kết quả đã xác minh gần nhất thay vì mạo hiểm làm bạn bị đăng xuất.",
+                    "Codex is the sole owner of the live session. Background quota checks only use its current access token; if it expires, the app keeps the last verified result instead of risking a sign-out."
+                ))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(14)
+            .frame(width: 320, alignment: .leading)
+        }
+    }
+
+    private var serviceStatusIcon: String {
+        guard let status = store.openAIStatus else { return "dot.radiowaves.left.and.right" }
+        return status.isOperational ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+    }
+
+    private var serviceStatusTint: Color {
+        guard let status = store.openAIStatus else { return .secondary }
+        return status.isOperational ? .green : .orange
+    }
+
+    private var serviceStatusTitle: String {
+        guard let status = store.openAIStatus else {
+            return store.isLoadingOpenAIStatus
+                ? language.text("Đang kiểm tra dịch vụ…", "Checking service status…")
+                : language.text("Chưa có trạng thái dịch vụ", "Service status unavailable")
+        }
+        return status.isOperational
+            ? language.text("Dịch vụ OpenAI bình thường", "OpenAI services normal")
+            : localizedOpenAIStatus(status.description, language: language.language)
+    }
+
     private var activeAccount: SavedAccount? {
         store.accounts.first(where: \.isActive)
     }
 
     private func count(for bucket: AccountTriage) -> Int {
         store.accounts.filter { $0.triage == bucket }.count
-    }
-
-    private func sidebarSignal(_ title: String, count: Int, icon: String, tint: Color) -> some View {
-        HStack(spacing: 9) {
-            Image(systemName: icon)
-                .foregroundStyle(tint)
-            Text(title)
-                .foregroundStyle(.primary)
-            Spacer()
-            Text("\(count)")
-                .font(.caption.monospacedDigit().weight(.semibold))
-                .foregroundStyle(.secondary)
-        }
-        .accessibilityElement(children: .combine)
-    }
-
-    private func quotaTint(_ remainingPercent: Int) -> Color {
-        Color.quotaTint(
-            remainingPercent: remainingPercent,
-            exhaustedAt: UsageWindow.exhaustedRemainingPercent
-        )
     }
 
     private func openAboutWindow() {
@@ -454,197 +573,163 @@ private struct DashboardView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @Binding var selection: UUID?
+    @Binding var focus: AccountTriage?
     let relogin: (SavedAccount) -> Void
     let reloginAll: ([SavedAccount]) -> Void
-    @State private var automationExpanded = false
-    @State private var confirmingFullBackupRestore = false
 
     var body: some View {
         GeometryReader { geometry in
             let contentWidth = max(0, min(geometry.size.width - 48, 1_240))
-            // Two columns once the window is wide enough, so the secondary
-            // cards stop stretching a short paragraph across 1,240 points.
-            let pairLayout = contentWidth >= 940
-                ? AnyLayout(HStackLayout(alignment: .top, spacing: 12))
-                : AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
+            // Resolved here rather than inside the banner so the banner can be
+            // dropped outright when nothing needs the user; the live session is
+            // reported once, by the sidebar.
+            let nextAction = NextAction.resolve(in: store)
             ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                DashboardHero(
-                    currentAccount: store.status?.currentAccount?.email,
-                    accountCount: store.accounts.count,
-                    activeAccount: store.accounts.first(where: \.isActive),
-                    selection: $selection
-                )
+                VStack(alignment: .leading, spacing: 18) {
+                    DashboardHero(accountCount: store.accounts.count)
 
-                NextActionBanner(
-                    selection: $selection,
-                    reloginAll: reloginAll
-                )
+                    if !nextAction.isAllClear {
+                        NextActionBanner(
+                            selection: $selection,
+                            action: nextAction,
+                            reloginAll: reloginAll
+                        )
+                    }
 
-                AccountTriageBoard(
-                    selection: $selection,
-                    relogin: relogin,
-                    reloginAll: reloginAll
-                )
+                    AccountTriageBoard(
+                        selection: $selection,
+                        focus: $focus,
+                        relogin: relogin,
+                        reloginAll: reloginAll
+                    )
 
-                pairLayout {
-                    OpenAIStatusCard()
                     GlobalResetOutlookCard()
+
+                    TokenUsageOverview()
                 }
-
-                TokenUsageOverview()
-
-                pairLayout {
-                    DisclosureGroup(isExpanded: $automationExpanded) {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Toggle(language.text("Tự động kiểm tra cửa sổ quota đến hạn", "Automatically check due quota windows"), isOn: Binding(
-                                get: { store.autoStartUsageWindows },
-                                set: { store.setAutoStartUsageWindows($0) }
-                            ))
-                            .disabled(store.isWorking)
-                            Text(language.text(
-                                "Kiểm tra các cửa sổ quota tuần đã đến hạn theo lịch nền. Việc này không đăng nhập lại các tài khoản không hoạt động; theo dõi quota live vẫn chạy riêng khi app hoạt động.",
-                                "Checks due weekly quota windows in the background. It does not sign into inactive accounts; live quota monitoring runs separately while the app is active."
-                            ))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            if store.isRefreshingQuotaInBackground {
-                                HStack(spacing: 6) {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                    Text(language.text("Đang cập nhật quota…", "Updating quota…"))
-                                }
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            } else if let lastQuotaRefreshAt = store.lastQuotaRefreshAt {
-                                Text(language.text(
-                                    "Đã cập nhật \(lastQuotaRefreshAt.formatted(date: .omitted, time: .shortened))",
-                                    "Updated \(lastQuotaRefreshAt.formatted(date: .omitted, time: .shortened))"
-                                ))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            }
-                            Divider()
-                            Toggle(language.text("Tự động chuyển khi hết quota", "Auto-switch when quota is exhausted"), isOn: Binding(
-                                get: { store.autoSwitchWhenExhausted },
-                                set: { store.setAutoSwitchWhenExhausted($0) }
-                            ))
-                            .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
-                            Text(language.text(
-                                "Khi tài khoản Codex (~/.codex) còn 0%: tìm tài khoản còn quota → force-quit ChatGPT → chuyển phiên → mở lại Desktop. Nhãn phiên theo ~/.codex, không đọc cookie đăng nhập riêng trong ChatGPT.",
-                                "When the Codex account (~/.codex) hits 0%: find an account with quota → force-quit ChatGPT → switch session → relaunch Desktop. The session label follows ~/.codex and does not read a separate ChatGPT cookie login."
-                            ))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            if let autoSwitchState = store.autoSwitchState {
-                                Text(autoSwitchStatusText(autoSwitchState))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Toggle(language.text("Mở Codex Roster khi đăng nhập macOS", "Open Codex Roster at login"), isOn: Binding(
-                                get: { store.launchAtLoginEnabled },
-                                set: { store.setLaunchAtLogin($0) }
-                            ))
-                            .disabled(store.isWorking)
-                            Text(language.text("Duy trì notch và các kiểm tra tự động sau khi bạn đăng nhập vào máy Mac.", "Keeps the notch and automatic checks available after you sign in to your Mac."))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            HStack {
-                                Button(language.text("Kiểm tra ngay", "Run refresh check now")) {
-                                    store.runUsageWindowCheck()
-                                }
-                                .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
-                                if store.autoSwitchWhenExhausted {
-                                    Button(language.text("Kiểm tra & chuyển", "Check & switch")) {
-                                        store.runAutoSwitchCheck()
-                                    }
-                                    .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
-                                }
-                                Spacer()
-                                Button(language.text("Khôi phục tài khoản cũ", "Recover older accounts")) {
-                                    store.recoverLegacySnapshots()
-                                }
-                                .disabled(store.isWorking)
-                            }
-                            .controlSize(.small)
-                            Button(language.text("Khôi phục phiên sao lưu", "Restore saved sessions")) {
-                                confirmingFullBackupRestore = true
-                            }
-                            .controlSize(.small)
-                            .disabled(store.isWorking)
-                            Text(language.text("Tự động giữ 5 bản sao đầy đủ được mã hóa bằng khóa trong Keychain của máy này; khôi phục xong có thể đăng nhập lại Codex.", "Keeps 5 full backups encrypted with this Mac's Keychain key; restored accounts can sign in to Codex again."))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text(language.text(
-                                "Nếu macOS hỏi quyền Keychain cho \"com.codexroster.app\", hãy Allow / Always Allow — đó là khóa mã hóa cục bộ, không phải mật khẩu OpenAI. Xem Giới thiệu để biết thêm.",
-                                "If macOS asks for Keychain access to \"com.codexroster.app\", choose Allow / Always Allow — that is the local encryption key, not your OpenAI password. See About for details."
-                            ))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        }
-                        .padding(.top, 8)
-                    } label: {
-                        HStack {
-                            Label(language.text("Tự động hóa", "Automation"), systemImage: "gearshape.2")
-                                .font(.subheadline.weight(.semibold))
-                            Spacer()
-                            Text(store.autoStartUsageWindows
-                                ? language.text("Cửa sổ quota · bật", "Quota windows · on")
-                                : language.text("Cửa sổ quota · tắt", "Quota windows · off"))
-                                .font(.caption)
-                                .foregroundStyle(store.autoStartUsageWindows ? Color.green : Color.secondary)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(14)
-                    .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: 13))
-                    .confirmationDialog(
-                        language.text("Khôi phục phiên sao lưu?", "Restore saved sessions?"),
-                        isPresented: $confirmingFullBackupRestore,
-                        titleVisibility: .visible
-                    ) {
-                        Button(language.text("Khôi phục", "Restore"), role: .destructive) {
-                            store.restoreLatestFullBackup()
-                        }
-                        Button(language.text("Hủy", "Cancel"), role: .cancel) {}
-                    } message: {
-                        Text(language.text("Danh sách hiện tại sẽ được thay bằng bản sao tự động gần nhất trên máy này.", "The current account list will be replaced by this Mac's most recent automatic backup."))
-                    }
-
-                    GroupBox(language.text("An toàn phiên Codex", "Codex session safety")) {
-                        VStack(alignment: .leading, spacing: 9) {
-                            Label(language.text(
-                                "Roster không xoay refresh token của phiên đang dùng",
-                                "Roster does not rotate the active session refresh token"
-                            ), systemImage: "lock.shield.fill")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.green)
-                            Text(language.text(
-                                "Codex là chủ sở hữu duy nhất của live session. Kiểm tra quota nền chỉ dùng access token hiện có; nếu token hết hạn, app giữ kết quả đã xác minh gần nhất thay vì mạo hiểm làm bạn bị đăng xuất.",
-                                "Codex is the sole owner of the live session. Background quota checks only use its current access token; if it expires, the app keeps the last verified result instead of risking a sign-out."
-                            ))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            if store.hasRunningCodexProcesses {
-                                Label(language.text("\(store.status?.processWarnings.count ?? 0) tiến trình Codex đang chạy", "\(store.status?.processWarnings.count ?? 0) Codex processes are running"), systemImage: "exclamationmark.triangle.fill")
-                                    .font(.caption)
-                                    .foregroundStyle(.orange)
-                            } else {
-                                Label(language.text("Sẵn sàng chuyển tài khoản", "Ready to switch accounts"), systemImage: "checkmark.circle.fill")
-                                    .font(.caption)
-                                    .foregroundStyle(.green)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-            }
-            .frame(width: contentWidth, alignment: .leading)
-            .padding(.vertical, 24)
-            .frame(maxWidth: .infinity, alignment: .top)
+                .frame(width: contentWidth, alignment: .leading)
+                .padding(.vertical, 24)
+                .frame(maxWidth: .infinity, alignment: .top)
             }
         }
         .navigationTitle(language.text("Tổng quan", "Overview"))
+    }
+}
+
+/// Automation and recovery are settings, not status, so they answer to the
+/// standard Settings shortcut instead of trailing the Overview scroll.
+struct AutomationSettingsView: View {
+    @EnvironmentObject private var store: AccountStore
+    @EnvironmentObject private var language: LanguageStore
+    @State private var confirmingFullBackupRestore = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Label(language.text("Tự động hóa", "Automation"), systemImage: "gearshape.2")
+                    .font(.headline)
+                    .padding(.bottom, 2)
+                Toggle(language.text("Tự động kiểm tra cửa sổ quota đến hạn", "Automatically check due quota windows"), isOn: Binding(
+                    get: { store.autoStartUsageWindows },
+                    set: { store.setAutoStartUsageWindows($0) }
+                ))
+                .disabled(store.isWorking)
+                Text(language.text(
+                    "Kiểm tra các cửa sổ quota tuần đã đến hạn theo lịch nền. Việc này không đăng nhập lại các tài khoản không hoạt động; theo dõi quota live vẫn chạy riêng khi app hoạt động.",
+                    "Checks due weekly quota windows in the background. It does not sign into inactive accounts; live quota monitoring runs separately while the app is active."
+                ))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                if store.isRefreshingQuotaInBackground {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text(language.text("Đang cập nhật quota…", "Updating quota…"))
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                } else if let lastQuotaRefreshAt = store.lastQuotaRefreshAt {
+                    Text(language.text(
+                        "Đã cập nhật \(lastQuotaRefreshAt.formatted(date: .omitted, time: .shortened))",
+                        "Updated \(lastQuotaRefreshAt.formatted(date: .omitted, time: .shortened))"
+                    ))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+                Divider()
+                Toggle(language.text("Tự động chuyển khi hết quota", "Auto-switch when quota is exhausted"), isOn: Binding(
+                    get: { store.autoSwitchWhenExhausted },
+                    set: { store.setAutoSwitchWhenExhausted($0) }
+                ))
+                .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
+                Text(language.text(
+                    "Khi tài khoản Codex (~/.codex) còn 0%: tìm tài khoản còn quota → force-quit ChatGPT → chuyển phiên → mở lại Desktop. Nhãn phiên theo ~/.codex, không đọc cookie đăng nhập riêng trong ChatGPT.",
+                    "When the Codex account (~/.codex) hits 0%: find an account with quota → force-quit ChatGPT → switch session → relaunch Desktop. The session label follows ~/.codex and does not read a separate ChatGPT cookie login."
+                ))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let autoSwitchState = store.autoSwitchState {
+                    Text(autoSwitchStatusText(autoSwitchState))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Toggle(language.text("Mở Codex Roster khi đăng nhập macOS", "Open Codex Roster at login"), isOn: Binding(
+                    get: { store.launchAtLoginEnabled },
+                    set: { store.setLaunchAtLogin($0) }
+                ))
+                .disabled(store.isWorking)
+                Text(language.text("Duy trì notch và các kiểm tra tự động sau khi bạn đăng nhập vào máy Mac.", "Keeps the notch and automatic checks available after you sign in to your Mac."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button(language.text("Kiểm tra ngay", "Run refresh check now")) {
+                        store.runUsageWindowCheck()
+                    }
+                    .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
+                    if store.autoSwitchWhenExhausted {
+                        Button(language.text("Kiểm tra & chuyển", "Check & switch")) {
+                            store.runAutoSwitchCheck()
+                        }
+                        .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
+                    }
+                    Spacer()
+                    Button(language.text("Khôi phục tài khoản cũ", "Recover older accounts")) {
+                        store.recoverLegacySnapshots()
+                    }
+                    .disabled(store.isWorking)
+                }
+                .controlSize(.small)
+                Button(language.text("Khôi phục phiên sao lưu", "Restore saved sessions")) {
+                    confirmingFullBackupRestore = true
+                }
+                .controlSize(.small)
+                .disabled(store.isWorking)
+                Text(language.text("Tự động giữ 5 bản sao đầy đủ được mã hóa bằng khóa trong Keychain của máy này; khôi phục xong có thể đăng nhập lại Codex.", "Keeps 5 full backups encrypted with this Mac's Keychain key; restored accounts can sign in to Codex again."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(language.text(
+                    "Nếu macOS hỏi quyền Keychain cho \"com.codexroster.app\", hãy Allow / Always Allow — đó là khóa mã hóa cục bộ, không phải mật khẩu OpenAI. Xem Giới thiệu để biết thêm.",
+                    "If macOS asks for Keychain access to \"com.codexroster.app\", choose Allow / Always Allow — that is the local encryption key, not your OpenAI password. See About for details."
+                ))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(width: 470, height: 580)
+        .confirmationDialog(
+            language.text("Khôi phục phiên sao lưu?", "Restore saved sessions?"),
+            isPresented: $confirmingFullBackupRestore,
+            titleVisibility: .visible
+        ) {
+            Button(language.text("Khôi phục", "Restore"), role: .destructive) {
+                store.restoreLatestFullBackup()
+            }
+            Button(language.text("Hủy", "Cancel"), role: .cancel) {}
+        } message: {
+            Text(language.text("Danh sách hiện tại sẽ được thay bằng bản sao tự động gần nhất trên máy này.", "The current account list will be replaced by this Mac's most recent automatic backup."))
+        }
     }
 
     private func autoSwitchStatusText(_ state: AutoSwitchState) -> String {
@@ -697,16 +782,62 @@ private enum NextAction {
     case recover(SavedAccount)
     case retryQuota([SavedAccount])
     case allClear(SavedAccount?)
+
+    /// The dashboard drops the banner entirely when nothing needs the user, so
+    /// the live session is stated once in the sidebar instead of three times.
+    var isAllClear: Bool {
+        if case .allClear = self { return true }
+        return false
+    }
+
+    /// Priority order: being blocked *right now* outranks housekeeping on other
+    /// accounts, so an exhausted live session is resolved before sign-ins.
+    @MainActor
+    static func resolve(in store: AccountStore) -> NextAction {
+        let accounts = store.accounts
+        guard !accounts.isEmpty else { return .addAccount }
+        let ready = store.sortedAccounts(accounts.filter { $0.triage == .ready })
+        let signIn = accounts.filter { $0.triage == .needsAction && $0.requiresLogin }
+        let recovery = accounts.filter { $0.triage == .needsAction && $0.requiresLocalRecovery }
+        let transient = accounts.filter { $0.triage == .needsAction && $0.hasTransientUsageError }
+        let resting = accounts.filter { $0.triage == .resting }
+        let active = accounts.first(where: \.isActive)
+
+        let needsReplacement = active == nil || active?.isExhaustedForSwitch == true
+        if needsReplacement {
+            if let candidate = ready.first { return .switchTo(candidate) }
+            if let banked = store.sortedAccounts(resting.filter(\.restingHasBankedReset)).first {
+                return .redeemBankedReset(banked)
+            }
+            if !signIn.isEmpty { return .signIn(signIn) }
+            if let soonest = soonestReset(among: resting) { return .waitForReset(soonest) }
+        }
+        if !signIn.isEmpty { return .signIn(signIn) }
+        if let account = recovery.first { return .recover(account) }
+        if !transient.isEmpty { return .retryQuota(transient) }
+        return .allClear(active)
+    }
+
+    @MainActor
+    private static func soonestReset(among accounts: [SavedAccount]) -> SavedAccount? {
+        accounts
+            .compactMap { account -> (SavedAccount, Date)? in
+                guard let reset = account.quotaWindowsForSwitch.map(\.resetAt.value).min() else { return nil }
+                return (account, reset)
+            }
+            .min { $0.1 < $1.1 }?
+            .0
+    }
 }
 
 private struct NextActionBanner: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @Binding var selection: UUID?
+    let action: NextAction
     let reloginAll: ([SavedAccount]) -> Void
 
     var body: some View {
-        let action = nextAction
         HStack(alignment: .center, spacing: 14) {
             Image(systemName: icon(for: action))
                 .font(.title2)
@@ -734,43 +865,6 @@ private struct NextActionBanner: View {
         )
         .accessibilityElement(children: .contain)
         .accessibilityLabel(language.text("Việc nên làm tiếp theo", "Next action"))
-    }
-
-    /// Priority order: being blocked *right now* outranks housekeeping on other
-    /// accounts, so an exhausted live session is resolved before sign-ins.
-    private var nextAction: NextAction {
-        let accounts = store.accounts
-        guard !accounts.isEmpty else { return .addAccount }
-        let ready = store.sortedAccounts(accounts.filter { $0.triage == .ready })
-        let signIn = accounts.filter { $0.triage == .needsAction && $0.requiresLogin }
-        let recovery = accounts.filter { $0.triage == .needsAction && $0.requiresLocalRecovery }
-        let transient = accounts.filter { $0.triage == .needsAction && $0.hasTransientUsageError }
-        let resting = accounts.filter { $0.triage == .resting }
-        let active = accounts.first(where: \.isActive)
-
-        let needsReplacement = active == nil || active?.isExhaustedForSwitch == true
-        if needsReplacement {
-            if let candidate = ready.first { return .switchTo(candidate) }
-            if let banked = store.sortedAccounts(resting.filter(\.restingHasBankedReset)).first {
-                return .redeemBankedReset(banked)
-            }
-            if !signIn.isEmpty { return .signIn(signIn) }
-            if let soonest = soonestReset(among: resting) { return .waitForReset(soonest) }
-        }
-        if !signIn.isEmpty { return .signIn(signIn) }
-        if let account = recovery.first { return .recover(account) }
-        if !transient.isEmpty { return .retryQuota(transient) }
-        return .allClear(active)
-    }
-
-    private func soonestReset(among accounts: [SavedAccount]) -> SavedAccount? {
-        accounts
-            .compactMap { account -> (SavedAccount, Date)? in
-                guard let reset = account.quotaWindowsForSwitch.map(\.resetAt.value).min() else { return nil }
-                return (account, reset)
-            }
-            .min { $0.1 < $1.1 }?
-            .0
     }
 
     private func icon(for action: NextAction) -> String {
@@ -935,10 +1029,10 @@ private struct AccountTriageBoard: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @Binding var selection: UUID?
+    @Binding var focus: AccountTriage?
     let relogin: (SavedAccount) -> Void
     let reloginAll: ([SavedAccount]) -> Void
     @State private var searchText = ""
-    @State private var focus: AccountTriage?
     /// Low-signal buckets start folded so the board opens on what matters.
     @State private var collapsed: Set<Int> = [
         AccountTriage.resting.rawValue,
@@ -951,7 +1045,6 @@ private struct AccountTriageBoard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-            filterChips
             if isSelecting { bulkBar }
             Divider()
             if matchingAccounts.isEmpty {
@@ -1000,6 +1093,27 @@ private struct AccountTriageBoard: View {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
 
+            if let focus {
+                Button {
+                    self.focus = nil
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: focus.systemImage)
+                        Text(focus.title(in: language.language))
+                        Image(systemName: "xmark")
+                            .font(.caption2)
+                    }
+                    .font(.caption.weight(.medium))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(focus.tint.opacity(0.20), in: Capsule())
+                    .foregroundStyle(focus.tint)
+                }
+                .buttonStyle(.plain)
+                .pointingHandCursor()
+                .help(language.text("Bỏ lọc", "Clear the filter"))
+            }
+
             Spacer(minLength: 12)
 
             HStack(spacing: 5) {
@@ -1043,47 +1157,6 @@ private struct AccountTriageBoard: View {
             }
             .controlSize(.small)
             .disabled(store.accounts.isEmpty)
-        }
-    }
-
-    private var filterChips: some View {
-        HStack(spacing: 6) {
-            ForEach(AccountTriage.allCases, id: \.self) { bucket in
-                // Counted before the focus filter, so focusing one state does
-                // not blank out every other chip.
-                let count = searchedAccounts.filter { $0.triage == bucket }.count
-                if count > 0 || focus == bucket {
-                    Button {
-                        focus = (focus == bucket) ? nil : bucket
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: bucket.systemImage)
-                            Text(bucket.title(in: language.language))
-                            Text("\(count)")
-                                .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                        }
-                        .font(.caption.weight(.medium))
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 5)
-                        .background(
-                            focus == bucket ? bucket.tint.opacity(0.20) : Color.secondary.opacity(0.10),
-                            in: Capsule()
-                        )
-                        .overlay(
-                            Capsule().strokeBorder(
-                                focus == bucket ? bucket.tint.opacity(0.55) : .clear,
-                                lineWidth: 1
-                            )
-                        )
-                        .foregroundStyle(focus == bucket ? bucket.tint : Color.primary)
-                    }
-                    .buttonStyle(.plain)
-                    .pointingHandCursor()
-                    .help(bucket.subtitle(in: language.language))
-                }
-            }
-            Spacer(minLength: 0)
         }
     }
 
@@ -1590,10 +1663,7 @@ private struct TriageQuotaBar: View {
 
 private struct DashboardHero: View {
     @EnvironmentObject private var language: LanguageStore
-    let currentAccount: String?
     let accountCount: Int
-    let activeAccount: SavedAccount?
-    @Binding var selection: UUID?
 
     var body: some View {
         HStack(alignment: .top, spacing: 22) {
@@ -1611,27 +1681,6 @@ private struct DashboardHero: View {
             }
 
             Spacer(minLength: 8)
-
-            VStack(alignment: .leading, spacing: 8) {
-                Label(language.text("Phiên Codex", "Codex session"), systemImage: "person.crop.circle.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.tint)
-                Text(currentAccount ?? language.text("Chưa đăng nhập", "Not signed in"))
-                    .font(.body.weight(.semibold))
-                    .textSelection(.enabled)
-                Text(language.text("Theo ~/.codex · không khởi động lại khi đăng nhập", "From ~/.codex · no restart during sign-in"))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                if let activeAccount {
-                    Button(language.text("Xem tài khoản hiện tại", "View current account")) {
-                        selection = activeAccount.id
-                    }
-                    .controlSize(.small)
-                }
-            }
-            .frame(minWidth: 245, maxWidth: .infinity, alignment: .leading)
-            .padding(16)
-            .background(.background.opacity(0.55), in: RoundedRectangle(cornerRadius: 14))
         }
         .padding(22)
         .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: 18))
@@ -2279,7 +2328,7 @@ private struct OpenAIStatusCard: View {
                 HStack(alignment: .firstTextBaseline, spacing: 9) {
                     Image(systemName: status.isOperational ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                         .foregroundStyle(status.isOperational ? .green : .orange)
-                    Text(localizedOpenAIStatus(status.description))
+                    Text(localizedOpenAIStatus(status.description, language: language.language))
                         .font(.body.weight(.semibold))
                     Spacer()
                     Button(language.text("Cập nhật", "Refresh")) { store.refreshOpenAIStatus() }
@@ -2317,18 +2366,20 @@ private struct OpenAIStatusCard: View {
         .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: 15))
     }
 
-    private func localizedOpenAIStatus(_ description: String) -> String {
-        guard language.language == .vietnamese, description == "All Systems Operational" else {
-            return description
-        }
-        return "Mọi hệ thống đang hoạt động"
+}
+
+private func localizedOpenAIStatus(_ description: String, language: AppLanguage) -> String {
+    guard language == .vietnamese, description == "All Systems Operational" else {
+        return description
     }
+    return "Mọi hệ thống đang hoạt động"
 }
 
 private struct GlobalResetOutlookCard: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @Environment(\.openURL) private var openURL
+    @State private var showingSignalDetails = false
 
     private let sourceURL = URL(string: "https://x.com/thsottiaux")!
 
@@ -2351,8 +2402,9 @@ private struct GlobalResetOutlookCard: View {
                 let isConfirmedReset = outlook.lastResetIsConfirmed == true
                 let urgencyColor = forecastColor(max(outlook.chance24Hours, outlook.chance48Hours), high: .orange)
 
-                // Forecast scores with color-coded urgency
-                HStack(spacing: 12) {
+                // One full-width row of metrics; the card used to stack these
+                // vertically and leave half of its width blank.
+                HStack(alignment: .top, spacing: 12) {
                     ResetOutlookMetric(
                         title: language.text("24 giờ", "24 hours"),
                         value: "\(outlook.chance24Hours)%",
@@ -2368,10 +2420,16 @@ private struct GlobalResetOutlookCard: View {
                         value: formatWindowForVietnam(outlook),
                         tint: .secondary
                     )
+                    if let scheduledResetAt = outlook.nextResetAt {
+                        ResetOutlookMetric(
+                            title: language.text("Reset dự kiến", "Expected reset"),
+                            value: formattedVietnamResetDate(scheduledResetAt, language: language.language),
+                            tint: .orange
+                        )
+                    }
                 }
 
-                // Confidence indicator
-                HStack(spacing: 6) {
+                HStack(spacing: 7) {
                     Circle()
                         .fill(urgencyColor)
                         .frame(width: 8, height: 8)
@@ -2379,132 +2437,43 @@ private struct GlobalResetOutlookCard: View {
                         "Độ tin cậy: \(localizedConfidence(outlook.confidence))",
                         "Confidence: \(localizedConfidence(outlook.confidence))"
                     ))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                     if isConfirmedReset {
-                        Text("·")
-                            .foregroundStyle(.tertiary)
+                        Text("·").foregroundStyle(.tertiary)
                         Text(language.text("Đã xác nhận", "Confirmed"))
-                            .font(.caption.weight(.medium))
+                            .fontWeight(.medium)
                             .foregroundStyle(.green)
                     }
-                }
-
-                // Cadence info
-                if let cadenceDays = outlook.cadenceDays {
-                    HStack(spacing: 4) {
-                        Image(systemName: "clock.badge.checkmark")
-                            .font(.caption)
-                            .foregroundStyle(.blue)
+                    if let cadenceDays = outlook.cadenceDays {
+                        Text("·").foregroundStyle(.tertiary)
                         Text(language.text(
-                            "Nhịp reset: ~\(String(format: "%.1f", cadenceDays)) ngày",
-                            "Reset cadence: ~\(String(format: "%.1f", cadenceDays)) days"
+                            "Nhịp ~\(String(format: "%.1f", cadenceDays)) ngày",
+                            "Cadence ~\(String(format: "%.1f", cadenceDays)) days"
                         ))
                         if outlook.cadenceAccelerating == true {
                             Text(language.text("(tăng nhanh)", "(accelerating)"))
                                 .foregroundStyle(.orange)
                         }
                     }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
 
-                // Last reset / signal
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(isConfirmedReset
-                        ? language.text("Lần reset gần nhất", "Last reset")
-                        : language.text("Tín hiệu gần nhất", "Latest signal"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(formattedResetDate(outlook.lastResetAt, language: language.language))
-                            .font(.subheadline.weight(.semibold))
-                        TimelineView(.periodic(from: .now, by: 60)) { context in
-                            Text(formattedRelativeResetDate(
-                                outlook.lastResetAt,
-                                relativeTo: context.date,
-                                language: language.language
-                            ))
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                        }
+                    Spacer(minLength: 8)
+
+                    Button(language.text("Chi tiết tín hiệu", "Signal details")) {
+                        showingSignalDetails.toggle()
                     }
-                }
-
-                // Expected reset
-                if let scheduledResetAt = outlook.nextResetAt {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Image(systemName: "clock.arrow.circlepath")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                        Text(language.text("Reset dự kiến", "Expected reset"))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(formattedVietnamResetDate(scheduledResetAt, language: language.language))
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.orange)
+                    .controlSize(.small)
+                    .popover(isPresented: $showingSignalDetails, arrowEdge: .bottom) {
+                        signalDetails(outlook, isConfirmedReset: isConfirmedReset)
                     }
-                    .padding(.vertical, 4)
-                    .padding(.horizontal, 8)
-                    .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
-                }
-
-                if let summary = outlook.signalSummary, !summary.isEmpty {
-                    Text(summary)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
-                }
-
-                // Recent Reset Timeline
-                if let timeline = store.resetTimeline, !timeline.isEmpty {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(language.text("Lịch sử reset", "Reset history"))
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.secondary)
-                        ForEach(timeline.prefix(2)) { event in
-                            HStack {
-                                Text(event.date)
-                                    .font(.caption2.monospacedDigit())
-                                    .foregroundStyle(.tertiary)
-                                Text(event.summary.prefix(50).description)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
-                        }
-                    }
-                }
-
-                // Juice Levels
-                if let juice = store.resetJuice, !juice.efforts.isEmpty {
-                    HStack(spacing: 12) {
-                        Text(language.text("Effort", "Effort"))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        ForEach(juice.efforts.prefix(4)) { effort in
-                            HStack(spacing: 2) {
-                                Text(effort.effort.prefix(1).uppercased())
-                                    .font(.caption2.weight(.medium))
-                                    .foregroundStyle(.secondary)
-                                Text("\(effort.current)")
-                                    .font(.caption2.monospacedDigit())
-                                    .foregroundStyle(effort.delta > 0 ? .green : effort.delta < 0 ? .red : .secondary)
-                            }
-                        }
-                    }
-                }
-
-                HStack {
-                    Text(language.text("Quota tài khoản là xác nhận cuối cùng.", "Account quota is the final confirmation."))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
                     Button(language.text("Cập nhật", "Refresh")) { store.refreshResetOutlook() }
                         .controlSize(.small)
                         .disabled(store.isLoadingResetOutlook)
                 }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                Text(language.text("Quota tài khoản là xác nhận cuối cùng.", "Account quota is the final confirmation."))
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
             } else {
                 HStack {
                     if store.isLoadingResetOutlook {
@@ -2523,6 +2492,97 @@ private struct GlobalResetOutlookCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
         .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: 15))
+    }
+
+    @ViewBuilder
+    private func signalDetails(_ outlook: ResetOutlook, isConfirmedReset: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(isConfirmedReset
+                    ? language.text("Lần reset gần nhất", "Last reset")
+                    : language.text("Tín hiệu gần nhất", "Latest signal"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(formattedResetDate(outlook.lastResetAt, language: language.language))
+                        .font(.subheadline.weight(.semibold))
+                    TimelineView(.periodic(from: .now, by: 60)) { context in
+                        Text(formattedRelativeResetDate(
+                            outlook.lastResetAt,
+                            relativeTo: context.date,
+                            language: language.language
+                        ))
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                    }
+                }
+            }
+
+            if let summary = outlook.signalSummary, !summary.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(language.text("Tóm tắt tín hiệu", "Signal summary"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(localizedSignalSummary(summary))
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+            }
+
+            if let timeline = store.resetTimeline, !timeline.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(language.text("Lịch sử reset", "Reset history"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ForEach(timeline.prefix(3)) { event in
+                        HStack(spacing: 6) {
+                            Text(event.date)
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.tertiary)
+                            Text(event.summary.prefix(50).description)
+                                .font(.caption2)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+            }
+
+            if let juice = store.resetJuice, !juice.efforts.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(language.text("Mức effort còn lại", "Remaining effort levels"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 12) {
+                        ForEach(juice.efforts.prefix(4)) { effort in
+                            HStack(spacing: 4) {
+                                Text(effort.effort.capitalized)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                Text("\(effort.current)")
+                                    .font(.caption2.monospacedDigit().weight(.medium))
+                                    .foregroundStyle(effort.delta > 0 ? .green : effort.delta < 0 ? .red : .secondary)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .frame(width: 340, alignment: .leading)
+    }
+
+    /// The upstream feed answers "did a reset happen" with a bare token, which
+    /// used to reach the card as an unlabelled "Yes".
+    private func localizedSignalSummary(_ summary: String) -> String {
+        switch summary.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "yes", "true":
+            return language.text("Nguồn báo đã có reset.", "The source reports a reset.")
+        case "no", "false":
+            return language.text("Nguồn báo chưa có reset.", "The source reports no reset yet.")
+        default:
+            return summary
+        }
     }
 
     private func forecastColor(_ percent: Int, high: Color = .orange) -> Color {
@@ -2564,7 +2624,7 @@ private struct ResetOutlookMetric: View {
                 .foregroundStyle(tint)
                 .monospacedDigit()
         }
-        .frame(width: 112, alignment: .leading)
+        .frame(minWidth: 112, maxWidth: .infinity, alignment: .leading)
         .padding(11)
         .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: 11))
     }

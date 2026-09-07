@@ -573,14 +573,14 @@ private struct DashboardView: View {
                             .controlSize(.small)
                             .disabled(store.isWorking)
                             Text(language.text("Tự động giữ 5 bản sao đầy đủ được mã hóa bằng khóa trong Keychain của máy này; khôi phục xong có thể đăng nhập lại Codex.", "Keeps 5 full backups encrypted with this Mac's Keychain key; restored accounts can sign in to Codex again."))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                             Text(language.text(
                                 "Nếu macOS hỏi quyền Keychain cho \"com.codexroster.app\", hãy Allow / Always Allow — đó là khóa mã hóa cục bộ, không phải mật khẩu OpenAI. Xem Giới thiệu để biết thêm.",
                                 "If macOS asks for Keychain access to \"com.codexroster.app\", choose Allow / Always Allow — that is the local encryption key, not your OpenAI password. See About for details."
                             ))
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
                         }
                         .padding(.top, 8)
                     } label: {
@@ -1109,13 +1109,13 @@ private struct AccountTriageBoard: View {
 
             Spacer()
 
-            Button(language.text("Quota", "Refresh")) {
+            Button(language.text("Làm mới quota", "Refresh quota")) {
                 store.refreshUsage(for: refreshableAccounts)
             }
             .disabled(refreshableAccounts.isEmpty || store.isBusyForActions)
             if !selectedReloginAccounts.isEmpty {
                 Button(language.text(
-                    "Login lại \(selectedReloginAccounts.count)",
+                    "Đăng nhập lại \(selectedReloginAccounts.count)",
                     "Sign in to \(selectedReloginAccounts.count)"
                 )) {
                     reloginAll(selectedReloginAccounts)
@@ -1453,7 +1453,7 @@ private struct TriageAccountCard: View {
         switch bucket {
         case .needsAction:
             if account.requiresLogin {
-                Button(language.text("Login lại", "Sign in"), action: relogin)
+                Button(language.text("Đăng nhập lại", "Sign in"), action: relogin)
                     .controlSize(.small)
                     .tint(.orange)
             } else if account.requiresLocalRecovery {
@@ -1893,14 +1893,7 @@ private struct TokenUsageChart: View {
         }
         .frame(maxWidth: .infinity)
         .padding(16)
-        .background(
-            LinearGradient(
-                colors: [dashboardCardFill, dashboardCardFill],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            ),
-            in: RoundedRectangle(cornerRadius: 14)
-        )
+        .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: 14))
     }
 }
 
@@ -3036,8 +3029,19 @@ private struct AccountDetail: View {
                         isArchived ? restore() : archive()
                     }
                     .disabled(store.isWorking)
-                    Button(language.text("Xóa", "Remove"), role: .destructive, action: remove)
-                        .disabled(store.isWorking)
+                    Menu {
+                        Button(language.text("Sao chép email", "Copy email")) {
+                            copyAccountEmail(account.email)
+                        }
+                        Divider()
+                        Button(language.text("Xóa tài khoản", "Remove account"), role: .destructive, action: remove)
+                            .disabled(store.isWorking)
+                    } label: {
+                        Image(systemName: "ellipsis")
+                    }
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help(language.text("Thao tác khác", "More actions"))
                     if !isArchived && account.requiresLogin {
                         Button(language.text("Đăng nhập lại", "Sign in again"), action: relogin)
                             .buttonStyle(.borderedProminent)
@@ -4232,31 +4236,49 @@ private struct MenuBarHeader: View {
     let attentionCount: Int
 
     var body: some View {
-        HStack(spacing: 9) {
+        HStack(alignment: .top, spacing: 9) {
             Image(systemName: "sparkles")
                 .font(.headline)
                 .foregroundStyle(rosterActionBlue)
                 .frame(width: 30, height: 30)
                 .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 9))
             VStack(alignment: .leading, spacing: 1) {
-                Text("Codex Roster")
-                    .font(.headline)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("Codex Roster")
+                        .font(.headline)
+                    Text("by An Le")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+
+                    Spacer(minLength: 8)
+
+                    if attentionCount > 0 {
+                        Text("\(attentionCount)")
+                            .font(.caption.monospacedDigit().weight(.bold))
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(.orange.opacity(0.12), in: Capsule())
+                            .help(language.text("Tài khoản cần đăng nhập", "Accounts needing sign-in"))
+                    }
+
+                    Link(destination: URL(string: "https://github.com/anlvdt/codex-roster")!) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "arrow.up.right")
+                            Text("GitHub")
+                        }
+                        .font(.caption.weight(.semibold))
+                    }
+                    .foregroundStyle(rosterActionBlue)
+                    .pointingHandCursor()
+                    .help(language.text("Mở trang GitHub của Codex Roster", "Open the Codex Roster GitHub page"))
+                }
                 Text(language.text(
                     "\(liveProviderCount)/4 provider live · \(savedCount) đã lưu",
                     "\(liveProviderCount)/4 providers live · \(savedCount) saved"
                 ))
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            }
-            Spacer()
-            if attentionCount > 0 {
-                Text("\(attentionCount)")
-                    .font(.caption.monospacedDigit().weight(.bold))
-                    .foregroundStyle(.orange)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(.orange.opacity(0.12), in: Capsule())
-                    .help(language.text("Tài khoản cần đăng nhập", "Accounts needing sign-in"))
             }
         }
     }

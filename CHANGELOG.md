@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.4.0 - 2026-09-07
+
+### Added
+
+- Redesign the notch as two progress rings that flank the physical camera housing — 5-hour on the left, weekly on the right — each showing remaining percent inside a quota-tinted ring. The panel measures the display's notch and sits in the menu-bar band beside the camera instead of hanging below over other windows; displays without a notch get a small centred pill.
+
+### Changed
+
+- Rebalance the Overview against the sidebar. The live session was stated four times on the first screen and the state counts twice, while the sidebar left about two thirds of its height empty. The sidebar now carries the session (name, email, both quota bars) and the OpenAI/session-safety indicators; the hero drops its session column and the all-clear banner is skipped entirely when nothing needs you.
+- Sidebar signal rows became the account filter, replacing the duplicated chip row in the board. The board shows a pill to clear the filter.
+- Move Automation and session recovery to the Settings window (⌘,), which until now opened About rather than any settings. Overview keeps status only.
+- Supersede the two-column Overview layout added in v0.3.1: with automation and service status out of the scroll, the remaining cards use the full width directly.
+
+### Fixed
+
+- The reset radar printed the upstream feed's raw "Yes" token as an unlabelled line. Signal detail is now labelled and lives behind a popover.
+- Reset metrics were pinned to 112pt, so "6 AM - 9 AM" spilled outside its own card background.
+- Remove the mismatched hover background from bordered notch buttons, and the redundant chevron from the icon-only overflow menu.
+- Match the copy and resync icons in the notch session card, which differed in size, weight and colour.
+
 ## v0.3.1 - 2026-09-07
 
 ### Fixed

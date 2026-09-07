@@ -4421,15 +4421,18 @@ private struct MenuBarCurrentSession: View {
                     copyAccountEmail(emailToCopy)
                 } label: {
                     Image(systemName: "doc.on.doc")
+                        .font(.system(size: 13, weight: .medium))
                 }
                 .buttonStyle(.plain)
+                .foregroundStyle(rosterActionBlue)
                 .help(language.text("Sao chép email", "Copy email"))
                 .menuBarInteractive()
             }
             Button {
                 store.resyncChatGPTDesktop()
             } label: {
-                Image(systemName: chatGPTRunning ? "arrow.triangle.2.circlepath" : "play.fill")
+                Image(systemName: chatGPTRunning ? "arrow.triangle.2.circlepath" : "play.circle")
+                    .font(.system(size: 13, weight: .medium))
             }
             .buttonStyle(.plain)
             .foregroundStyle(rosterActionBlue)

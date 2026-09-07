@@ -12,12 +12,31 @@ struct NotchWindowView: View {
     @State private var expandedContentOpacity = 0.0
     @State private var hoverTask: Task<Void, Never>?
     @State private var collapseTask: Task<Void, Never>?
+    /// Height of the display's physical notch (menu-bar band). The compact
+    /// panel sits inside this band so it never hangs below over other windows.
+    @State private var notchInset: CGFloat = 0
+    /// Width of the physical notch. The compact panel keeps this much clear
+    /// space in its centre so the two quota rings flank the camera housing.
+    @State private var notchWidth: CGFloat = 0
 
-    private let compactWidth: CGFloat = 356
-    private let expandedWidth: CGFloat = 436
+    private let earHalfWidth: CGFloat = 74
+    private let expandedWidth: CGFloat = 392
 
     private var activeAccount: SavedAccount? {
         store.accounts.first { $0.isActive && !store.isArchived($0) }
+    }
+
+    /// Two ears flanking the notch. On displays without a notch this collapses
+    /// to a small centred pill (an 8pt gap instead of the camera width).
+    private var compactWidth: CGFloat {
+        earHalfWidth * 2 + max(notchWidth, 8)
+    }
+
+    private var compactHeight: CGFloat {
+        // When collapsed the rings sit nestled inside the ears with margin above
+        // and below. When expanded this same row is just the panel's header, so
+        // it tightens to the notch band and the content starts near the top.
+        isExpanded ? max(notchInset, 28) : max(notchInset, 26) + 8
     }
 
     private var panelWidth: CGFloat {
@@ -36,12 +55,13 @@ struct NotchWindowView: View {
                 MenuBarView()
                     .opacity(expandedContentOpacity)
                     .scaleEffect(
-                        expandedContentOpacity == 0 ? 0.98 : 1,
+                        expandedContentOpacity == 0 ? 0.985 : 1,
                         anchor: .top
                     )
             }
         }
         .frame(width: panelWidth)
+        .fixedSize(horizontal: false, vertical: true)
         .background {
             notchShape
                 .fill(.ultraThinMaterial)
@@ -54,16 +74,17 @@ struct NotchWindowView: View {
                 .stroke(Color.white.opacity(isExpanded ? 0.16 : 0.09), lineWidth: 1)
         }
         .clipShape(notchShape)
-        .shadow(color: .black.opacity(isExpanded ? 0.34 : 0.18), radius: isExpanded ? 24 : 10, y: 10)
+        // No SwiftUI drop shadow: a content-sized borderless window includes the
+        // shadow's bleed in its frame, which pushes the panel down from the very
+        // top of the screen. The stroke border provides edge definition instead.
         .preferredColorScheme(.dark)
-        .background(NotchWindowConfigurator(panelWidth: panelWidth))
+        .background(NotchWindowConfigurator(panelWidth: panelWidth, notchInset: $notchInset, notchWidth: $notchWidth))
         .onHover(perform: handleHover)
         .animation(panelAnimation, value: isExpanded)
         .task {
             store.startCoreMonitoring()
             store.refreshProviderStatus(silently: true)
-            let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.46"
-            updater.startAutomaticChecks(currentVersion: version)
+            updater.startAutomaticChecks(currentVersion: AppInfo.shortVersion)
         }
         .onDisappear {
             hoverTask?.cancel()
@@ -82,42 +103,68 @@ struct NotchWindowView: View {
                 expand()
             }
         } label: {
-            HStack(spacing: 9) {
-                NotchAccountIdentity(
-                    account: activeAccount,
-                    providerStates: store.providerStates
-                )
-
-                Spacer(minLength: 2)
-
-                NotchQuotaMetric(
-                    title: language.text("5H", "5h"),
+            HStack(spacing: 0) {
+                notchEar(
+                    label: language.text("5H", "5h"),
                     window: activeAccount?.usage?.fiveHour,
-                    alignment: .leading
+                    prominent: true,
+                    ringFirst: false
                 )
+                .frame(width: earHalfWidth, alignment: .center)
 
-                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(.primary.opacity(0.78))
-                    .frame(width: 20, height: 20)
-                    .background(Color.white.opacity(0.08), in: Circle())
+                Color.clear.frame(width: max(notchWidth, 8))
+
+                notchEar(
+                    label: language.text("Tuần", "Wk"),
+                    window: activeAccount?.usage?.weekly,
+                    prominent: false,
+                    ringFirst: true
+                )
+                .frame(width: earHalfWidth, alignment: .center)
             }
-            .padding(.horizontal, 11)
-            .frame(height: 44)
+            .frame(height: compactHeight)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(language.text(
-            isExpanded ? "Thu gọn Codex Roster" : "Mở Codex Roster từ notch",
-            isExpanded ? "Collapse Codex Roster" : "Open Codex Roster from the notch"
-        ))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(compactAccessibilityLabel)
+    }
+
+    /// One side of the notch: a progress ring with the remaining percentage in
+    /// its centre, plus a short window label on the outward side.
+    private func notchEar(label: String, window: UsageWindow?, prominent: Bool, ringFirst: Bool) -> some View {
+        let text = Text(label)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .fixedSize()
+        return HStack(spacing: 6) {
+            if ringFirst {
+                NotchRing(window: window, prominent: prominent)
+                text
+            } else {
+                text
+                NotchRing(window: window, prominent: prominent)
+            }
+        }
+    }
+
+    private var compactAccessibilityLabel: String {
+        let five = activeAccount?.usage?.fiveHour?.displayRemainingPercent
+        let week = activeAccount?.usage?.weekly?.displayRemainingPercent
+        let fiveText = five.map { "\($0)%" } ?? language.text("chưa có", "no data")
+        let weekText = week.map { "\($0)%" } ?? language.text("chưa có", "no data")
+        return language.text(
+            "5 giờ còn \(fiveText), tuần còn \(weekText). Mở Codex Roster.",
+            "5-hour \(fiveText), weekly \(weekText). Open Codex Roster."
+        )
     }
 
     private var notchShape: UnevenRoundedRectangle {
         UnevenRoundedRectangle(
             topLeadingRadius: 0,
-            bottomLeadingRadius: isExpanded ? 24 : 14,
-            bottomTrailingRadius: isExpanded ? 24 : 14,
+            bottomLeadingRadius: isExpanded ? 24 : 10,
+            bottomTrailingRadius: isExpanded ? 24 : 10,
             topTrailingRadius: 0,
             style: .continuous
         )
@@ -154,15 +201,17 @@ struct NotchWindowView: View {
         hoverTask?.cancel()
         collapseTask?.cancel()
 
+        // Animate width AND the added content height together so the panel
+        // grows in one smooth motion instead of snapping to full size.
         withAnimation(panelAnimation) {
             isExpanded = true
+            rendersExpandedContent = true
         }
-        rendersExpandedContent = true
 
         if reduceMotion {
             expandedContentOpacity = 1
         } else {
-            withAnimation(.easeOut(duration: 0.16).delay(0.08)) {
+            withAnimation(.easeOut(duration: 0.22).delay(0.06)) {
                 expandedContentOpacity = 1
             }
         }
@@ -179,68 +228,30 @@ struct NotchWindowView: View {
             return
         }
 
-        withAnimation(.easeOut(duration: 0.14)) {
+        withAnimation(.easeOut(duration: 0.12)) {
             expandedContentOpacity = 0
         }
         collapseTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(150))
+            try? await Task.sleep(for: .milliseconds(110))
             guard !Task.isCancelled else { return }
-            rendersExpandedContent = false
             withAnimation(panelAnimation) {
                 isExpanded = false
+                rendersExpandedContent = false
             }
         }
     }
 }
 
-private struct NotchAccountIdentity: View {
-    @EnvironmentObject private var language: LanguageStore
-    let account: SavedAccount?
-    let providerStates: [ProviderState]
-
-    private var provider: AIProvider {
-        account?.aiProvider ?? .openAI
-    }
-
-    private var liveProviderCount: Int {
-        providerStates.filter(\.available).count
-    }
-
-    var body: some View {
-        HStack(spacing: 7) {
-            ZStack(alignment: .bottomTrailing) {
-                Image(systemName: provider.icon)
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(.primary)
-                    .frame(width: 26, height: 26)
-                    .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
-
-                Circle()
-                    .fill(account == nil ? Color.secondary : Color.green)
-                    .frame(width: 7, height: 7)
-                    .overlay(Circle().stroke(Color.black.opacity(0.8), lineWidth: 1.5))
-                    .offset(x: 2, y: 2)
-            }
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(account == nil
-                    ? language.text("\(liveProviderCount)/4 provider live", "\(liveProviderCount)/4 providers live")
-                    : provider.compactName)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        }
-        .frame(width: 108, alignment: .leading)
-        .accessibilityElement(children: .combine)
-    }
-}
-
-private struct NotchQuotaMetric: View {
-    @EnvironmentObject private var language: LanguageStore
-    let title: String
+/// A quota window drawn as a thin progress ring with the remaining percentage
+/// centred inside it. The ring and number are tinted by remaining quota so a
+/// low window reads as urgent at a glance.
+private struct NotchRing: View {
     let window: UsageWindow?
-    let alignment: HorizontalAlignment
+    var prominent: Bool = true
+
+    private var percent: Int {
+        max(0, min(100, window?.displayRemainingPercent ?? 0))
+    }
 
     private var tint: Color {
         guard let window else { return .secondary }
@@ -250,58 +261,33 @@ private struct NotchQuotaMetric: View {
         )
     }
 
+    private var diameter: CGFloat { prominent ? 24 : 22 }
+    private var lineWidth: CGFloat { prominent ? 3 : 2.5 }
+
     var body: some View {
-        VStack(alignment: alignment, spacing: 2) {
-            HStack(spacing: 4) {
-                if alignment == .trailing {
-                    Text(title)
-                        .foregroundStyle(.secondary)
-                }
-
-                if let window {
-                    Text("\(window.displayRemainingPercent)%")
-                        .foregroundStyle(.primary)
-                } else {
-                    Text("—")
-                        .foregroundStyle(.secondary)
-                }
-
-                if alignment == .leading {
-                    Text(title)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .font(.caption2.monospacedDigit().weight(.semibold))
-
-            GeometryReader { proxy in
-                Capsule()
-                    .fill(Color.white.opacity(0.14))
-                    .overlay(alignment: .leading) {
-                        Capsule()
-                            .fill(tint)
-                            .frame(width: proxy.size.width * CGFloat(window?.displayRemainingPercent ?? 0) / 100)
-                    }
-            }
-            .frame(width: 64, height: 2)
+        ZStack {
+            Circle()
+                .stroke(Color.white.opacity(0.16), lineWidth: lineWidth)
+            Circle()
+                .trim(from: 0, to: CGFloat(percent) / 100)
+                .stroke(tint, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+            Text(window == nil ? "—" : "\(percent)")
+                .font(.system(size: prominent ? 11 : 10, weight: .bold).monospacedDigit())
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                .padding(.horizontal, 1)
         }
-        .frame(width: 72, alignment: alignment == .leading ? .leading : .trailing)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibilityLabel)
-    }
-
-    private var accessibilityLabel: String {
-        guard let window else {
-            return language.text("\(title), chưa có dữ liệu quota", "\(title), no quota data")
-        }
-        return language.text(
-            "\(title) còn \(window.displayRemainingPercent) phần trăm",
-            "\(title) \(window.displayRemainingPercent) percent remaining"
-        )
+        .frame(width: diameter, height: diameter)
+        .opacity(prominent ? 1 : 0.94)
     }
 }
 
 private struct NotchWindowConfigurator: NSViewRepresentable {
     let panelWidth: CGFloat
+    @Binding var notchInset: CGFloat
+    @Binding var notchWidth: CGFloat
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
@@ -331,6 +317,22 @@ private struct NotchWindowConfigurator: NSViewRepresentable {
             window.ignoresMouseEvents = false
 
             let screen = preferredNotchScreen(for: window)
+            // The compact panel lives inside the menu-bar band and keeps the
+            // camera width clear, so the rings flank the notch and nothing
+            // hangs below over other windows.
+            let inset = screen.safeAreaInsets.top
+            if notchInset != inset {
+                notchInset = inset
+            }
+            let camera: CGFloat
+            if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
+                camera = max(0, right.minX - left.maxX)
+            } else {
+                camera = 0
+            }
+            if notchWidth != camera {
+                notchWidth = camera
+            }
             let x = screen.frame.midX - panelWidth / 2
             window.setFrameTopLeftPoint(NSPoint(x: x, y: screen.frame.maxY))
             window.orderFrontRegardless()

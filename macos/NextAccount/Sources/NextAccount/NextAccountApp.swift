@@ -3927,6 +3927,7 @@ struct MenuBarView: View {
                         .frame(width: 28, height: 28)
                 }
                 .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
                 .menuBarInteractive()
                 .help(language.text("Tác vụ khác", "More actions"))
             }

@@ -84,8 +84,7 @@ struct NotchWindowView: View {
         .task {
             store.startCoreMonitoring()
             store.refreshProviderStatus(silently: true)
-            let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.46"
-            updater.startAutomaticChecks(currentVersion: version)
+            updater.startAutomaticChecks(currentVersion: AppInfo.shortVersion)
         }
         .onDisappear {
             hoverTask?.cancel()

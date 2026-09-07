@@ -4223,9 +4223,9 @@ private struct MenuBarOperationStatus: View {
     }
 }
 
-private enum AppInfo {
+enum AppInfo {
     static var shortVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.9"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
     }
 }
 
@@ -4236,7 +4236,7 @@ private struct MenuBarHeader: View {
     let attentionCount: Int
 
     var body: some View {
-        HStack(alignment: .top, spacing: 9) {
+        HStack(spacing: 9) {
             Image(systemName: "sparkles")
                 .font(.headline)
                 .foregroundStyle(rosterActionBlue)

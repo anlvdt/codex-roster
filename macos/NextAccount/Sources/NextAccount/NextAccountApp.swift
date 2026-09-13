@@ -23,11 +23,38 @@ private final class SingleInstanceGuard {
     }
 }
 
-private extension Notification.Name {
+extension Notification.Name {
+    static let requestShowDashboard = Notification.Name("codexRoster.requestShowDashboard")
+    static let showDashboard = Notification.Name("codexRoster.showDashboard")
     static let showAddAccount = Notification.Name("codexRoster.showAddAccount")
     static let showReloginAccount = Notification.Name("codexRoster.showReloginAccount")
     static let exportBackup = Notification.Name("codexRoster.exportBackup")
     static let importBackup = Notification.Name("codexRoster.importBackup")
+}
+
+private final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var showDashboardObserver: NSObjectProtocol?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        showDashboardObserver = DistributedNotificationCenter.default().addObserver(
+            forName: .requestShowDashboard,
+            object: nil,
+            queue: .main
+        ) { _ in
+            NotificationCenter.default.post(name: .showDashboard, object: nil)
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        NotificationCenter.default.post(name: .showDashboard, object: nil)
+        return true
+    }
+
+    deinit {
+        if let showDashboardObserver {
+            DistributedNotificationCenter.default().removeObserver(showDashboardObserver)
+        }
+    }
 }
 
 private let dashboardCardFill = Color(nsColor: .controlBackgroundColor)
@@ -74,12 +101,19 @@ private extension View {
 @main
 struct CodexRosterApp: App {
     private static let instanceGuard = SingleInstanceGuard()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store = AccountStore()
     @StateObject private var language = LanguageStore()
     @StateObject private var updater = GitHubUpdater()
 
     init() {
         guard Self.instanceGuard != nil else {
+            DistributedNotificationCenter.default().postNotificationName(
+                .requestShowDashboard,
+                object: nil,
+                userInfo: nil,
+                deliverImmediately: true
+            )
             NSRunningApplication.runningApplications(withBundleIdentifier: "com.codexroster.app")
                 .first { $0.processIdentifier != getpid() }?
                 .activate(options: [])

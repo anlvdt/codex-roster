@@ -6,6 +6,7 @@ struct NotchWindowView: View {
     @EnvironmentObject private var language: LanguageStore
     @EnvironmentObject private var updater: GitHubUpdater
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.openWindow) private var openWindow
 
     @State private var isExpanded = false
     @State private var rendersExpandedContent = false
@@ -86,9 +87,22 @@ struct NotchWindowView: View {
             store.refreshProviderStatus(silently: true)
             updater.startAutomaticChecks(currentVersion: AppInfo.shortVersion)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .showDashboard)) { _ in
+            openDashboard()
+        }
         .onDisappear {
             hoverTask?.cancel()
             collapseTask?.cancel()
+        }
+    }
+
+    private func openDashboard() {
+        openWindow(id: "dashboard")
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        DispatchQueue.main.async {
+            NSApplication.shared.windows
+                .first(where: { $0.identifier?.rawValue == "dashboard" })?
+                .makeKeyAndOrderFront(nil)
         }
     }
 

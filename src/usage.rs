@@ -10,14 +10,15 @@ use time::{Duration, OffsetDateTime};
 
 use crate::identity::parse_identity_from_auth_json;
 use crate::model::{
-    AccountUsageView, BankedResetCreditView, BankedResetSummaryView, CreditsView, DisplayIdentity,
-    EnvironmentKind, SnapshotBlob, UsageOutput, UsageSource, UsageWindowView,
+    AccountUsageView, BankedResetCreditView, BankedResetSummaryView, CreditLimitView, CreditsView,
+    DisplayIdentity, EnvironmentKind, SnapshotBlob, UsageOutput, UsageSource, UsageWindowView,
 };
 
 static CHATGPT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 static USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
 static RESET_CREDITS_ENDPOINT: &str =
     "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
+static WORKSPACE_BALANCE_ENDPOINT_PREFIX: &str = "https://chatgpt.com/backend-api/accounts/";
 static REFRESH_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 /// Matches Codex CLI: treat ChatGPT-managed sessions as stale after ~8 days.
 static TOKEN_REFRESH_INTERVAL: LazyLock<Duration> = LazyLock::new(|| Duration::days(8));
@@ -143,6 +144,20 @@ pub fn fetch_usage(target: UsageTarget) -> Result<(UsageOutput, SnapshotBlob), F
         target.snapshot
     };
 
+    // Workspace/team accounts report `has_credits` without a personal balance.
+    // The scoped balance lives on a per-account endpoint; resolve it
+    // best-effort so a missing balance is never rendered as a spent balance.
+    let workspace_balance = if response.needs_workspace_balance() {
+        response
+            .workspace_balance_account_id(auth.account_id.as_deref())
+            .and_then(|account_id| {
+                fetch_workspace_remaining_balance(&auth.access_token, &account_id).ok()
+            })
+            .and_then(|workspace| workspace.balance)
+    } else {
+        None
+    };
+
     let fetched_identity = merge_identity(
         &target.identity,
         response.identity().map_err(|error| {
@@ -158,7 +173,12 @@ pub fn fetch_usage(target: UsageTarget) -> Result<(UsageOutput, SnapshotBlob), F
     );
     let subscription_active_until = subscription_active_until(auth.id_token.as_deref());
     let usage = response
-        .into_view(source, reset_credit_details, subscription_active_until)
+        .into_view(
+            source,
+            reset_credit_details,
+            subscription_active_until,
+            workspace_balance,
+        )
         .map_err(|error| {
             FetchUsageError::new(
                 error,
@@ -269,18 +289,110 @@ struct SnapshotAuth {
     changed: bool,
 }
 
-#[derive(Debug, Deserialize)]
+/// Decoded field-by-field from `Value` so one malformed optional block cannot
+/// discard the rest of the usage payload (mirrors upstream CodexBar's tolerant
+/// `CodexUsageResponse` decoding).
+#[derive(Debug)]
 struct UsageResponse {
     email: Option<String>,
     plan_type: Option<String>,
+    account_id: Option<String>,
     rate_limit: Option<UsageRateLimit>,
     credits: Option<UsageCredits>,
+    individual_limit: Option<SpendControlLimit>,
     rate_limit_reset_credits: Option<UsageResetCreditsSummary>,
 }
 
-#[derive(Debug, Deserialize)]
+impl<'de> Deserialize<'de> for UsageResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        Ok(Self::from_value(&value))
+    }
+}
+
+impl UsageResponse {
+    fn from_value(value: &Value) -> Self {
+        let rate_limit = value.get("rate_limit").and_then(UsageRateLimit::from_value);
+        let individual_limit =
+            first_spend_control_limit(value, &["individual_limit", "individualLimit"])
+                .or_else(|| {
+                    rate_limit
+                        .as_ref()
+                        .and_then(|limits| limits.individual_limit.clone())
+                })
+                .or_else(|| {
+                    value
+                        .get("spend_control")
+                        .or_else(|| value.get("spendControl"))
+                        .and_then(|control| {
+                            first_spend_control_limit(
+                                control,
+                                &["individual_limit", "individualLimit"],
+                            )
+                        })
+                });
+        Self {
+            email: value
+                .get("email")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            plan_type: value
+                .get("plan_type")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            account_id: first_string(value, &["account_id", "accountId"]),
+            rate_limit,
+            credits: value.get("credits").and_then(UsageCredits::from_value),
+            individual_limit,
+            rate_limit_reset_credits: value
+                .get("rate_limit_reset_credits")
+                .and_then(UsageResetCreditsSummary::from_value),
+        }
+    }
+
+    /// Workspace-scoped accounts report `has_credits` without a personal
+    /// balance; the readable balance lives on `/accounts/{id}/remaining_balance`.
+    fn needs_workspace_balance(&self) -> bool {
+        self.credits.as_ref().is_some_and(|credits| {
+            credits.has_credits && !credits.unlimited && credits.balance.is_none()
+        })
+    }
+
+    /// The account a workspace balance may be attributed to. When both the
+    /// response and the saved credential name an account they must agree —
+    /// applying one workspace's balance to another account would misreport it.
+    fn workspace_balance_account_id(&self, credential_account_id: Option<&str>) -> Option<String> {
+        let response_id = self
+            .account_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty());
+        let credential_id = credential_account_id
+            .map(str::trim)
+            .filter(|id| !id.is_empty());
+        match (response_id, credential_id) {
+            (Some(response_id), Some(credential_id)) if response_id != credential_id => None,
+            (Some(response_id), _) => Some(response_id.to_owned()),
+            (None, Some(credential_id)) => Some(credential_id.to_owned()),
+            (None, None) => None,
+        }
+    }
+}
+
+#[derive(Debug)]
 struct UsageResetCreditsSummary {
     available_count: i64,
+}
+
+impl UsageResetCreditsSummary {
+    fn from_value(value: &Value) -> Option<Self> {
+        Some(Self {
+            available_count: flexible_i64(value.get("available_count"))?,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -300,23 +412,164 @@ struct ResetCreditDetails {
     description: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 struct UsageRateLimit {
     primary_window: Option<UsageWindow>,
     secondary_window: Option<UsageWindow>,
+    individual_limit: Option<SpendControlLimit>,
 }
 
-#[derive(Debug, Deserialize)]
+impl UsageRateLimit {
+    fn from_value(value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        Some(Self {
+            primary_window: object
+                .get("primary_window")
+                .and_then(UsageWindow::from_value),
+            secondary_window: object
+                .get("secondary_window")
+                .and_then(UsageWindow::from_value),
+            individual_limit: first_spend_control_limit(
+                value,
+                &["individual_limit", "individualLimit"],
+            ),
+        })
+    }
+}
+
+#[derive(Debug)]
 struct UsageWindow {
     used_percent: u8,
     reset_at: i64,
 }
 
-#[derive(Debug, Deserialize)]
+impl UsageWindow {
+    fn from_value(value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        Some(Self {
+            used_percent: flexible_u8(object.get("used_percent"))?,
+            reset_at: flexible_i64(object.get("reset_at"))?,
+        })
+    }
+}
+
+#[derive(Debug)]
 struct UsageCredits {
     has_credits: bool,
     unlimited: bool,
-    balance: serde_json::Value,
+    /// Raw balance payload; `None` means the response did not publish a
+    /// readable balance (distinct from a real zero).
+    balance: Option<Value>,
+}
+
+impl UsageCredits {
+    fn from_value(value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        Some(Self {
+            has_credits: flexible_bool(object.get("has_credits")),
+            unlimited: flexible_bool(object.get("unlimited")),
+            balance: object
+                .get("balance")
+                .filter(|value| !value.is_null())
+                .cloned(),
+        })
+    }
+}
+
+/// Monthly spend-control cap reported under `individual_limit` (response root,
+/// `rate_limit`, or `spend_control`) or `spendControl`.
+#[derive(Clone, Debug)]
+struct SpendControlLimit {
+    limit: Option<f64>,
+    used: Option<f64>,
+    remaining_percent: Option<f64>,
+    resets_at: Option<i64>,
+}
+
+impl SpendControlLimit {
+    fn from_value(value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        Some(Self {
+            limit: flexible_f64(object.get("limit")),
+            used: flexible_f64(object.get("used")),
+            remaining_percent: flexible_f64(object.get("remainingPercent"))
+                .or_else(|| flexible_f64(object.get("remaining_percent"))),
+            resets_at: flexible_i64(object.get("resetsAt"))
+                .or_else(|| flexible_i64(object.get("resets_at")))
+                .or_else(|| flexible_i64(object.get("reset_at"))),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct WorkspaceBalanceResponse {
+    balance: Option<f64>,
+}
+
+impl<'de> Deserialize<'de> for WorkspaceBalanceResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        Ok(Self {
+            balance: flexible_f64(value.get("balance"))
+                .filter(|balance| balance.is_finite())
+                .map(|balance| balance.max(0.0)),
+        })
+    }
+}
+
+fn first_string(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn first_spend_control_limit(value: &Value, keys: &[&str]) -> Option<SpendControlLimit> {
+    keys.iter()
+        .find_map(|key| value.get(*key))
+        .and_then(SpendControlLimit::from_value)
+}
+
+fn flexible_bool(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::Bool(flag)) => *flag,
+        Some(Value::String(text)) => text.trim().eq_ignore_ascii_case("true"),
+        _ => false,
+    }
+}
+
+fn flexible_f64(value: Option<&Value>) -> Option<f64> {
+    match value? {
+        Value::Number(number) => number.as_f64().filter(|value| value.is_finite()),
+        Value::String(text) => text
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite()),
+        _ => None,
+    }
+}
+
+fn flexible_i64(value: Option<&Value>) -> Option<i64> {
+    match value? {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_f64().map(|value| value.trunc() as i64)),
+        Value::String(text) => text.trim().parse::<i64>().ok().or_else(|| {
+            text.trim()
+                .parse::<f64>()
+                .ok()
+                .map(|value| value.trunc() as i64)
+        }),
+        _ => None,
+    }
+}
+
+fn flexible_u8(value: Option<&Value>) -> Option<u8> {
+    flexible_f64(value).map(|value| value.trunc().clamp(0.0, 255.0) as u8)
 }
 
 #[derive(Debug, Deserialize)]
@@ -346,6 +599,7 @@ impl UsageResponse {
         source: UsageSource,
         reset_credit_details: Option<ResetCreditDetailsResponse>,
         subscription_active_until: Option<OffsetDateTime>,
+        workspace_balance: Option<f64>,
     ) -> Result<AccountUsageView> {
         let now = OffsetDateTime::now_utc();
         let plan_label = normalize_plan_label(self.plan_type.as_deref());
@@ -358,6 +612,7 @@ impl UsageResponse {
                         credits: None,
                     })
             });
+        let credit_limit = self.individual_limit.as_ref().and_then(credit_limit_view);
         Ok(AccountUsageView {
             source,
             fetched_at: now,
@@ -373,7 +628,7 @@ impl UsageResponse {
                 .and_then(|limits| limits.secondary_window.as_ref())
                 .map(window_view)
                 .transpose()?,
-            credits: self.credits.map(credits_view),
+            credits: credits_view(self.credits, credit_limit, workspace_balance),
             banked_resets,
             plan_label,
             subscription_active_until,
@@ -562,6 +817,48 @@ fn fetch_reset_credit_details(
         .context("failed to decode Codex banked reset response")
 }
 
+fn fetch_workspace_remaining_balance(
+    access_token: &str,
+    account_id: &str,
+) -> Result<WorkspaceBalanceResponse> {
+    let endpoint = format!(
+        "{WORKSPACE_BALANCE_ENDPOINT_PREFIX}{}/remaining_balance",
+        percent_encode_path_segment(account_id)
+    );
+    let mut response = ureq::get(&endpoint)
+        .header("Authorization", &format!("Bearer {access_token}"))
+        .header("User-Agent", "codex-roster")
+        .header("ChatGPT-Account-Id", account_id)
+        .config()
+        .http_status_as_error(false)
+        .timeout_global(Some(std::time::Duration::from_secs(5)))
+        .build()
+        .call()
+        .context("failed to query Codex workspace balance")?;
+    let status = response.status();
+    if status.as_u16() >= 400 {
+        bail!("workspace balance request failed with {status}");
+    }
+    response
+        .body_mut()
+        .read_json::<WorkspaceBalanceResponse>()
+        .context("failed to decode Codex workspace balance response")
+}
+
+/// Encode a path segment: keep unreserved characters, percent-encode the rest.
+fn percent_encode_path_segment(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
 fn needs_proactive_refresh(auth: &SnapshotAuth) -> bool {
     if auth.refresh_token.as_deref().is_none_or(str::is_empty) {
         return false;
@@ -705,15 +1002,67 @@ fn window_view(window: &UsageWindow) -> Result<UsageWindowView> {
     })
 }
 
-fn credits_view(credits: UsageCredits) -> CreditsView {
-    CreditsView {
-        has_credits: credits.has_credits,
-        unlimited: credits.unlimited,
-        balance: match credits.balance {
-            serde_json::Value::String(value) => value,
-            other => other.to_string(),
-        },
+fn credits_view(
+    credits: Option<UsageCredits>,
+    credit_limit: Option<CreditLimitView>,
+    workspace_balance: Option<f64>,
+) -> Option<CreditsView> {
+    match credits {
+        Some(credits) => Some(CreditsView {
+            has_credits: credits.has_credits,
+            unlimited: credits.unlimited,
+            balance: workspace_balance
+                .map(|balance| balance.to_string())
+                .or_else(|| credits.balance.as_ref().map(render_balance))
+                .unwrap_or_default(),
+            credit_limit,
+        }),
+        // A cap-only payload carries no `credits` block; still surface the
+        // monthly limit so workspace accounts see their credit pool.
+        None => credit_limit.map(|credit_limit| CreditsView {
+            has_credits: false,
+            unlimited: false,
+            balance: String::new(),
+            credit_limit: Some(credit_limit),
+        }),
     }
+}
+
+fn render_balance(balance: &Value) -> String {
+    match balance {
+        Value::String(value) => value.clone(),
+        Value::Number(number) => number.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Mirror upstream `codexCreditLimitSnapshot`: a usable cap requires a positive
+/// limit; `used`/`remaining_percent`/`resets_at` tolerate partial payloads.
+fn credit_limit_view(limit: &SpendControlLimit) -> Option<CreditLimitView> {
+    let cap = limit.limit.filter(|limit| *limit > 0.0)?;
+    let used = limit
+        .used
+        .or_else(|| {
+            limit
+                .remaining_percent
+                .map(|remaining| cap * (100.0 - remaining.clamp(0.0, 100.0)) / 100.0)
+        })
+        .unwrap_or(0.0)
+        .max(0.0);
+    let remaining_percent = limit
+        .remaining_percent
+        .unwrap_or_else(|| 100.0 - used / cap * 100.0)
+        .clamp(0.0, 100.0);
+    let resets_at = limit
+        .resets_at
+        .filter(|value| *value > 0)
+        .and_then(|value| OffsetDateTime::from_unix_timestamp(value).ok());
+    Some(CreditLimitView {
+        used: Some(used),
+        limit: cap,
+        remaining_percent,
+        resets_at,
+    })
 }
 
 fn normalize_plan_label(raw: Option<&str>) -> Option<String> {
@@ -962,7 +1311,7 @@ mod tests {
         .expect("usage payload");
 
         let view = response
-            .into_view(UsageSource::LiveAccessToken, None, None)
+            .into_view(UsageSource::LiveAccessToken, None, None, None)
             .expect("usage view");
 
         let resets = view.banked_resets.expect("banked reset summary");
@@ -987,7 +1336,7 @@ mod tests {
         .expect("usage payload");
 
         let view = response
-            .into_view(UsageSource::LiveAccessToken, None, None)
+            .into_view(UsageSource::LiveAccessToken, None, None, None)
             .expect("usage view");
 
         assert_eq!(
@@ -1179,6 +1528,195 @@ mod tests {
         .expect_err("a stale token must never be restored after refresh failure");
 
         assert!(format!("{error:#}").contains("current session was left unchanged"));
+    }
+
+    #[test]
+    fn usage_windows_accept_numeric_strings_and_floats() {
+        let response: UsageResponse = serde_json::from_value(json!({
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": "25.9",
+                    "reset_at": "1893456000"
+                },
+                "secondary_window": {
+                    "used_percent": 60.7,
+                    "reset_at": 1_893_888_000.0
+                }
+            }
+        }))
+        .expect("usage payload");
+
+        let view = response
+            .into_view(UsageSource::LiveAccessToken, None, None, None)
+            .expect("usage view");
+
+        assert_eq!(view.five_hour.expect("five-hour window").used_percent, 25);
+        assert_eq!(view.weekly.expect("weekly window").used_percent, 60);
+    }
+
+    #[test]
+    fn malformed_primary_window_does_not_discard_weekly() {
+        let response: UsageResponse = serde_json::from_value(json!({
+            "rate_limit": {
+                "primary_window": { "used_percent": "high", "reset_at": "soon" },
+                "secondary_window": {
+                    "used_percent": 60,
+                    "reset_at": 1_893_888_000_i64
+                }
+            }
+        }))
+        .expect("usage payload");
+
+        let view = response
+            .into_view(UsageSource::LiveAccessToken, None, None, None)
+            .expect("usage view");
+
+        assert!(view.five_hour.is_none());
+        assert_eq!(view.weekly.expect("weekly window").remaining_percent, 40);
+    }
+
+    #[test]
+    fn malformed_optional_blocks_do_not_fail_the_response() {
+        let response: UsageResponse = serde_json::from_value(json!({
+            "email": "ada@example.com",
+            "plan_type": "pro",
+            "rate_limit": "garbage",
+            "credits": 42,
+            "rate_limit_reset_credits": {"available_count": "many"},
+            "additional_rate_limits": [{"rate_limit": {"primary_window": null}}]
+        }))
+        .expect("usage payload");
+
+        let view = response
+            .into_view(UsageSource::LiveAccessToken, None, None, None)
+            .expect("usage view");
+
+        assert!(view.five_hour.is_none());
+        assert!(view.weekly.is_none());
+        assert!(view.credits.is_none());
+        assert!(view.banked_resets.is_none());
+        assert_eq!(view.plan_label.as_deref(), Some("Pro"));
+    }
+
+    #[test]
+    fn credits_without_balance_are_unread_not_zero() {
+        let response: UsageResponse = serde_json::from_value(json!({
+            "account_id": "acct-workspace",
+            "credits": { "has_credits": true, "unlimited": false }
+        }))
+        .expect("usage payload");
+
+        assert!(response.needs_workspace_balance());
+        assert_eq!(
+            response.workspace_balance_account_id(Some("acct-workspace")),
+            Some("acct-workspace".to_owned())
+        );
+        assert_eq!(
+            response.workspace_balance_account_id(Some("acct-other")),
+            None
+        );
+
+        let view = response
+            .into_view(UsageSource::LiveAccessToken, None, None, None)
+            .expect("usage view");
+        let credits = view.credits.expect("credits view");
+        assert!(credits.has_credits);
+        assert!(credits.balance.is_empty());
+    }
+
+    #[test]
+    fn workspace_balance_fills_missing_credit_balance() {
+        let response: UsageResponse = serde_json::from_value(json!({
+            "account_id": "acct-workspace",
+            "credits": { "has_credits": true, "unlimited": false }
+        }))
+        .expect("usage payload");
+
+        let view = response
+            .into_view(UsageSource::LiveAccessToken, None, None, Some(37.5))
+            .expect("usage view");
+
+        assert_eq!(view.credits.expect("credits view").balance, "37.5");
+    }
+
+    #[test]
+    fn workspace_balance_response_accepts_string_and_rejects_garbage() {
+        let parsed: WorkspaceBalanceResponse = serde_json::from_value(json!({
+            "balance": " 42.5 "
+        }))
+        .expect("string balance");
+        assert_eq!(parsed.balance, Some(42.5));
+
+        let negative: WorkspaceBalanceResponse = serde_json::from_value(json!({
+            "balance": -3
+        }))
+        .expect("negative balance");
+        assert_eq!(negative.balance, Some(0.0));
+
+        let missing: WorkspaceBalanceResponse =
+            serde_json::from_value(json!({"other": 1})).expect("missing balance");
+        assert_eq!(missing.balance, None);
+    }
+
+    #[test]
+    fn individual_limit_surfaces_monthly_credit_cap() {
+        let response: UsageResponse = serde_json::from_value(json!({
+            "spend_control": {
+                "individual_limit": {
+                    "limit": "1000",
+                    "used": 250.5,
+                    "remaining_percent": "74.95",
+                    "resets_at": 1_893_888_000_i64
+                }
+            }
+        }))
+        .expect("usage payload");
+
+        let view = response
+            .into_view(UsageSource::LiveAccessToken, None, None, None)
+            .expect("usage view");
+
+        let credits = view.credits.expect("cap-only credits view");
+        assert!(!credits.has_credits);
+        let limit = credits.credit_limit.expect("credit limit");
+        assert_eq!(limit.limit, 1000.0);
+        assert_eq!(limit.used, Some(250.5));
+        assert_eq!(limit.remaining_percent, 74.95);
+        assert_eq!(
+            limit.resets_at.map(|value| value.unix_timestamp()),
+            Some(1_893_888_000)
+        );
+    }
+
+    #[test]
+    fn individual_limit_derives_used_from_remaining_percent() {
+        let response: UsageResponse = serde_json::from_value(json!({
+            "rate_limit": {
+                "primary_window": { "used_percent": 10, "reset_at": 1_893_456_000_i64 },
+                "individualLimit": { "limit": 500, "remainingPercent": 60 }
+            }
+        }))
+        .expect("usage payload");
+
+        let view = response
+            .into_view(UsageSource::LiveAccessToken, None, None, None)
+            .expect("usage view");
+
+        let limit = view
+            .credits
+            .expect("credits view")
+            .credit_limit
+            .expect("credit limit");
+        assert_eq!(limit.used, Some(200.0));
+    }
+
+    #[test]
+    fn percent_encode_path_segment_keeps_unreserved_only() {
+        assert_eq!(percent_encode_path_segment("acct-123_ok"), "acct-123_ok");
+        assert_eq!(
+            percent_encode_path_segment("a/b?c#d%e"),
+            "a%2Fb%3Fc%23d%25e"
+        );
     }
 
     #[test]

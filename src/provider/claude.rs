@@ -22,6 +22,8 @@ pub static CLAUDE: ClaudeAdapter = ClaudeAdapter;
 const UNKNOWN_EMAIL: &str = "claude-user@unknown.local";
 const OAUTH_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+/// Anthropic expects a `claude-code/<version>` agent on the OAuth usage API.
+const FALLBACK_CLAUDE_CODE_VERSION: &str = "2.1.0";
 const CAPABILITIES: &[ProviderCapability] = &[
     ProviderCapability::ReadIdentity,
     ProviderCapability::MonitorUsage,
@@ -320,7 +322,8 @@ impl ProviderAdapter for ClaudeAdapter {
             .header("Authorization", &format!("Bearer {token}"))
             .header("anthropic-beta", "oauth-2025-04-20")
             .header("Accept", "application/json")
-            .header("User-Agent", "claude-code")
+            .header("Content-Type", "application/json")
+            .header("User-Agent", claude_code_user_agent())
             .config()
             .http_status_as_error(false)
             .timeout_global(Some(Duration::from_secs(15)))
@@ -346,6 +349,51 @@ impl ProviderAdapter for ClaudeAdapter {
         }
         parse_usage(&body)
     }
+}
+
+/// `claude-code/<version>` like the real CLI, detected once per process.
+/// Detection never blocks usage: any failure falls back to a pinned version.
+fn claude_code_user_agent() -> &'static str {
+    static USER_AGENT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    USER_AGENT.get_or_init(|| {
+        let version =
+            detect_claude_code_version().unwrap_or_else(|| FALLBACK_CLAUDE_CODE_VERSION.to_owned());
+        format!("claude-code/{version}")
+    })
+}
+
+fn detect_claude_code_version() -> Option<String> {
+    let binary = claude_binary_path()?;
+    let output = std::process::Command::new(binary)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .split_whitespace()
+        .next()
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+}
+
+fn claude_binary_path() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join("claude"))
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        candidates.push(home.join(".local/bin/claude"));
+        candidates.push(home.join(".claude/local/claude"));
+    }
+    candidates.push(PathBuf::from("/usr/local/bin/claude"));
+    candidates.push(PathBuf::from("/opt/homebrew/bin/claude"));
+    candidates.into_iter().find(|path| path.is_file())
 }
 
 fn status_view(status: ProviderUsageStatus, http_status: u16) -> ProviderUsageView {

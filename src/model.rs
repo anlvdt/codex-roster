@@ -560,7 +560,21 @@ pub struct UsageWindowView {
 pub struct CreditsView {
     pub has_credits: bool,
     pub unlimited: bool,
+    /// Displayable spend balance. An empty string means the backend did not
+    /// publish a readable balance for this fetch — it is not a real zero.
     pub balance: String,
+    /// Monthly spend-control cap (team/enterprise workspaces report the credit
+    /// pool here instead of a personal balance).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_limit: Option<CreditLimitView>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreditLimitView {
+    pub used: Option<f64>,
+    pub limit: f64,
+    pub remaining_percent: f64,
+    pub resets_at: Option<OffsetDateTime>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

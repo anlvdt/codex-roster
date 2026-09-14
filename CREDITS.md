@@ -4,12 +4,12 @@ Codex Roster is an independent native macOS application built for the Codex comm
 
 Except for the original MIT foundation explicitly identified below, Codex Roster does not include source code, visual assets, account data, credentials, or state from the referenced projects.
 
-## Reference audit — 2026-09-01
+## Reference audit — 2026-09-14
 
 | Source | Revision reviewed | Role in Codex Roster | License / boundary |
 | --- | --- | --- | --- |
 | [Pimpmuckl/codex-account-switcher](https://github.com/Pimpmuckl/codex-account-switcher) | `v0.1.10` / `7e27ed0` | Original CLI foundation | MIT |
-| [steipete/CodexBar](https://github.com/steipete/CodexBar) | `v0.56.1` / release reviewed 2026-08-31 | Menu-bar, quota-state, reset recovery, activity detection, and incremental local-history research | MIT; independently reimplemented |
+| [steipete/CodexBar](https://github.com/steipete/CodexBar) | `v0.60.2` / `69c5a785c` reviewed 2026-09-14 | Menu-bar, quota-state, reset recovery, workspace credit-balance, provider usage-schema, and incremental local-history research | MIT; independently reimplemented |
 | [jlcodes99/cockpit-tools](https://github.com/jlcodes99/cockpit-tools) | `v1.3.34` / release reviewed 2026-08-31 | High-level product, credential-safety, and account-lifecycle research | CC BY-NC-SA 4.0 as declared in its README; no source/assets copied |
 | [Ducksss/codex-profiles](https://github.com/Ducksss/codex-profiles) | `v0.9.1` / `76dfc39` | Profile, workspace, diagnostics, and local-state boundary research | MIT; no source imported |
 | [vyctorbrzezowski/codex-switchboard](https://github.com/vyctorbrzezowski/codex-switchboard) | `v1.0.10` / `296c0b3` | Local-first switching and shared-auth safety research | MIT; independently implemented |

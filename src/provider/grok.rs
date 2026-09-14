@@ -116,19 +116,32 @@ fn identity_from_value(value: &Value) -> DisplayIdentity {
 
 fn parse_usage(body: &str) -> Result<ProviderUsageView> {
     let value: Value = serde_json::from_str(body).context("failed to parse Grok billing JSON")?;
-    let reset_at = find_value(
-        &value,
-        &[
-            "billingPeriodEnd",
-            "billing_period_end",
-            "resetAt",
-            "reset_at",
-        ],
-    )
-    .and_then(parse_datetime);
+    // The billing proxy nests everything under `config`; keep root-level
+    // fallbacks so flat fixtures and older payloads still resolve.
+    let config = value
+        .get("config")
+        .filter(|config| config.is_object())
+        .unwrap_or(&value);
+    let reset_at = config
+        .get("currentPeriod")
+        .and_then(|period| period.get("end"))
+        .and_then(parse_datetime)
+        .or_else(|| {
+            find_value(
+                config,
+                &[
+                    "billingPeriodEnd",
+                    "billing_period_end",
+                    "resetAt",
+                    "reset_at",
+                ],
+            )
+            .and_then(parse_datetime)
+        });
     let used_percent = find_number(
-        &value,
+        config,
         &[
+            "creditUsagePercent",
             "usagePercent",
             "usage_percentage",
             "percentUsed",
@@ -136,20 +149,25 @@ fn parse_usage(body: &str) -> Result<ProviderUsageView> {
         ],
     );
     let remaining_percent = find_number(
-        &value,
+        config,
         &[
             "remainingPercent",
             "remaining_percentage",
             "percentRemaining",
         ],
     );
-    let percent = used_percent.or_else(|| remaining_percent.map(|remaining| 100.0 - remaining));
+    let percent = used_percent
+        .or_else(|| remaining_percent.map(|remaining| 100.0 - remaining))
+        .filter(|percent| percent.is_finite());
     let mut windows = Vec::new();
     if let Some(percent) = percent {
         windows.push(percent_window("credits", "Credits", percent, reset_at));
     } else {
-        let used = find_number(&value, &["usedCredits", "used_credits", "creditsUsed"]);
-        let limit = find_number(&value, &["totalCredits", "creditLimit", "limit"]);
+        // On-demand spend arrives as `{ "val": <number> }` pairs.
+        let used = nested_number(config, "onDemandUsed")
+            .or_else(|| find_number(config, &["usedCredits", "used_credits", "creditsUsed"]));
+        let limit = nested_number(config, "onDemandCap")
+            .or_else(|| find_number(config, &["totalCredits", "creditLimit", "limit"]));
         if used.is_some() || limit.is_some() {
             let used_percent = match (used, limit) {
                 (Some(used), Some(limit)) if limit > 0.0 => {
@@ -167,6 +185,19 @@ fn parse_usage(body: &str) -> Result<ProviderUsageView> {
                 limit,
                 unit: Some("credits".to_owned()),
             });
+        } else if reset_at.is_some() {
+            // A validated billing period without usage fields means usage is
+            // unpublished, not zero — keep the reset but leave percent unknown.
+            windows.push(crate::model::ProviderUsageWindowView {
+                key: "credits".to_owned(),
+                label: "Credits".to_owned(),
+                used_percent: None,
+                remaining_percent: None,
+                reset_at,
+                used: None,
+                limit: None,
+                unit: Some("credits".to_owned()),
+            });
         }
     }
     Ok(ProviderUsageView {
@@ -176,9 +207,40 @@ fn parse_usage(body: &str) -> Result<ProviderUsageView> {
         fidelity: UsageFidelity::Official,
         headline_window: windows.first().map(|window| window.key.clone()),
         windows,
-        plan_label: find_string(&value, &["plan", "planName", "subscription"]),
+        plan_label: find_string(config, &["subscriptionTier"])
+            .or_else(|| {
+                find_string(
+                    &value,
+                    &["subscriptionTier", "plan", "planName", "subscription"],
+                )
+            })
+            .map(|tier| grok_plan_label(&tier)),
         detail: None,
     })
+}
+
+/// Read `config.<key>.val` — the proxy wraps on-demand amounts in a `val` field.
+fn nested_number(config: &Value, key: &str) -> Option<f64> {
+    let inner = config.get(key)?.get("val")?;
+    inner
+        .as_f64()
+        .or_else(|| inner.as_str()?.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite())
+}
+
+/// Map the proxy's `subscriptionTier` onto the CLI's display names
+/// (SuperGrok vs SuperGrok Heavy), mirroring upstream `GrokPlan.displayName`.
+fn grok_plan_label(raw: &str) -> String {
+    let token: String = raw
+        .chars()
+        .filter(|ch| ch.is_alphabetic())
+        .flat_map(char::to_lowercase)
+        .collect();
+    match token.as_str() {
+        "supergrokheavy" | "heavy" => "SuperGrok Heavy".to_owned(),
+        "supergrok" => "SuperGrok".to_owned(),
+        _ => raw.trim().to_owned(),
+    }
 }
 
 impl ProviderAdapter for GrokAdapter {
@@ -317,6 +379,41 @@ mod tests {
             parse_usage(r#"{"usagePercent":31.0,"billingPeriodEnd":"2026-10-01T00:00:00Z"}"#)
                 .expect("usage");
         assert_eq!(usage.windows[0].remaining_percent, Some(69));
+    }
+
+    #[test]
+    fn parses_proxy_config_payload_and_subscription_tier() {
+        let usage = parse_usage(
+            r#"{"config":{"creditUsagePercent":42.5,"currentPeriod":{"end":"2026-10-01T00:00:00Z"},"subscriptionTier":"super_grok_heavy"},"subscriptionTier":"ignored-root"}"#,
+        )
+        .expect("usage");
+
+        assert_eq!(usage.windows[0].used_percent, Some(43));
+        assert!(usage.windows[0].reset_at.is_some());
+        assert_eq!(usage.plan_label.as_deref(), Some("SuperGrok Heavy"));
+    }
+
+    #[test]
+    fn derives_usage_from_on_demand_amounts() {
+        let usage = parse_usage(
+            r#"{"config":{"onDemandCap":{"val":5000},"onDemandUsed":{"val":1000},"billingPeriodEnd":"2026-10-01T00:00:00Z"}}"#,
+        )
+        .expect("usage");
+
+        assert_eq!(usage.windows[0].used_percent, Some(20));
+        assert_eq!(usage.windows[0].used, Some(1000.0));
+        assert_eq!(usage.windows[0].limit, Some(5000.0));
+    }
+
+    #[test]
+    fn preserves_unknown_usage_for_valid_billing_period() {
+        let usage = parse_usage(r#"{"config":{"currentPeriod":{"end":"2026-10-01T00:00:00Z"}}}"#)
+            .expect("usage");
+
+        assert_eq!(usage.windows.len(), 1);
+        assert_eq!(usage.windows[0].used_percent, None);
+        assert_eq!(usage.windows[0].remaining_percent, None);
+        assert!(usage.windows[0].reset_at.is_some());
     }
 
     #[test]

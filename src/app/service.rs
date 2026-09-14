@@ -1848,6 +1848,7 @@ mod tests {
                 has_credits: false,
                 unlimited: true,
                 balance: "0".to_owned(),
+                credit_limit: None,
             }),
         );
         assert!(!is_exhausted_for_switch(Some(&unlimited)));
@@ -1859,6 +1860,7 @@ mod tests {
                 has_credits: true,
                 unlimited: false,
                 balance: "12.50".to_owned(),
+                credit_limit: None,
             }),
         );
         assert!(!is_exhausted_for_switch(Some(&paid_credits)));
@@ -1870,6 +1872,7 @@ mod tests {
                 has_credits: true,
                 unlimited: false,
                 balance: "0".to_owned(),
+                credit_limit: None,
             }),
         );
         assert!(is_exhausted_for_switch(Some(&empty_credits)));

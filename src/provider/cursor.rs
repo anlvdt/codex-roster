@@ -173,6 +173,7 @@ fn ratio_window(
     used: Option<f64>,
     limit: Option<f64>,
     reset_at: Option<OffsetDateTime>,
+    unit: &str,
 ) -> Option<ProviderUsageWindowView> {
     if used.is_none() && limit.is_none() {
         return None;
@@ -191,8 +192,17 @@ fn ratio_window(
         reset_at,
         used,
         limit,
-        unit: Some("requests".to_owned()),
+        unit: Some(unit.to_owned()),
     })
+}
+
+fn usage_amount(block: Option<&Value>, key: &str) -> Option<f64> {
+    block.and_then(|block| find_number(block, &[key]))
+}
+
+/// `individualUsage`/`teamUsage` amounts are cents-based; convert to USD.
+fn cents_to_usd(value: Option<f64>) -> Option<f64> {
+    value.map(|cents| cents / 100.0)
 }
 
 fn parse_usage(body: &str) -> Result<ProviderUsageView> {
@@ -209,32 +219,126 @@ fn parse_usage(body: &str) -> Result<ProviderUsageView> {
     .and_then(parse_datetime);
     let mut windows = Vec::new();
 
-    if let Some(percent) = find_number(
-        &value,
-        &[
-            "planUsagePercent",
-            "plan_usage_percent",
-            "totalPercentUsed",
-            "percentUsed",
-        ],
-    ) {
-        windows.push(percent_window("plan", "Plan", percent, reset_at));
+    // Nested usage-summary schema (CodexBar v0.60): plan/auto/api lane percents,
+    // cents-based plan and team-pool amounts under `individualUsage`/`teamUsage`.
+    let individual = value.get("individualUsage");
+    let plan = individual.and_then(|usage| usage.get("plan"));
+    let team = value.get("teamUsage");
+
+    let plan_used_usd = cents_to_usd(usage_amount(plan, "used"));
+    let plan_limit_usd = cents_to_usd(usage_amount(plan, "limit"));
+    let auto_percent = usage_amount(plan, "autoPercentUsed");
+    let api_percent = usage_amount(plan, "apiPercentUsed");
+    let total_percent = usage_amount(plan, "totalPercentUsed");
+
+    // Enterprise/team members report a personal cap under `individualUsage.overall`;
+    // `teamUsage.pooled` is the shared pool and the last resort for a headline.
+    let overall_used_usd = cents_to_usd(usage_amount(
+        individual.and_then(|usage| usage.get("overall")),
+        "used",
+    ));
+    let overall_limit_usd = cents_to_usd(usage_amount(
+        individual.and_then(|usage| usage.get("overall")),
+        "limit",
+    ));
+    let pooled_used_usd = cents_to_usd(usage_amount(
+        team.and_then(|usage| usage.get("pooled")),
+        "used",
+    ));
+    let pooled_limit_usd = cents_to_usd(usage_amount(
+        team.and_then(|usage| usage.get("pooled")),
+        "limit",
+    ));
+
+    let (used_usd, limit_usd) = if plan_used_usd.is_some() || plan_limit_usd.is_some() {
+        (plan_used_usd, plan_limit_usd)
+    } else if overall_used_usd.is_some() || overall_limit_usd.is_some() {
+        (overall_used_usd, overall_limit_usd)
     } else {
-        let used = find_number(&value, &["planUsed", "plan_used", "used", "usage"]);
-        let limit = find_number(&value, &["planLimit", "plan_limit", "limit", "included"]);
-        if let Some(window) = ratio_window("plan", "Plan", used, limit, reset_at) {
+        (pooled_used_usd, pooled_limit_usd)
+    };
+
+    // Headline percent precedence mirrors upstream: totalPercentUsed → lane
+    // average → single lane → amount ratio → flat legacy percent fields.
+    let percent = total_percent
+        .or_else(|| match (auto_percent, api_percent) {
+            (Some(auto), Some(api)) => Some((auto + api) / 2.0),
+            (None, Some(api)) => Some(api),
+            (Some(auto), None) => Some(auto),
+            (None, None) => None,
+        })
+        .or_else(|| match (used_usd, limit_usd) {
+            (Some(used), Some(limit)) if limit > 0.0 => Some(used / limit * 100.0),
+            _ => None,
+        })
+        .or_else(|| {
+            find_number(
+                &value,
+                &[
+                    "planUsagePercent",
+                    "plan_usage_percent",
+                    "totalPercentUsed",
+                    "percentUsed",
+                ],
+            )
+        });
+
+    match (percent, used_usd, limit_usd) {
+        (Some(percent), used, limit) if used.is_some() || limit.is_some() => {
+            let mut window = percent_window("plan", "Plan", percent, reset_at);
+            window.used = used;
+            window.limit = limit;
+            window.unit = Some("USD".to_owned());
             windows.push(window);
+        }
+        (Some(percent), _, _) => {
+            windows.push(percent_window("plan", "Plan", percent, reset_at));
+        }
+        (None, used, limit) => {
+            if let Some(window) = ratio_window("plan", "Plan", used, limit, reset_at, "USD") {
+                windows.push(window);
+            } else {
+                // Legacy flat request-based fields.
+                let used = find_number(&value, &["planUsed", "plan_used", "used", "usage"]);
+                let limit = find_number(&value, &["planLimit", "plan_limit", "limit", "included"]);
+                if let Some(window) =
+                    ratio_window("plan", "Plan", used, limit, reset_at, "requests")
+                {
+                    windows.push(window);
+                }
+            }
         }
     }
 
-    let on_demand_used = find_number(&value, &["onDemandUsed", "on_demand_used", "onDemand"]);
-    let on_demand_limit = find_number(&value, &["onDemandLimit", "on_demand_limit"]);
+    let on_demand_used = cents_to_usd(usage_amount(
+        individual.and_then(|usage| usage.get("onDemand")),
+        "used",
+    ))
+    .or_else(|| {
+        cents_to_usd(usage_amount(
+            team.and_then(|usage| usage.get("onDemand")),
+            "used",
+        ))
+    })
+    .or_else(|| find_number(&value, &["onDemandUsed", "on_demand_used", "onDemand"]));
+    let on_demand_limit = cents_to_usd(usage_amount(
+        individual.and_then(|usage| usage.get("onDemand")),
+        "limit",
+    ))
+    .or_else(|| {
+        cents_to_usd(usage_amount(
+            team.and_then(|usage| usage.get("onDemand")),
+            "limit",
+        ))
+    })
+    .or_else(|| find_number(&value, &["onDemandLimit", "on_demand_limit"]));
     if let Some(window) = ratio_window(
         "on_demand",
         "On-demand",
         on_demand_used,
         on_demand_limit,
         reset_at,
+        "USD",
     ) {
         windows.push(window);
     }
@@ -396,5 +500,62 @@ mod tests {
         .expect("usage");
         assert_eq!(usage.windows[0].used_percent, Some(43));
         assert_eq!(usage.plan_label.as_deref(), Some("pro"));
+    }
+
+    #[test]
+    fn parses_nested_individual_usage_with_cents_amounts() {
+        let usage = parse_usage(
+            r#"{
+                "billingCycleEnd": "2026-10-01T00:00:00Z",
+                "membershipType": "pro",
+                "individualUsage": {
+                    "plan": {
+                        "used": 2000,
+                        "limit": 4000,
+                        "totalPercentUsed": 51.2,
+                        "autoPercentUsed": 48.0,
+                        "apiPercentUsed": 54.4
+                    },
+                    "onDemand": { "used": 1250, "limit": 5000 }
+                }
+            }"#,
+        )
+        .expect("usage");
+
+        let plan = &usage.windows[0];
+        assert_eq!(plan.key, "plan");
+        assert_eq!(plan.used_percent, Some(51));
+        assert_eq!(plan.used, Some(20.0));
+        assert_eq!(plan.limit, Some(40.0));
+        assert_eq!(plan.unit.as_deref(), Some("USD"));
+
+        let on_demand = &usage.windows[1];
+        assert_eq!(on_demand.key, "on_demand");
+        assert_eq!(on_demand.used, Some(12.5));
+        assert_eq!(on_demand.limit, Some(50.0));
+        assert_eq!(on_demand.used_percent, Some(25));
+    }
+
+    #[test]
+    fn falls_back_to_overall_and_pooled_team_amounts() {
+        let usage = parse_usage(
+            r#"{
+                "billingCycleEnd": "2026-10-01T00:00:00Z",
+                "membershipType": "enterprise",
+                "individualUsage": { "overall": { "used": 7384, "limit": 10000 } },
+                "teamUsage": { "pooled": { "used": 50000, "limit": 100000 } }
+            }"#,
+        )
+        .expect("usage");
+
+        let plan = &usage.windows[0];
+        assert_eq!(plan.used_percent, Some(74));
+        assert_eq!(plan.used, Some(73.84));
+        assert_eq!(plan.limit, Some(100.0));
+
+        let pooled_only =
+            parse_usage(r#"{"teamUsage": {"pooled": {"used": 25000, "limit": 100000}}}"#)
+                .expect("pooled usage");
+        assert_eq!(pooled_only.windows[0].used_percent, Some(25));
     }
 }

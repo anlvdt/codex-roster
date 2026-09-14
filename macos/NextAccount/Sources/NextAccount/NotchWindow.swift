@@ -1,5 +1,67 @@
 import AppKit
+import Carbon.HIToolbox
 import SwiftUI
+
+/// Registers ⌃⌥R as a process-wide hotkey that toggles the notch panel.
+/// Carbon hotkeys are delivered without Input Monitoring or Accessibility
+/// permission, unlike NSEvent global key monitors.
+@MainActor
+final class NotchGlobalHotKey {
+    static let shared = NotchGlobalHotKey()
+
+    private let signature = OSType(0x4352_5354) // 'CRST'
+    private var hotKeyRef: EventHotKeyRef?
+    private var handlerRef: EventHandlerRef?
+
+    func registerIfNeeded() {
+        guard hotKeyRef == nil else { return }
+
+        var eventType = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+        InstallEventHandler(
+            GetEventDispatcherTarget(),
+            { _, event, _ -> OSStatus in
+                guard let event else { return OSStatus(eventNotHandledErr) }
+                var hotKeyID = EventHotKeyID()
+                let status = GetEventParameter(
+                    event,
+                    UInt32(kEventParamDirectObject),
+                    UInt32(typeEventHotKeyID),
+                    nil,
+                    MemoryLayout<EventHotKeyID>.size,
+                    nil,
+                    &hotKeyID
+                )
+                guard status == noErr, hotKeyID.signature == OSType(0x4352_5354) else {
+                    return OSStatus(eventNotHandledErr)
+                }
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: .toggleNotchPanel, object: nil)
+                }
+                return noErr
+            },
+            1,
+            &eventType,
+            nil,
+            &handlerRef
+        )
+
+        let hotKeyID = EventHotKeyID(signature: signature, id: 1)
+        RegisterEventHotKey(
+            UInt32(kVK_ANSI_R),
+            UInt32(controlKey | optionKey),
+            hotKeyID,
+            GetEventDispatcherTarget(),
+            0,
+            &hotKeyRef
+        )
+    }
+
+    // No deinit: the singleton lives for the process lifetime and Carbon
+    // releases the hotkey/handler automatically on exit.
+}
 
 struct NotchWindowView: View {
     @EnvironmentObject private var store: AccountStore
@@ -89,6 +151,20 @@ struct NotchWindowView: View {
             store.startCoreMonitoring()
             store.refreshProviderStatus(silently: true)
             updater.startAutomaticChecks(currentVersion: AppInfo.shortVersion)
+            NotchGlobalHotKey.shared.registerIfNeeded()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .toggleNotchPanel)) { _ in
+            guard store.notchPanelEnabled else { return }
+            hoverTask?.cancel()
+            collapseTask?.cancel()
+            if isExpanded {
+                collapse()
+            } else {
+                // Match the click path: the app must be active for the
+                // panel's Esc monitor and button targets to work.
+                NSApplication.shared.activate(ignoringOtherApps: true)
+                expand()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .showDashboard)) { _ in
             openDashboard()

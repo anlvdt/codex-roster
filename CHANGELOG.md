@@ -5,8 +5,9 @@
 ### Added
 
 - Workspace-scoped Codex accounts now resolve their credit balance from the per-account `remaining_balance` endpoint when the usage response omits a personal balance, and the monthly spend-control cap (`individual_limit` / `spend_control`) is surfaced as a "Monthly cap" line in the credits card.
-- A Settings toggle hides the notch panel entirely for users who do not want a menu-bar overlay, and the notch panel can now be dismissed with Escape or by clicking into another app.
+- A Settings toggle hides the notch panel entirely for users who do not want a menu-bar overlay, and the notch panel can now be dismissed with Escape or by clicking into another app. ⌃⌥R toggles the notch from the keyboard via a Carbon global hotkey, so the panel is no longer mouse-only.
 - The empty-state "add your first account" banner now carries an Add account button instead of only describing the action.
+- A Providers surface is back: the dashboard regains a per-provider overview (live session, saved count, best quota, quick view/refresh for OpenAI) and the notch popup shows a compact four-provider badge strip.
 
 ### Changed
 
@@ -15,13 +16,14 @@
 - Reset-radar times follow the interface language: Vietnamese keeps the historical Vietnam-time conversion while English now renders the user's own timezone instead of labelling everything "Vietnam time".
 - The notch opens on hover after a longer 750ms dwell so drive-by pointer crossings no longer trigger it, and Reduce Motion no longer disables the auto-collapse-on-exit behaviour.
 - The sidebar now shows selection: the Overview row highlights when the board is showing, and the live-session card rings when its account is open in detail.
+- Informational popup text moved from `caption2` to `caption`, and the About window now uses semantic text styles instead of hard-coded point sizes.
 
 ### Fixed
 
 - Icon-only controls throughout the notch popup, account detail and search field now expose accessibility labels, the bulk-select checkbox names its account, the token chart columns announce day-plus-tokens, and the busy overlay is labelled.
 - Account-detail actions (edit, archive, remove, sign-in, activate, refresh) are disabled while a session switch is in flight, matching the rest of the app.
 - The About window's default size now matches its declared minimum instead of being clamped.
-- Removed ~450 lines of unreachable view code (the old account row, provider overview/strip and state label leftovers).
+- Removed ~450 lines of unreachable view code (the old account row, state label and empty-row leftovers); the provider overview and popup strip were subsequently restored as live UI.
 
 ## Known issues
 

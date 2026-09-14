@@ -85,24 +85,22 @@ struct NotchWindowView: View {
     /// space in its centre so the two quota rings flank the camera housing.
     @State private var notchWidth: CGFloat = 0
 
-    private let earHalfWidth: CGFloat = 74
     private let expandedWidth: CGFloat = 392
+    private let miniDiameter: CGFloat = 28
 
     private var activeAccount: SavedAccount? {
         store.accounts.first { $0.isActive && !store.isArchived($0) }
     }
 
-    /// Two ears flanking the notch. On displays without a notch this collapses
-    /// to a small centred pill (an 8pt gap instead of the camera width).
+    /// The compact panel becomes a small centred orbit pill that fits inside
+    /// the menu-bar band. On displays without a notch it keeps the same pill
+    /// shape instead of flanking the camera.
     private var compactWidth: CGFloat {
-        earHalfWidth * 2 + max(notchWidth, 8)
+        miniDiameter * 2.2
     }
 
     private var compactHeight: CGFloat {
-        // When collapsed the rings sit nestled inside the ears with margin above
-        // and below. When expanded this same row is just the panel's header, so
-        // it tightens to the notch band and the content starts near the top.
-        isExpanded ? max(notchInset, 28) : max(notchInset, 26) + 8
+        isExpanded ? max(notchInset, 28) : max(notchInset, 26) + 6
     }
 
     private var panelWidth: CGFloat {
@@ -204,50 +202,13 @@ struct NotchWindowView: View {
                 expand()
             }
         } label: {
-            HStack(spacing: 0) {
-                notchEar(
-                    label: language.text("5H", "5h"),
-                    window: activeAccount?.usage?.fiveHour,
-                    prominent: true,
-                    ringFirst: false
-                )
-                .frame(width: earHalfWidth, alignment: .center)
-
-                Color.clear.frame(width: max(notchWidth, 8))
-
-                notchEar(
-                    label: language.text("Tuần", "Wk"),
-                    window: activeAccount?.usage?.weekly,
-                    prominent: false,
-                    ringFirst: true
-                )
-                .frame(width: earHalfWidth, alignment: .center)
-            }
-            .frame(height: compactHeight)
-            .contentShape(Rectangle())
+            OrbitMiniView(account: activeAccount, diameter: miniDiameter, compact: true)
+                .frame(height: compactHeight)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(compactAccessibilityLabel)
-    }
-
-    /// One side of the notch: a progress ring with the remaining percentage in
-    /// its centre, plus a short window label on the outward side.
-    private func notchEar(label: String, window: UsageWindow?, prominent: Bool, ringFirst: Bool) -> some View {
-        let text = Text(label)
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .fixedSize()
-        return HStack(spacing: 6) {
-            if ringFirst {
-                NotchRing(window: window, prominent: prominent)
-                text
-            } else {
-                text
-                NotchRing(window: window, prominent: prominent)
-            }
-        }
     }
 
     private var compactAccessibilityLabel: String {
@@ -368,48 +329,6 @@ struct NotchWindowView: View {
             NSEvent.removeMonitor(monitor)
         }
         keyMonitors.removeAll()
-    }
-}
-
-/// A quota window drawn as a thin progress ring with the remaining percentage
-/// centred inside it. The ring and number are tinted by remaining quota so a
-/// low window reads as urgent at a glance.
-private struct NotchRing: View {
-    let window: UsageWindow?
-    var prominent: Bool = true
-
-    private var percent: Int {
-        max(0, min(100, window?.displayRemainingPercent ?? 0))
-    }
-
-    private var tint: Color {
-        guard let window else { return .secondary }
-        return Color.quotaTint(
-            remainingPercent: window.remainingPercent,
-            exhaustedAt: UsageWindow.exhaustedRemainingPercent
-        )
-    }
-
-    private var diameter: CGFloat { prominent ? 24 : 22 }
-    private var lineWidth: CGFloat { prominent ? 3 : 2.5 }
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .stroke(Color.white.opacity(0.16), lineWidth: lineWidth)
-            Circle()
-                .trim(from: 0, to: CGFloat(percent) / 100)
-                .stroke(tint, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-            Text(window == nil ? "—" : "\(percent)")
-                .font(.system(size: prominent ? 11 : 10, weight: .bold).monospacedDigit())
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
-                .padding(.horizontal, 1)
-        }
-        .frame(width: diameter, height: diameter)
-        .opacity(prominent ? 1 : 0.94)
     }
 }
 

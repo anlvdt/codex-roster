@@ -61,14 +61,27 @@ private let dashboardCardFill = Color(nsColor: .controlBackgroundColor)
 private let rosterActionBlue = Color(nsColor: .systemBlue)
 
 private struct PointingHandCursor: ViewModifier {
+    @State private var isHovering = false
+
     func body(content: Content) -> some View {
-        content.onHover { isHovering in
-            if isHovering {
-                NSCursor.pointingHand.push()
-            } else {
-                NSCursor.pop()
+        content
+            .onHover { hovering in
+                // Only pop the cursor we pushed, so a stale exit event can't
+                // unbalance the shared cursor stack.
+                if hovering, !isHovering {
+                    NSCursor.pointingHand.push()
+                    isHovering = true
+                } else if !hovering, isHovering {
+                    NSCursor.pop()
+                    isHovering = false
+                }
             }
-        }
+            .onDisappear {
+                if isHovering {
+                    NSCursor.pop()
+                    isHovering = false
+                }
+            }
     }
 }
 
@@ -186,7 +199,7 @@ struct CodexRosterApp: App {
                 .environmentObject(language)
                 .environment(\.locale, language.language.locale)
         }
-        .defaultSize(width: 560, height: 720)
+        .defaultSize(width: 720, height: 560)
 
         Settings {
             AutomationSettingsView()
@@ -242,6 +255,7 @@ struct ContentView: View {
             if store.isBusyForActions {
                 ProgressView()
                     .controlSize(.large)
+                    .accessibilityLabel(language.text("Đang xử lý", "Working"))
                     .padding(24)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
             }
@@ -376,8 +390,17 @@ private struct AccountSidebar: View {
             Section {
                 Button { selection = nil } label: {
                     Label(language.text("Tổng quan", "Overview"), systemImage: "house")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 4)
+                        .background(
+                            selection == nil ? Color.accentColor.opacity(0.15) : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 7)
+                        )
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(selection == nil ? [.isSelected] : [])
             }
             if let activeAccount {
                 Section {
@@ -454,6 +477,13 @@ private struct AccountSidebar: View {
                 .foregroundStyle(.tertiary)
         }
         .padding(.vertical, 3)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(
+                    selection == account.id ? Color.accentColor.opacity(0.55) : .clear,
+                    lineWidth: 1
+                )
+        )
     }
 
     // MARK: - Signals double as the account filter
@@ -715,6 +745,13 @@ struct AutomationSettingsView: View {
                 Text(language.text("Duy trì notch và các kiểm tra tự động sau khi bạn đăng nhập vào máy Mac.", "Keeps the notch and automatic checks available after you sign in to your Mac."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Toggle(language.text("Hiện notch quota trên cùng màn hình", "Show the quota notch at the top of the screen"), isOn: Binding(
+                    get: { store.notchPanelEnabled },
+                    set: { store.setNotchPanelEnabled($0) }
+                ))
+                Text(language.text("Tắt để gỡ panel khỏi menu bar; mở lại bất cứ lúc nào.", "Turn off to remove the panel from the menu bar; you can turn it back on anytime."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 HStack {
                     Button(language.text("Kiểm tra ngay", "Run refresh check now")) {
                         store.runUsageWindowCheck()
@@ -921,7 +958,7 @@ private struct NextActionBanner: View {
         case .waitForReset: .orange
         case .signIn: .orange
         case .recover: .red
-        case .retryQuota: .yellow
+        case .retryQuota: .orange
         case .allClear: .green
         }
     }
@@ -1006,7 +1043,11 @@ private struct NextActionBanner: View {
     private func button(for action: NextAction) -> some View {
         switch action {
         case .addAccount:
-            EmptyView()
+            Button(language.text("Thêm tài khoản", "Add account")) {
+                NotificationCenter.default.post(name: .showAddAccount, object: nil)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(store.isWorking)
         case .switchTo(let account), .redeemBankedReset(let account):
             Button(language.text("Chuyển", "Switch")) {
                 store.activate(account, force: true)
@@ -1163,6 +1204,7 @@ private struct AccountTriageBoard: View {
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(language.text("Xóa tìm kiếm", "Clear search"))
                 }
             }
             .font(.caption)
@@ -1425,6 +1467,7 @@ private struct TriageAccountCard: View {
                     }
                     .toggleStyle(.checkbox)
                     .labelsHidden()
+                    .accessibilityLabel(language.text("Chọn \(account.displayName)", "Select \(account.displayName)"))
                 }
 
                 Button(action: openDetails) {
@@ -1634,7 +1677,7 @@ private struct TriageAccountCard: View {
     private var healthColor: Color {
         if account.requiresLogin { return .orange }
         if account.requiresLocalRecovery { return .red }
-        if account.hasTransientUsageError { return .yellow }
+        if account.hasTransientUsageError { return .orange }
         if account.archived { return .secondary }
         return .green
     }
@@ -2007,6 +2050,11 @@ private struct TokenDayColumn: View {
         }
         .frame(maxWidth: .infinity)
         .help(day.date)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(AppLanguage.text(
+            "\(day.date): \(compactTokenCount(day.tokens, in: language)) token",
+            "\(day.date): \(compactTokenCount(day.tokens, in: language)) tokens"
+        ))
     }
 
     private var barHeight: CGFloat {
@@ -2038,111 +2086,10 @@ private func compactTokenCount(_ tokens: UInt64, in language: AppLanguage) -> St
         return "\(tokens)"
     }
 
-    let formatter = NumberFormatter()
-    formatter.locale = language.locale
-    formatter.numberStyle = .decimal
-    formatter.minimumFractionDigits = 0
-    formatter.maximumFractionDigits = 1
-    return "\(formatter.string(from: NSNumber(value: scaledValue)) ?? "\(scaledValue)") \(unit)"
-}
-
-private struct AccountRow: View {
-    @EnvironmentObject private var language: LanguageStore
-    let account: SavedAccount
-    let isArchived: Bool
-    let edit: (SavedAccount) -> Void
-    let archive: (SavedAccount) -> Void
-    let restore: (SavedAccount) -> Void
-    let remove: (SavedAccount) -> Void
-    let relogin: (SavedAccount) -> Void
-    @Binding var selection: UUID?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 9) {
-                Image(systemName: account.isActive ? "checkmark.circle.fill" : "person.crop.circle")
-                    .foregroundStyle(account.isActive ? .green : .secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(account.displayName)
-                        .font(.body.weight(.medium))
-                        .lineLimit(1)
-                        .layoutPriority(1)
-                        .help(account.displayName)
-                    Text(account.email)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .layoutPriority(1)
-                        .textSelection(.enabled)
-                        .help(language.text("Nhấp đúp hoặc dùng menu để sao chép email", "Double-click or use the menu to copy email"))
-                }
-                Spacer(minLength: 4)
-                accountActionsMenu
-            }
-            .contextMenu {
-                Button(language.text("Sao chép email", "Copy email")) {
-                    copyAccountEmail(account.email)
-                }
-            }
-
-            HStack(spacing: 8) {
-                SidebarQuotaMeter(account: account)
-                if let plan = account.planLabel {
-                    Text(account.paidSubscriptionActiveUntil.map {
-                        "GPT \(plan) · \(compactSubscriptionUntil($0, language: language.language))"
-                    } ?? "GPT \(plan)")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .help(language.text("Gói ChatGPT: \(plan). Codex có trong các gói ChatGPT; quota thay đổi theo gói, model và mức sử dụng.", "ChatGPT plan: \(plan). Codex is included with ChatGPT plans; quota varies by plan, model, and usage."))
-                        .accessibilityLabel(language.text("Gói ChatGPT \(plan)", "ChatGPT plan \(plan)"))
-                }
-                if let resets = account.usage?.bankedResets {
-                    Label("\(max(0, resets.availableCount))", systemImage: "arrow.counterclockwise.circle.fill")
-                        .font(.caption.monospacedDigit().weight(.semibold))
-                        .foregroundStyle(resets.availableCount > 0 ? Color.accentColor : Color.secondary)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .help(language.text(
-                            "Banked reset khả dụng: \(max(0, resets.availableCount))",
-                            "Available banked resets: \(max(0, resets.availableCount))"
-                        ))
-                        .accessibilityLabel(language.text(
-                            "Có \(max(0, resets.availableCount)) lượt banked reset",
-                            "\(max(0, resets.availableCount)) banked resets available"
-                        ))
-                }
-            }
-        }
-    }
-
-    private var accountActionsMenu: some View {
-        Menu {
-            Button(language.text("Xem chi tiết", "View details")) { selection = account.id }
-            Button(language.text("Sao chép email", "Copy email")) {
-                copyAccountEmail(account.email)
-            }
-            if !isArchived && account.requiresLogin {
-                Button(language.text("Đăng nhập lại…", "Sign in again…")) { relogin(account) }
-            }
-            Button(language.text("Sửa", "Edit")) { edit(account) }
-            if isArchived {
-                Button(language.text("Khôi phục", "Restore")) { restore(account) }
-            } else {
-                Button(language.text("Lưu trữ", "Archive")) { archive(account) }
-            }
-            Divider()
-            Button(language.text("Xóa", "Remove"), role: .destructive) { remove(account) }
-        } label: {
-            Image(systemName: "ellipsis")
-                .font(.system(size: 15, weight: .bold))
-                .foregroundStyle(Color(nsColor: .secondaryLabelColor))
-                .frame(width: 28, height: 28)
-                .background(Color(nsColor: .tertiaryLabelColor).opacity(0.22), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-        }
-        .menuIndicator(.hidden)
-        .help(language.text("Thao tác tài khoản", "Account actions"))
-    }
+    let scaled = scaledValue.formatted(
+        .number.precision(.fractionLength(0...1)).locale(language.locale)
+    )
+    return "\(scaled) \(unit)"
 }
 
 private struct SidebarQuotaMeter: View {
@@ -2184,11 +2131,17 @@ private struct SidebarQuotaMeter: View {
                 .frame(width: 40, alignment: .leading)
                 .foregroundStyle(.secondary)
             ProgressView(value: Double(window.displayRemainingPercent), total: 100)
-                .tint(tint(for: window.remainingPercent))
+                .tint(Color.quotaTint(
+                    remainingPercent: window.remainingPercent,
+                    exhaustedAt: UsageWindow.exhaustedRemainingPercent
+                ))
                 .frame(minWidth: 46, maxWidth: .infinity)
             Text("\(window.displayRemainingPercent)%")
                 .font(.caption2.monospacedDigit().weight(.semibold))
-                .foregroundStyle(tint(for: window.remainingPercent))
+                .foregroundStyle(Color.quotaTint(
+                    remainingPercent: window.remainingPercent,
+                    exhaustedAt: UsageWindow.exhaustedRemainingPercent
+                ))
             Text(compactReset(window, language: language.language))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -2198,11 +2151,6 @@ private struct SidebarQuotaMeter: View {
             "\(label) còn \(window.displayRemainingPercent) phần trăm, \(compactReset(window, language: language.language))",
             "\(label) \(window.displayRemainingPercent) percent remaining, \(compactReset(window, language: language.language))"
         ))
-    }
-
-    private func tint(for remaining: Int) -> Color {
-        if remaining <= UsageWindow.exhaustedRemainingPercent { return .red }
-        return remaining < 20 ? .orange : (remaining < 50 ? .yellow : .green)
     }
 }
 
@@ -2244,98 +2192,6 @@ private func compactTimeRemaining(until date: Date, language: AppLanguage) -> St
         return language == .vietnamese ? "còn \(hours) giờ" : "\(hours)h left"
     }
     return language == .vietnamese ? "còn \(minutes) phút" : "\(minutes)m left"
-}
-
-private struct ProviderEmptyRow: View {
-    @EnvironmentObject private var language: LanguageStore
-    let provider: AIProvider
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: provider.icon)
-                .foregroundStyle(.secondary)
-            Text(language.text("Chưa có tài khoản đã lưu", "No saved accounts"))
-                .foregroundStyle(.secondary)
-        }
-        .font(.caption)
-        .padding(.vertical, 3)
-    }
-}
-
-private struct ProviderSectionHeader: View {
-    let provider: AIProvider
-    let accountCount: Int
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: provider.icon)
-                .font(.caption.weight(.bold))
-                .foregroundStyle(.tint)
-                .frame(width: 24, height: 24)
-                .background(Color.accentColor.opacity(0.16), in: RoundedRectangle(cornerRadius: 7))
-            Text(provider.name)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.primary)
-            Spacer(minLength: 4)
-            Text("\(accountCount)")
-                .font(.caption.monospacedDigit().weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(.quaternary, in: Capsule())
-        }
-        .padding(.top, 10)
-        .padding(.bottom, 4)
-        .textCase(nil)
-    }
-}
-
-private struct SidebarStateLabel: View {
-    let title: String
-    let count: Int
-    let tint: Color
-
-    var body: some View {
-        HStack {
-            Text(title)
-            Spacer()
-            Text("\(count)")
-                .font(.caption.monospacedDigit())
-        }
-        .font(.subheadline.weight(.semibold))
-        .foregroundStyle(tint)
-        .padding(.top, 4)
-    }
-}
-
-private struct ProviderOverview: View {
-    @EnvironmentObject private var store: AccountStore
-    @EnvironmentObject private var language: LanguageStore
-    @Binding var selection: UUID?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label(language.text("AI providers", "AI providers"), systemImage: "square.grid.2x2")
-                .font(.headline)
-            Text(language.text(
-                "Tình trạng phiên và tài khoản đã lưu của OpenAI, Claude, Cursor và Grok.",
-                "Live sessions and saved-account health across OpenAI, Claude, Cursor, and Grok."
-            ))
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            VStack(spacing: 0) {
-                ForEach(AIProvider.allCases) { provider in
-                    ProviderStatusRow(provider: provider, selection: $selection)
-                    if provider != AIProvider.allCases.last { Divider() }
-                }
-            }
-            .padding(.horizontal, 16)
-            .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 15))
-        }
-        .onAppear {
-            store.refreshProviderStatus(silently: true)
-        }
-    }
 }
 
 private struct OpenAIStatusCard: View {
@@ -2451,7 +2307,7 @@ private struct GlobalResetOutlookCard: View {
                     )
                     ResetOutlookMetric(
                         title: language.text("Giờ thường reset", "Reset window"),
-                        value: formatWindowForVietnam(outlook),
+                        value: formatResetWindow(outlook, language: language.language),
                         tint: .secondary
                     )
                     if let scheduledResetAt = outlook.nextResetAt {
@@ -2678,25 +2534,29 @@ private func formattedResetDate(_ value: String, language: AppLanguage) -> Strin
     )
 }
 
-private func formatWindowForVietnam(_ outlook: ResetOutlook) -> String {
-    // API returns UTC time window (e.g., 11 PM - 2 AM UTC)
-    // Convert to Vietnam time (UTC+7)
-    let vnOffset = 7
+private func formatResetWindow(_ outlook: ResetOutlook, language: AppLanguage) -> String {
+    // API returns a UTC time window (e.g., 11 PM - 2 AM UTC). Vietnamese mode
+    // keeps the historical Asia/Ho_Chi_Minh conversion; English follows the
+    // user's own timezone so the hours are locally meaningful.
     guard let startHour = outlook.windowStartHour, let endHour = outlook.windowEndHour else {
         return outlook.windowLabel
     }
-    let startVN = (startHour + vnOffset) % 24
-    let endVN = (endHour + vnOffset) % 24
-    return "\(formatHour(startVN)) - \(formatHour(endVN))"
+    let timeZone = language == .vietnamese
+        ? (TimeZone(identifier: "Asia/Ho_Chi_Minh") ?? .current)
+        : .current
+    let offsetMinutes = timeZone.secondsFromGMT() / 60
+    return "\(formatClockTime(startHour * 60 + offsetMinutes, language: language)) - \(formatClockTime(endHour * 60 + offsetMinutes, language: language))"
 }
 
-private func formatHour(_ hour: Int) -> String {
-    switch hour {
-    case 0: return "12 AM"
-    case 12: return "12 PM"
-    case 1..<12: return "\(hour) AM"
-    default: return "\(hour - 12) PM"
+private func formatClockTime(_ totalMinutes: Int, language: AppLanguage) -> String {
+    let minutes = ((totalMinutes % 1_440) + 1_440) % 1_440
+    let hour = minutes / 60
+    let minute = minutes % 60
+    if language == .vietnamese {
+        return String(format: "%d:%02d", hour, minute)
     }
+    let hour12 = hour % 12 == 0 ? 12 : hour % 12
+    return String(format: "%d:%02d %@", hour12, minute, hour < 12 ? "AM" : "PM")
 }
 
 private func formatRelativeTime(_ date: Date, language: AppLanguage) -> String {
@@ -2730,21 +2590,25 @@ private func formattedVietnamResetDate(_ value: String, language: AppLanguage) -
         return value
     }
 
-    let vietnamTimeZone = TimeZone(identifier: "Asia/Ho_Chi_Minh") ?? .current
+    // Same convention as formatResetWindow: Vietnamese reads Asia/Ho_Chi_Minh,
+    // English reads the user's own timezone.
+    let displayTimeZone = language == .vietnamese
+        ? (TimeZone(identifier: "Asia/Ho_Chi_Minh") ?? .current)
+        : .current
     var calendar = Calendar(identifier: .gregorian)
-    calendar.timeZone = vietnamTimeZone
+    calendar.timeZone = displayTimeZone
     let components = calendar.dateComponents([.hour, .weekday], from: date)
 
     let posixLocale = Locale(identifier: "en_US_POSIX")
     let timeFormatter = DateFormatter()
     timeFormatter.locale = posixLocale
-    timeFormatter.timeZone = vietnamTimeZone
+    timeFormatter.timeZone = displayTimeZone
     let dateFormatter = DateFormatter()
     dateFormatter.locale = posixLocale
-    dateFormatter.timeZone = vietnamTimeZone
+    dateFormatter.timeZone = displayTimeZone
     let symbolFormatter = DateFormatter()
     symbolFormatter.locale = language.locale
-    symbolFormatter.timeZone = vietnamTimeZone
+    symbolFormatter.timeZone = displayTimeZone
 
     if language == .vietnamese {
         timeFormatter.dateFormat = "HH:mm"
@@ -2764,173 +2628,7 @@ private func formattedVietnamResetDate(_ value: String, language: AppLanguage) -
     timeFormatter.dateFormat = "h:mm a"
     dateFormatter.dateFormat = "MM/dd"
     let weekday = symbolFormatter.weekdaySymbols[(components.weekday ?? 1) - 1]
-    return "around \(timeFormatter.string(from: date)) \(weekday), \(dateFormatter.string(from: date)) Vietnam time"
-}
-
-private struct ProviderStatusRow: View {
-    @EnvironmentObject private var store: AccountStore
-    @EnvironmentObject private var language: LanguageStore
-    let provider: AIProvider
-    @Binding var selection: UUID?
-
-    private var accounts: [SavedAccount] {
-        store.accounts.filter { $0.aiProvider == provider && !store.isArchived($0) }
-    }
-
-    private var providerState: ProviderState? {
-        store.providerStates.first { $0.provider == provider }
-    }
-
-    private var savedCount: Int {
-        provider == .openAI ? accounts.count : (providerState?.savedAccounts ?? 0)
-    }
-
-    private var hasLiveSession: Bool {
-        providerState?.available ?? (provider == .openAI && accounts.contains(where: \.isActive))
-    }
-
-    private var readyAccounts: [SavedAccount] {
-        store.sortedAccounts(accounts.filter { !$0.requiresLogin })
-    }
-
-    private var attentionCount: Int {
-        accounts.filter(\.requiresLogin).count
-    }
-
-    private var bestQuotaAccount: SavedAccount? {
-        readyAccounts.max { $0.switchQuotaScore < $1.switchQuotaScore }
-    }
-
-    private var bestFiveHourWindow: UsageWindow? { bestQuotaAccount?.usage?.fiveHour }
-
-    private var bestWeeklyWindow: UsageWindow? {
-        bestQuotaAccount?.usage?.weekly
-    }
-
-    private func quotaTint(_ window: UsageWindow) -> Color {
-        Color.quotaTint(
-            remainingPercent: window.remainingPercent,
-            exhaustedAt: UsageWindow.exhaustedRemainingPercent
-        )
-    }
-
-    var body: some View {
-        HStack(spacing: 14) {
-            Image(systemName: provider.icon)
-                .font(.title3)
-                .foregroundStyle(savedCount == 0 && !hasLiveSession ? Color.secondary : Color.accentColor)
-                .frame(width: 26)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(provider.name).font(.subheadline.weight(.semibold))
-                if provider == .openAI {
-                    if accounts.isEmpty {
-                        Text(language.text("Chưa có tài khoản đã lưu", "No saved accounts"))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text(language.text("\(readyAccounts.count) sẵn sàng · \(attentionCount) cần đăng nhập", "\(readyAccounts.count) ready · \(attentionCount) need sign-in"))
-                            .font(.caption)
-                            .foregroundStyle(attentionCount == 0 ? Color.secondary : Color.orange)
-                    }
-                } else if providerState == nil && store.isLoadingProviderStatus {
-                    Text(language.text("Đang kiểm tra phiên local…", "Checking local session…"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text(language.text(
-                        "\(savedCount) đã lưu · \(hasLiveSession ? "phiên live" : "chưa có phiên live")",
-                        "\(savedCount) saved · \(hasLiveSession ? "live session" : "no live session")"
-                    ))
-                        .font(.caption)
-                        .foregroundStyle(hasLiveSession ? Color.secondary : Color.orange)
-                }
-            }
-
-            Spacer(minLength: 12)
-
-            if bestFiveHourWindow != nil || bestWeeklyWindow != nil {
-                VStack(alignment: .trailing, spacing: 5) {
-                    if let window = bestFiveHourWindow {
-                        providerQuotaLine(language.text("5 giờ", "5-hour"), window: window)
-                    }
-                    if let window = bestWeeklyWindow {
-                        providerQuotaLine(language.text("Tuần", "Weekly"), window: window)
-                    }
-                }
-                .frame(width: 166, alignment: .trailing)
-            } else if provider == .openAI && !accounts.isEmpty {
-                Text(language.text("Chưa có quota", "Quota not checked"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            if provider == .openAI && !accounts.isEmpty {
-                Button(language.text("Xem", "View")) {
-                    selection = readyAccounts.first?.id ?? accounts.first?.id
-                }
-                .controlSize(.small)
-                Button(language.text("Cập nhật", "Refresh")) {
-                    store.refreshUsage(scope: .activeOnly)
-                }
-                .controlSize(.small)
-                .disabled(store.isWorking)
-            } else if provider != .openAI {
-                Label(
-                    hasLiveSession ? language.text("Live", "Live") : language.text("Offline", "Offline"),
-                    systemImage: hasLiveSession ? "checkmark.circle.fill" : "circle"
-                )
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(hasLiveSession ? Color.green : Color.secondary)
-            }
-        }
-        .padding(.vertical, 14)
-    }
-
-    private func providerQuotaLine(_ label: String, window: UsageWindow) -> some View {
-        HStack(spacing: 5) {
-            Text(label)
-                .foregroundStyle(.secondary)
-            Text("\(window.displayRemainingPercent)%")
-                .fontWeight(.bold)
-                .foregroundStyle(quotaTint(window))
-            Text(compactReset(window, language: language.language))
-                .foregroundStyle(.secondary)
-        }
-        .font(.caption.monospacedDigit())
-    }
-}
-
-private struct UsagePill: View {
-    @EnvironmentObject private var language: LanguageStore
-    let account: SavedAccount
-
-    var body: some View {
-        if account.usageError != nil {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-                .help(language.text("Hãy đăng nhập lại trước khi dùng tài khoản đã lưu này.", "Sign in again before using this saved account."))
-        } else if account.primaryQuotaWindow != nil {
-            HStack(spacing: 6) {
-                if let window = account.usage?.fiveHour {
-                    usageText("5h", window: window)
-                }
-                if let window = account.usage?.weekly {
-                    usageText(language.text("Tuần", "Week"), window: window)
-                }
-            }
-        } else if let plan = account.planLabel {
-            Text(plan)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private func usageText(_ label: String, window: UsageWindow) -> some View {
-        Text("\(label) \(window.displayRemainingPercent)%")
-            .font(.caption.monospacedDigit().weight(.semibold))
-            .foregroundStyle(window.isDepleted ? .red : (window.remainingPercent < 20 ? .orange : .secondary))
-    }
+    return "around \(timeFormatter.string(from: date)) \(weekday), \(dateFormatter.string(from: date))"
 }
 
 private struct AddAccountSheet: View {
@@ -3038,7 +2736,7 @@ private struct AddAccountSheet: View {
                 }
             } else if case .saved = state {
                 Task {
-                    try? await Task.sleep(for: .milliseconds(650))
+                    try? await Task.sleep(for: .milliseconds(1_200))
                     dismiss()
                 }
             }
@@ -3118,34 +2816,35 @@ private struct AccountDetail: View {
                     }
                     Spacer()
                     Button(language.text("Sửa", "Edit"), action: edit)
-                    .disabled(store.isWorking)
+                    .disabled(store.isBusyForActions)
                     Button(isArchived ? language.text("Khôi phục", "Restore") : language.text("Lưu trữ", "Archive")) {
                         isArchived ? restore() : archive()
                     }
-                    .disabled(store.isWorking)
+                    .disabled(store.isBusyForActions)
                     Menu {
                         Button(language.text("Sao chép email", "Copy email")) {
                             copyAccountEmail(account.email)
                         }
                         Divider()
                         Button(language.text("Xóa tài khoản", "Remove account"), role: .destructive, action: remove)
-                            .disabled(store.isWorking)
+                            .disabled(store.isBusyForActions)
                     } label: {
                         Image(systemName: "ellipsis")
                     }
                     .menuIndicator(.hidden)
                     .fixedSize()
                     .help(language.text("Thao tác khác", "More actions"))
+                    .accessibilityLabel(language.text("Thao tác khác", "More actions"))
                     if !isArchived && account.requiresLogin {
                         Button(language.text("Đăng nhập lại", "Sign in again"), action: relogin)
                             .buttonStyle(.borderedProminent)
                             .tint(.orange)
-                            .disabled(store.isWorking)
+                            .disabled(store.isBusyForActions)
                     } else if !isArchived && !account.isActive
                                 && !account.requiresLogin && !account.requiresLocalRecovery {
                         Button(language.text("Chuyển sang tài khoản này", "Activate"), action: activate)
                             .buttonStyle(.borderedProminent)
-                            .disabled(store.isWorking)
+                            .disabled(store.isBusyForActions)
                     }
                 }
 
@@ -3166,21 +2865,42 @@ private struct AccountDetail: View {
                     BankedResetCard(summary: resets)
                 }
 
-                if let credits = account.usage?.credits, credits.unlimited || credits.hasDisplayableBalance {
+                if let credits = account.usage?.credits,
+                   credits.unlimited || credits.hasDisplayableBalance || credits.creditLimit != nil
+                {
                     GroupBox(language.text("Tín dụng ChatGPT", "ChatGPT credits")) {
-                        HStack {
-                            Label(
-                                credits.unlimited
-                                    ? language.text("Không giới hạn", "Unlimited")
-                                    : language.text("Số dư: \(credits.balance)", "Balance: \(credits.balance)"),
-                                systemImage: "creditcard"
-                            )
-                            Spacer()
-                            Text(language.text("Có thể mở rộng quota Codex", "Can extend Codex quota"))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                        if credits.unlimited || credits.hasDisplayableBalance {
+                            HStack {
+                                Label(
+                                    credits.unlimited
+                                        ? language.text("Không giới hạn", "Unlimited")
+                                        : language.text("Số dư: \(credits.balance)", "Balance: \(credits.balance)"),
+                                    systemImage: "creditcard"
+                                )
+                                Spacer()
+                                Text(language.text("Có thể mở rộng quota Codex", "Can extend Codex quota"))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        if let creditLimit = credits.creditLimit {
+                            HStack {
+                                Label(
+                                    language.text(
+                                        "Hạn mức tháng: \(creditLimit.displayText)",
+                                        "Monthly cap: \(creditLimit.displayText)"),
+                                    systemImage: "chart.bar"
+                                )
+                                Spacer()
+                                Text(language.text(
+                                    "Còn \(Int(creditLimit.remainingPercent.rounded()))%",
+                                    "\(Int(creditLimit.remainingPercent.rounded()))% left"))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
                 }
 
@@ -3206,7 +2926,7 @@ private struct AccountDetail: View {
                         Button(language.text("Bắt đầu đăng nhập lại…", "Start sign-in again…"), action: relogin)
                             .buttonStyle(.borderedProminent)
                             .tint(.orange)
-                            .disabled(store.isWorking || isArchived)
+                            .disabled(store.isBusyForActions || isArchived)
                     }
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -3247,6 +2967,7 @@ private struct AccountDetail: View {
                                 }
                                 .buttonStyle(.borderless)
                                 .help(language.text("Sao chép địa chỉ email", "Copy email address"))
+                                .accessibilityLabel(language.text("Sao chép địa chỉ email", "Copy email address"))
                             }
                         }
                         GridRow { Text(language.text("Gói ChatGPT", "ChatGPT plan")).foregroundStyle(.secondary); Text(account.planLabel ?? language.text("Chưa có", "Not available")) }
@@ -3278,7 +2999,7 @@ private struct AccountDetail: View {
                     } label: {
                         Label(language.text("Cập nhật quota", "Refresh usage"), systemImage: "arrow.clockwise")
                     }
-                    .disabled(store.isWorking || isArchived)
+                    .disabled(store.isBusyForActions || isArchived)
                 }
             }
             .padding(32)
@@ -3322,7 +3043,7 @@ private struct SessionDiagnosticsPanel: View {
     private var sessionColor: Color {
         if account.requiresLogin { return .orange }
         if account.requiresLocalRecovery { return .red }
-        if account.hasTransientUsageError { return .yellow }
+        if account.hasTransientUsageError { return .orange }
         return .green
     }
 
@@ -3384,7 +3105,7 @@ private struct SessionDiagnosticsPanel: View {
                 ? language.text("Snapshot không bị thay đổi", "Snapshot remains unchanged")
                 : language.text("Tách riêng cửa sổ 5 giờ và tuần", "Separate 5-hour and weekly windows"),
             icon: account.hasTransientUsageError ? "wifi.exclamationmark" : "gauge.with.dots.needle.67percent",
-            tint: account.hasTransientUsageError ? .yellow : .accentColor
+            tint: account.hasTransientUsageError ? .orange : .accentColor
         )
         DiagnosticMetric(
             title: language.text("Live session", "Live session"),
@@ -3963,6 +3684,7 @@ struct MenuBarView: View {
                 .pointingHandCursor()
                 .disabled(store.isBusyForActions || store.isLoadingOpenAIStatus || store.isLoadingResetOutlook)
                 .help(language.text("Làm mới tài khoản và tín hiệu live", "Refresh accounts and live signals"))
+                .accessibilityLabel(language.text("Làm mới", "Refresh"))
 
                 Button { openDashboard() } label: {
                     Label(language.text("Mở Codex Roster", "Open Codex Roster"), systemImage: "square.grid.2x2")
@@ -4024,6 +3746,7 @@ struct MenuBarView: View {
                 .menuIndicator(.hidden)
                 .menuBarInteractive()
                 .help(language.text("Tác vụ khác", "More actions"))
+                .accessibilityLabel(language.text("Tác vụ khác", "More actions"))
             }
             .padding(.vertical, 2)
         }
@@ -4309,6 +4032,7 @@ private struct MenuBarOperationStatus: View {
                 }
                 .buttonStyle(.plain)
                 .help(language.text("Đóng thông báo", "Dismiss"))
+                .accessibilityLabel(language.text("Đóng thông báo", "Dismiss"))
             }
         }
         .foregroundStyle(tint)
@@ -4379,90 +4103,6 @@ private struct MenuBarHeader: View {
     }
 }
 
-private struct MenuBarProviderStrip: View {
-    @EnvironmentObject private var store: AccountStore
-    @EnvironmentObject private var language: LanguageStore
-
-    private var liveCount: Int {
-        store.providerStates.filter(\.available).count
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack {
-                Text(language.text("Providers", "Providers"))
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if store.isLoadingProviderStatus && store.providerStates.isEmpty {
-                    ProgressView()
-                        .controlSize(.mini)
-                } else {
-                    Text(language.text("\(liveCount)/4 live", "\(liveCount)/4 live"))
-                        .font(.caption2.monospacedDigit().weight(.semibold))
-                        .foregroundStyle(liveCount > 0 ? Color.green : Color.secondary)
-                }
-            }
-
-            HStack(spacing: 6) {
-                ForEach(AIProvider.allCases) { provider in
-                    providerBadge(provider)
-                }
-            }
-        }
-        .padding(9)
-        .background(.quaternary.opacity(0.58), in: RoundedRectangle(cornerRadius: 11))
-        .overlay {
-            RoundedRectangle(cornerRadius: 11)
-                .stroke(Color.primary.opacity(0.07), lineWidth: 1)
-        }
-    }
-
-    private func providerBadge(_ provider: AIProvider) -> some View {
-        let state = store.providerStates.first { $0.provider == provider }
-        let isLive = state?.available == true
-        let savedCount = state?.savedAccounts ?? (provider == .openAI ? store.accounts.count : 0)
-
-        return VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 4) {
-                Image(systemName: provider.icon)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(isLive ? Color.primary : Color.secondary)
-                Spacer(minLength: 0)
-                Circle()
-                    .fill(isLive ? Color.green : Color.secondary.opacity(0.55))
-                    .frame(width: 6, height: 6)
-            }
-            Text(provider.compactName)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-            Text(language.text("\(savedCount) lưu", "\(savedCount) saved"))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 7)
-        .background(Color.primary.opacity(isLive ? 0.075 : 0.035), in: RoundedRectangle(cornerRadius: 8))
-        .help(providerHelp(provider, state: state))
-    }
-
-    private func providerHelp(_ provider: AIProvider, state: ProviderState?) -> String {
-        guard let state else {
-            return language.text("Đang kiểm tra \(provider.name)", "Checking \(provider.name)")
-        }
-        if let email = state.identity?.email, state.available {
-            return language.text("\(provider.name) đang live: \(email)", "\(provider.name) live: \(email)")
-        }
-        if let error = state.usageError, !error.isEmpty {
-            return error
-        }
-        return language.text("\(provider.name) chưa có phiên local đang hoạt động", "No active local \(provider.name) session")
-    }
-}
-
 private struct MenuBarCurrentSession: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
@@ -4520,6 +4160,7 @@ private struct MenuBarCurrentSession: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(rosterActionBlue)
                 .help(language.text("Sao chép email", "Copy email"))
+                .accessibilityLabel(language.text("Sao chép email", "Copy email"))
                 .menuBarInteractive()
             }
             Button {
@@ -4535,6 +4176,9 @@ private struct MenuBarCurrentSession: View {
             .help(chatGPTRunning
                 ? language.text("Đồng bộ lại ChatGPT theo phiên này", "Resync ChatGPT with this session")
                 : language.text("Mở ChatGPT theo phiên này", "Open ChatGPT with this session"))
+            .accessibilityLabel(chatGPTRunning
+                ? language.text("Đồng bộ lại ChatGPT", "Resync ChatGPT")
+                : language.text("Mở ChatGPT", "Open ChatGPT"))
             if let account, account.primaryQuotaWindow != nil {
                 MenuBarQuota(account: account)
             }
@@ -4762,7 +4406,7 @@ private struct AboutView: View {
                         AboutBullet(icon: "arrow.counterclockwise", text: language.text("Khôi phục danh sách hoặc phiên sao lưu gần nhất sau khi xác nhận.", "Restore the latest account list or saved sessions after confirmation."))
                     }
                     AboutFeatureGroup(title: language.text("Trải nghiệm hệ thống", "System experience")) {
-                        AboutBullet(icon: "macbook", text: language.text("Notch hiển thị quota hiện tại, chuyển nhanh, trạng thái dịch vụ, refresh, mở dashboard và thoát ứng dụng.", "The notch shows current quota, quick switching, service state, refresh, dashboard access, and quit."))
+                        AboutBullet(icon: "macbook", text: language.text("Notch hiển thị quota hiện tại, chuyển nhanh, trạng thái dịch vụ, refresh, mở dashboard và thoát ứng dụng; tắt được trong Cài đặt.", "The notch shows current quota, quick switching, service state, refresh, dashboard access, and quit; it can be hidden in Settings."))
                         AboutBullet(icon: "power", text: language.text("Tùy chọn mở Codex Roster khi đăng nhập macOS; hỗ trợ phím tắt, Dark Mode và song ngữ Việt–Anh (mặc định Tiếng Việt).", "Optionally launch at macOS sign-in; supports keyboard shortcuts, Dark Mode, and Vietnamese–English (Vietnamese by default)."))
                         AboutBullet(icon: "desktopcomputer", text: language.text("macOS là nền tảng duy nhất đang được phát triển và phát hành; app Windows và Linux hiện tạm dừng, mã nguồn được giữ lại để bảo trì trong tương lai.", "macOS is the only actively developed and released platform; Windows and Linux apps are paused, with source retained for future maintenance."))
                     }

@@ -13,6 +13,9 @@ struct NotchWindowView: View {
     @State private var expandedContentOpacity = 0.0
     @State private var hoverTask: Task<Void, Never>?
     @State private var collapseTask: Task<Void, Never>?
+    /// Escape monitors installed while expanded so the panel can be dismissed
+    /// from the keyboard even though the borderless window never becomes key.
+    @State private var keyMonitors: [Any] = []
     /// Height of the display's physical notch (menu-bar band). The compact
     /// panel sits inside this band so it never hangs below over other windows.
     @State private var notchInset: CGFloat = 0
@@ -79,7 +82,7 @@ struct NotchWindowView: View {
         // shadow's bleed in its frame, which pushes the panel down from the very
         // top of the screen. The stroke border provides edge definition instead.
         .preferredColorScheme(.dark)
-        .background(NotchWindowConfigurator(panelWidth: panelWidth, notchInset: $notchInset, notchWidth: $notchWidth))
+        .background(NotchWindowConfigurator(panelWidth: panelWidth, panelEnabled: store.notchPanelEnabled, notchInset: $notchInset, notchWidth: $notchWidth))
         .onHover(perform: handleHover)
         .animation(panelAnimation, value: isExpanded)
         .task {
@@ -90,9 +93,17 @@ struct NotchWindowView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showDashboard)) { _ in
             openDashboard()
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+            // Clicking into another app dismisses the panel like a real menu.
+            if isExpanded { collapse() }
+        }
+        .onChange(of: store.notchPanelEnabled) { _, enabled in
+            if !enabled { collapse() }
+        }
         .onDisappear {
             hoverTask?.cancel()
             collapseTask?.cancel()
+            removeKeyMonitors()
         }
     }
 
@@ -193,12 +204,14 @@ struct NotchWindowView: View {
     private func handleHover(_ hovering: Bool) {
         hoverTask?.cancel()
         collapseTask?.cancel()
-        guard !reduceMotion else { return }
 
         if hovering {
             guard !isExpanded else { return }
+            // Deliberately slow: the pointer often crosses the notch on the way
+            // to neighbouring menu bar items, and a shorter delay opens the
+            // panel on pure drive-by hovers.
             hoverTask = Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(450))
+                try? await Task.sleep(for: .milliseconds(750))
                 guard !Task.isCancelled else { return }
                 expand()
             }
@@ -214,6 +227,7 @@ struct NotchWindowView: View {
     private func expand() {
         hoverTask?.cancel()
         collapseTask?.cancel()
+        installKeyMonitors()
 
         // Animate width AND the added content height together so the panel
         // grows in one smooth motion instead of snapping to full size.
@@ -234,6 +248,7 @@ struct NotchWindowView: View {
     private func collapse() {
         hoverTask?.cancel()
         collapseTask?.cancel()
+        removeKeyMonitors()
 
         guard !reduceMotion else {
             expandedContentOpacity = 0
@@ -253,6 +268,30 @@ struct NotchWindowView: View {
                 rendersExpandedContent = false
             }
         }
+    }
+
+    private func installKeyMonitors() {
+        guard keyMonitors.isEmpty else { return }
+        if let local = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { event in
+            guard event.keyCode == 53 else { return event }
+            Task { @MainActor in collapse() }
+            return nil
+        }) {
+            keyMonitors.append(local)
+        }
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: { event in
+            guard event.keyCode == 53 else { return }
+            Task { @MainActor in collapse() }
+        }) {
+            keyMonitors.append(global)
+        }
+    }
+
+    private func removeKeyMonitors() {
+        for monitor in keyMonitors {
+            NSEvent.removeMonitor(monitor)
+        }
+        keyMonitors.removeAll()
     }
 }
 
@@ -300,6 +339,7 @@ private struct NotchRing: View {
 
 private struct NotchWindowConfigurator: NSViewRepresentable {
     let panelWidth: CGFloat
+    let panelEnabled: Bool
     @Binding var notchInset: CGFloat
     @Binding var notchWidth: CGFloat
 
@@ -316,6 +356,10 @@ private struct NotchWindowConfigurator: NSViewRepresentable {
     private func configureWindow(attachedTo view: NSView) {
         DispatchQueue.main.async {
             guard let window = view.window else { return }
+            guard panelEnabled else {
+                window.orderOut(nil)
+                return
+            }
             window.identifier = NSUserInterfaceItemIdentifier("notch")
             window.styleMask = [.borderless, .fullSizeContentView]
             window.titleVisibility = .hidden

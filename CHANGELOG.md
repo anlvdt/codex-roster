@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Workspace-scoped Codex accounts now resolve their credit balance from the per-account `remaining_balance` endpoint when the usage response omits a personal balance, and the monthly spend-control cap (`individual_limit` / `spend_control`) is surfaced as a "Monthly cap" line in the credits card.
+- A Settings toggle hides the notch panel entirely for users who do not want a menu-bar overlay, and the notch panel can now be dismissed with Escape or by clicking into another app.
+- The empty-state "add your first account" banner now carries an Add account button instead of only describing the action.
+
+### Changed
+
+- Researched upstream steipete/CodexBar `v0.60.2` (`69c5a785c`) and applied the relevant hardening: Codex usage payloads now decode tolerantly (numeric strings/floats, per-window fail-soft, malformed optional blocks no longer fail the whole response), Claude usage sends a `claude-code/<version>` user agent, Cursor usage understands the nested `individualUsage`/`teamUsage` cents-based schema, and Grok billing reads the proxy `config` payload — including on-demand amounts and `subscriptionTier` — while preserving an unknown reading instead of inventing 0%.
+- The shared quota color ramp drops the low-contrast yellow band: below-half remaining windows now read orange, and every remaining yellow text state (transient quota errors, retry banner) moved to orange for legibility in light mode.
+- Reset-radar times follow the interface language: Vietnamese keeps the historical Vietnam-time conversion while English now renders the user's own timezone instead of labelling everything "Vietnam time".
+- The notch opens on hover after a longer 750ms dwell so drive-by pointer crossings no longer trigger it, and Reduce Motion no longer disables the auto-collapse-on-exit behaviour.
+- The sidebar now shows selection: the Overview row highlights when the board is showing, and the live-session card rings when its account is open in detail.
+
+### Fixed
+
+- Icon-only controls throughout the notch popup, account detail and search field now expose accessibility labels, the bulk-select checkbox names its account, the token chart columns announce day-plus-tokens, and the busy overlay is labelled.
+- Account-detail actions (edit, archive, remove, sign-in, activate, refresh) are disabled while a session switch is in flight, matching the rest of the app.
+- The About window's default size now matches its declared minimum instead of being clamped.
+- Removed ~450 lines of unreachable view code (the old account row, provider overview/strip and state label leftovers).
+
+## Known issues
+
+- `swift test` fails in this toolchain because the `Testing` module is unavailable; this predates these changes.
+
 ## v0.4.0 - 2026-09-07
 
 ### Added

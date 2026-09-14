@@ -85,8 +85,7 @@ extension Color {
     /// notch) so the thresholds never drift apart.
     static func quotaTint(remainingPercent: Int, exhaustedAt: Int) -> Color {
         if remainingPercent <= exhaustedAt { return .red }
-        if remainingPercent < 20 { return .orange }
-        if remainingPercent < 50 { return .yellow }
+        if remainingPercent < 50 { return .orange }
         return .green
     }
 }
@@ -199,6 +198,7 @@ final class AccountStore: ObservableObject {
     @Published private(set) var autoSwitchState: AutoSwitchState?
     @Published private(set) var isCheckingAutoSwitch = false
     @Published private(set) var launchAtLoginEnabled: Bool
+    @Published private(set) var notchPanelEnabled: Bool
     @Published private(set) var backupStatusMessage: String?
     @Published private(set) var isWorking = false
     @Published private(set) var isSwitching = false
@@ -218,6 +218,7 @@ final class AccountStore: ObservableObject {
     private var legacyArchivedAccountIDs: Set<UUID>
     private let legacyAutoSwitchWhenExhaustedKey = "codexRoster.autoSwitchWhenExhausted"
     private let accountSortModeKey = "codexRoster.accountSortMode"
+    private let notchPanelEnabledKey = "codexRoster.notchPanelEnabled"
     private var autoSwitchTask: Task<Void, Never>?
     private var quotaRefreshTask: Task<Void, Never>?
     private var vibeUsageTask: Task<Void, Never>?
@@ -244,6 +245,9 @@ final class AccountStore: ObservableObject {
         )
         autoSwitchWhenExhausted = false
         launchAtLoginEnabled = LaunchAtLogin.isEnabled
+        notchPanelEnabled = defaults.object(forKey: notchPanelEnabledKey) == nil
+            ? true
+            : defaults.bool(forKey: notchPanelEnabledKey)
         if let raw = defaults.string(forKey: accountSortModeKey),
            let mode = AccountSortMode(rawValue: raw) {
             accountSortMode = mode
@@ -255,6 +259,11 @@ final class AccountStore: ObservableObject {
     func setAccountSortMode(_ mode: AccountSortMode) {
         accountSortMode = mode
         UserDefaults.standard.set(mode.rawValue, forKey: accountSortModeKey)
+    }
+
+    func setNotchPanelEnabled(_ enabled: Bool) {
+        notchPanelEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: notchPanelEnabledKey)
     }
 
     func sortedAccounts(_ accounts: [SavedAccount]) -> [SavedAccount] {
@@ -2648,9 +2657,29 @@ struct UsageCredits: Decodable {
     let hasCredits: Bool
     let unlimited: Bool
     let balance: String
+    /// Monthly spend-control cap (workspace/team credit pool). Absent for
+    /// personal balances.
+    let creditLimit: UsageCreditLimit?
 
     var hasDisplayableBalance: Bool {
         hasCredits && !balance.isEmpty && balance != "null"
+    }
+}
+
+struct UsageCreditLimit: Decodable {
+    let used: Double?
+    let limit: Double
+    let remainingPercent: Double
+    let resetsAt: RustDate?
+
+    /// "45.5 / 100" style summary of the monthly credit pool.
+    var displayText: String {
+        let format: (Double) -> String = { value in
+            value.truncatingRemainder(dividingBy: 1) == 0
+                ? String(format: "%.0f", value)
+                : String(format: "%.1f", value)
+        }
+        return "\(format(used ?? 0)) / \(format(limit))"
     }
 }
 

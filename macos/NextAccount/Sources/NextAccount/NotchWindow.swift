@@ -78,8 +78,9 @@ struct NotchWindowView: View {
     @State private var hoverTask: Task<Void, Never>?
     @State private var collapseTask: Task<Void, Never>?
     @State private var keyMonitors: [Any] = []
-    @State private var notchInset: CGFloat = 0
-    @State private var notchWidth: CGFloat = 0
+    @State private var isWindowExpanded = false
+    @State private var notchInset: CGFloat = detectInitialNotch().inset
+    @State private var notchWidth: CGFloat = detectInitialNotch().camera
 
     // Sheet presentation states directly inside the Notch Console
     @State private var showingAddAccount = false
@@ -177,11 +178,15 @@ struct NotchWindowView: View {
             .contentShape(notchShape)
             .onHover(perform: handleHover)
         }
-        .frame(width: maxExpandedWidth, alignment: .top)
+        .frame(
+            width: isWindowExpanded ? maxExpandedWidth : compactWidth,
+            height: isWindowExpanded ? 480 : compactHeight,
+            alignment: .top
+        )
         .preferredColorScheme(.dark)
         .background {
             NotchWindowConfigurator(
-                isExpanded: isExpanded,
+                isExpanded: isWindowExpanded,
                 compactWidth: compactWidth,
                 compactHeight: compactHeight,
                 expandedWidth: maxExpandedWidth,
@@ -356,6 +361,7 @@ struct NotchWindowView: View {
         hoverTask?.cancel()
         collapseTask?.cancel()
         installKeyMonitors()
+        isWindowExpanded = true
 
         guard !reduceMotion else {
             expansionState = .fullyExpanded
@@ -384,12 +390,34 @@ struct NotchWindowView: View {
 
         guard !reduceMotion else {
             expansionState = .collapsed
+            isWindowExpanded = false
             return
         }
 
         withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
             expansionState = .collapsed
         }
+
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard expansionState == .collapsed else { return }
+            isWindowExpanded = false
+        }
+    }
+
+    private static func detectInitialNotch() -> (camera: CGFloat, inset: CGFloat) {
+        let screens = NSScreen.screens
+        guard let screen = screens.max(by: { $0.safeAreaInsets.top < $1.safeAreaInsets.top }) ?? NSScreen.main ?? screens.first else {
+            return (0, 0)
+        }
+        let inset = screen.safeAreaInsets.top
+        let camera: CGFloat
+        if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
+            camera = max(0, right.minX - left.maxX)
+        } else {
+            camera = 0
+        }
+        return (camera, inset)
     }
 
     private func installKeyMonitors() {
@@ -479,10 +507,16 @@ private struct NotchWindowConfigurator: NSViewRepresentable {
                 notchWidth = camera
             }
 
-            // Window stays centered permanently at screen midX with fixed width expandedWidth.
-            // Symmetrical 2-way expansion and drop-down happen smoothly inside SwiftUI!
-            let x = screen.frame.midX - expandedWidth / 2
-            window.setFrameTopLeftPoint(NSPoint(x: x, y: screen.frame.maxY))
+            // Dynamic sizing: only occupy compact capsule bounds when collapsed so
+            // menu-bar icons and menus remain directly clickable without interception.
+            let targetWidth = isExpanded ? expandedWidth : compactWidth
+            let targetHeight = isExpanded ? CGFloat(480) : compactHeight
+            let x = screen.frame.midX - targetWidth / 2
+            let y = screen.frame.maxY - targetHeight
+            let targetFrame = NSRect(x: x, y: y, width: targetWidth, height: targetHeight)
+            if window.frame != targetFrame {
+                window.setFrame(targetFrame, display: true, animate: false)
+            }
             window.orderFrontRegardless()
         }
     }

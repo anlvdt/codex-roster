@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.6 - 2026-09-16
+
+### Fixed
+
+- Dynamically size the compact notch window strictly to the pill dimensions (`compactWidth` x `compactHeight`) when collapsed, preventing the transparent 920pt window from intercepting mouse clicks on macOS menu bar icons and menus.
+- Smoothly coordinate window frame expansion and collapse with SwiftUI spring animations to preserve the two-way blooming transition without clipping.
+
 ## v0.4.5 - 2026-09-15
 
 ### Changed

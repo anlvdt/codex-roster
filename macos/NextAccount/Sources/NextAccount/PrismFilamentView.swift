@@ -2,9 +2,9 @@ import SwiftUI
 
 /// Symmetrically Balanced Two-Ear Live Notch Flanking System for Codex Roster.
 /// Minimalist, high-legibility telemetry hugging the MacBook camera notch:
-/// - Left Ear: 5-Hour Quota (large, borderless typography, seamlessly flush to notch)
+/// - Left Ear: 5-Hour Quota (large, borderless typography, symmetrically balanced)
 /// - Center: Physical camera notch clearance (100% transparent & hugging notch edges)
-/// - Right Ear: Weekly Quota + Reset Countdown / Banked Resets (seamlessly flush to notch, zero clipping)
+/// - Right Ear: Weekly Quota + Reset Countdown / Banked Resets (fully visible, zero clipping)
 struct PrismFilamentView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
@@ -14,7 +14,7 @@ struct PrismFilamentView: View {
     var diameter: CGFloat = 20
     var compact: Bool = true
     var notchWidth: CGFloat = 185
-    var earWidth: CGFloat = 118
+    var earWidth: CGFloat = 126
     var compactHeight: CGFloat = 32
 
     private var fivePercent: Int? {
@@ -42,7 +42,7 @@ struct PrismFilamentView: View {
     }
 
     private var physicalNotchClearance: CGFloat {
-        notchWidth > 0 ? max(notchWidth - 36, 148) : 0
+        notchWidth > 0 ? max(notchWidth - 14, 170) : 0
     }
 
     var body: some View {
@@ -64,7 +64,7 @@ struct PrismFilamentView: View {
     // MARK: - Non-notch Display Mode (External monitors)
     private var nonNotchCapsule: some View {
         HStack(spacing: 8) {
-            // 5h Quota
+            // 5H Quota
             HStack(spacing: 3) {
                 Text("5H")
                     .font(.system(size: 12, weight: .semibold))
@@ -124,17 +124,16 @@ struct PrismFilamentView: View {
         .padding(.vertical, 4.5)
         .background(
             Capsule()
-                .fill(.ultraThinMaterial)
-                .overlay(Capsule().fill(Color.black.opacity(0.72)))
+                .fill(Color.black)
         )
         .overlay(
             Capsule().strokeBorder(
                 LinearGradient(
-                    colors: [Color.white.opacity(0.22), Color.white.opacity(0.05)],
+                    colors: [Color.white.opacity(0.18), Color.white.opacity(0.04)],
                     startPoint: .top,
                     endPoint: .bottom
                 ),
-                lineWidth: 0.6
+                lineWidth: 0.5
             )
         )
     }
@@ -145,6 +144,7 @@ struct PrismFilamentView: View {
             Text(language.text("5H", "5H"))
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.68))
+                .lineLimit(1)
                 .fixedSize()
 
             if let fivePercent {
@@ -152,16 +152,19 @@ struct PrismFilamentView: View {
                     .font(.system(size: 13.5, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(fiveTint)
+                    .lineLimit(1)
                     .fixedSize()
             } else {
                 Text("—")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
                     .fixedSize()
             }
         }
-        .padding(.horizontal, 10)
-        .frame(width: earWidth, height: compactHeight, alignment: .center)
+        .padding(.leading, 14)
+        .padding(.trailing, 12)
+        .frame(width: earWidth, height: compactHeight, alignment: .trailing)
         .background(leftEarBackground)
         .overlay(leftEarBorder)
         .help(account?.displayName ?? language.text("Chưa có phiên", "No session"))
@@ -171,10 +174,11 @@ struct PrismFilamentView: View {
     private var rightEarWing: some View {
         HStack(spacing: 4) {
             // Weekly Quota
-            HStack(spacing: 2) {
+            HStack(spacing: 2.5) {
                 Text(language.text("Tuần", "Wk"))
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.68))
+                    .lineLimit(1)
                     .fixedSize()
 
                 if let weekPercent {
@@ -182,11 +186,13 @@ struct PrismFilamentView: View {
                         .font(.system(size: 13.5, weight: .bold, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(weekTint)
+                        .lineLimit(1)
                         .fixedSize()
                 } else {
                     Text("—")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                         .fixedSize()
                 }
             }
@@ -216,13 +222,15 @@ struct PrismFilamentView: View {
                     Text(compactReset(weeklyResetDate))
                         .font(.system(size: 11.5, weight: .semibold, design: .rounded))
                         .foregroundStyle(.white.opacity(0.78))
+                        .lineLimit(1)
                         .fixedSize()
                 }
                 .help(account?.usage?.weekly?.resetDescription(in: language.language) ?? "")
             }
         }
-        .padding(.horizontal, 10)
-        .frame(width: earWidth, height: compactHeight, alignment: .center)
+        .padding(.leading, 12)
+        .padding(.trailing, 14)
+        .frame(width: earWidth, height: compactHeight, alignment: .leading)
         .background(rightEarBackground)
         .overlay(rightEarBorder)
     }
@@ -250,32 +258,26 @@ struct PrismFilamentView: View {
 
     private var leftEarBackground: some View {
         leftEarShape
-            .fill(.ultraThinMaterial)
-            .overlay {
-                leftEarShape.fill(Color.black.opacity(0.72))
-            }
+            .fill(Color.black)
     }
 
     private var rightEarBackground: some View {
         rightEarShape
-            .fill(.ultraThinMaterial)
-            .overlay {
-                rightEarShape.fill(Color.black.opacity(0.72))
-            }
+            .fill(Color.black)
     }
 
     private var leftEarBorder: some View {
         leftEarShape.strokeBorder(
             LinearGradient(
                 stops: [
-                    .init(color: Color.white.opacity(0.22), location: 0.0),
-                    .init(color: Color.white.opacity(0.10), location: 0.65),
-                    .init(color: Color.clear, location: 1.0)
+                    .init(color: Color.white.opacity(0.16), location: 0.0),
+                    .init(color: Color.white.opacity(0.06), location: 0.5),
+                    .init(color: Color.clear, location: 0.85)
                 ],
                 startPoint: .leading,
                 endPoint: .trailing
             ),
-            lineWidth: 0.6
+            lineWidth: 0.5
         )
     }
 
@@ -283,32 +285,32 @@ struct PrismFilamentView: View {
         rightEarShape.strokeBorder(
             LinearGradient(
                 stops: [
-                    .init(color: Color.clear, location: 0.0),
-                    .init(color: Color.white.opacity(0.10), location: 0.35),
-                    .init(color: Color.white.opacity(0.22), location: 1.0)
+                    .init(color: Color.clear, location: 0.15),
+                    .init(color: Color.white.opacity(0.06), location: 0.5),
+                    .init(color: Color.white.opacity(0.16), location: 1.0)
                 ],
                 startPoint: .leading,
                 endPoint: .trailing
             ),
-            lineWidth: 0.6
+            lineWidth: 0.5
         )
     }
 
     private func compactReset(_ date: Date) -> String {
         let diff = date.timeIntervalSince(Date())
         guard diff > 0 else {
-            return language.text("chờ", "pending")
+            return language.text("CHỜ", "PENDING")
         }
         let seconds = Int(diff)
         let days = seconds / 86400
         let hours = (seconds % 86400) / 3600
         if days > 0 {
-            return "\(days)d"
+            return "\(days)D"
         } else if hours > 0 {
-            return "\(hours)h"
+            return "\(hours)H"
         } else {
             let minutes = max(1, (seconds % 3600) / 60)
-            return language.text("\(minutes)p", "\(minutes)m")
+            return "\(minutes)M"
         }
     }
 }

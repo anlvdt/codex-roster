@@ -88,9 +88,9 @@ struct NotchWindowView: View {
     @State private var accountForEditing: SavedAccount? = nil
 
     private let maxExpandedWidth: CGFloat = 920
-    private let earWidth: CGFloat = 100
+    private let earWidth: CGFloat = 128
     private var compactWidth: CGFloat {
-        notchWidth > 0 ? max(notchWidth, 185) + 2 * earWidth : 260
+        notchWidth > 0 ? max(notchWidth, 185) + 2 * earWidth : 270
     }
     private let miniDiameter: CGFloat = 20
 
@@ -99,7 +99,7 @@ struct NotchWindowView: View {
     }
 
     private var compactHeight: CGFloat {
-        max(notchInset, 34)
+        notchInset > 0 ? notchInset : 32
     }
 
     private var currentWidth: CGFloat {
@@ -297,7 +297,7 @@ struct NotchWindowView: View {
                 expand()
             }
         } label: {
-            PrismFilamentView(account: activeAccount, diameter: miniDiameter, compact: true, notchWidth: notchWidth, earWidth: earWidth)
+            PrismFilamentView(account: activeAccount, diameter: miniDiameter, compact: true, notchWidth: notchWidth, earWidth: earWidth, compactHeight: compactHeight)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 .contentShape(Rectangle())
         }
@@ -477,7 +477,7 @@ private struct NotchWindowConfigurator: NSViewRepresentable {
             // Window stays centered permanently at screen midX with fixed width expandedWidth.
             // Symmetrical 2-way expansion and drop-down happen smoothly inside SwiftUI!
             let x = screen.frame.midX - expandedWidth / 2
-            window.setFrameTopLeftPoint(NSPoint(x: x, y: screen.frame.maxY + 1))
+            window.setFrameTopLeftPoint(NSPoint(x: x, y: screen.frame.maxY))
             window.orderFrontRegardless()
         }
     }

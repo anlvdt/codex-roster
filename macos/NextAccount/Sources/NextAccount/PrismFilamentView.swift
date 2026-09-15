@@ -2,9 +2,9 @@ import SwiftUI
 
 /// Symmetrically Balanced Two-Ear Live Notch Flanking System for Codex Roster.
 /// Minimalist, high-legibility telemetry hugging the MacBook camera notch:
-/// - Left Ear: 5-Hour Quota (large, borderless typography directly on glass)
+/// - Left Ear: 5-Hour Quota (large, borderless typography, fully visible without truncation)
 /// - Center: Physical camera notch clearance (100% transparent & centered)
-/// - Right Ear: Weekly Quota + Reset Countdown / Banked Resets (borderless & clean)
+/// - Right Ear: Weekly Quota + Reset Countdown / Banked Resets (fully visible, zero clipping)
 struct PrismFilamentView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
@@ -14,7 +14,8 @@ struct PrismFilamentView: View {
     var diameter: CGFloat = 20
     var compact: Bool = true
     var notchWidth: CGFloat = 185
-    var earWidth: CGFloat = 100
+    var earWidth: CGFloat = 128
+    var compactHeight: CGFloat = 32
 
     private var fivePercent: Int? {
         account?.usage?.fiveHour?.displayRemainingPercent
@@ -60,14 +61,16 @@ struct PrismFilamentView: View {
     private var nonNotchCapsule: some View {
         HStack(spacing: 8) {
             // 5h Quota
-            HStack(spacing: 3.5) {
-                Text("5h")
-                    .font(.system(size: 12.5, weight: .semibold))
+            HStack(spacing: 3) {
+                Text("5H")
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.68))
+                    .fixedSize()
                 Text("\(fivePercent ?? 0)%")
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .font(.system(size: 13.5, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(fiveTint)
+                    .fixedSize()
             }
 
             Rectangle()
@@ -75,35 +78,41 @@ struct PrismFilamentView: View {
                 .frame(width: 1, height: 12)
 
             // Weekly Quota
-            HStack(spacing: 3.5) {
+            HStack(spacing: 3) {
                 Text(language.text("Tuần", "Wk"))
-                    .font(.system(size: 12.5, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.68))
+                    .fixedSize()
                 Text("\(weekPercent ?? 0)%")
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .font(.system(size: 13.5, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(weekTint)
+                    .fixedSize()
             }
 
             // Banked Reset / Reset Countdown
             if bankedCount > 0 {
                 HStack(spacing: 2) {
                     Text("⟲")
-                        .font(.system(size: 11.5, weight: .bold))
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(Color.orange)
+                        .fixedSize()
                     Text("\(bankedCount)")
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .font(.system(size: 12.5, weight: .bold, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(Color.orange)
+                        .fixedSize()
                 }
             } else if let weeklyResetDate {
                 HStack(spacing: 2) {
                     Text("↺")
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.system(size: 10.5, weight: .bold))
                         .foregroundStyle(.white.opacity(0.50))
+                        .fixedSize()
                     Text(compactReset(weeklyResetDate))
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .font(.system(size: 11.5, weight: .semibold, design: .rounded))
                         .foregroundStyle(.white.opacity(0.78))
+                        .fixedSize()
                 }
             }
         }
@@ -128,26 +137,27 @@ struct PrismFilamentView: View {
 
     // MARK: - Left Ear Wing (Flanking Left of Camera Notch)
     private var leftEarWing: some View {
-        HStack(spacing: 3.5) {
-            Text(language.text("5h", "5h"))
-                .font(.system(size: 12.5, weight: .semibold))
+        HStack(spacing: 3) {
+            Text(language.text("5H", "5H"))
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.68))
+                .fixedSize()
 
             if let fivePercent {
                 Text("\(fivePercent)%")
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .font(.system(size: 13.5, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(fiveTint)
+                    .fixedSize()
             } else {
                 Text("—")
-                    .font(.system(size: 12.5, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
+                    .fixedSize()
             }
         }
-        .padding(.leading, 12)
-        .padding(.trailing, 10)
-        .padding(.vertical, 4)
-        .frame(width: earWidth, alignment: .trailing)
+        .padding(.horizontal, 8)
+        .frame(width: earWidth, height: compactHeight, alignment: .center)
         .background(leftEarBackground)
         .overlay(leftEarBorder)
         .help(account?.displayName ?? language.text("Chưa có phiên", "No session"))
@@ -155,22 +165,25 @@ struct PrismFilamentView: View {
 
     // MARK: - Right Ear Wing (Flanking Right of Camera Notch)
     private var rightEarWing: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             // Weekly Quota
-            HStack(spacing: 3.5) {
+            HStack(spacing: 3) {
                 Text(language.text("Tuần", "Wk"))
-                    .font(.system(size: 12.5, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.68))
+                    .fixedSize()
 
                 if let weekPercent {
                     Text("\(weekPercent)%")
-                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .font(.system(size: 13.5, weight: .bold, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(weekTint)
+                        .fixedSize()
                 } else {
                     Text("—")
-                        .font(.system(size: 12.5, weight: .medium))
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
+                        .fixedSize()
                 }
             }
 
@@ -178,32 +191,34 @@ struct PrismFilamentView: View {
             if bankedCount > 0 {
                 HStack(spacing: 2) {
                     Text("⟲")
-                        .font(.system(size: 11.5, weight: .bold))
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(Color.orange)
+                        .fixedSize()
 
                     Text("\(bankedCount)")
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .font(.system(size: 12.5, weight: .bold, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(Color.orange)
+                        .fixedSize()
                 }
                 .help(language.text("\(bankedCount) lượt banked reset có thể dùng", "\(bankedCount) banked resets available"))
             } else if let weeklyResetDate {
                 HStack(spacing: 2) {
                     Text("↺")
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.system(size: 10.5, weight: .bold))
                         .foregroundStyle(.white.opacity(0.50))
+                        .fixedSize()
 
                     Text(compactReset(weeklyResetDate))
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .font(.system(size: 11.5, weight: .semibold, design: .rounded))
                         .foregroundStyle(.white.opacity(0.78))
+                        .fixedSize()
                 }
                 .help(account?.usage?.weekly?.resetDescription(in: language.language) ?? "")
             }
         }
-        .padding(.leading, 10)
-        .padding(.trailing, 12)
-        .padding(.vertical, 4)
-        .frame(width: earWidth, alignment: .leading)
+        .padding(.horizontal, 8)
+        .frame(width: earWidth, height: compactHeight, alignment: .center)
         .background(rightEarBackground)
         .overlay(rightEarBorder)
     }

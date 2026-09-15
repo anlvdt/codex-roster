@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.4.4 - 2026-09-15
+
+### Changed
+
+- Capitalize radar outlook metrics to \`24H\` and \`48H\` across Quick Switch and Bento Studio for consistent time typography.
+
 ## v0.4.3 - 2026-09-15
 
 ### Added

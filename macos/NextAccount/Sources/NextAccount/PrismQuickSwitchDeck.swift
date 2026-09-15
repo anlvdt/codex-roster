@@ -260,7 +260,7 @@ struct PrismQuickSwitchDeck: View {
 
                 if let outlook = store.resetOutlook {
                     Text("·").foregroundStyle(.tertiary)
-                    Text("24h: \(outlook.chance24Hours)%")
+                    Text("24H: \(outlook.chance24Hours)%")
                         .font(.system(size: 11.5, weight: .bold, design: .rounded))
                         .foregroundStyle(outlook.chance24Hours >= 50 ? PrismTheme.amber : PrismTheme.emerald)
                 }
@@ -330,8 +330,8 @@ struct PrismQuickSwitchDeck: View {
             // Radar bars (24h & 48h)
             if let outlook = store.resetOutlook {
                 HStack(spacing: 8) {
-                    miniRadarMetric(title: "24h", percent: outlook.chance24Hours)
-                    miniRadarMetric(title: "48h", percent: outlook.chance48Hours)
+                    miniRadarMetric(title: "24H", percent: outlook.chance24Hours)
+                    miniRadarMetric(title: "48H", percent: outlook.chance48Hours)
                 }
             }
 

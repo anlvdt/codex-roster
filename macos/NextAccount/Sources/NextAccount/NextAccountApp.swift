@@ -3879,7 +3879,7 @@ private struct MenuBarLiveSignals: View {
         guard let outlook = store.resetOutlook else {
             return language.text("Đang theo dõi", "Monitoring")
         }
-        return "\(outlook.chance24Hours)% / 24h"
+        return "\(outlook.chance24Hours)% / 24H"
     }
 }
 

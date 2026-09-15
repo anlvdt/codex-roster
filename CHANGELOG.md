@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.4.5 - 2026-09-15
+
+### Changed
+
+- Increase the size, padding, and typography of the Swap ("Đổi") button and action badges in both Quick Switch and Bento Studio for better clickability and prominence.
+
 ## v0.4.4 - 2026-09-15
 
 ### Changed

@@ -361,36 +361,38 @@ struct PrismBentoStudioView: View {
             // Action Button
             if account.isActive {
                 Text(language.text("Đang dùng", "Active"))
-                    .font(.system(size: 8, weight: .semibold))
+                    .font(.system(size: 9.5, weight: .bold))
                     .foregroundStyle(PrismTheme.emerald)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(PrismTheme.emerald.opacity(0.14)))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(PrismTheme.emerald.opacity(0.16)))
             } else if account.requiresLogin {
                 Button {
                     relogin(account)
                 } label: {
                     Text(language.text("Login", "Login"))
-                        .font(.system(size: 8.5, weight: .bold))
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(PrismTheme.amber)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
                         .background(Capsule().fill(PrismTheme.amber.opacity(0.18)))
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
             } else if !account.usageErrorBlocksActivation {
                 Button {
                     PrismTheme.triggerHaptic()
                     store.activate(account, force: true)
                 } label: {
                     Text(language.text("Đổi", "Swap"))
-                        .font(.system(size: 8.5, weight: .bold))
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(Color.accentColor)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
                         .background(Capsule().fill(Color.accentColor.opacity(0.14)))
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
             }
         }
         .padding(.horizontal, 6)

@@ -545,28 +545,29 @@ struct PrismQuickSwitchDeck: View {
 
             // Action Button
             if account.isActive {
-                HStack(spacing: 2.5) {
+                HStack(spacing: 3) {
                     Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 9))
+                        .font(.system(size: 10, weight: .bold))
                     Text(language.text("Dùng", "Active"))
-                        .font(.system(size: 10.5, weight: .bold))
+                        .font(.system(size: 12, weight: .bold))
                 }
                 .foregroundStyle(PrismTheme.emerald)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Capsule().fill(PrismTheme.emerald.opacity(0.15)))
+                .padding(.horizontal, 11)
+                .padding(.vertical, 5.5)
+                .background(Capsule().fill(PrismTheme.emerald.opacity(0.16)))
             } else if account.requiresLogin {
                 Button {
                     openReloginFlow()
                 } label: {
                     Text(language.text("Login", "Login"))
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.system(size: 12.5, weight: .bold))
                         .foregroundStyle(PrismTheme.amber)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 4)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5.5)
                         .background(Capsule().fill(PrismTheme.amber.opacity(0.18)))
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
             } else if !account.usageErrorBlocksActivation {
                 if let shortcutIndex {
                     Button {
@@ -577,17 +578,18 @@ struct PrismQuickSwitchDeck: View {
                         store.activate(account, force: true)
                     } label: {
                         Text(language.text("Đổi", "Swap"))
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(Color.white.opacity(0.95))
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 3.5)
+                            .font(.system(size: 12.5, weight: .bold))
+                            .foregroundStyle(Color.white)
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 5.5)
                             .background(
                                 Capsule()
-                                    .fill(Color.white.opacity(0.10))
-                                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.16), lineWidth: 0.8))
+                                    .fill(Color.white.opacity(0.12))
+                                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.24), lineWidth: 0.9))
                             )
                     }
                     .buttonStyle(.plain)
+                    .pointingHandCursor()
                     .keyboardShortcut(KeyEquivalent(Character("\(shortcutIndex)")), modifiers: [])
                 } else {
                     Button {
@@ -598,17 +600,18 @@ struct PrismQuickSwitchDeck: View {
                         store.activate(account, force: true)
                     } label: {
                         Text(language.text("Đổi", "Swap"))
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(Color.white.opacity(0.95))
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 3.5)
+                            .font(.system(size: 12.5, weight: .bold))
+                            .foregroundStyle(Color.white)
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 5.5)
                             .background(
                                 Capsule()
-                                    .fill(Color.white.opacity(0.10))
-                                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.16), lineWidth: 0.8))
+                                    .fill(Color.white.opacity(0.12))
+                                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.24), lineWidth: 0.9))
                             )
                     }
                     .buttonStyle(.plain)
+                    .pointingHandCursor()
                 }
             }
         }

@@ -2,9 +2,9 @@ import SwiftUI
 
 /// Symmetrically Balanced Two-Ear Live Notch Flanking System for Codex Roster.
 /// Minimalist, high-legibility telemetry hugging the MacBook camera notch:
-/// - Left Ear: 5-Hour Quota (large, borderless typography, fully visible without truncation)
-/// - Center: Physical camera notch clearance (100% transparent & centered)
-/// - Right Ear: Weekly Quota + Reset Countdown / Banked Resets (fully visible, zero clipping)
+/// - Left Ear: 5-Hour Quota (large, borderless typography, seamlessly flush to notch)
+/// - Center: Physical camera notch clearance (100% transparent & hugging notch edges)
+/// - Right Ear: Weekly Quota + Reset Countdown / Banked Resets (seamlessly flush to notch)
 struct PrismFilamentView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
@@ -14,7 +14,7 @@ struct PrismFilamentView: View {
     var diameter: CGFloat = 20
     var compact: Bool = true
     var notchWidth: CGFloat = 185
-    var earWidth: CGFloat = 128
+    var earWidth: CGFloat = 106
     var compactHeight: CGFloat = 32
 
     private var fivePercent: Int? {
@@ -41,14 +41,18 @@ struct PrismFilamentView: View {
         PrismTheme.quotaTint(percent: weekPercent)
     }
 
+    private var physicalNotchClearance: CGFloat {
+        notchWidth > 0 ? max(notchWidth - 22, 160) : 0
+    }
+
     var body: some View {
         if notchWidth > 0 {
-            // Hardware Notch Mode: Flanks left and right of the physical camera notch
+            // Hardware Notch Mode: Hugs left and right of the physical camera notch tightly
             HStack(spacing: 0) {
                 leftEarWing
 
                 Spacer(minLength: 0)
-                    .frame(width: max(notchWidth, 185))
+                    .frame(width: physicalNotchClearance)
 
                 rightEarWing
             }
@@ -165,9 +169,9 @@ struct PrismFilamentView: View {
 
     // MARK: - Right Ear Wing (Flanking Right of Camera Notch)
     private var rightEarWing: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 4.5) {
             // Weekly Quota
-            HStack(spacing: 3) {
+            HStack(spacing: 2.5) {
                 Text(language.text("Tuần", "Wk"))
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.68))
@@ -217,7 +221,7 @@ struct PrismFilamentView: View {
                 .help(account?.usage?.weekly?.resetDescription(in: language.language) ?? "")
             }
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 7)
         .frame(width: earWidth, height: compactHeight, alignment: .center)
         .background(rightEarBackground)
         .overlay(rightEarBorder)
@@ -227,8 +231,8 @@ struct PrismFilamentView: View {
     private var leftEarShape: UnevenRoundedRectangle {
         UnevenRoundedRectangle(
             topLeadingRadius: 0,
-            bottomLeadingRadius: 11,
-            bottomTrailingRadius: 4,
+            bottomLeadingRadius: 10,
+            bottomTrailingRadius: 0,
             topTrailingRadius: 0,
             style: .continuous
         )
@@ -237,8 +241,8 @@ struct PrismFilamentView: View {
     private var rightEarShape: UnevenRoundedRectangle {
         UnevenRoundedRectangle(
             topLeadingRadius: 0,
-            bottomLeadingRadius: 4,
-            bottomTrailingRadius: 11,
+            bottomLeadingRadius: 0,
+            bottomTrailingRadius: 10,
             topTrailingRadius: 0,
             style: .continuous
         )
@@ -263,9 +267,13 @@ struct PrismFilamentView: View {
     private var leftEarBorder: some View {
         leftEarShape.strokeBorder(
             LinearGradient(
-                colors: [Color.white.opacity(0.22), Color.white.opacity(0.05)],
-                startPoint: .top,
-                endPoint: .bottom
+                stops: [
+                    .init(color: Color.white.opacity(0.22), location: 0.0),
+                    .init(color: Color.white.opacity(0.10), location: 0.65),
+                    .init(color: Color.clear, location: 1.0)
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
             ),
             lineWidth: 0.6
         )
@@ -274,9 +282,13 @@ struct PrismFilamentView: View {
     private var rightEarBorder: some View {
         rightEarShape.strokeBorder(
             LinearGradient(
-                colors: [Color.white.opacity(0.22), Color.white.opacity(0.05)],
-                startPoint: .top,
-                endPoint: .bottom
+                stops: [
+                    .init(color: Color.clear, location: 0.0),
+                    .init(color: Color.white.opacity(0.10), location: 0.35),
+                    .init(color: Color.white.opacity(0.22), location: 1.0)
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
             ),
             lineWidth: 0.6
         )

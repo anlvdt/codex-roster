@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Symmetrically Balanced Two-Ear Live Notch Flanking System for Codex Roster.
 /// Minimalist, high-legibility telemetry hugging the MacBook camera notch:
-/// - Left Ear: 5-Hour Quota (large, borderless typography, symmetrically balanced)
+/// - Left Ear: 5-Hour Quota + Live Indicator & 5H Reset Countdown (informative & fun)
 /// - Center: Physical camera notch clearance (100% transparent & hugging notch edges)
 /// - Right Ear: Weekly Quota + Reset Countdown / Banked Resets (fully visible, zero clipping)
 struct PrismFilamentView: View {
@@ -29,8 +29,16 @@ struct PrismFilamentView: View {
         account?.usage?.bankedResets?.availableCount ?? 0
     }
 
+    private var fiveResetDate: Date? {
+        account?.usage?.fiveHour?.resetAt.value
+    }
+
     private var weeklyResetDate: Date? {
         account?.usage?.weekly?.resetAt.value
+    }
+
+    private var isRunning: Bool {
+        store.hasRunningCodexProcesses
     }
 
     private var fiveTint: Color {
@@ -64,8 +72,12 @@ struct PrismFilamentView: View {
     // MARK: - Non-notch Display Mode (External monitors)
     private var nonNotchCapsule: some View {
         HStack(spacing: 8) {
-            // 5H Quota
+            // 5H Quota with live energy icon
             HStack(spacing: 3) {
+                Text("⚡")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(fiveTint)
+                    .fixedSize()
                 Text("5H")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.68))
@@ -140,31 +152,65 @@ struct PrismFilamentView: View {
 
     // MARK: - Left Ear Wing (Flanking Left of Camera Notch)
     private var leftEarWing: some View {
-        HStack(spacing: 3) {
-            Text(language.text("5H", "5H"))
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.68))
-                .lineLimit(1)
+        HStack(spacing: 3.5) {
+            // Live energy / activity indicator
+            Text("⚡")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(fiveTint)
+                .shadow(color: fiveTint.opacity(isRunning ? 0.85 : 0), radius: isRunning ? 3.5 : 0)
                 .fixedSize()
 
-            if let fivePercent {
-                Text("\(fivePercent)%")
-                    .font(.system(size: 13.5, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(fiveTint)
+            // 5H Quota
+            HStack(spacing: 2.5) {
+                Text(language.text("5H", "5H"))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.68))
                     .lineLimit(1)
                     .fixedSize()
-            } else {
-                Text("—")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+
+                if let fivePercent {
+                    Text("\(fivePercent)%")
+                        .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(fiveTint)
+                        .lineLimit(1)
+                        .fixedSize()
+                } else {
+                    Text("—")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+            }
+
+            // 5H Reset Countdown (or Plan Tag if full)
+            if let fiveResetDate, fiveResetDate > Date() {
+                HStack(spacing: 2) {
+                    Text("↺")
+                        .font(.system(size: 10.5, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.50))
+                        .fixedSize()
+
+                    Text(compactReset(fiveResetDate))
+                        .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.78))
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+                .help(account?.usage?.fiveHour?.resetDescription(in: language.language) ?? "")
+            } else if let plan = account?.planLabel, !plan.isEmpty {
+                Text(plan.uppercased())
+                    .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                    .foregroundStyle(fiveTint.opacity(0.85))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1.5)
+                    .background(Capsule().fill(fiveTint.opacity(0.12)))
                     .fixedSize()
             }
         }
-        .padding(.leading, 14)
-        .padding(.trailing, 12)
-        .frame(width: earWidth, height: compactHeight, alignment: .trailing)
+        .padding(.horizontal, 10)
+        .frame(width: earWidth, height: compactHeight, alignment: .center)
         .background(leftEarBackground)
         .overlay(leftEarBorder)
         .help(account?.displayName ?? language.text("Chưa có phiên", "No session"))

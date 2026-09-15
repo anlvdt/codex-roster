@@ -291,7 +291,12 @@ struct PrismQuickSwitchDeck: View {
 
             Spacer(minLength: 2)
         }
-        .padding(.top, (NSScreen.main?.safeAreaInsets.top ?? 0) > 0 ? (NSScreen.main?.safeAreaInsets.top ?? 32) + 2 : 12)
+        .padding(.top, topNotchClearance)
+    }
+
+    private var topNotchClearance: CGFloat {
+        let maxInset = NSScreen.screens.map(\.safeAreaInsets.top).max() ?? 0
+        return max(maxInset + 16, 50)
     }
 
     // MARK: - Upper Right Wing (Radar & Telemetry)

@@ -31,6 +31,7 @@ extension Notification.Name {
     static let exportBackup = Notification.Name("codexRoster.exportBackup")
     static let importBackup = Notification.Name("codexRoster.importBackup")
     static let toggleNotchPanel = Notification.Name("codexRoster.toggleNotchPanel")
+    static let editAccount = Notification.Name("codexRoster.editAccount")
 }
 
 private final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -101,7 +102,7 @@ private struct MenuBarHoverFeedback: ViewModifier {
     }
 }
 
-private extension View {
+extension View {
     func pointingHandCursor() -> some View {
         modifier(PointingHandCursor())
     }
@@ -142,6 +143,7 @@ struct CodexRosterApp: App {
     var body: some Scene {
         Window("Codex Roster Notch", id: "notch") {
             NotchWindowView()
+                .ignoresSafeArea()
                 .environmentObject(store)
                 .environmentObject(language)
                 .environmentObject(updater)
@@ -165,7 +167,8 @@ struct CodexRosterApp: App {
                     store.ensureAutomaticFullBackup()
                 }
         }
-        .defaultSize(width: 1120, height: 760)
+        .defaultSize(width: 390, height: 450)
+        .windowResizability(.contentSize)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button(language.text("Thêm tài khoản…", "Add account…")) {
@@ -226,11 +229,8 @@ struct ContentView: View {
     @State private var backupOperation: BackupOperation?
 
     var body: some View {
-        NavigationSplitView {
-            AccountSidebar(selection: $selection, focus: $triageFocus)
-        } detail: {
-            detailContent
-        }
+        detailContent
+            .frame(minWidth: 370, idealWidth: 390, maxWidth: 420, minHeight: 420, idealHeight: 450, maxHeight: 480)
         .toolbar { AccountToolbar(showingAddAccount: $showingAddAccount) }
         .onReceive(NotificationCenter.default.publisher(for: .showAddAccount)) { _ in
             showingAddAccount = true
@@ -334,11 +334,14 @@ struct ContentView: View {
                 relogin: { presentRelogin(selected) }
             )
         } else {
-            DashboardView(
+            PrismBentoStudioView(
                 selection: $selection,
-                focus: $triageFocus,
                 relogin: presentRelogin,
-                reloginAll: startReloginQueue
+                reloginAll: startReloginQueue,
+                openAddAccount: { showingAddAccount = true },
+                openBackup: { backupOperation = $0 },
+                editAccount: { accountForEditing = $0 },
+                deleteAccount: { accountForDeletion = $0 }
             )
         }
     }
@@ -432,8 +435,7 @@ private struct AccountSidebar: View {
         .navigationTitle("Codex Roster")
         .navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 290)
         .background {
-            StarfieldBackground()
-                .ignoresSafeArea()
+            Color.clear
         }
         .safeAreaInset(edge: .bottom) {
             Button(action: openAboutWindow) {
@@ -454,7 +456,11 @@ private struct AccountSidebar: View {
         VStack(alignment: .leading, spacing: 7) {
             Button { selection = account.id } label: {
                 HStack(spacing: 10) {
-                    OrbitMiniView(account: account, diameter: 28)
+                    Text(String(account.displayName.prefix(1)).uppercased())
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(PrismTheme.quotaTint(percent: account.usage?.fiveHour?.displayRemainingPercent))
+                        .frame(width: 24, height: 24)
+                        .background(Circle().fill(PrismTheme.quotaTint(percent: account.usage?.fiveHour?.displayRemainingPercent).opacity(0.15)))
                     VStack(alignment: .leading, spacing: 1) {
                         Text(account.displayName)
                             .font(.subheadline.weight(.semibold))
@@ -679,8 +685,7 @@ private struct DashboardView: View {
         }
         .navigationTitle(language.text("Tổng quan", "Overview"))
         .background {
-            StarfieldBackground()
-                .ignoresSafeArea()
+            Color.clear
         }
     }
 }
@@ -974,8 +979,7 @@ struct AutomationSettingsView: View {
             Text(language.text("Danh sách hiện tại sẽ được thay bằng bản sao tự động gần nhất trên máy này.", "The current account list will be replaced by this Mac's most recent automatic backup."))
         }
         .background {
-            StarfieldBackground()
-                .ignoresSafeArea()
+            Color.clear
         }
     }
 
@@ -1942,14 +1946,13 @@ private struct StarMapHero: View {
             }
 
             if let activeAccount {
-                OrbitSystemView(
-                    centerAccount: activeAccount,
-                    planets: planetAccounts,
-                    maxRadius: 140,
-                    selectedID: selection,
-                    onSelect: { account in selection = account.id }
+                PrismDualChamberGauge(
+                    fiveHour: activeAccount.usage?.fiveHour,
+                    weekly: activeAccount.usage?.weekly,
+                    showLabels: true,
+                    compact: false
                 )
-                .frame(height: 320)
+                .padding(.vertical, 8)
             } else {
                 Text(language.text("Chưa có tài khoản nào. Thêm tài khoản đầu tiên để khởi động bản đồ.", "No accounts yet. Add the first account to start the star map."))
                     .font(.body)
@@ -2829,7 +2832,7 @@ private func formattedVietnamResetDate(_ value: String, language: AppLanguage) -
     return "around \(timeFormatter.string(from: date)) \(weekday), \(dateFormatter.string(from: date))"
 }
 
-private struct AddAccountSheet: View {
+struct AddAccountSheet: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @Environment(\.dismiss) private var dismiss
@@ -2940,8 +2943,7 @@ private struct AddAccountSheet: View {
             }
         }
         .background {
-            StarfieldBackground()
-                .ignoresSafeArea()
+            Color.clear
         }
     }
 
@@ -2999,7 +3001,18 @@ private struct AccountDetail: View {
             VStack(alignment: .leading, spacing: 24) {
                 HStack(alignment: .top) {
                     HStack(alignment: .top, spacing: 14) {
-                        OrbitMiniView(account: account, diameter: 52)
+                        ZStack {
+                            Circle()
+                                .fill(PrismTheme.quotaTint(percent: account.usage?.fiveHour?.displayRemainingPercent).opacity(0.18))
+                                .frame(width: 52, height: 52)
+                            Image(systemName: account.aiProvider.icon)
+                                .font(.system(size: 24, weight: .bold))
+                                .foregroundStyle(PrismTheme.quotaTint(percent: account.usage?.fiveHour?.displayRemainingPercent))
+                        }
+                        .overlay(
+                            Circle()
+                                .strokeBorder(PrismTheme.quotaTint(percent: account.usage?.fiveHour?.displayRemainingPercent).opacity(0.4), lineWidth: 1.5)
+                        )
                         VStack(alignment: .leading, spacing: 8) {
                             Label(account.isActive ? language.text("Tài khoản đang dùng", "Active account") : language.text("Tài khoản đã lưu", "Saved account"), systemImage: account.isActive ? "checkmark.seal.fill" : "person.crop.circle")
                                 .foregroundStyle(account.isActive ? .green : .secondary)
@@ -3219,8 +3232,7 @@ private struct AccountDetail: View {
             }
         }
         .background {
-            StarfieldBackground()
-                .ignoresSafeArea()
+            Color.clear
         }
     }
 }
@@ -3361,7 +3373,7 @@ private struct DiagnosticMetric: View {
     }
 }
 
-private struct ReloginAccountSheet: View {
+struct ReloginAccountSheet: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @Environment(\.dismiss) private var dismiss
@@ -3492,13 +3504,12 @@ private struct ReloginAccountSheet: View {
             }
         }
         .background {
-            StarfieldBackground()
-                .ignoresSafeArea()
+            Color.clear
         }
     }
 }
 
-private struct AccountEditorSheet: View {
+struct AccountEditorSheet: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @Environment(\.dismiss) private var dismiss
@@ -3545,8 +3556,7 @@ private struct AccountEditorSheet: View {
         .padding(24)
         .frame(width: 480)
         .background {
-            StarfieldBackground()
-                .ignoresSafeArea()
+            Color.clear
         }
     }
 }
@@ -3731,240 +3741,18 @@ struct MenuBarView: View {
     @EnvironmentObject private var updater: GitHubUpdater
     @Environment(\.openWindow) private var openWindow
 
-    private var quickSwitchAccounts: [SavedAccount] {
-        Array(switchTargets.prefix(3))
-    }
-
-    private var remainingSwitchAccounts: [SavedAccount] {
-        Array(switchTargets.dropFirst(3))
-    }
-
-    private var switchTargets: [SavedAccount] {
-        store.sortedAccounts(switchableAccounts.filter { !$0.isActive })
-    }
-
-    private var switchableAccounts: [SavedAccount] {
-        store.accounts.filter {
-            !store.isArchived($0)
-                && !$0.usageErrorBlocksActivation
-                && ($0.isUsableForSwitch || $0.canSwitchUsingBankedReset)
-        }
-    }
-
-    private var hiddenQuickSwitchCount: Int {
-        remainingSwitchAccounts.count
-    }
-
-    private var attentionCount: Int {
-        store.accounts.filter { !store.isArchived($0) && $0.requiresLogin }.count
-    }
-
-    private var activeAccount: SavedAccount? {
-        store.accounts.first { $0.isActive && !store.isArchived($0) }
-    }
-
-    private var totalSavedProviderAccounts: Int {
-        guard !store.providerStates.isEmpty else { return store.accounts.count }
-        return store.providerStates.reduce(0) { $0 + $1.savedAccounts }
-    }
-
-    private var liveProviderCount: Int {
-        store.providerStates.filter(\.available).count
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if store.isBusyForActions || store.isCheckingAutoSwitch || store.errorMessage != nil || store.autoSwitchState != nil {
-                MenuBarOperationStatus()
-            }
-
-            if store.isPendingLogin {
-                HStack(spacing: 7) {
-                    Image(systemName: "person.badge.plus")
-                        .foregroundStyle(.blue)
-                    Text(language.text(
-                        "Đang thêm/đăng nhập lại tài khoản. Hủy để khôi phục phiên trước.",
-                        "Adding or re-signing an account. Cancel to restore the previous session."
-                    ))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    Spacer()
-                    Button(language.text("Hủy", "Cancel")) {
-                        store.cancelPendingLogin()
-                    }
-                    .controlSize(.small)
-                }
-                .padding(.horizontal, 9)
-                .padding(.vertical, 7)
-                .background(Color.blue.opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
-            }
-
-            // Active account core
-            HStack(spacing: 12) {
-                if let activeAccount {
-                    OrbitMiniView(account: activeAccount, diameter: 48)
-                } else {
-                    OrbitMiniView(account: nil, diameter: 48)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(activeAccount?.displayName ?? language.text("Chưa có phiên", "No session"))
-                        .font(.subheadline.weight(.semibold))
-                    Text(store.status?.currentAccount?.email ?? activeAccount?.email ?? language.text("Không có email", "No email"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
-                Button { store.resyncChatGPTDesktop() } label: {
-                    Image(systemName: store.hasRunningCodexProcesses ? "arrow.triangle.2.circlepath" : "play.circle")
-                        .font(.system(size: 15, weight: .medium))
-                        .frame(width: 32, height: 32)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(Color.accentColor)
-                .disabled(store.isBusyForActions)
-                .help(language.text("Đồng bộ ChatGPT", "Sync ChatGPT"))
-                .accessibilityLabel(language.text("Đồng bộ ChatGPT", "Sync ChatGPT"))
-            }
-
-            // Orbit switch dock
-            if let activeAccount {
-                OrbitSystemView(
-                    centerAccount: activeAccount,
-                    planets: Array(switchTargets.prefix(6)),
-                    maxRadius: 110,
-                    onSelect: requestActivation
-                )
-                .frame(height: 240)
-            } else {
-                Text(language.text("Chưa có tài khoản nào đang hoạt động.", "No active account."))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 120, alignment: .center)
-            }
-
-            // Provider constellation
-            HStack {
-                Text(language.text("Providers", "Providers"))
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                ConstellationStrip()
-            }
-
-            // Status chips
-            MenuBarLiveSignals()
-            MenuBarUpdateStatus()
-
-            if attentionCount > 0 {
-                Button { openReloginFlow() } label: {
-                    HStack(spacing: 7) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                        Text(language.text("\(attentionCount) tài khoản cần đăng nhập", "\(attentionCount) accounts need sign-in"))
-                        Spacer()
-                        Text(language.text("Đăng nhập lại", "Sign in again"))
-                            .font(.caption.weight(.semibold))
-                        Image(systemName: "chevron.right")
-                            .font(.caption.weight(.bold))
-                    }
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.orange)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
-                }
-                .buttonStyle(.plain)
-                .menuBarInteractive(cornerRadius: 9)
-            }
-
-            Divider()
-                .padding(.top, 4)
-            HStack(spacing: 8) {
-                Button { refreshMenuBar() } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .frame(width: 28, height: 28)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .pointingHandCursor()
-                .disabled(store.isBusyForActions || store.isLoadingOpenAIStatus || store.isLoadingResetOutlook)
-                .help(language.text("Làm mới tài khoản và tín hiệu live", "Refresh accounts and live signals"))
-                .accessibilityLabel(language.text("Làm mới", "Refresh"))
-
-                Button { openDashboard() } label: {
-                    Label(language.text("Mở Codex Roster", "Open Codex Roster"), systemImage: "square.grid.2x2")
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .pointingHandCursor()
-                .help(language.text("Mở bảng điều khiển đầy đủ.", "Open the full dashboard."))
-
-                Menu {
-                    Button { openAddAccountFlow() } label: {
-                        Label(language.text("Thêm tài khoản", "Add account"), systemImage: "person.crop.circle.badge.plus")
-                    }
-                    .disabled(store.isWorking || store.isPendingLogin)
-
-                    Toggle(isOn: Binding(
-                        get: { store.autoSwitchWhenExhausted },
-                        set: { store.setAutoSwitchWhenExhausted($0) }
-                    )) {
-                        Label(language.text("Tự động chuyển khi hết quota", "Auto-switch when exhausted"), systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
-
-                    Toggle(isOn: Binding(
-                        get: { store.autoStartUsageWindows },
-                        set: { store.setAutoStartUsageWindows($0) }
-                    )) {
-                        Label(language.text("Kiểm tra cửa sổ quota tự động", "Automatic quota window checks"), systemImage: "clock.arrow.circlepath")
-                    }
-                    .disabled(store.isWorking)
-
-                    Button { store.runUsageWindowCheck() } label: {
-                        Label(language.text("Chạy kiểm tra quota", "Run quota check"), systemImage: "arrow.clockwise")
-                    }
-                    .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
-
-                    Divider()
-
-                    Button { updater.checkForUpdates(currentVersion: AppInfo.shortVersion) } label: {
-                        Label(language.text("Kiểm tra cập nhật", "Check for updates"), systemImage: "arrow.down.app")
-                    }
-                    .disabled(updater.state.isBusy)
-                    Button { openAbout() } label: {
-                        Label(language.text("Giới thiệu", "About"), systemImage: "info.circle")
-                    }
-
-                    Divider()
-
-                    Button(role: .destructive) { NSApplication.shared.terminate(nil) } label: {
-                        Label(language.text("Thoát Codex Roster", "Quit Codex Roster"), systemImage: "power")
-                    }
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .frame(width: 28, height: 28)
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .menuBarInteractive()
-                .help(language.text("Tác vụ khác", "More actions"))
-                .accessibilityLabel(language.text("Tác vụ khác", "More actions"))
-            }
-            .padding(.vertical, 2)
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        PrismQuickSwitchDeck(
+            openDashboard: openDashboard,
+            openAddAccountFlow: openAddAccountFlow,
+            openReloginFlow: openReloginFlow,
+            openBackupFlow: openBackupFlow,
+            openEditAccount: openEditAccount,
+            openAbout: openAbout
+        )
         .onAppear {
             refreshMenuBar()
         }
-    }
-
-    private func requestActivation(_ account: SavedAccount) {
-        store.noteMenuInteraction()
-        store.activate(account, force: true)
     }
 
     private func openDashboard() {
@@ -3979,17 +3767,23 @@ struct MenuBarView: View {
 
     private func openReloginFlow() {
         let accountID = store.accounts.first { !store.isArchived($0) && $0.requiresLogin }?.id
-        openDashboard()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            NotificationCenter.default.post(name: .showReloginAccount, object: accountID?.uuidString)
-        }
+        NotificationCenter.default.post(name: .showReloginAccount, object: accountID?.uuidString)
     }
 
     private func openAddAccountFlow() {
-        openDashboard()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            NotificationCenter.default.post(name: .showAddAccount, object: nil)
+        NotificationCenter.default.post(name: .showAddAccount, object: nil)
+    }
+
+    private func openBackupFlow(_ op: BackupOperation) {
+        if op == .export {
+            NotificationCenter.default.post(name: .exportBackup, object: nil)
+        } else {
+            NotificationCenter.default.post(name: .importBackup, object: nil)
         }
+    }
+
+    private func openEditAccount(_ account: SavedAccount) {
+        NotificationCenter.default.post(name: .editAccount, object: account.id.uuidString)
     }
 
     private func openAbout() {
@@ -4462,8 +4256,7 @@ private struct AboutView: View {
         .frame(minWidth: 720, minHeight: 560)
         .navigationTitle(language.text("Giới thiệu Codex Roster", "About Codex Roster"))
         .background {
-            StarfieldBackground()
-                .ignoresSafeArea()
+            Color.clear
         }
     }
 }

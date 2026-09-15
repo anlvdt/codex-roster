@@ -1,10 +1,8 @@
+import SwiftUI
 import AppKit
 import Carbon.HIToolbox
-import SwiftUI
 
 /// Registers ⌃⌥R as a process-wide hotkey that toggles the notch panel.
-/// Carbon hotkeys are delivered without Input Monitoring or Accessibility
-/// permission, unlike NSEvent global key monitors.
 @MainActor
 final class NotchGlobalHotKey {
     static let shared = NotchGlobalHotKey()
@@ -58,98 +56,165 @@ final class NotchGlobalHotKey {
             &hotKeyRef
         )
     }
-
-    // No deinit: the singleton lives for the process lifetime and Carbon
-    // releases the hotkey/handler automatically on exit.
 }
 
+enum NotchExpansionState: Equatable {
+    case collapsed
+    case droppingDown
+    case fullyExpanded
+}
+
+/// All-In-One Panoramic Floating Notch Console for Codex Roster.
+/// Drops down from the camera notch, then blooms out symmetrically to both left and right wings.
 struct NotchWindowView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @EnvironmentObject private var updater: GitHubUpdater
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.openWindow) private var openWindow
+    @AppStorage("codex_roster_notch_pinned_live") private var isPinnedLive = false
 
-    @State private var isExpanded = false
-    @State private var rendersExpandedContent = false
-    @State private var expandedContentOpacity = 0.0
+    @State private var expansionState: NotchExpansionState = .collapsed
     @State private var hoverTask: Task<Void, Never>?
     @State private var collapseTask: Task<Void, Never>?
-    /// Escape monitors installed while expanded so the panel can be dismissed
-    /// from the keyboard even though the borderless window never becomes key.
     @State private var keyMonitors: [Any] = []
-    /// Height of the display's physical notch (menu-bar band). The compact
-    /// panel sits inside this band so it never hangs below over other windows.
     @State private var notchInset: CGFloat = 0
-    /// Width of the physical notch. The compact panel keeps this much clear
-    /// space in its centre so the two quota rings flank the camera housing.
     @State private var notchWidth: CGFloat = 0
 
-    private let expandedWidth: CGFloat = 392
-    private let miniDiameter: CGFloat = 28
+    // Sheet presentation states directly inside the Notch Console
+    @State private var showingAddAccount = false
+    @State private var accountForRelogin: SavedAccount? = nil
+    @State private var backupOperation: BackupOperation? = nil
+    @State private var accountForEditing: SavedAccount? = nil
+
+    private let maxExpandedWidth: CGFloat = 920
+    private let earWidth: CGFloat = 164
+    private var compactWidth: CGFloat {
+        notchWidth > 0 ? max(notchWidth, 185) + 2 * earWidth : 330
+    }
+    private let miniDiameter: CGFloat = 20
 
     private var activeAccount: SavedAccount? {
         store.accounts.first { $0.isActive && !store.isArchived($0) }
     }
 
-    /// The compact panel becomes a small centred orbit pill that fits inside
-    /// the menu-bar band. On displays without a notch it keeps the same pill
-    /// shape instead of flanking the camera.
-    private var compactWidth: CGFloat {
-        miniDiameter * 2.2
-    }
-
     private var compactHeight: CGFloat {
-        isExpanded ? max(notchInset, 28) : max(notchInset, 26) + 6
+        max(notchInset, 34)
     }
 
-    private var panelWidth: CGFloat {
-        isExpanded ? expandedWidth : compactWidth
+    private var currentWidth: CGFloat {
+        switch expansionState {
+        case .collapsed:
+            return compactWidth
+        case .droppingDown:
+            return 280
+        case .fullyExpanded:
+            return maxExpandedWidth
+        }
+    }
+
+    private var currentHeight: CGFloat {
+        switch expansionState {
+        case .collapsed:
+            return compactHeight
+        case .droppingDown, .fullyExpanded:
+            return 425
+        }
+    }
+
+    private var isExpanded: Bool {
+        expansionState != .collapsed
+    }
+
+    private var notchShape: UnevenRoundedRectangle {
+        UnevenRoundedRectangle(
+            topLeadingRadius: 0,
+            bottomLeadingRadius: isExpanded ? 24 : 12,
+            bottomTrailingRadius: isExpanded ? 24 : 12,
+            topTrailingRadius: 0,
+            style: .continuous
+        )
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            compactBar
-
-            if rendersExpandedContent {
-                Divider()
-                    .overlay(Color.white.opacity(0.08))
-                    .padding(.horizontal, 14)
-
-                MenuBarView()
-                    .opacity(expandedContentOpacity)
-                    .scaleEffect(
-                        expandedContentOpacity == 0 ? 0.985 : 1,
-                        anchor: .top
-                    )
-            }
-        }
-        .frame(width: panelWidth)
-        .fixedSize(horizontal: false, vertical: true)
-        .background {
-            notchShape
-                .fill(.ultraThinMaterial)
-                .overlay {
-                    notchShape.fill(Color.black.opacity(isExpanded ? 0.76 : 0.88))
+        ZStack(alignment: .top) {
+            // Symmetrically expanding Liquid Quartz capsule
+            VStack(spacing: 0) {
+                if expansionState == .fullyExpanded {
+                    expandedDropdownContent
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .move(edge: .top)),
+                            removal: .opacity
+                        ))
+                } else if expansionState == .droppingDown {
+                    Color.clear
+                        .frame(height: 425)
+                } else {
+                    compactBar
+                        .transition(.opacity)
                 }
+            }
+            .frame(width: currentWidth, height: currentHeight)
+            .background {
+                if isExpanded {
+                    notchShape
+                        .fill(.ultraThinMaterial)
+                        .overlay {
+                            notchShape.fill(Color(red: 0.08, green: 0.09, blue: 0.12).opacity(0.62))
+                        }
+                }
+            }
+            .overlay {
+                if isExpanded {
+                    notchShape
+                        .strokeBorder(PrismTheme.rimStroke, lineWidth: 1)
+                }
+            }
+            .clipShape(notchShape)
         }
-        .overlay {
-            notchShape
-                .stroke(Color.white.opacity(isExpanded ? 0.16 : 0.09), lineWidth: 1)
-        }
-        .clipShape(notchShape)
-        // No SwiftUI drop shadow: a content-sized borderless window includes the
-        // shadow's bleed in its frame, which pushes the panel down from the very
-        // top of the screen. The stroke border provides edge definition instead.
+        .frame(width: maxExpandedWidth, alignment: .top)
         .preferredColorScheme(.dark)
-        .background(NotchWindowConfigurator(panelWidth: panelWidth, panelEnabled: store.notchPanelEnabled, notchInset: $notchInset, notchWidth: $notchWidth))
+        .background {
+            NotchWindowConfigurator(
+                isExpanded: isExpanded,
+                compactWidth: compactWidth,
+                compactHeight: compactHeight,
+                expandedWidth: maxExpandedWidth,
+                panelEnabled: store.notchPanelEnabled,
+                notchInset: $notchInset,
+                notchWidth: $notchWidth
+            )
+        }
         .onHover(perform: handleHover)
-        .animation(panelAnimation, value: isExpanded)
+        // Sheets presented directly on top of the Notch Window
+        .sheet(isPresented: $showingAddAccount) {
+            AddAccountSheet()
+                .environmentObject(store)
+                .environmentObject(language)
+        }
+        .sheet(item: $accountForRelogin) { account in
+            ReloginAccountSheet(account: account, queuedCount: 0, cancelQueue: {})
+                .environmentObject(store)
+                .environmentObject(language)
+        }
+        .sheet(item: $backupOperation) { op in
+            BackupTransferSheet(operation: op)
+                .environmentObject(store)
+                .environmentObject(language)
+        }
+        .sheet(item: $accountForEditing) { account in
+            AccountEditorSheet(account: account)
+                .environmentObject(store)
+                .environmentObject(language)
+        }
         .task {
             store.startCoreMonitoring()
             store.refreshProviderStatus(silently: true)
             updater.startAutomaticChecks(currentVersion: AppInfo.shortVersion)
             NotchGlobalHotKey.shared.registerIfNeeded()
+            if isPinnedLive && !isExpanded {
+                expand()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .toggleNotchPanel)) { _ in
             guard store.notchPanelEnabled else { return }
@@ -158,8 +223,6 @@ struct NotchWindowView: View {
             if isExpanded {
                 collapse()
             } else {
-                // Match the click path: the app must be active for the
-                // panel's Esc monitor and button targets to work.
                 NSApplication.shared.activate(ignoringOtherApps: true)
                 expand()
             }
@@ -167,9 +230,39 @@ struct NotchWindowView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showDashboard)) { _ in
             openDashboard()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .showAddAccount)) { _ in
+            if !isExpanded { expand() }
+            showingAddAccount = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showReloginAccount)) { notification in
+            let id = (notification.object as? String).flatMap(UUID.init(uuidString:))
+                ?? notification.object as? UUID
+            if let id, let account = store.accounts.first(where: { $0.id == id }) {
+                if !isExpanded { expand() }
+                accountForRelogin = account
+            } else if let account = store.accounts.first(where: { !store.isArchived($0) && $0.requiresLogin }) {
+                if !isExpanded { expand() }
+                accountForRelogin = account
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .exportBackup)) { _ in
+            if !isExpanded { expand() }
+            backupOperation = .export
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .importBackup)) { _ in
+            if !isExpanded { expand() }
+            backupOperation = .import
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .editAccount)) { notification in
+            let id = (notification.object as? String).flatMap(UUID.init(uuidString:))
+                ?? notification.object as? UUID
+            if let id, let account = store.accounts.first(where: { $0.id == id }) {
+                if !isExpanded { expand() }
+                accountForEditing = account
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
-            // Clicking into another app dismisses the panel like a real menu.
-            if isExpanded { collapse() }
+            if isExpanded && !isPinnedLive { collapse() }
         }
         .onChange(of: store.notchPanelEnabled) { _, enabled in
             if !enabled { collapse() }
@@ -191,10 +284,12 @@ struct NotchWindowView: View {
         }
     }
 
+    // MARK: - Compact Bar (Top Notch Filament)
     private var compactBar: some View {
         Button {
             hoverTask?.cancel()
             collapseTask?.cancel()
+            PrismTheme.triggerHaptic(type: .alignment)
             NSApplication.shared.activate(ignoringOtherApps: true)
             if isExpanded {
                 collapse()
@@ -202,8 +297,8 @@ struct NotchWindowView: View {
                 expand()
             }
         } label: {
-            OrbitMiniView(account: activeAccount, diameter: miniDiameter, compact: true)
-                .frame(height: compactHeight)
+            PrismFilamentView(account: activeAccount, diameter: miniDiameter, compact: true, notchWidth: notchWidth, earWidth: earWidth)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -211,48 +306,38 @@ struct NotchWindowView: View {
         .accessibilityLabel(compactAccessibilityLabel)
     }
 
+    // MARK: - Expanded Dropdown Content
+    private var expandedDropdownContent: some View {
+        MenuBarView()
+    }
+
     private var compactAccessibilityLabel: String {
         let five = activeAccount?.usage?.fiveHour?.displayRemainingPercent
         let week = activeAccount?.usage?.weekly?.displayRemainingPercent
+        let banked = activeAccount?.usage?.bankedResets?.availableCount ?? 0
         let fiveText = five.map { "\($0)%" } ?? language.text("chưa có", "no data")
         let weekText = week.map { "\($0)%" } ?? language.text("chưa có", "no data")
+        let bankedText = banked > 0
+            ? language.text(", \(banked) lượt banked reset", ", \(banked) banked resets available")
+            : ""
         return language.text(
-            "5 giờ còn \(fiveText), tuần còn \(weekText). Mở Codex Roster.",
-            "5-hour \(fiveText), weekly \(weekText). Open Codex Roster."
+            "5 giờ còn \(fiveText), tuần còn \(weekText)\(bankedText). Mở Codex Roster.",
+            "5-hour \(fiveText), weekly \(weekText)\(bankedText). Open Codex Roster."
         )
     }
-
-    private var notchShape: UnevenRoundedRectangle {
-        UnevenRoundedRectangle(
-            topLeadingRadius: 0,
-            bottomLeadingRadius: isExpanded ? 24 : 10,
-            bottomTrailingRadius: isExpanded ? 24 : 10,
-            topTrailingRadius: 0,
-            style: .continuous
-        )
-    }
-
-    private var panelAnimation: Animation {
-        reduceMotion
-            ? .easeOut(duration: 0.16)
-            : .spring(response: 0.34, dampingFraction: 0.88)
-    }
-
     private func handleHover(_ hovering: Bool) {
         hoverTask?.cancel()
         collapseTask?.cancel()
 
         if hovering {
             guard !isExpanded else { return }
-            // Deliberately slow: the pointer often crosses the notch on the way
-            // to neighbouring menu bar items, and a shorter delay opens the
-            // panel on pure drive-by hovers.
             hoverTask = Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(750))
+                try? await Task.sleep(for: .milliseconds(600))
                 guard !Task.isCancelled else { return }
                 expand()
             }
         } else if isExpanded {
+            guard !isPinnedLive else { return }
             collapseTask = Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(850))
                 guard !Task.isCancelled else { return }
@@ -261,23 +346,28 @@ struct NotchWindowView: View {
         }
     }
 
+    // MARK: - Choreographed Dropdown & 2-Way Bloom Animation
     private func expand() {
         hoverTask?.cancel()
         collapseTask?.cancel()
         installKeyMonitors()
 
-        // Animate width AND the added content height together so the panel
-        // grows in one smooth motion instead of snapping to full size.
-        withAnimation(panelAnimation) {
-            isExpanded = true
-            rendersExpandedContent = true
+        guard !reduceMotion else {
+            expansionState = .fullyExpanded
+            return
         }
 
-        if reduceMotion {
-            expandedContentOpacity = 1
-        } else {
-            withAnimation(.easeOut(duration: 0.22).delay(0.06)) {
-                expandedContentOpacity = 1
+        // Phase 1: Rapid drop down from the notch ceiling
+        withAnimation(.spring(response: 0.26, dampingFraction: 0.88)) {
+            expansionState = .droppingDown
+        }
+
+        // Phase 2: Smoothly bloom outward horizontally to both left and right sides!
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(75))
+            guard expansionState != .collapsed else { return }
+            withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) {
+                expansionState = .fullyExpanded
             }
         }
     }
@@ -288,22 +378,12 @@ struct NotchWindowView: View {
         removeKeyMonitors()
 
         guard !reduceMotion else {
-            expandedContentOpacity = 0
-            rendersExpandedContent = false
-            isExpanded = false
+            expansionState = .collapsed
             return
         }
 
-        withAnimation(.easeOut(duration: 0.12)) {
-            expandedContentOpacity = 0
-        }
-        collapseTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(110))
-            guard !Task.isCancelled else { return }
-            withAnimation(panelAnimation) {
-                isExpanded = false
-                rendersExpandedContent = false
-            }
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
+            expansionState = .collapsed
         }
     }
 
@@ -332,19 +412,29 @@ struct NotchWindowView: View {
     }
 }
 
+// MARK: - Notch Window Configurator with Custom Hit Testing
 private struct NotchWindowConfigurator: NSViewRepresentable {
-    let panelWidth: CGFloat
+    let isExpanded: Bool
+    let compactWidth: CGFloat
+    let compactHeight: CGFloat
+    let expandedWidth: CGFloat
     let panelEnabled: Bool
     @Binding var notchInset: CGFloat
     @Binding var notchWidth: CGFloat
 
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
+    func makeNSView(context: Context) -> NotchHitTestView {
+        let view = NotchHitTestView()
+        view.isExpanded = isExpanded
+        view.compactWidth = compactWidth
+        view.compactHeight = compactHeight
         configureWindow(attachedTo: view)
         return view
     }
 
-    func updateNSView(_ view: NSView, context: Context) {
+    func updateNSView(_ view: NotchHitTestView, context: Context) {
+        view.isExpanded = isExpanded
+        view.compactWidth = compactWidth
+        view.compactHeight = compactHeight
         configureWindow(attachedTo: view)
     }
 
@@ -370,9 +460,6 @@ private struct NotchWindowConfigurator: NSViewRepresentable {
             window.ignoresMouseEvents = false
 
             let screen = preferredNotchScreen(for: window)
-            // The compact panel lives inside the menu-bar band and keeps the
-            // camera width clear, so the rings flank the notch and nothing
-            // hangs below over other windows.
             let inset = screen.safeAreaInsets.top
             if notchInset != inset {
                 notchInset = inset
@@ -386,8 +473,11 @@ private struct NotchWindowConfigurator: NSViewRepresentable {
             if notchWidth != camera {
                 notchWidth = camera
             }
-            let x = screen.frame.midX - panelWidth / 2
-            window.setFrameTopLeftPoint(NSPoint(x: x, y: screen.frame.maxY))
+
+            // Window stays centered permanently at screen midX with fixed width expandedWidth.
+            // Symmetrical 2-way expansion and drop-down happen smoothly inside SwiftUI!
+            let x = screen.frame.midX - expandedWidth / 2
+            window.setFrameTopLeftPoint(NSPoint(x: x, y: screen.frame.maxY + 1))
             window.orderFrontRegardless()
         }
     }
@@ -396,5 +486,31 @@ private struct NotchWindowConfigurator: NSViewRepresentable {
         NSScreen.screens.max { left, right in
             left.safeAreaInsets.top < right.safeAreaInsets.top
         } ?? window.screen ?? NSScreen.main ?? NSScreen.screens[0]
+    }
+}
+
+/// Custom NSView that only intercepts clicks within the compact capsule when collapsed,
+/// letting mouse clicks pass directly through to menu-bar items and background apps on the wings.
+final class NotchHitTestView: NSView {
+    var isExpanded: Bool = false
+    var compactWidth: CGFloat = 415
+    var compactHeight: CGFloat = 32
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if isExpanded {
+            return super.hitTest(point)
+        }
+        // In compact mode, only hit-test the centered compact capsule
+        let capsuleX = (bounds.width - compactWidth) / 2
+        let capsuleRect = NSRect(
+            x: capsuleX,
+            y: bounds.height - compactHeight,
+            width: compactWidth,
+            height: compactHeight
+        )
+        guard capsuleRect.contains(point) else {
+            return nil
+        }
+        return super.hitTest(point)
     }
 }

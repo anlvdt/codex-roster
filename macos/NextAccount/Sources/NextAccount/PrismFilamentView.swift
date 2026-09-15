@@ -4,7 +4,7 @@ import SwiftUI
 /// Minimalist, high-legibility telemetry hugging the MacBook camera notch:
 /// - Left Ear: 5-Hour Quota (large, borderless typography, seamlessly flush to notch)
 /// - Center: Physical camera notch clearance (100% transparent & hugging notch edges)
-/// - Right Ear: Weekly Quota + Reset Countdown / Banked Resets (seamlessly flush to notch)
+/// - Right Ear: Weekly Quota + Reset Countdown / Banked Resets (seamlessly flush to notch, zero clipping)
 struct PrismFilamentView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
@@ -14,7 +14,7 @@ struct PrismFilamentView: View {
     var diameter: CGFloat = 20
     var compact: Bool = true
     var notchWidth: CGFloat = 185
-    var earWidth: CGFloat = 106
+    var earWidth: CGFloat = 118
     var compactHeight: CGFloat = 32
 
     private var fivePercent: Int? {
@@ -42,7 +42,7 @@ struct PrismFilamentView: View {
     }
 
     private var physicalNotchClearance: CGFloat {
-        notchWidth > 0 ? max(notchWidth - 22, 160) : 0
+        notchWidth > 0 ? max(notchWidth - 36, 148) : 0
     }
 
     var body: some View {
@@ -160,7 +160,7 @@ struct PrismFilamentView: View {
                     .fixedSize()
             }
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 10)
         .frame(width: earWidth, height: compactHeight, alignment: .center)
         .background(leftEarBackground)
         .overlay(leftEarBorder)
@@ -169,9 +169,9 @@ struct PrismFilamentView: View {
 
     // MARK: - Right Ear Wing (Flanking Right of Camera Notch)
     private var rightEarWing: some View {
-        HStack(spacing: 4.5) {
+        HStack(spacing: 4) {
             // Weekly Quota
-            HStack(spacing: 2.5) {
+            HStack(spacing: 2) {
                 Text(language.text("Tuần", "Wk"))
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.68))
@@ -221,7 +221,7 @@ struct PrismFilamentView: View {
                 .help(account?.usage?.weekly?.resetDescription(in: language.language) ?? "")
             }
         }
-        .padding(.horizontal, 7)
+        .padding(.horizontal, 10)
         .frame(width: earWidth, height: compactHeight, alignment: .center)
         .background(rightEarBackground)
         .overlay(rightEarBorder)

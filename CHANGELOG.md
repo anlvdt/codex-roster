@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.4.2 - 2026-09-15
+
+### Changed
+
+- Confine compact notch mouse hover tracking strictly to the active pill boundaries (`currentWidth`) instead of the full 920pt screen container, eliminating accidental hover triggers from across the menu bar.
+- Calibrate mouse hover dwell time from 600ms to 900ms to require deliberate intent and prevent drive-by cursor crossing activations.
+- Add live energy indicator (`⚡`) and 5-hour rolling limit reset countdown (`↺ XH`) to the left notch ear.
+- Set pitch black (`Color.black`) background on compact wings for seamless fusion with physical MacBook camera notch.
+
 ## v0.4.1 - 2026-09-15
 
 ### Added

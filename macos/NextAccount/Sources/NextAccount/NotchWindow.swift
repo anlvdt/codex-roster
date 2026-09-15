@@ -174,6 +174,8 @@ struct NotchWindowView: View {
                 }
             }
             .clipShape(notchShape)
+            .contentShape(notchShape)
+            .onHover(perform: handleHover)
         }
         .frame(width: maxExpandedWidth, alignment: .top)
         .preferredColorScheme(.dark)
@@ -188,7 +190,7 @@ struct NotchWindowView: View {
                 notchWidth: $notchWidth
             )
         }
-        .onHover(perform: handleHover)
+
         // Sheets presented directly on top of the Notch Window
         .sheet(isPresented: $showingAddAccount) {
             AddAccountSheet()
@@ -335,7 +337,7 @@ struct NotchWindowView: View {
         if hovering {
             guard !isExpanded else { return }
             hoverTask = Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(600))
+                try? await Task.sleep(for: .milliseconds(900))
                 guard !Task.isCancelled else { return }
                 expand()
             }

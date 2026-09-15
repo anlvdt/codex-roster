@@ -88,9 +88,9 @@ struct NotchWindowView: View {
     @State private var accountForEditing: SavedAccount? = nil
 
     private let maxExpandedWidth: CGFloat = 920
-    private let earWidth: CGFloat = 164
+    private let earWidth: CGFloat = 156
     private var compactWidth: CGFloat {
-        notchWidth > 0 ? max(notchWidth, 185) + 2 * earWidth : 330
+        notchWidth > 0 ? max(notchWidth, 185) + 2 * earWidth : 300
     }
     private let miniDiameter: CGFloat = 20
 

@@ -8,21 +8,21 @@ private struct MiniQuotaRing: View {
     var body: some View {
         ZStack {
             Circle()
-                .stroke(tint.opacity(0.22), lineWidth: 1.6)
+                .stroke(tint.opacity(0.22), lineWidth: 1.8)
             if let percent {
                 Circle()
                     .trim(from: 0, to: min(1, max(0, CGFloat(percent) / 100.0)))
-                    .stroke(tint, style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
+                    .stroke(tint, style: StrokeStyle(lineWidth: 1.8, lineCap: .round))
                     .rotationEffect(.degrees(-90))
             }
         }
-        .frame(width: 9.5, height: 9.5)
+        .frame(width: 11, height: 11)
     }
 }
 
 /// Symmetrically Balanced Two-Ear Live Notch Flanking System for Codex Roster.
 /// Seamlessly hugs the MacBook camera notch with balanced weight and telemetry:
-/// - Left Ear: Session identity (Provider Icon + Account Name) + 5-Hour Quota Pill
+/// - Left Ear: Session identity orb (Provider Icon) + 5-Hour Quota Pill (larger font)
 /// - Center: Physical camera notch clearance (100% transparent & centered)
 /// - Right Ear: Weekly Quota Pill + Banked Resets (if available) / Reset Countdown
 struct PrismFilamentView: View {
@@ -34,7 +34,7 @@ struct PrismFilamentView: View {
     var diameter: CGFloat = 20
     var compact: Bool = true
     var notchWidth: CGFloat = 185
-    var earWidth: CGFloat = 164
+    var earWidth: CGFloat = 156
 
     private var fivePercent: Int? {
         account?.usage?.fiveHour?.displayRemainingPercent
@@ -86,32 +86,20 @@ struct PrismFilamentView: View {
 
     // MARK: - Non-notch Display Mode (External monitors)
     private var nonNotchCapsule: some View {
-        HStack(spacing: 6) {
-            // Identity
-            HStack(spacing: 4.5) {
-                Image(systemName: provider.icon)
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(fiveTint)
-                Text(account?.displayName ?? language.text("Chưa có phiên", "No session"))
-                    .font(.system(size: 11, weight: .semibold))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: 70, alignment: .leading)
-            }
-
-            // 5h Quota Pill
+        HStack(spacing: 7) {
+            identityBadge
             fiveHourPill
 
             Rectangle()
                 .fill(Color.white.opacity(0.18))
-                .frame(width: 1, height: 10)
+                .frame(width: 1, height: 12)
 
-            // Weekly Quota Pill
             weeklyQuotaPill
 
-            // Banked Reset Pill
             if bankedCount > 0 {
                 bankedPill
+            } else if let weeklyResetDate {
+                resetCountdownPill(date: weeklyResetDate)
             }
         }
         .padding(.horizontal, 10)
@@ -166,54 +154,46 @@ struct PrismFilamentView: View {
 
     // MARK: - Component Pills
     private var identityBadge: some View {
-        HStack(spacing: 5) {
-            ZStack {
-                Circle()
-                    .fill(fiveTint.opacity(0.18))
-                    .frame(width: 18, height: 18)
+        ZStack {
+            Circle()
+                .fill(fiveTint.opacity(0.18))
+                .frame(width: 20, height: 20)
 
-                Image(systemName: provider.icon)
-                    .font(.system(size: 9.5, weight: .bold))
-                    .foregroundStyle(fiveTint)
-            }
-            .overlay(
-                Circle()
-                    .strokeBorder(
-                        fiveTint.opacity(isRunning ? 0.90 : 0.35),
-                        lineWidth: isRunning ? 1.4 : 0.8
-                    )
-            )
-
-            Text(account?.displayName ?? language.text("Chưa có phiên", "No session"))
-                .font(.system(size: 11, weight: .semibold))
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: 55, alignment: .leading)
-                .foregroundStyle(Color.white.opacity(0.95))
+            Image(systemName: provider.icon)
+                .font(.system(size: 10.5, weight: .bold))
+                .foregroundStyle(fiveTint)
         }
+        .overlay(
+            Circle()
+                .strokeBorder(
+                    fiveTint.opacity(isRunning ? 0.90 : 0.35),
+                    lineWidth: isRunning ? 1.5 : 0.8
+                )
+        )
+        .help(account?.displayName ?? language.text("Chưa có phiên", "No session"))
     }
 
     private var fiveHourPill: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: 3.5) {
             MiniQuotaRing(percent: fivePercent, tint: fiveTint)
 
             Text(language.text("5h", "5h"))
-                .font(.system(size: 9.5, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.60))
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.62))
 
             if let fivePercent {
                 Text("\(fivePercent)%")
-                    .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                    .font(.system(size: 12.5, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(fiveTint)
             } else {
                 Text("—")
-                    .font(.system(size: 9.5, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(.horizontal, 5.5)
-        .padding(.vertical, 2.5)
+        .padding(.horizontal, 6.5)
+        .padding(.vertical, 3)
         .background(
             Capsule()
                 .fill(Color.white.opacity(0.06))
@@ -222,26 +202,26 @@ struct PrismFilamentView: View {
     }
 
     private var weeklyQuotaPill: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: 3.5) {
             MiniQuotaRing(percent: weekPercent, tint: weekTint)
 
             Text(language.text("Tuần", "Wk"))
-                .font(.system(size: 9.5, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.60))
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.62))
 
             if let weekPercent {
                 Text("\(weekPercent)%")
-                    .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                    .font(.system(size: 12.5, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(weekTint)
             } else {
                 Text("—")
-                    .font(.system(size: 9.5, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(.horizontal, 5.5)
-        .padding(.vertical, 2.5)
+        .padding(.horizontal, 6.5)
+        .padding(.vertical, 3)
         .background(
             Capsule()
                 .fill(Color.white.opacity(0.06))
@@ -250,18 +230,18 @@ struct PrismFilamentView: View {
     }
 
     private var bankedPill: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: 3.5) {
             Image(systemName: "arrow.counterclockwise.circle.fill")
-                .font(.system(size: 9.5, weight: .bold))
+                .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(Color.orange)
 
             Text("\(bankedCount)")
-                .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                .font(.system(size: 12.5, weight: .bold, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(Color.orange)
         }
-        .padding(.horizontal, 5.5)
-        .padding(.vertical, 2.5)
+        .padding(.horizontal, 6.5)
+        .padding(.vertical, 3)
         .background(
             Capsule()
                 .fill(Color.orange.opacity(0.14))
@@ -271,21 +251,21 @@ struct PrismFilamentView: View {
     }
 
     private func resetCountdownPill(date: Date) -> some View {
-        HStack(spacing: 2.5) {
+        HStack(spacing: 3) {
             Text("↺")
-                .font(.system(size: 9.5, weight: .bold))
-                .foregroundStyle(.white.opacity(0.50))
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(.white.opacity(0.55))
 
             Text(compactReset(date))
-                .font(.system(size: 9.5, weight: .medium))
-                .foregroundStyle(.white.opacity(0.70))
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.85))
         }
-        .padding(.horizontal, 5)
-        .padding(.vertical, 2.5)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
         .background(
             Capsule()
-                .fill(Color.white.opacity(0.04))
-                .overlay(Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5))
+                .fill(Color.white.opacity(0.05))
+                .overlay(Capsule().strokeBorder(Color.white.opacity(0.16), lineWidth: 0.5))
         )
         .help(account?.usage?.weekly?.resetDescription(in: language.language) ?? "")
     }

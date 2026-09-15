@@ -88,9 +88,9 @@ struct NotchWindowView: View {
     @State private var accountForEditing: SavedAccount? = nil
 
     private let maxExpandedWidth: CGFloat = 920
-    private let earWidth: CGFloat = 156
+    private let earWidth: CGFloat = 100
     private var compactWidth: CGFloat {
-        notchWidth > 0 ? max(notchWidth, 185) + 2 * earWidth : 300
+        notchWidth > 0 ? max(notchWidth, 185) + 2 * earWidth : 260
     }
     private let miniDiameter: CGFloat = 20
 
@@ -118,7 +118,7 @@ struct NotchWindowView: View {
         case .collapsed:
             return compactHeight
         case .droppingDown, .fullyExpanded:
-            return 425
+            return 480
         }
     }
 
@@ -148,7 +148,7 @@ struct NotchWindowView: View {
                         ))
                 } else if expansionState == .droppingDown {
                     Color.clear
-                        .frame(height: 425)
+                        .frame(height: 480)
                 } else {
                     compactBar
                         .transition(.opacity)

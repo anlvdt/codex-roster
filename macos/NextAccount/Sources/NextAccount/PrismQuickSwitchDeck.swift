@@ -68,22 +68,22 @@ struct PrismQuickSwitchDeck: View {
     }
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 12) {
             // Upper Deck: Left Wing | Notch Clearance & Live Pin | Right Wing (Height: 132pt)
             upperDeckFramingNotch
 
             // Lower Deck: Full-width 2-column account switchboard
             lowerSwitchboardDeck
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 10)
+        .padding(.horizontal, 14)
+        .padding(.top, 12)
         .padding(.bottom, 14)
-        .frame(width: 920, height: 425)
+        .frame(width: 920, height: 480)
     }
 
     // MARK: - Upper Deck (Left Wing 340pt | Center 188pt | Right Wing 340pt)
     private var upperDeckFramingNotch: some View {
-        HStack(alignment: .top, spacing: 14) {
+        HStack(alignment: .top, spacing: 12) {
             // Left Ear Wing: Active Session Identity & Quotas (340pt)
             upperLeftWing
                 .frame(width: 340)
@@ -469,9 +469,9 @@ struct PrismQuickSwitchDeck: View {
                         compactGridAccountCard(account, shortcutIndex: switchableShortcutMap[account.id])
                     }
                 }
-                .padding(.vertical, 2)
+                .padding(.vertical, 3)
             }
-            .frame(height: 224)
+            .frame(height: 260)
         }
         .padding(12)
         .background(

@@ -355,16 +355,8 @@ struct PrismBentoStudioView: View {
 
             Spacer(minLength: 2)
 
-            // Micro Quota Bar & Percent
-            PrismFilamentBar(fivePercent: quota, weekPercent: week, width: 36, height: 2)
-
-            if let quota {
-                Text("\(quota)%")
-                    .font(.system(size: 10, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(PrismTheme.quotaTint(percent: quota))
-                    .frame(width: 26, alignment: .trailing)
-            }
+            // Dual Quota Telemetry (5H & Wk)
+            PrismFilamentBar(fivePercent: quota, weekPercent: week, width: 28, height: 2.5, showLabels: true)
 
             // Action Button
             if account.isActive {

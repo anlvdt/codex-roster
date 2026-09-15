@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.3 - 2026-09-15
+
+### Added
+
+- Explicit \`5H\` and \`Wk\` labels and independent percentage values for both quota bars in account cards, resolving ambiguity between rolling 5-hour limit and weekly quota.
+
+### Changed
+
+- Remove duplicate \`isPinnedLive\` toggle from the utility ellipsis menu, keeping the dedicated prominent \`[ 📌 Ghim live ]\` header button clean and clutter-free.
+
 ## v0.4.2 - 2026-09-15
 
 ### Changed

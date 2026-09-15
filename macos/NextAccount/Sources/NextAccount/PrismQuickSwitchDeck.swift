@@ -429,11 +429,6 @@ struct PrismQuickSwitchDeck: View {
                     Button { openDashboard() } label: {
                         Label(language.text("Mở cửa sổ phụ", "Open detached window"), systemImage: "macwindow")
                     }
-                    Divider()
-                    Toggle(isOn: $isPinnedLive) {
-                        Label(language.text("Ghim xem live liên tục (⌘P)", "Pin live open continuously (⌘P)"), systemImage: "pin")
-                    }
-                    Divider()
                     Button { openBackupFlow(.export) } label: {
                         Label(language.text("Sao lưu", "Export backup"), systemImage: "square.and.arrow.up")
                     }
@@ -545,16 +540,8 @@ struct PrismQuickSwitchDeck: View {
             Spacer(minLength: 4)
 
             // Micro Quota Bar & Percent
-            PrismFilamentBar(fivePercent: quota, weekPercent: week, width: 36, height: 3.5)
-
-            if let quota {
-                Text("\(quota)%")
-                    .font(.system(size: 12.5, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .foregroundStyle(PrismTheme.quotaTint(percent: quota))
-                    .frame(width: 44, alignment: .trailing)
-            }
+            // Dual Quota Telemetry (5H & Wk)
+            PrismFilamentBar(fivePercent: quota, weekPercent: week, width: 34, height: 3.5, showLabels: true)
 
             // Action Button
             if account.isActive {

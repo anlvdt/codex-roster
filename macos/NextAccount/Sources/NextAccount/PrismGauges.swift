@@ -186,37 +186,83 @@ struct PrismArcGauge: View {
     }
 }
 
-/// Micro filament dual-line gauge for ultra-compact tiles
+/// Micro filament dual-line gauge for ultra-compact tiles with explicit labels and percentages
 struct PrismFilamentBar: View {
+    @EnvironmentObject private var language: LanguageStore
     let fivePercent: Int?
     let weekPercent: Int?
-    var width: CGFloat = 38
-    var height: CGFloat = 3
+    var width: CGFloat = 36
+    var height: CGFloat = 3.5
+    var showLabels: Bool = true
 
     var body: some View {
-        VStack(spacing: 2) {
-            // 5h line
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.primary.opacity(0.10))
-                    Capsule()
-                        .fill(PrismTheme.quotaTint(percent: fivePercent))
-                        .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(fivePercent ?? 0) / 100.0)))
+        VStack(alignment: .leading, spacing: 2.5) {
+            // 5H quota line
+            HStack(spacing: 3) {
+                if showLabels {
+                    Text("5H")
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .frame(width: 14, alignment: .leading)
+                        .fixedSize()
                 }
-            }
-            .frame(width: width, height: height)
 
-            // Weekly line
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.primary.opacity(0.10))
-                    Capsule()
-                        .fill(PrismTheme.quotaTint(percent: weekPercent))
-                        .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(weekPercent ?? 0) / 100.0)))
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.white.opacity(0.12))
+                        Capsule()
+                            .fill(PrismTheme.quotaTint(percent: fivePercent))
+                            .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(fivePercent ?? 0) / 100.0)))
+                    }
+                }
+                .frame(width: width, height: height)
+
+                if showLabels, let fivePercent {
+                    Text("\(fivePercent)%")
+                        .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(PrismTheme.quotaTint(percent: fivePercent))
+                        .frame(width: 32, alignment: .trailing)
+                        .fixedSize()
                 }
             }
-            .frame(width: width, height: height)
+
+            // Weekly quota line
+            HStack(spacing: 3) {
+                if showLabels {
+                    Text(language.text("Wk", "Wk"))
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .frame(width: 14, alignment: .leading)
+                        .fixedSize()
+                }
+
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.white.opacity(0.12))
+                        Capsule()
+                            .fill(PrismTheme.quotaTint(percent: weekPercent))
+                            .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(weekPercent ?? 0) / 100.0)))
+                    }
+                }
+                .frame(width: width, height: height)
+
+                if showLabels, let weekPercent {
+                    Text("\(weekPercent)%")
+                        .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(PrismTheme.quotaTint(percent: weekPercent))
+                        .frame(width: 32, alignment: .trailing)
+                        .fixedSize()
+                }
+            }
         }
+        .help(
+            language.text(
+                "5H: \(fivePercent.map { "\($0)%" } ?? "—"), Tuần: \(weekPercent.map { "\($0)%" } ?? "—")",
+                "5H: \(fivePercent.map { "\($0)%" } ?? "—"), Weekly: \(weekPercent.map { "\($0)%" } ?? "—")"
+            )
+        )
     }
 }
 

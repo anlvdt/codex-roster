@@ -1,14 +1,21 @@
 # Changelog
 
-## Unreleased
+## v0.4.1 - 2026-09-15
 
 ### Added
 
-- Workspace-scoped Codex accounts now resolve their credit balance from the per-account `remaining_balance` endpoint when the usage response omits a personal balance, and the monthly spend-control cap (`individual_limit` / `spend_control`) is surfaced as a "Monthly cap" line in the credits card.
-- A Settings toggle hides the notch panel entirely for users who do not want a menu-bar overlay, and the notch panel can now be dismissed with Escape or by clicking into another app. ⌃⌥R toggles the notch from the keyboard via a Carbon global hotkey, so the panel is no longer mouse-only.
-- The empty-state "add your first account" banner now carries an Add account button instead of only describing the action.
-- A Providers surface is back: the dashboard regains a per-provider overview (live session, saved count, best quota, quick view/refresh for OpenAI) and the notch popup shows a compact four-provider badge strip.
+- Symmetrically balanced notch flanking wings: 5H quota with live energy activity indicator (`⚡`) and 5H reset countdown on the left, weekly quota with reset countdown (`↺ 5D`) and banked reset badge (`⟲ count`) on the right.
+- Pure pitch black background (`Color.black`) for compact notch wings, seamlessly fusing with the physical MacBook camera notch with zero seam lines.
+- Contiguous sequential keyboard shortcuts (1..6) in Quick Switch for active switchable accounts without gaps or skipped keys.
+- Roster sequence numbering (`#1, #2...`) in Bento Studio account rows.
 
+### Changed
+
+- Lock compact notch wing height exactly to the physical screen safe area top inset (`screen.safeAreaInsets.top`).
+- Streamline compact notch typography: borderless quota metrics with large bold numbers (`14pt`), capitalized labels (`5H`, `5D`), and clean padding.
+- Increase expanded console deck height to 480pt and lower grid height to 260pt, completely eliminating account card slicing and bottom clipping.
+- Fix camera notch clearance for the `OpenAI OK` status capsule, ensuring 10pt+ air cushion below the physical camera housing.
+- Standardize account sorting across Quick Switch and Bento Studio with `store.sortedAccounts(...)`.
 ### Changed
 
 - Researched upstream steipete/CodexBar `v0.60.2` (`69c5a785c`) and applied the relevant hardening: Codex usage payloads now decode tolerantly (numeric strings/floats, per-window fail-soft, malformed optional blocks no longer fail the whole response), Claude usage sends a `claude-code/<version>` user agent, Cursor usage understands the nested `individualUsage`/`teamUsage` cents-based schema, and Grok billing reads the proxy `config` payload — including on-demand amounts and `subscriptionTier` — while preserving an unknown reading instead of inventing 0%.

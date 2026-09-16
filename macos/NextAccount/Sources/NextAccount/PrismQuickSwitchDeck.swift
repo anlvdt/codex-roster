@@ -129,10 +129,16 @@ struct PrismQuickSwitchDeck: View {
                         }
                     }
 
-                    Text(activeAccount?.email ?? "—")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    HStack(spacing: 5) {
+                        Text(activeAccount?.email ?? "—")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+
+                        if let email = activeAccount?.email, !email.isEmpty {
+                            CopyEmailButton(email: email, iconSize: 9.5)
+                        }
+                    }
                 }
 
                 Spacer()
@@ -338,13 +344,31 @@ struct PrismQuickSwitchDeck: View {
             // Telemetry line: Today / 7d / VibeCafe
             HStack(spacing: 8) {
                 if let summary = store.tokenUsage {
-                    Text(language.text("Hôm nay: \(summary.today)", "Today: \(summary.today)"))
-                        .font(.system(size: 10.5, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 3) {
+                        Text(language.text("Hôm nay: \(summary.today)", "Today: \(summary.today)"))
+                        if let todayCost = summary.todayCostUsd, todayCost > 0 {
+                            Text(String(format: "($%.2f)", todayCost))
+                                .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                                .foregroundStyle(PrismTheme.emerald)
+                        }
+                    }
+                    .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
                     Text("·").foregroundStyle(.tertiary)
                     Text(language.text("7d: \(summary.last7Days)", "7d: \(summary.last7Days)"))
                         .font(.system(size: 10.5, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
+                    if let sub = summary.subagentSessions, sub > 0 {
+                        Text("·").foregroundStyle(.tertiary)
+                        HStack(spacing: 2) {
+                            Image(systemName: "point.3.connected.trianglepath.dotted")
+                                .font(.system(size: 8.5))
+                            Text("\(sub) sub")
+                        }
+                        .font(.system(size: 9.5, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .help(language.text("\(sub) phiên subagent phát hiện", "\(sub) subagent sessions detected"))
+                    }
                 }
                 if let vibe = store.status?.vibeUsage {
                     Text("·").foregroundStyle(.tertiary)
@@ -531,10 +555,14 @@ struct PrismQuickSwitchDeck: View {
                     .font(.system(size: 12.5, weight: .bold))
                     .lineLimit(1)
 
-                Text(account.email)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(account.email)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+
+                    CopyEmailButton(email: account.email, iconSize: 9)
+                }
             }
 
             Spacer(minLength: 4)
@@ -626,6 +654,12 @@ struct PrismQuickSwitchDeck: View {
                 store.activate(account, force: true)
             } label: {
                 Label(language.text("Kích hoạt", "Activate"), systemImage: "bolt.fill")
+            }
+            Button {
+                PrismTheme.triggerHaptic()
+                copyAccountEmail(account.email)
+            } label: {
+                Label(language.text("Sao chép email", "Copy email"), systemImage: "doc.on.doc")
             }
             Button {
                 openEditAccount(account)

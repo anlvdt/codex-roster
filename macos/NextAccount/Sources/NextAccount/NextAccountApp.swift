@@ -2078,6 +2078,40 @@ private struct TokenUsageDetails: View {
             .font(.caption)
             .foregroundStyle(.secondary)
 
+            if let cost = summary.estimatedCostUsd, cost > 0 {
+                HStack(spacing: 8) {
+                    Label(
+                        language.text(
+                            String(format: "Ước tính giá trị API: $%.2f", cost),
+                            String(format: "Est. API token value: $%.2f", cost)
+                        ),
+                        systemImage: "dollarsign.circle.fill"
+                    )
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(PrismTheme.emerald)
+
+                    if let todayCost = summary.todayCostUsd, todayCost > 0 {
+                        Text("·").foregroundStyle(.tertiary)
+                        Text(String(format: language.text("Hôm nay: $%.2f", "Today: $%.2f"), todayCost))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 1)
+            }
+
+            if let sub = summary.subagentSessions, sub > 0, let main = summary.mainSessions {
+                HStack(spacing: 6) {
+                    Image(systemName: "point.3.connected.trianglepath.dotted")
+                    Text(language.text(
+                        "Phiên chạy: \(main) chính, \(sub) subagents",
+                        "Sessions: \(main) main, \(sub) subagents"
+                    ))
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
             if !summary.byModel.isEmpty {
                 TokenUsageRanking(title: language.text("Theo model", "By model"), entries: summary.byModel)
             }
@@ -2123,6 +2157,11 @@ private struct TokenUsageRanking: View {
                     Text(entry.label)
                         .lineLimit(1)
                     Spacer()
+                    if let cost = entry.estimatedCostUsd, cost > 0 {
+                        Text(String(format: "$%.2f", cost))
+                            .font(.caption.monospacedDigit().weight(.medium))
+                            .foregroundStyle(PrismTheme.emerald)
+                    }
                     Text(compactTokenCount(entry.tokens, in: language.language))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
@@ -4380,13 +4419,43 @@ private struct AboutFeatureGroup<Content: View>: View {
     }
 }
 
-private func copyAccountEmail(_ email: String) {
+func copyAccountEmail(_ email: String) {
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(email, forType: .string)
 }
 
-private func copyAccountEmails(_ emails: [String]) {
+func copyAccountEmails(_ emails: [String]) {
     guard !emails.isEmpty else { return }
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(emails.joined(separator: "\n"), forType: .string)
+}
+
+struct CopyEmailButton: View {
+    let email: String
+    var iconSize: CGFloat = 8.5
+    @EnvironmentObject private var language: LanguageStore
+    @State private var justCopied = false
+
+    var body: some View {
+        Button {
+            PrismTheme.triggerHaptic()
+            copyAccountEmail(email)
+            withAnimation(.easeInOut(duration: 0.15)) {
+                justCopied = true
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    justCopied = false
+                }
+            }
+        } label: {
+            Image(systemName: justCopied ? "checkmark" : "doc.on.doc")
+                .font(.system(size: iconSize, weight: .semibold))
+                .foregroundStyle(justCopied ? PrismTheme.emerald : .secondary.opacity(0.8))
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .help(justCopied ? language.text("Đã sao chép!", "Copied!") : language.text("Sao chép email", "Copy email"))
+        .accessibilityLabel(language.text("Sao chép email", "Copy email"))
+    }
 }

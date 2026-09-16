@@ -38,6 +38,10 @@ struct CachedSession {
     by_project: BTreeMap<String, CachedTokenUsage>,
     model: String,
     project: String,
+    #[serde(default)]
+    is_subagent: bool,
+    #[serde(default)]
+    parent_thread_id: Option<String>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -69,6 +73,9 @@ pub fn summarize_session_tokens(
     let mut usage = CachedTokenUsage::default();
     let mut by_model = BTreeMap::new();
     let mut by_project = BTreeMap::new();
+    let mut day_costs: BTreeMap<time::Date, f64> = BTreeMap::new();
+    let mut main_sessions = 0;
+    let mut subagent_sessions = 0;
 
     for file in &files {
         let key = file
@@ -78,7 +85,23 @@ pub fn summarize_session_tokens(
             .into_owned();
         active_keys.insert(key.clone());
         let previous = cache.files.remove(&key).unwrap_or_default();
-        let current = refresh_cached_session(file, offset, previous)?;
+        let mut current = refresh_cached_session(file, offset, previous)?;
+        if current.cursor > 0 && !current.is_subagent && current.parent_thread_id.is_none() {
+            check_session_meta_first_line(file, &mut current);
+        }
+        if current.is_subagent {
+            subagent_sessions += 1;
+        } else {
+            main_sessions += 1;
+        }
+
+        for (day, day_usage) in &current.by_day {
+            if let Ok(timestamp) = OffsetDateTime::parse(&format!("{day}T00:00:00Z"), &Rfc3339) {
+                let cost = estimate_cost_usd(day_usage, &current.model);
+                *day_costs.entry(timestamp.date()).or_default() += cost;
+            }
+        }
+
         merge_cached_days(&current, &mut by_day);
         merge_usage(&mut usage, &current.usage);
         merge_cached_breakdowns(&current.by_model, &mut by_model);
@@ -95,6 +118,24 @@ pub fn summarize_session_tokens(
             .map(|(_, usage)| usage.tokens)
             .sum()
     };
+    let cost_since = |days: i64| {
+        day_costs
+            .iter()
+            .filter(|(date, _)| **date >= today - Duration::days(days - 1) && **date <= today)
+            .map(|(_, cost)| *cost)
+            .sum::<f64>()
+    };
+
+    let today_cost_usd = day_costs.get(&today).copied().unwrap_or(0.0);
+    let last_7_days_cost_usd = cost_since(7);
+    let last_30_days_cost_usd = cost_since(30);
+
+    let by_model_outputs = breakdown_outputs(by_model);
+    let estimated_cost_usd = by_model_outputs
+        .iter()
+        .map(|entry| entry.estimated_cost_usd)
+        .sum::<f64>();
+
     let daily = (0..7)
         .rev()
         .map(|days_ago| {
@@ -105,6 +146,7 @@ pub fn summarize_session_tokens(
                     .get(&date)
                     .map(|usage| usage.tokens)
                     .unwrap_or_default(),
+                cost_usd: day_costs.get(&date).copied().unwrap_or(0.0),
             }
         })
         .collect();
@@ -125,10 +167,16 @@ pub fn summarize_session_tokens(
         reasoning_output_tokens: usage.reasoning_output_tokens,
         cache_hit_percent: cache_hit_percent(&usage),
         daily,
-        by_model: breakdown_outputs(by_model),
+        by_model: by_model_outputs,
         by_project: breakdown_outputs(by_project),
         sessions_scanned: files.len(),
         token_events: usage.token_events,
+        estimated_cost_usd,
+        today_cost_usd,
+        last_7_days_cost_usd,
+        last_30_days_cost_usd,
+        main_sessions,
+        subagent_sessions,
     })
 }
 
@@ -340,6 +388,29 @@ fn update_session_context(value: &Value, cached: &mut CachedSession) {
     if let Some(cwd) = value.pointer("/payload/cwd").and_then(Value::as_str) {
         cached.project = project_label(cwd);
     }
+    if let Some(source) = value.pointer("/payload/thread_source").and_then(Value::as_str) {
+        if source.eq_ignore_ascii_case("subagent") {
+            cached.is_subagent = true;
+        }
+    }
+    if let Some(parent) = value.pointer("/payload/parent_thread_id").and_then(Value::as_str) {
+        if !parent.is_empty() {
+            cached.is_subagent = true;
+            cached.parent_thread_id = Some(parent.to_owned());
+        }
+    }
+}
+
+fn check_session_meta_first_line(file: &Path, cached: &mut CachedSession) {
+    if let Ok(input) = File::open(file) {
+        let mut reader = BufReader::new(input);
+        let mut first_line = String::new();
+        if reader.read_line(&mut first_line).is_ok() {
+            if let Ok(val) = serde_json::from_str::<Value>(first_line.trim()) {
+                update_session_context(&val, cached);
+            }
+        }
+    }
 }
 
 fn project_label(cwd: &str) -> String {
@@ -460,15 +531,19 @@ fn breakdown_outputs(
 ) -> Vec<TokenUsageBreakdownOutput> {
     let mut outputs = by_label
         .into_iter()
-        .map(|(label, usage)| TokenUsageBreakdownOutput {
-            label,
-            tokens: usage.tokens,
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
-            cached_input_tokens: usage.cached_input_tokens,
-            cache_write_input_tokens: usage.cache_write_input_tokens,
-            reasoning_output_tokens: usage.reasoning_output_tokens,
-            token_events: usage.token_events,
+        .map(|(label, usage)| {
+            let estimated_cost_usd = estimate_cost_usd(&usage, &label);
+            TokenUsageBreakdownOutput {
+                label,
+                tokens: usage.tokens,
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cached_input_tokens: usage.cached_input_tokens,
+                cache_write_input_tokens: usage.cache_write_input_tokens,
+                reasoning_output_tokens: usage.reasoning_output_tokens,
+                token_events: usage.token_events,
+                estimated_cost_usd,
+            }
         })
         .collect::<Vec<_>>();
     outputs.sort_by(|left, right| {
@@ -478,6 +553,105 @@ fn breakdown_outputs(
             .then_with(|| left.label.cmp(&right.label))
     });
     outputs
+}
+
+struct ModelRates {
+    input_rate: f64,
+    output_rate: f64,
+    cache_read_rate: f64,
+    cache_write_rate: f64,
+}
+
+fn rate_for_model(model: &str) -> ModelRates {
+    let lower = model.to_ascii_lowercase();
+    if lower.contains("gpt-6") || lower.contains("astra") {
+        ModelRates {
+            input_rate: 10.0,
+            output_rate: 50.0,
+            cache_read_rate: 1.0,
+            cache_write_rate: 12.5,
+        }
+    } else if lower.contains("gpt-5.6-sol") || lower.contains("sol") {
+        ModelRates {
+            input_rate: 4.0,
+            output_rate: 20.0,
+            cache_read_rate: 0.4,
+            cache_write_rate: 5.0,
+        }
+    } else if lower.contains("gpt-5.6-terra") || lower.contains("terra") {
+        ModelRates {
+            input_rate: 2.0,
+            output_rate: 12.0,
+            cache_read_rate: 0.2,
+            cache_write_rate: 2.5,
+        }
+    } else if lower.contains("gpt-5.6-luna") || lower.contains("luna") {
+        ModelRates {
+            input_rate: 0.20,
+            output_rate: 1.20,
+            cache_read_rate: 0.02,
+            cache_write_rate: 0.25,
+        }
+    } else if lower.contains("gpt-5.5") || lower.contains("gpt-5") {
+        ModelRates {
+            input_rate: 5.0,
+            output_rate: 30.0,
+            cache_read_rate: 0.5,
+            cache_write_rate: 6.25,
+        }
+    } else if lower.contains("claude-opus") || lower.contains("opus") {
+        ModelRates {
+            input_rate: 5.0,
+            output_rate: 25.0,
+            cache_read_rate: 0.5,
+            cache_write_rate: 6.25,
+        }
+    } else if lower.contains("claude-sonnet") || lower.contains("sonnet") {
+        ModelRates {
+            input_rate: 3.0,
+            output_rate: 15.0,
+            cache_read_rate: 0.3,
+            cache_write_rate: 3.75,
+        }
+    } else if lower.contains("claude-haiku") || lower.contains("haiku") {
+        ModelRates {
+            input_rate: 1.0,
+            output_rate: 5.0,
+            cache_read_rate: 0.1,
+            cache_write_rate: 1.25,
+        }
+    } else if lower.contains("grok-4.6") {
+        ModelRates {
+            input_rate: 2.0,
+            output_rate: 6.0,
+            cache_read_rate: 0.5,
+            cache_write_rate: 2.5,
+        }
+    } else if lower.contains("mini") {
+        ModelRates {
+            input_rate: 0.15,
+            output_rate: 0.60,
+            cache_read_rate: 0.075,
+            cache_write_rate: 0.1875,
+        }
+    } else {
+        ModelRates {
+            input_rate: 2.5,
+            output_rate: 10.0,
+            cache_read_rate: 0.25,
+            cache_write_rate: 3.125,
+        }
+    }
+}
+
+fn estimate_cost_usd(usage: &CachedTokenUsage, model: &str) -> f64 {
+    let rates = rate_for_model(model);
+    let uncached_input = usage.input_tokens.saturating_sub(usage.cached_input_tokens);
+    let input_cost = (uncached_input as f64) * rates.input_rate;
+    let cache_read_cost = (usage.cached_input_tokens as f64) * rates.cache_read_rate;
+    let cache_write_cost = (usage.cache_write_input_tokens as f64) * rates.cache_write_rate;
+    let output_cost = (usage.output_tokens as f64) * rates.output_rate;
+    (input_cost + cache_read_cost + cache_write_cost + output_cost) / 1_000_000.0
 }
 
 #[cfg(test)]
@@ -671,5 +845,43 @@ mod tests {
         assert_eq!(summary.cache_hit_percent, 25);
         assert_eq!(summary.token_events, 2);
         assert_eq!(summary.sessions_scanned, 1);
+    }
+
+    #[test]
+    fn detects_subagents_and_calculates_estimated_costs() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let sessions = temp.path().join("sessions/2026/08/30");
+        fs::create_dir_all(&sessions).expect("sessions");
+        fs::write(
+            sessions.join("rollout-main.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-08-30T01:00:00Z","type":"session_meta","payload":{"thread_source":"user","model":"gpt-5.6-sol","cwd":"/path/to/project-a"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-30T01:00:01Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000000,"cached_input_tokens":500000,"cache_write_input_tokens":0,"output_tokens":100000,"reasoning_output_tokens":10000,"total_tokens":1100000}}}}"#,
+                "\n"
+            ),
+        )
+        .expect("main session");
+        fs::write(
+            sessions.join("rollout-subagent.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-08-30T01:05:00Z","type":"session_meta","payload":{"thread_source":"subagent","parent_thread_id":"019f2dc5","model":"gpt-5.6-luna","cwd":"/path/to/project-a"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-30T01:05:01Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000000,"cached_input_tokens":500000,"cache_write_input_tokens":0,"output_tokens":100000,"reasoning_output_tokens":10000,"total_tokens":1100000}}}}"#,
+                "\n"
+            ),
+        )
+        .expect("subagent session");
+
+        let now = OffsetDateTime::parse("2026-08-30T10:00:00Z", &Rfc3339).expect("now");
+        let summary =
+            summarize_session_tokens(&temp.path().join("sessions"), now).expect("summary");
+
+        assert_eq!(summary.sessions_scanned, 2);
+        assert_eq!(summary.main_sessions, 1);
+        assert_eq!(summary.subagent_sessions, 1);
+        assert!(summary.estimated_cost_usd > 0.0);
+        assert!(summary.today_cost_usd > 0.0);
+        assert_eq!(summary.daily.len(), 7);
     }
 }

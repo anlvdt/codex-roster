@@ -1941,6 +1941,12 @@ struct TokenUsageSummary: Decodable {
     let byProject: [TokenUsageBreakdown]
     let sessionsScanned: Int
     let tokenEvents: Int
+    let estimatedCostUsd: Double?
+    let todayCostUsd: Double?
+    let last7DaysCostUsd: Double?
+    let last30DaysCostUsd: Double?
+    let mainSessions: Int?
+    let subagentSessions: Int?
 }
 
 struct TokenUsageBreakdown: Identifiable, Decodable {
@@ -1952,6 +1958,7 @@ struct TokenUsageBreakdown: Identifiable, Decodable {
     let cacheWriteInputTokens: UInt64
     let reasoningOutputTokens: UInt64
     let tokenEvents: Int
+    let estimatedCostUsd: Double?
 
     var id: String { label }
 }
@@ -2390,6 +2397,7 @@ struct OpenAIServiceComponent: Identifiable, Decodable {
 struct TokenUsageDay: Identifiable, Decodable {
     let date: String
     let tokens: UInt64
+    let costUsd: Double?
 
     var id: String { date }
 }

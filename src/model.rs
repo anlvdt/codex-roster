@@ -372,12 +372,26 @@ pub struct TokenUsageSummaryOutput {
     pub by_project: Vec<TokenUsageBreakdownOutput>,
     pub sessions_scanned: usize,
     pub token_events: usize,
+    #[serde(default)]
+    pub estimated_cost_usd: f64,
+    #[serde(default)]
+    pub today_cost_usd: f64,
+    #[serde(default)]
+    pub last_7_days_cost_usd: f64,
+    #[serde(default)]
+    pub last_30_days_cost_usd: f64,
+    #[serde(default)]
+    pub main_sessions: usize,
+    #[serde(default)]
+    pub subagent_sessions: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TokenUsageDayOutput {
     pub date: String,
     pub tokens: u64,
+    #[serde(default)]
+    pub cost_usd: f64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -390,6 +404,8 @@ pub struct TokenUsageBreakdownOutput {
     pub cache_write_input_tokens: u64,
     pub reasoning_output_tokens: u64,
     pub token_events: usize,
+    #[serde(default)]
+    pub estimated_cost_usd: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

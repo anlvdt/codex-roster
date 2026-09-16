@@ -167,7 +167,7 @@ struct CodexRosterApp: App {
                     store.ensureAutomaticFullBackup()
                 }
         }
-        .defaultSize(width: 440, height: 530)
+        .defaultSize(width: 415, height: 490)
         .windowResizability(.contentSize)
         .commands {
             CommandGroup(replacing: .newItem) {
@@ -230,7 +230,8 @@ struct ContentView: View {
 
     var body: some View {
         detailContent
-            .frame(minWidth: 420, idealWidth: 440, maxWidth: 480, minHeight: 490, idealHeight: 530, maxHeight: 590)
+            .frame(width: 415, height: 490)
+            .fixedSize()
         .toolbar { AccountToolbar(showingAddAccount: $showingAddAccount) }
         .onReceive(NotificationCenter.default.publisher(for: .showAddAccount)) { _ in
             showingAddAccount = true
@@ -4510,7 +4511,7 @@ func formatUsdCost(_ amount: Double, in language: AppLanguage) -> String {
     let formatted = language == .vietnamese
         ? String(format: "%.2f", amount).replacingOccurrences(of: ".", with: ",")
         : String(format: "%.2f", amount)
-    return "(~$\(formatted))"
+    return "($\(formatted))"
 }
 
 func formatFullTokenNumber(_ tokens: UInt64, in language: AppLanguage) -> String {

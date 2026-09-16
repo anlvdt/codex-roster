@@ -56,8 +56,8 @@ struct PrismBentoStudioView: View {
             // 3. Radar, Service Health & Automation Card
             radarAndAutomationCard
         }
-        .padding(11)
-        .frame(minWidth: 370, idealWidth: 390, maxWidth: 420, minHeight: 420, idealHeight: 450, maxHeight: 480)
+        .padding(10)
+        .frame(width: 415, height: 490)
         .background(
             ZStack {
                 (colorScheme == .dark ? PrismTheme.darkBackground : PrismTheme.lightBackground)
@@ -244,25 +244,22 @@ struct PrismBentoStudioView: View {
             }
 
             // Minimalist Telemetry Row
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 if let summary = store.tokenUsage {
-                    HStack(spacing: 4) {
+                    HStack(spacing: 3) {
                         Image(systemName: "bolt.fill")
-                            .font(.system(size: 9))
+                            .font(.system(size: 8.5))
                             .foregroundStyle(Color.accentColor)
-                        Text(language.text(
-                            "Hôm nay: \(formatTokenMetric(summary.today, in: language.language)) token",
-                            "Today: \(formatTokenMetric(summary.today, in: language.language)) tokens"
-                        ))
+                        Text("\(language.text("Hôm nay", "Today")): \(formatTokenMetric(summary.today, in: language.language))")
                         if let todayCost = summary.todayCostUsd, todayCost > 0 {
                             Text(formatUsdCost(todayCost, in: language.language))
-                                .font(.system(size: 10, weight: .bold, design: .rounded))
+                                .font(.system(size: 9.5, weight: .bold, design: .rounded))
                                 .foregroundStyle(PrismTheme.emerald)
                         }
                     }
-                    .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                     .help(language.text(
                         "Hôm nay: \(formatFullTokenNumber(summary.today, in: language.language)) token (ước tính \(formatUsdCost(summary.todayCostUsd ?? 0, in: language.language)))",
                         "Today: \(formatFullTokenNumber(summary.today, in: language.language)) tokens (est. \(formatUsdCost(summary.todayCostUsd ?? 0, in: language.language)))"
@@ -270,28 +267,25 @@ struct PrismBentoStudioView: View {
 
                     Text("·").foregroundStyle(.tertiary)
 
-                    Text(language.text(
-                        "7 ngày: \(formatTokenMetric(summary.last7Days, in: language.language))",
-                        "7d: \(formatTokenMetric(summary.last7Days, in: language.language))"
-                    ))
-                    .font(.system(size: 10.5, weight: .medium, design: .rounded))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .help(language.text(
-                        "7 ngày qua: \(formatFullTokenNumber(summary.last7Days, in: language.language)) token",
-                        "Last 7 days: \(formatFullTokenNumber(summary.last7Days, in: language.language)) tokens"
-                    ))
+                    Text("\(language.text("7 ngày", "7d")): \(formatTokenMetric(summary.last7Days, in: language.language))")
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .help(language.text(
+                            "7 ngày qua: \(formatFullTokenNumber(summary.last7Days, in: language.language)) token",
+                            "Last 7 days: \(formatFullTokenNumber(summary.last7Days, in: language.language)) tokens"
+                        ))
 
                     if let sub = summary.subagentSessions, sub > 0 {
                         Text("·").foregroundStyle(.tertiary)
-                        HStack(spacing: 3) {
+                        HStack(spacing: 2.5) {
                             Image(systemName: "point.3.connected.trianglepath.dotted")
-                                .font(.system(size: 9))
-                            Text("\(sub) subagents")
+                                .font(.system(size: 8.5))
+                            Text("\(sub) sub")
                         }
                         .font(.system(size: 10, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .help(language.text("\(sub) phiên subagent đã phát hiện", "\(sub) subagent sessions detected"))
                     }
                 }
@@ -299,19 +293,19 @@ struct PrismBentoStudioView: View {
                 if let vibe = store.status?.vibeUsage {
                     Text("·").foregroundStyle(.tertiary)
                     Text(String(format: "Vibe: $%.2f", vibe.estimatedCostUsd))
-                        .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
 
-                Spacer()
+                Spacer(minLength: 4)
 
                 Button {
                     PrismTheme.triggerHaptic()
                     store.refresh()
                 } label: {
                     Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 11))
+                        .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
@@ -366,7 +360,7 @@ struct PrismBentoStudioView: View {
                 }
                 .padding(.vertical, 1)
             }
-            .frame(maxHeight: 220)
+            .frame(height: 195)
         }
         .padding(10)
         .prismGlass(cornerRadius: 12)

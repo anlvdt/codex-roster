@@ -167,7 +167,7 @@ struct CodexRosterApp: App {
                     store.ensureAutomaticFullBackup()
                 }
         }
-        .defaultSize(width: 390, height: 450)
+        .defaultSize(width: 440, height: 530)
         .windowResizability(.contentSize)
         .commands {
             CommandGroup(replacing: .newItem) {
@@ -230,7 +230,7 @@ struct ContentView: View {
 
     var body: some View {
         detailContent
-            .frame(minWidth: 370, idealWidth: 390, maxWidth: 420, minHeight: 420, idealHeight: 450, maxHeight: 480)
+            .frame(minWidth: 420, idealWidth: 440, maxWidth: 480, minHeight: 490, idealHeight: 530, maxHeight: 590)
         .toolbar { AccountToolbar(showingAddAccount: $showingAddAccount) }
         .onReceive(NotificationCenter.default.publisher(for: .showAddAccount)) { _ in
             showingAddAccount = true
@@ -2309,6 +2309,19 @@ private struct TokenDayColumn: View {
         return String(day.date.suffix(2))
     }
 }
+func compactMetric(_ tokens: UInt64) -> String {
+    let value = Double(tokens)
+    if value >= 1_000_000_000 {
+        return String(format: "%.1fB", value / 1_000_000_000)
+    } else if value >= 1_000_000 {
+        return String(format: "%.1fM", value / 1_000_000)
+    } else if value >= 1_000 {
+        return String(format: "%.1fK", value / 1_000)
+    } else {
+        return "\(tokens)"
+    }
+}
+
 
 private func compactTokenCount(_ tokens: UInt64, in language: AppLanguage) -> String {
     let value = Double(tokens)
@@ -4432,9 +4445,10 @@ func copyAccountEmails(_ emails: [String]) {
 
 struct CopyEmailButton: View {
     let email: String
-    var iconSize: CGFloat = 8.5
+    var iconSize: CGFloat = 12
     @EnvironmentObject private var language: LanguageStore
     @State private var justCopied = false
+    @State private var isHovered = false
 
     var body: some View {
         Button {
@@ -4451,11 +4465,57 @@ struct CopyEmailButton: View {
         } label: {
             Image(systemName: justCopied ? "checkmark" : "doc.on.doc")
                 .font(.system(size: iconSize, weight: .semibold))
-                .foregroundStyle(justCopied ? PrismTheme.emerald : .secondary.opacity(0.8))
+                .foregroundStyle(justCopied ? PrismTheme.emerald : (isHovered ? .primary : .secondary.opacity(0.8)))
+                .frame(width: max(22, iconSize + 10), height: max(22, iconSize + 10))
+                .background(
+                    RoundedRectangle(cornerRadius: 4.5, style: .continuous)
+                        .fill(isHovered ? Color.primary.opacity(0.08) : Color.clear)
+                )
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
+        .onHover { isHovered = $0 }
         .help(justCopied ? language.text("Đã sao chép!", "Copied!") : language.text("Sao chép email", "Copy email"))
         .accessibilityLabel(language.text("Sao chép email", "Copy email"))
     }
+}
+
+func formatTokenMetric(_ tokens: UInt64, in language: AppLanguage) -> String {
+    let value = Double(tokens)
+    if value >= 1_000_000_000 {
+        let scaled = value / 1_000_000_000
+        let formatted = language == .vietnamese
+            ? String(format: "%.1f", scaled).replacingOccurrences(of: ".", with: ",")
+            : String(format: "%.1f", scaled)
+        return language == .vietnamese ? "\(formatted) tỷ" : "\(formatted)B"
+    } else if value >= 1_000_000 {
+        let scaled = value / 1_000_000
+        let formatted = language == .vietnamese
+            ? String(format: "%.1f", scaled).replacingOccurrences(of: ".", with: ",")
+            : String(format: "%.1f", scaled)
+        return language == .vietnamese ? "\(formatted) tr" : "\(formatted)M"
+    } else if value >= 1_000 {
+        let scaled = value / 1_000
+        let formatted = language == .vietnamese
+            ? String(format: "%.1f", scaled).replacingOccurrences(of: ".", with: ",")
+            : String(format: "%.1f", scaled)
+        return language == .vietnamese ? "\(formatted) nghìn" : "\(formatted)K"
+    } else {
+        return "\(tokens)"
+    }
+}
+
+func formatUsdCost(_ amount: Double, in language: AppLanguage) -> String {
+    let formatted = language == .vietnamese
+        ? String(format: "%.2f", amount).replacingOccurrences(of: ".", with: ",")
+        : String(format: "%.2f", amount)
+    return "(~$\(formatted))"
+}
+
+func formatFullTokenNumber(_ tokens: UInt64, in language: AppLanguage) -> String {
+    let formatter = NumberFormatter()
+    formatter.locale = language.locale
+    formatter.numberStyle = .decimal
+    return formatter.string(from: NSNumber(value: tokens)) ?? "\(tokens)"
 }

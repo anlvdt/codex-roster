@@ -95,30 +95,48 @@ struct PrismBentoStudioView: View {
                     Circle().strokeBorder(PrismTheme.quotaTint(percent: activeAccount?.usage?.fiveHour?.displayRemainingPercent).opacity(0.35), lineWidth: 1)
                 )
 
-                VStack(alignment: .leading, spacing: 1) {
-                    HStack(spacing: 4) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 5) {
                         Text(activeAccount?.displayName ?? language.text("Chưa chọn phiên", "No session"))
-                            .font(.system(size: 13, weight: .bold))
+                            .font(.system(size: 14.5, weight: .bold))
                             .lineLimit(1)
 
                         if let plan = activeAccount?.planLabel, !plan.isEmpty {
                             Text(plan.uppercased())
-                                .font(.system(size: 8, weight: .bold, design: .rounded))
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
+                                .font(.system(size: 9, weight: .bold, design: .rounded))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1.5)
                                 .background(Capsule().fill(Color.accentColor.opacity(0.14)))
                                 .foregroundStyle(Color.accentColor)
                         }
+
+                        if let banked = activeAccount?.usage?.bankedResets?.availableCount, banked > 0 {
+                            HStack(spacing: 2.5) {
+                                Image(systemName: "arrow.counterclockwise.circle.fill")
+                                    .font(.system(size: 9))
+                                Text("+\(banked) banked")
+                                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                            }
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(Capsule().fill(Color.orange.opacity(0.18)))
+                            .foregroundStyle(Color.orange)
+                            .help(language.text(
+                                "\(banked) lượt reset dự phòng (banked reset) có sẵn trong Codex",
+                                "\(banked) banked rate-limit resets available in Codex"
+                            ))
+                        }
                     }
 
-                    HStack(spacing: 4) {
+                    HStack(spacing: 5) {
                         Text(activeAccount?.email ?? "—")
-                            .font(.system(size: 9.5))
+                            .font(.system(size: 11.5))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
+                            .truncationMode(.middle)
 
                         if let email = activeAccount?.email, !email.isEmpty {
-                            CopyEmailButton(email: email, iconSize: 8.5)
+                            CopyEmailButton(email: email, iconSize: 12)
                         }
                     }
                 }
@@ -130,18 +148,18 @@ struct PrismBentoStudioView: View {
                     PrismTheme.triggerHaptic()
                     store.resyncChatGPTDesktop()
                 } label: {
-                    HStack(spacing: 3) {
+                    HStack(spacing: 4) {
                         if store.isWorking || store.isBusyForActions {
                             ProgressView().controlSize(.mini)
                         } else {
                             Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(.system(size: 9, weight: .bold))
+                                .font(.system(size: 11, weight: .bold))
                         }
                         Text(language.text("Đồng bộ", "Sync"))
-                            .font(.system(size: 9.5, weight: .medium))
+                            .font(.system(size: 11, weight: .medium))
                     }
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
                     .background(
                         Capsule()
                             .fill(Color.primary.opacity(0.06))
@@ -163,16 +181,16 @@ struct PrismBentoStudioView: View {
 
                     HStack(alignment: .firstTextBaseline) {
                         Text(language.text("Cửa sổ 5h", "5h window"))
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.secondary)
                         Spacer()
                         if let fivePercent {
                             Text("\(fivePercent)%")
-                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                                .font(.system(size: 17, weight: .bold, design: .rounded))
                                 .monospacedDigit()
                                 .foregroundStyle(PrismTheme.quotaTint(percent: fivePercent))
                         } else {
-                            Text("—").font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+                            Text("—").font(.system(size: 14, weight: .semibold)).foregroundStyle(.secondary)
                         }
                     }
 
@@ -193,16 +211,16 @@ struct PrismBentoStudioView: View {
 
                     HStack(alignment: .firstTextBaseline) {
                         Text(language.text("Hạn mức tuần", "Weekly"))
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.secondary)
                         Spacer()
                         if let weekPercent {
                             Text("\(weekPercent)%")
-                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                                .font(.system(size: 17, weight: .bold, design: .rounded))
                                 .monospacedDigit()
                                 .foregroundStyle(PrismTheme.quotaTint(percent: weekPercent))
                         } else {
-                            Text("—").font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+                            Text("—").font(.system(size: 14, weight: .semibold)).foregroundStyle(.secondary)
                         }
                     }
 
@@ -228,38 +246,62 @@ struct PrismBentoStudioView: View {
             // Minimalist Telemetry Row
             HStack(spacing: 8) {
                 if let summary = store.tokenUsage {
-                    HStack(spacing: 3) {
-                        Text(language.text("Hôm nay: \(summary.today)", "Today: \(summary.today)"))
+                    HStack(spacing: 4) {
+                        Image(systemName: "bolt.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(Color.accentColor)
+                        Text(language.text(
+                            "Hôm nay: \(formatTokenMetric(summary.today, in: language.language)) token",
+                            "Today: \(formatTokenMetric(summary.today, in: language.language)) tokens"
+                        ))
                         if let todayCost = summary.todayCostUsd, todayCost > 0 {
-                            Text(String(format: "($%.2f)", todayCost))
-                                .font(.system(size: 8.5, weight: .semibold, design: .rounded))
+                            Text(formatUsdCost(todayCost, in: language.language))
+                                .font(.system(size: 10, weight: .bold, design: .rounded))
                                 .foregroundStyle(PrismTheme.emerald)
                         }
                     }
-                    .font(.system(size: 9, weight: .medium, design: .rounded))
+                    .font(.system(size: 10.5, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .help(language.text(
+                        "Hôm nay: \(formatFullTokenNumber(summary.today, in: language.language)) token (ước tính \(formatUsdCost(summary.todayCostUsd ?? 0, in: language.language)))",
+                        "Today: \(formatFullTokenNumber(summary.today, in: language.language)) tokens (est. \(formatUsdCost(summary.todayCostUsd ?? 0, in: language.language)))"
+                    ))
+
                     Text("·").foregroundStyle(.tertiary)
-                    Text(language.text("7d: \(summary.last7Days)", "7d: \(summary.last7Days)"))
-                        .font(.system(size: 9, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
+
+                    Text(language.text(
+                        "7 ngày: \(formatTokenMetric(summary.last7Days, in: language.language))",
+                        "7d: \(formatTokenMetric(summary.last7Days, in: language.language))"
+                    ))
+                    .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .help(language.text(
+                        "7 ngày qua: \(formatFullTokenNumber(summary.last7Days, in: language.language)) token",
+                        "Last 7 days: \(formatFullTokenNumber(summary.last7Days, in: language.language)) tokens"
+                    ))
+
                     if let sub = summary.subagentSessions, sub > 0 {
                         Text("·").foregroundStyle(.tertiary)
-                        HStack(spacing: 2) {
+                        HStack(spacing: 3) {
                             Image(systemName: "point.3.connected.trianglepath.dotted")
-                                .font(.system(size: 7.5))
-                            Text("\(sub) sub")
+                                .font(.system(size: 9))
+                            Text("\(sub) subagents")
                         }
-                        .font(.system(size: 8.5, weight: .medium, design: .rounded))
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
-                        .help(language.text("\(sub) phiên subagent phát hiện", "\(sub) subagent sessions detected"))
+                        .lineLimit(1)
+                        .help(language.text("\(sub) phiên subagent đã phát hiện", "\(sub) subagent sessions detected"))
                     }
                 }
 
                 if let vibe = store.status?.vibeUsage {
                     Text("·").foregroundStyle(.tertiary)
                     Text(String(format: "Vibe: $%.2f", vibe.estimatedCostUsd))
-                        .font(.system(size: 9, weight: .medium, design: .rounded))
+                        .font(.system(size: 10.5, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
 
                 Spacer()
@@ -269,7 +311,7 @@ struct PrismBentoStudioView: View {
                     store.refresh()
                 } label: {
                     Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 9.5))
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
@@ -284,12 +326,12 @@ struct PrismBentoStudioView: View {
     private var accountRosterCard: some View {
         VStack(alignment: .leading, spacing: 6) {
             // Header Row: Title, Filter Tabs, Add Button
-            HStack(spacing: 5) {
+            HStack(spacing: 6) {
                 Text(language.text("Tài khoản", "Accounts"))
-                    .font(.system(size: 11.5, weight: .bold))
+                    .font(.system(size: 13, weight: .bold))
 
                 Text("(\(store.accounts.count))")
-                    .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundStyle(.secondary)
 
                 Spacer()
@@ -306,13 +348,14 @@ struct PrismBentoStudioView: View {
                     openAddAccount()
                 } label: {
                     Image(systemName: "plus")
-                        .font(.system(size: 9, weight: .bold))
-                        .frame(width: 18, height: 18)
+                        .font(.system(size: 11, weight: .bold))
+                        .frame(width: 22, height: 22)
                         .background(Circle().fill(Color.primary.opacity(0.06)))
                 }
                 .buttonStyle(.plain)
                 .help(language.text("Thêm tài khoản (⌘N)", "Add account (⌘N)"))
             }
+            .lineLimit(1)
 
             // Compact Account List (Row height ~32pt)
             ScrollView {
@@ -323,7 +366,7 @@ struct PrismBentoStudioView: View {
                 }
                 .padding(.vertical, 1)
             }
-            .frame(maxHeight: 185)
+            .frame(maxHeight: 220)
         }
         .padding(10)
         .prismGlass(cornerRadius: 12)
@@ -338,9 +381,9 @@ struct PrismBentoStudioView: View {
             }
         } label: {
             Text(label)
-                .font(.system(size: 8.5, weight: isSelected ? .bold : .medium))
-                .padding(.horizontal, 5)
-                .padding(.vertical, 2)
+                .font(.system(size: 10, weight: isSelected ? .bold : .medium))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
                 .background(Capsule().fill(isSelected ? Color.accentColor : Color.primary.opacity(0.05)))
                 .foregroundStyle(isSelected ? Color.white : Color.primary)
         }
@@ -352,57 +395,76 @@ struct PrismBentoStudioView: View {
         let quota = account.usage?.fiveHour?.displayRemainingPercent
         let week = account.usage?.weekly?.displayRemainingPercent
 
-        return HStack(spacing: 6) {
+        return HStack(spacing: 8) {
             // Roster Sequence Number
             Text("\(index)")
-                .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
                 .foregroundStyle(.secondary.opacity(0.8))
-                .frame(width: 14, alignment: .trailing)
+                .frame(width: 16, alignment: .trailing)
 
             // Initial Avatar
             Text(String(account.displayName.prefix(1)).uppercased())
-                .font(.system(size: 9, weight: .bold))
+                .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(PrismTheme.quotaTint(percent: quota))
-                .frame(width: 18, height: 18)
+                .frame(width: 24, height: 24)
                 .background(Circle().fill(PrismTheme.quotaTint(percent: quota).opacity(0.14)))
             // Name & Email
-            VStack(alignment: .leading, spacing: 0.5) {
-                Text(account.displayName)
-                    .font(.system(size: 11, weight: .semibold))
-                    .lineLimit(1)
-
+            VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 4) {
-                    Text(account.email)
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
+                    Text(account.displayName)
+                        .font(.system(size: 12.5, weight: .semibold))
                         .lineLimit(1)
 
-                    CopyEmailButton(email: account.email, iconSize: 8)
+                    if let banked = account.usage?.bankedResets?.availableCount, banked > 0 {
+                        HStack(spacing: 2) {
+                            Image(systemName: "arrow.counterclockwise.circle.fill")
+                                .font(.system(size: 8))
+                            Text("+\(banked)")
+                                .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                        }
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.orange.opacity(0.18)))
+                        .foregroundStyle(Color.orange)
+                        .help(language.text(
+                            "\(banked) lượt banked reset có thể dùng",
+                            "\(banked) banked resets available"
+                        ))
+                    }
+                }
+                HStack(spacing: 4) {
+                    Text(account.email)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    CopyEmailButton(email: account.email, iconSize: 11.5)
                 }
             }
 
-            Spacer(minLength: 2)
+            Spacer(minLength: 4)
 
             // Dual Quota Telemetry (5H & Wk)
-            PrismFilamentBar(fivePercent: quota, weekPercent: week, width: 28, height: 2.5, showLabels: true)
+            PrismFilamentBar(fivePercent: quota, weekPercent: week, width: 32, height: 3, showLabels: true)
 
             // Action Button
             if account.isActive {
                 Text(language.text("Đang dùng", "Active"))
-                    .font(.system(size: 9.5, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(PrismTheme.emerald)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
                     .background(Capsule().fill(PrismTheme.emerald.opacity(0.16)))
             } else if account.requiresLogin {
                 Button {
                     relogin(account)
                 } label: {
                     Text(language.text("Login", "Login"))
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(PrismTheme.amber)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
                         .background(Capsule().fill(PrismTheme.amber.opacity(0.18)))
                 }
                 .buttonStyle(.plain)
@@ -413,18 +475,18 @@ struct PrismBentoStudioView: View {
                     store.activate(account, force: true)
                 } label: {
                     Text(language.text("Đổi", "Swap"))
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(Color.accentColor)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
                         .background(Capsule().fill(Color.accentColor.opacity(0.14)))
                 }
                 .buttonStyle(.plain)
                 .pointingHandCursor()
             }
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3.5)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4.5)
         .background(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(Color.primary.opacity(account.isActive ? 0.05 : 0.015))
@@ -471,14 +533,14 @@ struct PrismBentoStudioView: View {
                 if let outlook = store.resetOutlook {
                     HStack(spacing: 4) {
                         Image(systemName: "antenna.radiowaves.left.and.right")
-                            .font(.system(size: 8.5))
+                            .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                         Text("24H: \(outlook.chance24Hours)%")
-                        .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
                         .foregroundStyle(outlook.chance24Hours >= 50 ? PrismTheme.amber : PrismTheme.emerald)
                     Text("·").foregroundStyle(.tertiary)
                     Text("48H: \(outlook.chance48Hours)%")
-                            .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
                             .foregroundStyle(outlook.chance48Hours >= 50 ? PrismTheme.amber : PrismTheme.emerald)
                     }
                 }
@@ -489,9 +551,9 @@ struct PrismBentoStudioView: View {
                 HStack(spacing: 4) {
                     let statusIndicator = store.openAIStatus?.indicator ?? "none"
                     let isOperational = statusIndicator == "none"
-                    Circle().fill(isOperational ? PrismTheme.emerald : PrismTheme.ruby).frame(width: 5.5, height: 5.5)
+                    Circle().fill(isOperational ? PrismTheme.emerald : PrismTheme.ruby).frame(width: 6.5, height: 6.5)
                     Text(isOperational ? language.text("OpenAI Bình thường", "OpenAI Normal") : language.text("Sự cố", "Incident"))
-                        .font(.system(size: 9.5, weight: .medium))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(isOperational ? PrismTheme.emerald : PrismTheme.ruby)
                 }
             }
@@ -501,19 +563,20 @@ struct PrismBentoStudioView: View {
             // Row 2: Auto-Switch & Providers
             HStack(spacing: 8) {
                 // Auto-Switch Toggle
-                HStack(spacing: 4) {
+                HStack(spacing: 5) {
                     Image(systemName: "bolt.shield.fill")
-                        .font(.system(size: 8.5))
+                        .font(.system(size: 10))
                         .foregroundStyle(store.autoSwitchWhenExhausted ? PrismTheme.violet : .secondary)
 
                     if store.autoSwitchWhenExhausted, let next = readyCandidates.first {
-                        Text("→ \(next.displayName)")
-                            .font(.system(size: 9, weight: .bold))
+                        Text(language.text("Tự chuyển ➔ \(next.displayName)", "Auto-swap ➔ \(next.displayName)"))
+                            .font(.system(size: 10.5, weight: .semibold))
                             .foregroundStyle(PrismTheme.violet)
                             .lineLimit(1)
+                            .help(language.text("Tự động chuyển sang \(next.displayName) khi tài khoản hiện tại hết quota", "Auto-switch to \(next.displayName) when active quota is exhausted"))
                     } else {
-                        Text(language.text("Tự động chuyển: Tắt", "Auto-switch: Off"))
-                            .font(.system(size: 9))
+                        Text(language.text("Tự chuyển: Tắt", "Auto-swap: Off"))
+                            .font(.system(size: 10.5))
                             .foregroundStyle(.secondary)
                     }
 
@@ -530,24 +593,29 @@ struct PrismBentoStudioView: View {
                 // 4 Provider badges
                 HStack(spacing: 3) {
                     ForEach(AIProvider.allCases) { provider in
-                        let isLive = store.providerStates.first { $0.provider == provider }?.available == true
-                        let count = store.accounts.filter { $0.provider == provider.rawValue }.count
-                        HStack(spacing: 2) {
-                            Image(systemName: provider.icon)
-                                .font(.system(size: 7.5, weight: .bold))
-                                .foregroundStyle(isLive ? PrismTheme.emerald : .secondary)
-                            Text("\(count)")
-                                .font(.system(size: 7, weight: .bold, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal, 3)
-                        .padding(.vertical, 1.5)
-                        .background(RoundedRectangle(cornerRadius: 3).fill(Color.primary.opacity(0.04)))
+                        providerBadge(provider)
                     }
                 }
             }
         }
-        .padding(9)
+        .padding(11)
         .prismGlass(cornerRadius: 11)
+    }
+
+    private func providerBadge(_ provider: AIProvider) -> some View {
+        let isLive = store.providerStates.first { $0.provider == provider }?.available == true
+        let count = store.accounts.filter { $0.provider == provider.rawValue }.count
+        return HStack(spacing: 2.5) {
+            Image(systemName: provider.icon)
+                .font(.system(size: 9.5, weight: .bold))
+                .foregroundStyle(isLive ? PrismTheme.emerald : .secondary)
+            Text("\(count)")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 5)
+        .padding(.vertical, 2.5)
+        .background(RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.04)))
+        .help("\(provider.compactName): \(count) \(language.text("tài khoản", "accounts"))")
     }
 }

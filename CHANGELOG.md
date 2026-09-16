@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.4.7 - 2026-09-16
+
+### Added
+
+- **Restored Copy Email button**: Added one-click email copying with haptic feedback, transient checkmark confirmation, and context menu support across all account cards and rows in Bento Studio and Quick Switch Deck.
+- **API token value estimation ($ USD)**: Calculate real-time estimated USD cost across OpenAI models (`gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`), Claude, and Grok with Cache Read discount and Cache Write accounting. Surfaced in CLI (`token-usage`), Bento Studio, Quick Switch, and Token Details.
+- **Codex subagent detection & hierarchy**: Detect and separate main sessions from background subagents via `session_meta` (`thread_source`, `parent_thread_id`), exposing subagent counts and telemetry.
+
+### Changed
+
+- Updated references in `CREDITS.md` with research from `steipete/CodexBar 0.60.3`, `getagentseal/codeburn 0.9.24`, and `donvito/agent-monitor`.
+
 ## v0.4.6 - 2026-09-16
 
 ### Fixed

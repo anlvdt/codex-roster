@@ -1083,15 +1083,30 @@ fn print_auto_start_usage_windows_run(output: &AutoStartUsageWindowsRunOutput) {
 
 fn print_token_usage_summary(output: &TokenUsageSummaryOutput) {
     println!("Local Codex session tokens:");
-    println!("Today: {} (est. ${:.2})", output.today, output.today_cost_usd);
-    println!("Last 7 days: {} (est. ${:.2})", output.last_7_days, output.last_7_days_cost_usd);
-    println!("Last 30 days: {} (est. ${:.2})", output.last_30_days, output.last_30_days_cost_usd);
+    println!(
+        "Today: {} (est. ${:.2})",
+        output.today, output.today_cost_usd
+    );
+    println!(
+        "Last 7 days: {} (est. ${:.2})",
+        output.last_7_days, output.last_7_days_cost_usd
+    );
+    println!(
+        "Last 30 days: {} (est. ${:.2})",
+        output.last_30_days, output.last_30_days_cost_usd
+    );
     println!("Last 365 days: {}", output.last_365_days);
-    println!("All time: {} (est. ${:.2})", output.all_time, output.estimated_cost_usd);
+    println!(
+        "All time: {} (est. ${:.2})",
+        output.all_time, output.estimated_cost_usd
+    );
     if output.subagent_sessions > 0 {
         println!(
             "Scanned {} sessions ({} main, {} subagents) / {} token events",
-            output.sessions_scanned, output.main_sessions, output.subagent_sessions, output.token_events
+            output.sessions_scanned,
+            output.main_sessions,
+            output.subagent_sessions,
+            output.token_events
         );
     } else {
         println!(

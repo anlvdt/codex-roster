@@ -388,28 +388,34 @@ fn update_session_context(value: &Value, cached: &mut CachedSession) {
     if let Some(cwd) = value.pointer("/payload/cwd").and_then(Value::as_str) {
         cached.project = project_label(cwd);
     }
-    if let Some(source) = value.pointer("/payload/thread_source").and_then(Value::as_str) {
-        if source.eq_ignore_ascii_case("subagent") {
-            cached.is_subagent = true;
-        }
+    if let Some(_source) = value
+        .pointer("/payload/thread_source")
+        .and_then(Value::as_str)
+        .filter(|source| source.eq_ignore_ascii_case("subagent"))
+    {
+        cached.is_subagent = true;
     }
-    if let Some(parent) = value.pointer("/payload/parent_thread_id").and_then(Value::as_str) {
-        if !parent.is_empty() {
-            cached.is_subagent = true;
-            cached.parent_thread_id = Some(parent.to_owned());
-        }
+    if let Some(parent) = value
+        .pointer("/payload/parent_thread_id")
+        .and_then(Value::as_str)
+        .filter(|parent| !parent.is_empty())
+    {
+        cached.is_subagent = true;
+        cached.parent_thread_id = Some(parent.to_owned());
     }
 }
 
 fn check_session_meta_first_line(file: &Path, cached: &mut CachedSession) {
-    if let Ok(input) = File::open(file) {
-        let mut reader = BufReader::new(input);
-        let mut first_line = String::new();
-        if reader.read_line(&mut first_line).is_ok() {
-            if let Ok(val) = serde_json::from_str::<Value>(first_line.trim()) {
-                update_session_context(&val, cached);
-            }
-        }
+    let Ok(input) = File::open(file) else {
+        return;
+    };
+    let mut reader = BufReader::new(input);
+    let mut first_line = String::new();
+    let Ok(_) = reader.read_line(&mut first_line) else {
+        return;
+    };
+    if let Ok(val) = serde_json::from_str::<Value>(first_line.trim()) {
+        update_session_context(&val, cached);
     }
 }
 

@@ -85,6 +85,12 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Enable Luna Reserve (gpt-5.6-luna) for the active account or a specific account.
+    EnableLunaReserve {
+        account_id: Option<Uuid>,
+        #[arg(long)]
+        json: bool,
+    },
     Delete {
         account_id: Option<Uuid>,
         #[arg(long)]
@@ -281,6 +287,9 @@ pub fn run() -> Result<()> {
                 match status.current_account {
                     Some(account) => println!("Current account: {}", account.email),
                     None => println!("Current account: not logged in"),
+                }
+                if let Some(model) = &status.codex_model {
+                    println!("Codex model: {model}");
                 }
                 println!("Saved accounts: {}", status.saved_accounts);
                 if let Some(usage) = status.vibe_usage {
@@ -499,6 +508,21 @@ pub fn run() -> Result<()> {
                 println!("Activated {} ({})", output.account.email, output.account.id);
                 if !showed_preflight {
                     print_process_summary("Codex processes", &output.warnings);
+                }
+            }
+            Ok(())
+        }
+        Some(Command::EnableLunaReserve { account_id, json }) => {
+            let output = app.enable_luna_reserve(account_id)?;
+            if json {
+                print_json(&output)?;
+            } else {
+                println!(
+                    "Luna Reserve enabled for {} (model: {})",
+                    output.account_email, output.model
+                );
+                if let Some(prev) = output.previous_model {
+                    println!("Previous model: {prev}");
                 }
             }
             Ok(())

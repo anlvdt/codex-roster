@@ -11,7 +11,8 @@ use time::{Duration, OffsetDateTime};
 use crate::identity::parse_identity_from_auth_json;
 use crate::model::{
     AccountUsageView, BankedResetCreditView, BankedResetSummaryView, CreditLimitView, CreditsView,
-    DisplayIdentity, EnvironmentKind, SnapshotBlob, UsageOutput, UsageSource, UsageWindowView,
+    DisplayIdentity, EnvironmentKind, LunaReserveView, SnapshotBlob, UsageOutput, UsageSource,
+    UsageWindowView,
 };
 
 static CHATGPT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -301,6 +302,7 @@ struct UsageResponse {
     credits: Option<UsageCredits>,
     individual_limit: Option<SpendControlLimit>,
     rate_limit_reset_credits: Option<UsageResetCreditsSummary>,
+    luna_reserve: Option<LunaReserveView>,
 }
 
 impl<'de> Deserialize<'de> for UsageResponse {
@@ -334,6 +336,7 @@ impl UsageResponse {
                             )
                         })
                 });
+        let luna_reserve = parse_luna_reserve(value);
         Self {
             email: value
                 .get("email")
@@ -350,6 +353,7 @@ impl UsageResponse {
             rate_limit_reset_credits: value
                 .get("rate_limit_reset_credits")
                 .and_then(UsageResetCreditsSummary::from_value),
+            luna_reserve,
         }
     }
 
@@ -632,6 +636,7 @@ impl UsageResponse {
             banked_resets,
             plan_label,
             subscription_active_until,
+            luna_reserve: self.luna_reserve,
         })
     }
 }
@@ -1117,9 +1122,60 @@ fn parse_last_refresh(value: Option<&str>) -> Result<Option<OffsetDateTime>> {
 }
 
 fn format_last_refresh(value: OffsetDateTime) -> String {
+
     value
         .format(&Rfc3339)
         .unwrap_or_else(|_| value.unix_timestamp().to_string())
+}
+fn parse_luna_reserve(value: &Value) -> Option<LunaReserveView> {
+    if let Some(arr) = value.get("additional_rate_limits").and_then(Value::as_array) {
+        for item in arr {
+            let limit_name = item.get("limit_name").and_then(Value::as_str).unwrap_or("");
+            let normal_model_slug = item
+                .get("normal_model_slug")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if limit_name == "gpt-reserve" || normal_model_slug.contains("luna") {
+                let rate_limit = item.get("rate_limit");
+                let allowed = rate_limit
+                    .and_then(|rl| rl.get("allowed"))
+                    .map(|v| flexible_bool(Some(v)))
+                    .unwrap_or(true);
+                let primary_window = rate_limit.and_then(|rl| rl.get("primary_window"));
+                let used_percent = primary_window.and_then(|pw| flexible_u8(pw.get("used_percent")));
+                let reset_at = primary_window
+                    .and_then(|pw| flexible_i64(pw.get("reset_at")))
+                    .and_then(|ts| OffsetDateTime::from_unix_timestamp(ts).ok());
+                let model_slug = if !normal_model_slug.is_empty() {
+                    Some(normal_model_slug.to_owned())
+                } else {
+                    Some("gpt-5.6-luna".to_owned())
+                };
+                return Some(LunaReserveView {
+                    allowed,
+                    used_percent,
+                    reset_at,
+                    model_slug,
+                });
+            }
+        }
+    }
+
+    if let Some(upsell) = value.get("rate_limit_upsell") {
+        let banner_type = upsell.get("banner_type").and_then(Value::as_str).unwrap_or("");
+        if banner_type == "luna_reserve" {
+            let reset_at = flexible_i64(upsell.get("reset_at"))
+                .and_then(|ts| OffsetDateTime::from_unix_timestamp(ts).ok());
+            return Some(LunaReserveView {
+                allowed: true,
+                used_percent: None,
+                reset_at,
+                model_slug: Some("gpt-5.6-luna".to_owned()),
+            });
+        }
+    }
+
+    None
 }
 
 /// Ensure a saved snapshot carries a usable (non-expired) access token before it
@@ -1730,5 +1786,38 @@ mod tests {
             changed: false,
         };
         assert!(!needs_proactive_refresh(&auth));
+    }
+
+    #[test]
+    fn parses_luna_reserve_from_additional_rate_limits_and_upsell() {
+        let response: UsageResponse = serde_json::from_value(json!({
+            "additional_rate_limits": [
+                {
+                    "limit_name": "gpt-reserve",
+                    "normal_model_slug": "gpt-5.6-luna",
+                    "rate_limit": {
+                        "allowed": true,
+                        "primary_window": {
+                            "used_percent": 0,
+                            "reset_at": 1_790_220_153_i64
+                        }
+                    }
+                }
+            ],
+            "rate_limit_upsell": {
+                "banner_type": "luna_reserve"
+            }
+        }))
+        .expect("usage payload");
+
+        let view = response
+            .into_view(UsageSource::LiveAccessToken, None, None, None)
+            .expect("usage view");
+
+        let luna = view.luna_reserve.expect("luna reserve view");
+        assert!(luna.allowed);
+        assert_eq!(luna.used_percent, Some(0));
+        assert_eq!(luna.model_slug.as_deref(), Some("gpt-5.6-luna"));
+        assert!(luna.reset_at.is_some());
     }
 }

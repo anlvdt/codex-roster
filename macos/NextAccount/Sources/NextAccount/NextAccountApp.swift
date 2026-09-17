@@ -1698,6 +1698,7 @@ private struct TriageAccountCard: View {
 
             HStack(spacing: 8) {
                 bankedResetBadge
+                lunaReserveBadge
                 Spacer(minLength: 4)
                 primaryAction
             }
@@ -1775,6 +1776,27 @@ private struct TriageAccountCard: View {
             .help(language.text(
                 "Banked reset chỉ dùng được sau khi redeem trong Codex.",
                 "A banked reset only counts once redeemed inside Codex."
+            ))
+        }
+    }
+
+    @ViewBuilder
+    private var lunaReserveBadge: some View {
+        if account.hasLunaReserve {
+            let isLunaActive = store.isLunaReserveActive(for: account)
+            HStack(spacing: 3) {
+                Image(systemName: isLunaActive ? "moon.stars.fill" : "moon.fill")
+                Text(isLunaActive ? "Luna Active" : "Luna")
+                    .monospacedDigit()
+            }
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(Color.purple)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+            .background(Capsule().fill(Color.purple.opacity(0.15)))
+            .help(language.text(
+                isLunaActive ? "Codex đang chạy bằng Luna Reserve" : "Tài khoản có Luna Reserve",
+                isLunaActive ? "Codex is active on Luna Reserve" : "Account has Luna Reserve"
             ))
         }
     }
@@ -3136,6 +3158,10 @@ private struct AccountDetail: View {
                     BankedResetCard(summary: resets)
                 }
 
+                if account.hasLunaReserve {
+                    LunaReserveCard(account: account)
+                }
+
                 if let credits = account.usage?.credits,
                    credits.unlimited || credits.hasDisplayableBalance || credits.creditLimit != nil
                 {
@@ -3704,6 +3730,101 @@ private struct BankedResetCard: View {
                 ), systemImage: "lock.shield")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(4)
+        }
+    }
+}
+
+private struct LunaReserveCard: View {
+    @EnvironmentObject private var store: AccountStore
+    @EnvironmentObject private var language: LanguageStore
+    let account: SavedAccount
+
+    private var isLunaActive: Bool {
+        store.isLunaReserveActive(for: account)
+    }
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline) {
+                    Label("Luna Reserve (GPT-5.6 Luna)", systemImage: "moon.stars.fill")
+                        .font(.headline)
+                        .foregroundStyle(Color.purple)
+                    Spacer()
+                    if isLunaActive {
+                        Text(language.text("Đang hoạt động", "Active in Codex"))
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(PrismTheme.emerald)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(PrismTheme.emerald.opacity(0.16)))
+                    } else if account.isLunaReserveAllowed {
+                        Text(language.text("Sẵn sàng bật", "Ready to enable"))
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(Color.purple)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(Color.purple.opacity(0.16)))
+                    }
+                }
+
+                Text(language.text(
+                    "Hạn mức dự phòng khẩn cấp khi hết quota chính của tài khoản Plus/Pro. Cho phép tiếp tục code với model GPT-5.6 Luna.",
+                    "Emergency fallback allowance when primary quota is exhausted on Plus/Pro. Allows continued coding with GPT-5.6 Luna."
+                ))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                HStack(spacing: 16) {
+                    if let used = account.usage?.lunaReserve?.usedPercent {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(language.text("Đã dùng", "Used"))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            Text("\(used)%")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                    }
+
+                    if let resetAt = account.usage?.lunaReserve?.resetAt {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(language.text("Đặt lại", "Resets"))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            Text(resetAt.value.formatted(date: .abbreviated, time: .shortened))
+                                .font(.subheadline.weight(.semibold))
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(language.text("Model", "Model"))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Text(account.usage?.lunaReserve?.modelSlug ?? "gpt-5.6-luna")
+                            .font(.subheadline.weight(.semibold).monospaced())
+                    }
+
+                    Spacer()
+
+                    if !isLunaActive && account.isLunaReserveAllowed {
+                        Button {
+                            PrismTheme.triggerHaptic()
+                            store.enableLunaReserve(account)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "moon.stars.fill")
+                                Text(language.text("Bật Luna Reserve", "Enable Luna Reserve"))
+                            }
+                            .font(.caption.weight(.bold))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Color.purple)
+                        .disabled(store.isBusyForActions)
+                    }
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)

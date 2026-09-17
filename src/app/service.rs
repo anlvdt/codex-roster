@@ -47,6 +47,7 @@ where
             .as_ref()
             .and_then(|bundle| match_saved_account(&saved_accounts, &bundle.identity))
             .map(|account| account.id);
+        let codex_model = codex::read_configured_model(&self.env.codex_root);
         Ok(StatusOutput {
             environment: self.env.kind.clone(),
             codex_root: self.env.codex_root.display().to_string(),
@@ -55,11 +56,39 @@ where
             saved_accounts: saved_accounts.len(),
             process_warnings: crate::process::detect_running_codex_processes(),
             vibe_usage: crate::vibe_usage::load_cached(&self.env.app_data_dir),
+            codex_model,
         })
     }
 
     pub fn auto_switch_enabled(&self) -> Result<bool> {
         Ok(load_settings(&self.env.app_data_dir)?.auto_switch_when_exhausted)
+    }
+
+    pub fn enable_luna_reserve(
+        &self,
+        account_id: Option<Uuid>,
+    ) -> Result<crate::model::EnableLunaReserveOutput> {
+        let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+
+        if let Some(target_id) = account_id {
+            if !self.is_live_saved_account(target_id)? {
+                self.activate(target_id)?;
+            }
+        }
+
+        let live = codex::try_read_live_auth_bundle(&self.env)?
+            .ok_or_else(|| anyhow::anyhow!("no active account found to enable Luna Reserve for"))?;
+
+        let previous_model = codex::read_configured_model(&self.env.codex_root);
+        codex::set_configured_model(&self.env.codex_root, "gpt-5.6-luna")?;
+
+        Ok(crate::model::EnableLunaReserveOutput {
+            status: "enabled".to_owned(),
+            account_email: live.identity.email,
+            model: "gpt-5.6-luna".to_owned(),
+            previous_model,
+        })
     }
 
     pub fn set_auto_switch_when_exhausted(&self, enabled: bool) -> Result<AutoSwitchOutput> {
@@ -1658,6 +1687,7 @@ mod tests {
             banked_resets: None,
             plan_label: None,
             subscription_active_until: None,
+            luna_reserve: None,
         };
 
         assert!(is_exhausted_for_switch(Some(&usage)));
@@ -1772,6 +1802,7 @@ mod tests {
             banked_resets: None,
             plan_label: plan.map(str::to_owned),
             subscription_active_until: None,
+            luna_reserve: None,
         };
         let account = |roster: Option<&str>, usage_plan: Option<&str>| crate::model::AccountView {
             id: Uuid::new_v4(),
@@ -1836,6 +1867,7 @@ mod tests {
             banked_resets: None,
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
+            luna_reserve: None,
         };
 
         let exhausted = usage(0, None);
@@ -1899,6 +1931,7 @@ mod tests {
             banked_resets: None,
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
+            luna_reserve: None,
         };
         assert!(is_exhausted_for_switch(Some(&depleted)));
         assert!(!is_usable_for_switch(Some(&depleted)));
@@ -1935,6 +1968,7 @@ mod tests {
             }),
             plan_label: Some(plan.to_owned()),
             subscription_active_until: None,
+            luna_reserve: None,
         };
         let account = |email: &str, plan: &str, reset_count: i64| AccountView {
             id: Uuid::new_v4(),
@@ -2009,6 +2043,7 @@ mod tests {
                 banked_resets: None,
                 plan_label: Some(plan.to_owned()),
                 subscription_active_until: None,
+                luna_reserve: None,
             }),
             usage_error: None,
         };
@@ -2110,6 +2145,7 @@ mod tests {
             banked_resets: None,
             plan_label: None,
             subscription_active_until: None,
+            luna_reserve: None,
         };
 
         assert!(!cached_usage_is_fresh(Some(&usage), now));
@@ -2133,6 +2169,7 @@ mod tests {
             banked_resets: None,
             plan_label: None,
             subscription_active_until: None,
+            luna_reserve: None,
         };
 
         assert!(!cached_usage_is_fresh(Some(&usage), now));
@@ -2154,6 +2191,7 @@ mod tests {
             banked_resets: None,
             plan_label: None,
             subscription_active_until: None,
+            luna_reserve: None,
         };
 
         assert!(cached_usage_is_fresh(Some(&usage), now));
@@ -2249,6 +2287,7 @@ mod tests {
                 banked_resets: None,
                 plan_label: None,
                 subscription_active_until: None,
+                luna_reserve: None,
             }),
         )
         .expect("replace");
@@ -2311,6 +2350,7 @@ mod tests {
                 banked_resets: None,
                 plan_label: None,
                 subscription_active_until: None,
+                luna_reserve: None,
             }),
         )
         .expect("replace");

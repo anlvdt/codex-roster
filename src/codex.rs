@@ -677,6 +677,60 @@ pub fn auth_json_fixture(email: &str, subject: &str, plan: Option<&str>) -> Stri
     .to_string()
 }
 
+pub fn read_configured_model(codex_root: &Path) -> Option<String> {
+    let config_path = codex_root.join("config.toml");
+    let content = fs::read_to_string(config_path).ok()?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("model") {
+            let parts: Vec<&str> = trimmed.splitn(2, '=').collect();
+            if parts.len() == 2 && parts[0].trim() == "model" {
+                let model = parts[1].trim().trim_matches('"').trim_matches('\'');
+                return Some(model.to_owned());
+            }
+        }
+    }
+    None
+}
+
+pub fn set_configured_model(codex_root: &Path, new_model: &str) -> Result<()> {
+    let config_path = codex_root.join("config.toml");
+    if !config_path.exists() {
+        fs::write(&config_path, format!("model = \"{new_model}\"\n"))
+            .with_context(|| format!("failed to create {}", config_path.display()))?;
+        return Ok(());
+    }
+    let content = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let mut replaced = false;
+    let mut new_lines = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("model")
+            && trimmed
+                .splitn(2, '=')
+                .next()
+                .map(str::trim)
+                == Some("model")
+        {
+            new_lines.push(format!("model = \"{new_model}\""));
+            replaced = true;
+        } else {
+            new_lines.push(line.to_owned());
+        }
+    }
+    if !replaced {
+        new_lines.insert(0, format!("model = \"{new_model}\""));
+    }
+    let mut result = new_lines.join("\n");
+    if content.ends_with('\n') {
+        result.push('\n');
+    }
+    fs::write(&config_path, result)
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
@@ -1093,5 +1147,27 @@ mod tests {
 
         assert!(!snapshot_matches(&left, &right));
         assert!(!snapshot_matches(&right, &left));
+    }
+
+    #[test]
+    fn reads_and_updates_configured_model() -> Result<()> {
+        let temp = tempdir()?;
+        let codex_root = temp.path();
+
+        assert_eq!(read_configured_model(codex_root), None);
+
+        set_configured_model(codex_root, "gpt-5.6-luna")?;
+        assert_eq!(
+            read_configured_model(codex_root).as_deref(),
+            Some("gpt-5.6-luna")
+        );
+
+        set_configured_model(codex_root, "gpt-6-astra")?;
+        assert_eq!(
+            read_configured_model(codex_root).as_deref(),
+            Some("gpt-6-astra")
+        );
+
+        Ok(())
     }
 }

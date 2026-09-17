@@ -18,6 +18,7 @@ struct PrismBentoStudioView: View {
 
     @State private var rosterFilter: AccountTriage? = nil
     @State private var rosterSearch: String = ""
+    @State private var isShowingMetricsTable = false
 
     private var activeAccount: SavedAccount? {
         store.accounts.first { $0.isActive && !$0.archived }
@@ -126,6 +127,24 @@ struct PrismBentoStudioView: View {
                                 "\(banked) banked rate-limit resets available in Codex"
                             ))
                         }
+
+                        if let active = activeAccount, active.hasLunaReserve {
+                            let isLunaActive = store.isLunaReserveActive(for: active)
+                            HStack(spacing: 2.5) {
+                                Image(systemName: isLunaActive ? "moon.stars.fill" : "moon.fill")
+                                    .font(.system(size: 9))
+                                Text(isLunaActive ? "Luna Active" : "Luna Reserve")
+                                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                            }
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(Capsule().fill(Color.purple.opacity(0.18)))
+                            .foregroundStyle(Color.purple)
+                            .help(language.text(
+                                isLunaActive ? "Codex đang chạy bằng Luna Reserve (gpt-5.6-luna)" : "Tài khoản có Luna Reserve sẵn sàng sử dụng",
+                                isLunaActive ? "Codex is running on Luna Reserve (gpt-5.6-luna)" : "Luna Reserve is available for this account"
+                            ))
+                        }
                     }
 
                     HStack(spacing: 5) {
@@ -142,6 +161,34 @@ struct PrismBentoStudioView: View {
                 }
 
                 Spacer()
+
+                if let active = activeAccount, active.hasLunaReserve && !store.isLunaReserveActive(for: active) {
+                    Button {
+                        PrismTheme.triggerHaptic()
+                        store.enableLunaReserve(active)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "moon.stars.fill")
+                                .font(.system(size: 10, weight: .bold))
+                            Text(language.text("Bật Luna", "Enable Luna"))
+                                .font(.system(size: 11, weight: .bold))
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(
+                            Capsule()
+                                .fill(Color.purple.opacity(0.18))
+                                .overlay(Capsule().strokeBorder(Color.purple.opacity(0.35), lineWidth: 0.8))
+                        )
+                        .foregroundStyle(Color.purple)
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                    .help(language.text(
+                        "Kích hoạt Luna Reserve (gpt-5.6-luna) cho Codex",
+                        "Activate Luna Reserve (gpt-5.6-luna) for Codex"
+                    ))
+                }
 
                 // Sync ChatGPT 1-Click Button
                 Button {
@@ -330,13 +377,42 @@ struct PrismBentoStudioView: View {
 
                 Spacer()
 
-                // Filter tabs
-                filterTab(label: language.text("Tất cả", "All"), filter: nil)
-                filterTab(label: language.text("Sẵn sàng", "Ready"), filter: .ready)
-                if store.accounts.contains(where: { $0.triage == .needsAction }) {
-                    filterTab(label: language.text("Login", "Action"), filter: .needsAction)
+                // Toggle Metrics Table Button
+                Button {
+                    PrismTheme.triggerHaptic()
+                    withAnimation(PrismTheme.snapSpring) {
+                        isShowingMetricsTable.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: isShowingMetricsTable ? "list.bullet" : "chart.bar.xaxis")
+                            .font(.system(size: 9.5, weight: .bold))
+                        Text(language.text(
+                            isShowingMetricsTable ? "Danh bạ" : "Chỉ số",
+                            isShowingMetricsTable ? "Roster" : "Metrics"
+                        ))
+                        .font(.system(size: 10, weight: .bold))
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(isShowingMetricsTable ? Color.purple : Color.primary.opacity(0.06)))
+                    .foregroundStyle(isShowingMetricsTable ? Color.white : Color.primary)
                 }
+                .buttonStyle(.plain)
+                .pointingHandCursor()
+                .help(language.text(
+                    isShowingMetricsTable ? "Quay lại danh bạ tài khoản" : "Xem bảng thống kê các chỉ số cần thiết",
+                    isShowingMetricsTable ? "Return to account roster" : "View essential metrics statistics table"
+                ))
 
+                if !isShowingMetricsTable {
+                    // Filter tabs
+                    filterTab(label: language.text("Tất cả", "All"), filter: nil)
+                    filterTab(label: language.text("Sẵn sàng", "Ready"), filter: .ready)
+                    if store.accounts.contains(where: { $0.triage == .needsAction }) {
+                        filterTab(label: language.text("Login", "Action"), filter: .needsAction)
+                    }
+                }
                 // Add Account Button
                 Button {
                     openAddAccount()
@@ -351,16 +427,20 @@ struct PrismBentoStudioView: View {
             }
             .lineLimit(1)
 
-            // Compact Account List (Row height ~32pt)
-            ScrollView {
-                LazyVStack(spacing: 3.5) {
-                    ForEach(Array(filteredAccounts.enumerated()), id: \.element.id) { index, account in
-                        accountRow(account, index: index + 1)
+            if isShowingMetricsTable {
+                PrismMetricsTableView()
+            } else {
+                // Compact Account List (Row height ~32pt)
+                ScrollView {
+                    LazyVStack(spacing: 3.5) {
+                        ForEach(Array(filteredAccounts.enumerated()), id: \.element.id) { index, account in
+                            accountRow(account, index: index + 1)
+                        }
                     }
+                    .padding(.vertical, 1)
                 }
-                .padding(.vertical, 1)
+                .frame(height: 195)
             }
-            .frame(height: 195)
         }
         .padding(10)
         .prismGlass(cornerRadius: 12)
@@ -423,6 +503,24 @@ struct PrismBentoStudioView: View {
                         .help(language.text(
                             "\(banked) lượt banked reset có thể dùng",
                             "\(banked) banked resets available"
+                        ))
+                    }
+
+                    if account.hasLunaReserve {
+                        let isLunaActive = store.isLunaReserveActive(for: account)
+                        HStack(spacing: 2) {
+                            Image(systemName: isLunaActive ? "moon.stars.fill" : "moon.fill")
+                                .font(.system(size: 8))
+                            Text(isLunaActive ? "Luna" : "Reserve")
+                                .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                        }
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.purple.opacity(0.18)))
+                        .foregroundStyle(Color.purple)
+                        .help(language.text(
+                            isLunaActive ? "Codex đang chạy Luna Reserve" : "Tài khoản có Luna Reserve",
+                            isLunaActive ? "Codex active on Luna Reserve" : "Account has Luna Reserve"
                         ))
                     }
                 }
@@ -501,6 +599,14 @@ struct PrismBentoStudioView: View {
                 editAccount(account)
             } label: {
                 Label(language.text("Sửa nhãn", "Edit label"), systemImage: "pencil")
+            }
+            if account.hasLunaReserve && !store.isLunaReserveActive(for: account) {
+                Button {
+                    PrismTheme.triggerHaptic()
+                    store.enableLunaReserve(account)
+                } label: {
+                    Label(language.text("Bật Luna Reserve", "Enable Luna Reserve"), systemImage: "moon.stars.fill")
+                }
             }
             if account.requiresLogin {
                 Button {

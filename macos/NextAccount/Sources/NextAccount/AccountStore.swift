@@ -670,6 +670,26 @@ final class AccountStore: ObservableObject {
         }
     }
 
+    var currentCodexModel: String? {
+        status?.codexModel
+    }
+
+    var isLunaReserveActiveInCodex: Bool {
+        guard let model = currentCodexModel?.lowercased() else { return false }
+        return model.contains("luna") || model.contains("reserve")
+    }
+
+    func isLunaReserveActive(for account: SavedAccount) -> Bool {
+        account.isActive && isLunaReserveActiveInCodex
+    }
+
+    func enableLunaReserve(_ account: SavedAccount) {
+        run(switching: !account.isActive) {
+            _ = try await self.cli.data(arguments: ["enable-luna-reserve", account.id.uuidString, "--json"])
+            try await self.reloadAccountsAfterSwitch()
+        }
+    }
+
     private func activateAfterProcessesDrain(
         accountID: UUID,
         waitForDrain: Bool
@@ -1850,17 +1870,20 @@ struct StatusOutput: Decodable {
     let currentAccountSavedId: UUID?
     let processWarnings: [RunningProcess]
     let vibeUsage: VibeUsageSummary?
+    let codexModel: String?
 
     init(
         currentAccount: AccountIdentity?,
         currentAccountSavedId: UUID? = nil,
         processWarnings: [RunningProcess],
-        vibeUsage: VibeUsageSummary? = nil
+        vibeUsage: VibeUsageSummary? = nil,
+        codexModel: String? = nil
     ) {
         self.currentAccount = currentAccount
         self.currentAccountSavedId = currentAccountSavedId
         self.processWarnings = processWarnings
         self.vibeUsage = vibeUsage
+        self.codexModel = codexModel
     }
 }
 
@@ -2614,6 +2637,18 @@ struct SavedAccount: Identifiable, Decodable {
         return 4
     }
 
+    var hasLunaReserve: Bool {
+        usage?.lunaReserve != nil
+    }
+
+    var isLunaReserveAllowed: Bool {
+        usage?.lunaReserve?.allowed == true
+    }
+
+    var lunaReserveRemainingPercent: Int? {
+        usage?.lunaReserve?.usedPercent.map { max(0, 100 - $0) }
+    }
+
 }
 
 func bankedResetSwitchIsAllowed(
@@ -2659,6 +2694,7 @@ struct AccountUsage: Decodable {
     let credits: UsageCredits?
     let bankedResets: BankedResetSummary?
     let subscriptionActiveUntil: RustDate?
+    let lunaReserve: LunaReserve?
 }
 
 struct UsageCredits: Decodable {
@@ -2704,6 +2740,20 @@ struct BankedResetCredit: Identifiable, Decodable {
     let expiresAt: RustDate?
     let title: String?
     let description: String?
+}
+
+struct LunaReserve: Decodable, Equatable {
+    let allowed: Bool
+    let usedPercent: Int?
+    let resetAt: RustDate?
+    let modelSlug: String?
+
+    static func == (lhs: LunaReserve, rhs: LunaReserve) -> Bool {
+        lhs.allowed == rhs.allowed
+            && lhs.usedPercent == rhs.usedPercent
+            && lhs.resetAt?.value == rhs.resetAt?.value
+            && lhs.modelSlug == rhs.modelSlug
+    }
 }
 
 struct UsageWindow: Decodable {

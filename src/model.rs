@@ -254,6 +254,8 @@ pub struct StatusOutput {
     pub process_warnings: Vec<RunningCodexProcess>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vibe_usage: Option<crate::vibe_usage::VibeUsageSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_model: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -267,6 +269,14 @@ pub struct UsageOutput {
     pub environment: EnvironmentKind,
     pub account: DisplayIdentity,
     pub usage: AccountUsageView,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct EnableLunaReserveOutput {
+    pub status: String,
+    pub account_email: String,
+    pub model: String,
+    pub previous_model: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -427,6 +437,21 @@ pub struct AccountUsageView {
     /// OpenAI's ID-token claim. This is separate from OAuth token expiry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscription_active_until: Option<OffsetDateTime>,
+    /// Luna Reserve fallback status. Present when an account has access to the
+    /// GPT-5.6 Luna reserve pool after primary model exhaustion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub luna_reserve: Option<LunaReserveView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LunaReserveView {
+    pub allowed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<OffsetDateTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_slug: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]

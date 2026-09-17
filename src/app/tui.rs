@@ -894,6 +894,7 @@ mod tests {
             saved_accounts: usize::from(current_saved_id.is_some()),
             process_warnings: Vec::new(),
             vibe_usage: None,
+            codex_model: None,
         }
     }
 
@@ -948,6 +949,7 @@ mod tests {
             banked_resets: None,
             plan_label: None,
             subscription_active_until: None,
+            luna_reserve: None,
         });
 
         let label = render_account_label(
@@ -985,6 +987,7 @@ mod tests {
             banked_resets: None,
             plan_label: None,
             subscription_active_until: None,
+            luna_reserve: None,
         });
         list.accounts[0].usage_error = Some("Login required: Codex auth expired.".to_owned());
 
@@ -1019,6 +1022,7 @@ mod tests {
             banked_resets: None,
             plan_label: None,
             subscription_active_until: None,
+            luna_reserve: None,
         });
         list.accounts[0].usage_error =
             Some("Usage unavailable: failed to query Codex usage".to_owned());
@@ -1193,6 +1197,7 @@ mod tests {
             saved_accounts: 1,
             process_warnings: Vec::new(),
             vibe_usage: None,
+            codex_model: None,
         };
         let menu = build_menu(
             InteractiveMode::Persistent,

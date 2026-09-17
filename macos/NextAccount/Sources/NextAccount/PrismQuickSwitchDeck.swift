@@ -144,6 +144,24 @@ struct PrismQuickSwitchDeck: View {
                                 "\(banked) banked rate-limit resets available in Codex"
                             ))
                         }
+
+                        if let active = activeAccount, active.hasLunaReserve {
+                            let isLunaActive = store.isLunaReserveActive(for: active)
+                            HStack(spacing: 2.5) {
+                                Image(systemName: isLunaActive ? "moon.stars.fill" : "moon.fill")
+                                    .font(.system(size: 9.5))
+                                Text(isLunaActive ? "Luna Active" : "Luna Reserve")
+                                    .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                            }
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.purple.opacity(0.18)))
+                            .foregroundStyle(Color.purple)
+                            .help(language.text(
+                                isLunaActive ? "Codex đang chạy bằng Luna Reserve (gpt-5.6-luna)" : "Tài khoản có Luna Reserve sẵn sàng sử dụng",
+                                isLunaActive ? "Codex is running on Luna Reserve (gpt-5.6-luna)" : "Luna Reserve is available for this account"
+                            ))
+                        }
                     }
 
                     HStack(spacing: 5) {
@@ -160,6 +178,34 @@ struct PrismQuickSwitchDeck: View {
                 }
 
                 Spacer()
+
+                if let active = activeAccount, active.hasLunaReserve && !store.isLunaReserveActive(for: active) {
+                    Button {
+                        PrismTheme.triggerHaptic()
+                        store.enableLunaReserve(active)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "moon.stars.fill")
+                                .font(.system(size: 10, weight: .bold))
+                            Text(language.text("Bật Luna", "Enable Luna"))
+                                .font(.system(size: 11.5, weight: .bold))
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5.5)
+                        .background(
+                            Capsule()
+                                .fill(Color.purple.opacity(0.18))
+                                .overlay(Capsule().strokeBorder(Color.purple.opacity(0.35), lineWidth: 0.8))
+                        )
+                        .foregroundStyle(Color.purple)
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                    .help(language.text(
+                        "Kích hoạt Luna Reserve (gpt-5.6-luna) cho Codex",
+                        "Activate Luna Reserve (gpt-5.6-luna) for Codex"
+                    ))
+                }
 
                 // Sync button
                 Button {
@@ -611,6 +657,24 @@ struct PrismQuickSwitchDeck: View {
                             "\(banked) banked resets available"
                         ))
                     }
+
+                    if account.hasLunaReserve {
+                        let isLunaActive = store.isLunaReserveActive(for: account)
+                        HStack(spacing: 2) {
+                            Image(systemName: isLunaActive ? "moon.stars.fill" : "moon.fill")
+                                .font(.system(size: 8))
+                            Text(isLunaActive ? "Luna" : "Reserve")
+                                .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                        }
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.purple.opacity(0.18)))
+                        .foregroundStyle(Color.purple)
+                        .help(language.text(
+                            isLunaActive ? "Codex đang chạy bằng Luna Reserve" : "Tài khoản có Luna Reserve",
+                            isLunaActive ? "Codex active on Luna Reserve" : "Account has Luna Reserve"
+                        ))
+                    }
                 }
                 HStack(spacing: 4) {
                     Text(account.email)
@@ -723,6 +787,14 @@ struct PrismQuickSwitchDeck: View {
                 openEditAccount(account)
             } label: {
                 Label(language.text("Sửa nhãn", "Edit label"), systemImage: "pencil")
+            }
+            if account.hasLunaReserve && !store.isLunaReserveActive(for: account) {
+                Button {
+                    PrismTheme.triggerHaptic()
+                    store.enableLunaReserve(account)
+                } label: {
+                    Label(language.text("Bật Luna Reserve", "Enable Luna Reserve"), systemImage: "moon.stars.fill")
+                }
             }
             if account.requiresLogin {
                 Button {

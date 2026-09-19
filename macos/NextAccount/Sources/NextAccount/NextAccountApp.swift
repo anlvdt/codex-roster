@@ -188,12 +188,15 @@ struct CodexRosterApp: App {
         }
         .defaultSize(width: 720, height: 560)
 
-        Settings {
+        // Named Window (not Settings scene): LSUIElement/.accessory apps often
+        // never surface showSettingsWindow:, so the notch menu opens this id.
+        Window(language.text("Cài đặt", "Settings"), id: "settings") {
             AutomationSettingsView()
                 .environmentObject(store)
                 .environmentObject(language)
                 .environment(\.locale, language.language.locale)
         }
+        .defaultSize(width: 470, height: 580)
     }
 
 }
@@ -3775,8 +3778,15 @@ struct MenuBarView: View {
     }
 
     private func openSettings() {
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        // Mirror openAbout: Settings scene + showSettingsWindow: is a no-op for
+        // this .accessory / statusBar notch app.
+        openWindow(id: "settings")
         NSApplication.shared.activate(ignoringOtherApps: true)
+        DispatchQueue.main.async {
+            NSApplication.shared.windows
+                .first(where: { $0.identifier?.rawValue == "settings" })?
+                .makeKeyAndOrderFront(nil)
+        }
     }
 
     private func openReloginFlow(_ accountID: UUID) {

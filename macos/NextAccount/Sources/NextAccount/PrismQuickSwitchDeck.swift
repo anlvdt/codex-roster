@@ -327,52 +327,102 @@ struct PrismQuickSwitchDeck: View {
 
     // MARK: - Upper Center Notch Gap (Padded safely below Camera Notch)
     private var upperCenterNotchGap: some View {
-        VStack(spacing: 8) {
-            // OpenAI Health + Tibo Radar Chip directly below camera notch
+        VStack(spacing: 10) {
+            // Service health — one capsule under the camera
             HStack(spacing: 6) {
                 let statusIndicator = store.openAIStatus?.indicator ?? "none"
                 let isOperational = statusIndicator == "none"
                 Circle()
                     .fill(isOperational ? PrismTheme.emerald : PrismTheme.ruby)
                     .frame(width: 7, height: 7)
-                Text(isOperational ? "OpenAI OK" : "OpenAI Inc.")
-                    .font(.system(size: 11.5, weight: .semibold))
+                Text(isOperational
+                      ? language.text("OpenAI ổn", "OpenAI OK")
+                      : language.text("Sự cố OpenAI", "OpenAI issue"))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(isOperational ? PrismTheme.emerald : PrismTheme.ruby)
-
-                if let outlook = store.resetOutlook {
-                    Text("·").foregroundStyle(.tertiary)
-                    Text("24H: \(outlook.chance24Hours)%")
-                        .font(.system(size: 11.5, weight: .bold, design: .rounded))
-                        .foregroundStyle(outlook.chance24Hours >= 50 ? PrismTheme.amber : PrismTheme.emerald)
-                }
+                    .lineLimit(1)
             }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 5.5)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
             .background(Capsule().fill(Color.white.opacity(0.07)))
 
-            // Auto-switch quick chip
-            HStack(spacing: 5) {
-                Image(systemName: "bolt.shield.fill")
-                    .font(.system(size: 10))
-                    .foregroundStyle(store.autoSwitchWhenExhausted ? PrismTheme.violet : .secondary)
-
-                if store.autoSwitchWhenExhausted, let next = readyCandidates.first {
-                    Text("Auto: → \(next.displayName)")
+            // Auto-switch control (Settings is secondary; notch is primary)
+            VStack(spacing: 5) {
+                HStack(spacing: 6) {
+                    Image(systemName: "bolt.shield.fill")
                         .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(PrismTheme.violet)
-                        .lineLimit(1)
-                } else {
-                    Text("Auto-switch: Off")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(store.autoSwitchWhenExhausted ? PrismTheme.violet : .secondary)
+                    Text(language.text("Tự chuyển", "Auto-switch"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(store.autoSwitchWhenExhausted ? PrismTheme.violet : .secondary)
+                    Spacer(minLength: 0)
+                    Toggle("", isOn: Binding(
+                        get: { store.autoSwitchWhenExhausted },
+                        set: { store.setAutoSwitchWhenExhausted($0) }
+                    ))
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .labelsHidden()
                 }
+
+                Text(autoSwitchStatusCaption)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
             }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 3.5)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.white.opacity(0.05))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(
+                                store.autoSwitchWhenExhausted
+                                    ? PrismTheme.violet.opacity(0.35)
+                                    : Color.white.opacity(0.08),
+                                lineWidth: 0.8
+                            )
+                    )
+            )
 
             Spacer(minLength: 2)
         }
         .padding(.top, topNotchClearance)
+    }
+
+    private var autoSwitchStatusCaption: String {
+        if !store.autoSwitchWhenExhausted {
+            return language.text("Tắt — chỉ chuyển tay", "Off — manual switch only")
+        }
+        if store.isCheckingAutoSwitch {
+            return language.text("Đang kiểm tra…", "Checking…")
+        }
+        switch store.autoSwitchState {
+        case .some(.allAccountsExhausted):
+            return language.text("Tạm dừng — hết quota", "Paused — all exhausted")
+        case .some(.bankedResetAvailable(let account, let count, _)):
+            return language.text("Banked ×\(count) · \(account)", "Banked ×\(count) · \(account)")
+        case .some(.switched(let name)):
+            return language.text("Đã chuyển → \(name)", "Switched → \(name)")
+        case .some(.switchingAccount), .some(.closingDesktop), .some(.relaunchingDesktop):
+            return language.text("Đang chuyển…", "Switching…")
+        case .some(.waitingForProcesses):
+            return language.text("Đóng ChatGPT thủ công", "Quit ChatGPT manually")
+        case .some(.generationInProgress):
+            return language.text("Chờ phiên yên…", "Waiting for idle…")
+        case .some(.waitingForLogin):
+            return language.text("Tạm dừng khi đăng nhập", "Paused while signing in")
+        case .some(.desktopRelaunchFailed), .some(.checkFailed):
+            return language.text("Lỗi — thử lại", "Failed — retry")
+        case .none:
+            if let next = readyCandidates.first {
+                return language.text("Sẵn sàng → \(next.displayName)", "Ready → \(next.displayName)")
+            }
+            return language.text("Chưa có ứng viên usable", "No usable candidate")
+        }
     }
 
     private var topNotchClearance: CGFloat {
@@ -380,101 +430,80 @@ struct PrismQuickSwitchDeck: View {
         return max(maxInset + 16, 50)
     }
 
-    // MARK: - Upper Right Wing (Radar & Telemetry)
+    // MARK: - Upper Right Wing (Telemetry — Tibo lives once in the center strip)
     private var upperRightWing: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // Radar details & refresh
-            HStack {
-                Label(language.text("Radar Tibo", "Tibo Radar"), systemImage: "antenna.radiowaves.left.and.right")
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Label(language.text("Tiêu thụ", "Usage"), systemImage: "chart.line.uptrend.xyaxis")
                     .font(.system(size: 13, weight: .bold))
                 Spacer()
                 if let outlook = store.resetOutlook {
-                    Text(outlook.windowLabel)
-                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    HStack(spacing: 4) {
+                        Image(systemName: "antenna.radiowaves.left.and.right")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                        Text("24h \(outlook.chance24Hours)%")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(outlook.chance24Hours >= 50 ? PrismTheme.amber : PrismTheme.emerald)
+                        Text("·").foregroundStyle(.tertiary)
+                        Text("48h \(outlook.chance48Hours)%")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(outlook.chance48Hours >= 50 ? PrismTheme.amber : PrismTheme.emerald)
+                    }
+                    .help(outlook.windowLabel)
                 }
                 Button {
                     PrismTheme.triggerHaptic()
                     store.refresh()
+                    store.refreshTokenUsage(silently: true)
+                    store.refreshResetOutlook(silently: true)
+                    store.refreshOpenAIStatus(silently: true)
                 } label: {
                     Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 11))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.secondary)
-                        .frame(width: 22, height: 22)
-                        .background(Circle().fill(Color.white.opacity(0.05)))
+                        .frame(width: 24, height: 24)
+                        .background(Circle().fill(Color.white.opacity(0.06)))
                 }
                 .buttonStyle(.plain)
                 .disabled(store.isBusyForActions)
+                .help(language.text("Làm mới", "Refresh"))
             }
 
-            // Radar bars (24h & 48h)
-            if let outlook = store.resetOutlook {
+            if let summary = store.tokenUsage {
                 HStack(spacing: 8) {
-                    miniRadarMetric(title: "24H", percent: outlook.chance24Hours)
-                    miniRadarMetric(title: "48H", percent: outlook.chance48Hours)
-                }
-            }
-
-            // Telemetry line: Today / 7d / VibeCafe
-            HStack(spacing: 6) {
-                if let summary = store.tokenUsage {
-                    HStack(spacing: 3) {
-                        Image(systemName: "bolt.fill")
-                            .font(.system(size: 8.5))
-                            .foregroundStyle(Color.accentColor)
-                        Text("\(language.text("Hôm nay", "Today")): \(formatTokenMetric(summary.today, in: language.language))")
-                        if let todayCost = summary.todayCostUsd, todayCost > 0 {
-                            Text(formatUsdCost(todayCost, in: language.language))
-                                .font(.system(size: 9.5, weight: .bold, design: .rounded))
-                                .foregroundStyle(PrismTheme.emerald)
-                        }
-                    }
-                    .font(.system(size: 10, weight: .medium, design: .rounded))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .help(language.text(
-                        "Hôm nay: \(formatFullTokenNumber(summary.today, in: language.language)) token (ước tính \(formatUsdCost(summary.todayCostUsd ?? 0, in: language.language)))",
-                        "Today: \(formatFullTokenNumber(summary.today, in: language.language)) tokens (est. \(formatUsdCost(summary.todayCostUsd ?? 0, in: language.language)))"
-                    ))
-
-                    Text("·").foregroundStyle(.tertiary)
-
-                    Text("\(language.text("7 ngày", "7d")): \(formatTokenMetric(summary.last7Days, in: language.language))")
-                        .font(.system(size: 10, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .help(language.text(
-                            "7 ngày qua: \(formatFullTokenNumber(summary.last7Days, in: language.language)) token",
-                            "Last 7 days: \(formatFullTokenNumber(summary.last7Days, in: language.language)) tokens"
-                        ))
-
+                    telemetryPill(
+                        title: language.text("Hôm nay", "Today"),
+                        value: formatTokenMetric(summary.today, in: language.language),
+                        accent: summary.todayCostUsd.flatMap { $0 > 0 ? formatUsdCost($0, in: language.language) : nil }
+                    )
+                    telemetryPill(
+                        title: language.text("7 ngày", "7 days"),
+                        value: formatTokenMetric(summary.last7Days, in: language.language),
+                        accent: summary.last7DaysCostUsd.flatMap { $0 > 0 ? formatUsdCost($0, in: language.language) : nil }
+                    )
                     if let sub = summary.subagentSessions, sub > 0 {
-                        Text("·").foregroundStyle(.tertiary)
-                        HStack(spacing: 2) {
-                            Image(systemName: "point.3.connected.trianglepath.dotted")
-                                .font(.system(size: 8.5))
-                            Text("\(sub) sub")
-                        }
-                        .font(.system(size: 10, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .help(language.text("\(sub) phiên subagent đã phát hiện", "\(sub) subagent sessions detected"))
+                        telemetryPill(
+                            title: "Sub",
+                            value: "\(sub)",
+                            accent: nil
+                        )
+                    }
+                    if let vibe = store.status?.vibeUsage {
+                        telemetryPill(
+                            title: "Vibe",
+                            value: String(format: "$%.2f", vibe.estimatedCostUsd),
+                            accent: nil
+                        )
                     }
                 }
-
-                if let vibe = store.status?.vibeUsage {
-                    Text("·").foregroundStyle(.tertiary)
-                    Text(String(format: "Vibe: $%.2f", vibe.estimatedCostUsd))
-                        .font(.system(size: 10, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: true, vertical: false)
-                }
-
-                Spacer(minLength: 2)
+            } else {
+                Text(language.text("Chưa có dữ liệu token", "No token data yet"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 6)
             }
-            .lineLimit(1)
-            .padding(.top, 1)
         }
         .padding(12)
         .background(
@@ -484,113 +513,91 @@ struct PrismQuickSwitchDeck: View {
         )
     }
 
+    private func telemetryPill(title: String, value: String, accent: String?) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.system(size: 9.5, weight: .medium))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: 12.5, weight: .bold, design: .rounded))
+                .lineLimit(1)
+            if let accent {
+                Text(accent)
+                    .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                    .foregroundStyle(PrismTheme.emerald)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.white.opacity(0.04)))
+    }
+
     // MARK: - Lower Deck: 2-Column Full-Width Account Switchboard
     private var lowerSwitchboardDeck: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // Header Row: Title, Filter Tabs, Prominent Pin Button, Add Button, Menu
             HStack(spacing: 8) {
-                Text(language.text("Danh bạ tài khoản", "Account Roster"))
+                Text(language.text("Danh bạ", "Roster"))
                     .font(.system(size: 14, weight: .bold))
 
-                Text("(\(store.accounts.count))")
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                Text("\(filteredAccounts.count)/\(store.accounts.filter { !$0.archived }.count)")
+                    .font(.system(size: 11.5, weight: .medium, design: .monospaced))
                     .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.white.opacity(0.06)))
 
-                Spacer()
+                Spacer(minLength: 6)
 
-                // Filter pills
                 filterTab(label: language.text("Tất cả", "All"), filter: .all)
                 filterTab(label: language.text("Sẵn sàng", "Ready"), filter: .triage(.ready))
                 if store.accounts.contains(where: { $0.hasDeferredAccessTokenRefresh }) {
-                    filterTab(label: language.text("Chưa xác minh", "Unverified"), filter: .deferredUnverified)
+                    filterTab(label: language.text("Chưa XM", "Unverified"), filter: .deferredUnverified)
                 }
                 if store.accounts.contains(where: { $0.triage == .needsAction }) {
                     filterTab(label: language.text("Login", "Action"), filter: .triage(.needsAction))
                 }
 
-                // Expand roster to fit all rows (no scroll for typical ≤20)
-                Button {
-                    PrismTheme.triggerHaptic()
+                toolbarIconButton(
+                    systemName: isRosterExpanded
+                        ? "arrow.down.right.and.arrow.up.left"
+                        : "arrow.up.left.and.arrow.down.right",
+                    active: isRosterExpanded,
+                    help: language.text(
+                        "Xem tất cả account không cần scroll",
+                        "See every account without scrolling"
+                    )
+                ) {
                     withAnimation(PrismTheme.snapSpring) {
                         isRosterExpanded.toggle()
                     }
-                } label: {
-                    HStack(spacing: 4.5) {
-                        Image(systemName: isRosterExpanded
-                              ? "arrow.down.right.and.arrow.up.left"
-                              : "arrow.up.left.and.arrow.down.right")
-                            .font(.system(size: 10.5, weight: .bold))
-                        Text(language.text(
-                            isRosterExpanded ? "Thu gọn" : "Mở rộng",
-                            isRosterExpanded ? "Collapse" : "Expand"
-                        ))
-                        .font(.system(size: 11, weight: isRosterExpanded ? .bold : .medium))
-                    }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(
-                        Capsule()
-                            .fill(isRosterExpanded ? Color.accentColor.opacity(0.85) : Color.white.opacity(0.07))
-                            .overlay(Capsule().strokeBorder(
-                                isRosterExpanded ? Color.accentColor : Color.white.opacity(0.14),
-                                lineWidth: 0.8
-                            ))
-                    )
-                    .foregroundStyle(isRosterExpanded ? Color.white : Color.primary)
                 }
-                .buttonStyle(.plain)
-                .pointingHandCursor()
-                .help(language.text(
-                    "Xem tất cả account không cần scroll",
-                    "See every account without scrolling"
-                ))
 
-                // Prominent Pin Live Pill Button (30pt height)
-                Button {
-                    PrismTheme.triggerHaptic()
+                toolbarIconButton(
+                    systemName: isPinnedLive ? "pin.fill" : "pin",
+                    active: isPinnedLive,
+                    help: language.text(
+                        "Ghim mở liên tục (⌘P)",
+                        "Pin open continuously (⌘P)"
+                    )
+                ) {
                     withAnimation(PrismTheme.snapSpring) {
                         isPinnedLive.toggle()
                     }
-                } label: {
-                    HStack(spacing: 4.5) {
-                        Image(systemName: isPinnedLive ? "pin.fill" : "pin")
-                            .font(.system(size: 10.5, weight: .bold))
-                        Text(language.text(isPinnedLive ? "Đang ghim live" : "Ghim live", isPinnedLive ? "Pinned" : "Pin live"))
-                            .font(.system(size: 11, weight: isPinnedLive ? .bold : .medium))
-                    }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(
-                        Capsule()
-                            .fill(isPinnedLive ? Color.accentColor : Color.white.opacity(0.07))
-                            .overlay(Capsule().strokeBorder(isPinnedLive ? Color.accentColor : Color.white.opacity(0.14), lineWidth: 0.8))
-                    )
-                    .foregroundStyle(isPinnedLive ? Color.white : Color.primary)
                 }
-                .buttonStyle(.plain)
                 .keyboardShortcut("p", modifiers: [.command])
-                .pointingHandCursor()
-                .help(language.text("Ghim mở liên tục không tự đóng khi rê chuột ra ngoài (⌘P)", "Pin open continuously without closing on mouse exit (⌘P)"))
 
-                // Add Account Button
-                Button {
+                toolbarIconButton(
+                    systemName: "plus",
+                    active: false,
+                    help: language.text("Thêm tài khoản (⌘⇧N)", "Add account (⌘⇧N)")
+                ) {
                     openAddAccountFlow()
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 11, weight: .bold))
-                        .frame(width: 24, height: 24)
-                        .background(Circle().fill(Color.white.opacity(0.08)))
                 }
-                .buttonStyle(.plain)
-                .help(language.text("Thêm tài khoản (⌘N)", "Add account (⌘N)"))
 
-                // Utility Menu
                 Menu {
                     Button { openSettings() } label: {
-                        Label(
-                            language.text("Cài đặt…", "Settings…"),
-                            systemImage: "gearshape"
-                        )
+                        Label(language.text("Cài đặt…", "Settings…"), systemImage: "gearshape")
                     }
                     Button { openBackupFlow(.export) } label: {
                         Label(language.text("Sao lưu", "Export backup"), systemImage: "square.and.arrow.up")
@@ -612,7 +619,7 @@ struct PrismQuickSwitchDeck: View {
                 } label: {
                     Image(systemName: "ellipsis")
                         .font(.system(size: 11, weight: .bold))
-                        .frame(width: 24, height: 24)
+                        .frame(width: 26, height: 26)
                         .background(Circle().fill(Color.white.opacity(0.08)))
                 }
                 .menuStyle(.borderlessButton)
@@ -620,15 +627,12 @@ struct PrismQuickSwitchDeck: View {
                 .pointingHandCursor()
             }
 
-            // 2-Column Account Grid (Cleanly visible with generous spacing)
             ScrollView {
                 let columns = [
                     GridItem(.flexible(), spacing: 10),
                     GridItem(.flexible(), spacing: 10)
                 ]
 
-                // ForEach order is LTR row-major (top→bottom, left→right) for
-                // this fixed 2-column grid — same order as `sortedAccounts`.
                 LazyVGrid(columns: columns, spacing: 7) {
                     ForEach(filteredAccounts) { account in
                         PrismCompactAccountCard(
@@ -652,6 +656,30 @@ struct PrismQuickSwitchDeck: View {
         )
     }
 
+    private func toolbarIconButton(
+        systemName: String,
+        active: Bool,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button {
+            PrismTheme.triggerHaptic()
+            action()
+        } label: {
+            Image(systemName: systemName)
+                .font(.system(size: 11, weight: .bold))
+                .frame(width: 26, height: 26)
+                .background(
+                    Circle()
+                        .fill(active ? Color.accentColor.opacity(0.9) : Color.white.opacity(0.08))
+                )
+                .foregroundStyle(active ? Color.white : Color.primary)
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .help(help)
+    }
+
     private func filterTab(label: String, filter: RosterListFilter) -> some View {
         let isSelected = rosterFilter == filter
         return Button {
@@ -669,31 +697,6 @@ struct PrismQuickSwitchDeck: View {
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
-    }
-
-    private func miniRadarMetric(title: String, percent: Int) -> some View {
-        let tint = percent >= 50 ? PrismTheme.amber : PrismTheme.emerald
-        return HStack(spacing: 3) {
-            Text(title)
-                .font(.system(size: 9.5))
-                .foregroundStyle(.secondary)
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.primary.opacity(0.08))
-                    Capsule()
-                        .fill(tint)
-                        .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(percent) / 100.0)))
-                }
-            }
-            .frame(height: 3.5)
-            Text("\(percent)%")
-                .font(.system(size: 10.5, weight: .bold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(tint)
-        }
-        .padding(.horizontal, 5)
-        .padding(.vertical, 3)
-        .background(RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(0.03)))
     }
 }
 
@@ -837,15 +840,14 @@ private struct PrismCompactAccountCard: View {
                         guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
                         store.activate(target, force: true)
                     } label: {
-                        Text(language.text("Đổi", "Swap"))
+                        Text(language.text("Đổi", "Switch"))
                             .font(.system(size: 12.5, weight: .bold))
                             .foregroundStyle(Color.white)
                             .padding(.horizontal, 13)
                             .padding(.vertical, 5.5)
                             .background(
                                 Capsule()
-                                    .fill(Color.white.opacity(0.12))
-                                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.24), lineWidth: 0.9))
+                                    .fill(Color.accentColor.opacity(0.85))
                             )
                     }
                     .buttonStyle(.plain)
@@ -860,15 +862,14 @@ private struct PrismCompactAccountCard: View {
                         guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
                         store.activate(target, force: true)
                     } label: {
-                        Text(language.text("Đổi", "Swap"))
+                        Text(language.text("Đổi", "Switch"))
                             .font(.system(size: 12.5, weight: .bold))
                             .foregroundStyle(Color.white)
                             .padding(.horizontal, 13)
                             .padding(.vertical, 5.5)
                             .background(
                                 Capsule()
-                                    .fill(Color.white.opacity(0.12))
-                                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.24), lineWidth: 0.9))
+                                    .fill(Color.accentColor.opacity(0.85))
                             )
                     }
                     .buttonStyle(.plain)

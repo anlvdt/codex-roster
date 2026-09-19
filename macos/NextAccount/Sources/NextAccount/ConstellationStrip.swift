@@ -36,7 +36,7 @@ private struct ConstellationBadge: View {
         VStack(spacing: 4) {
             Image(systemName: provider.icon)
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(isLive ? Color.green : Color.secondary)
+                .foregroundStyle(isLive ? PrismTheme.success : Color.secondary)
             Text(provider.compactName)
                 .font(.caption2.weight(.semibold))
                 .lineLimit(1)
@@ -49,11 +49,11 @@ private struct ConstellationBadge: View {
         .padding(.vertical, 6)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.primary.opacity(isLive ? 0.10 : 0.04))
+                .fill(isLive ? PrismTheme.surfaceHover : PrismTheme.surfacePanel)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(isLive ? Color.green.opacity(0.45) : Color.primary.opacity(0.06), lineWidth: 1)
+                .stroke(isLive ? PrismTheme.success.opacity(0.45) : Color.primary.opacity(0.06), lineWidth: 1)
         )
         .accessibilityElement(children: .combine)
         .accessibilityLabel(label)

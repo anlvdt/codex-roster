@@ -23,11 +23,11 @@ struct PrismDualChamberGauge: View {
                 HStack {
                     Label {
                         Text(language.text("Cửa sổ 5 giờ", "5-hour window"))
-                            .font(.system(size: compact ? 10 : 11, weight: .medium))
+                            .font(compact ? PrismTheme.fontCaption : PrismTheme.fontBodyCompactMedium)
                             .foregroundStyle(.secondary)
                     } icon: {
                         Image(systemName: "clock.arrow.circlepath")
-                            .font(.system(size: compact ? 9 : 10))
+                            .font(compact ? PrismTheme.fontChipIcon : PrismTheme.fontCaptionRegular)
                             .foregroundStyle(PrismTheme.quotaTint(percent: fivePercent))
                     }
 
@@ -35,12 +35,12 @@ struct PrismDualChamberGauge: View {
 
                     if let fivePercent {
                         Text("\(fivePercent)%")
-                            .font(.system(size: compact ? 11 : 12, weight: .bold, design: .rounded))
+                            .font(compact ? PrismTheme.fontBodyCompactBold : PrismTheme.fontMetricSub)
                             .monospacedDigit()
                             .foregroundStyle(PrismTheme.quotaTint(percent: fivePercent))
                     } else {
                         Text(language.text("Chưa có", "No data"))
-                            .font(.system(size: compact ? 9 : 10))
+                            .font(compact ? PrismTheme.fontChipIcon : PrismTheme.fontCaptionRegular)
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -51,7 +51,7 @@ struct PrismDualChamberGauge: View {
                 if showLabels, let fiveHour {
                     HStack {
                         Text(fiveHour.resetDescription(in: language.language))
-                            .font(.system(size: 9, weight: .regular))
+                            .font(PrismTheme.fontChipIcon)
                             .foregroundStyle(.secondary)
                         Spacer()
                     }
@@ -64,11 +64,11 @@ struct PrismDualChamberGauge: View {
                 HStack {
                     Label {
                         Text(language.text("Hạn mức tuần", "Weekly quota"))
-                            .font(.system(size: compact ? 10 : 11, weight: .medium))
+                            .font(compact ? PrismTheme.fontCaption : PrismTheme.fontBodyCompactMedium)
                             .foregroundStyle(.secondary)
                     } icon: {
                         Image(systemName: "calendar")
-                            .font(.system(size: compact ? 9 : 10))
+                            .font(compact ? PrismTheme.fontChipIcon : PrismTheme.fontCaptionRegular)
                             .foregroundStyle(PrismTheme.quotaTint(percent: weekPercent))
                     }
 
@@ -76,12 +76,12 @@ struct PrismDualChamberGauge: View {
 
                     if let weekPercent {
                         Text("\(weekPercent)%")
-                            .font(.system(size: compact ? 11 : 12, weight: .bold, design: .rounded))
+                            .font(compact ? PrismTheme.fontBodyCompactBold : PrismTheme.fontMetricSub)
                             .monospacedDigit()
                             .foregroundStyle(PrismTheme.quotaTint(percent: weekPercent))
                     } else {
                         Text(language.text("Chưa có", "No data"))
-                            .font(.system(size: compact ? 9 : 10))
+                            .font(compact ? PrismTheme.fontChipIcon : PrismTheme.fontCaptionRegular)
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -90,7 +90,7 @@ struct PrismDualChamberGauge: View {
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
                         Capsule()
-                            .fill(Color.primary.opacity(0.08))
+                            .fill(PrismTheme.trackFill)
                             .frame(height: compact ? 3 : 4)
 
                         let width = max(0, min(geo.size.width, geo.size.width * CGFloat(weekPercent ?? 0) / 100.0))
@@ -105,7 +105,7 @@ struct PrismDualChamberGauge: View {
                 if showLabels, let weekly {
                     HStack {
                         Text(weekly.resetDescription(in: language.language))
-                            .font(.system(size: 9, weight: .regular))
+                            .font(PrismTheme.fontChipIcon)
                             .foregroundStyle(.secondary)
                         Spacer()
                     }
@@ -132,7 +132,7 @@ struct PrismSegmentedBar: View {
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
                         RoundedRectangle(cornerRadius: height / 2, style: .continuous)
-                            .fill(Color.primary.opacity(0.07))
+                            .fill(PrismTheme.trackSoft)
 
                         if fillRatio > 0 {
                             RoundedRectangle(cornerRadius: height / 2, style: .continuous)
@@ -165,7 +165,7 @@ struct PrismArcGauge: View {
             Circle()
                 .trim(from: 0.15, to: 0.85)
                 .stroke(
-                    Color.primary.opacity(0.10),
+                    PrismTheme.surfaceHover,
                     style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
                 )
                 .rotationEffect(.degrees(90))
@@ -201,15 +201,15 @@ struct PrismFilamentBar: View {
             HStack(spacing: 3) {
                 if showLabels {
                     Text("5H")
-                        .font(.system(size: 8, weight: .bold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.55))
+                        .font(PrismTheme.fontMicro)
+                        .foregroundStyle(PrismTheme.textSecondary)
                         .frame(width: 14, alignment: .leading)
                         .fixedSize()
                 }
 
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
-                        Capsule().fill(Color.white.opacity(0.12))
+                        Capsule().fill(PrismTheme.surfaceStrong)
                         Capsule()
                             .fill(PrismTheme.quotaTint(percent: fivePercent))
                             .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(fivePercent ?? 0) / 100.0)))
@@ -219,7 +219,7 @@ struct PrismFilamentBar: View {
 
                 if showLabels, let fivePercent {
                     Text("\(fivePercent)%")
-                        .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                        .font(PrismTheme.fontChip)
                         .monospacedDigit()
                         .foregroundStyle(PrismTheme.quotaTint(percent: fivePercent))
                         .frame(width: 32, alignment: .trailing)
@@ -231,15 +231,15 @@ struct PrismFilamentBar: View {
             HStack(spacing: 3) {
                 if showLabels {
                     Text(language.text("Wk", "Wk"))
-                        .font(.system(size: 8, weight: .bold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.55))
+                        .font(PrismTheme.fontMicro)
+                        .foregroundStyle(PrismTheme.textSecondary)
                         .frame(width: 14, alignment: .leading)
                         .fixedSize()
                 }
 
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
-                        Capsule().fill(Color.white.opacity(0.12))
+                        Capsule().fill(PrismTheme.surfaceStrong)
                         Capsule()
                             .fill(PrismTheme.quotaTint(percent: weekPercent))
                             .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(weekPercent ?? 0) / 100.0)))
@@ -249,7 +249,7 @@ struct PrismFilamentBar: View {
 
                 if showLabels, let weekPercent {
                     Text("\(weekPercent)%")
-                        .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                        .font(PrismTheme.fontChip)
                         .monospacedDigit()
                         .foregroundStyle(PrismTheme.quotaTint(percent: weekPercent))
                         .frame(width: 32, alignment: .trailing)
@@ -275,18 +275,18 @@ struct PrismResetClockChip: View {
         if let window {
             HStack(spacing: 4) {
                 Image(systemName: "hourglass")
-                    .font(.system(size: 9))
+                    .font(PrismTheme.fontChipIcon)
                     .foregroundStyle(PrismTheme.amber)
                 Text(window.relativeReset(in: language.language))
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .font(PrismTheme.fontCaption)
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(
                 Capsule()
-                    .fill(Color.primary.opacity(0.04))
-                    .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+                    .fill(PrismTheme.surfacePanel)
+                    .overlay(Capsule().strokeBorder(PrismTheme.trackFill, lineWidth: 0.5))
             )
         }
     }

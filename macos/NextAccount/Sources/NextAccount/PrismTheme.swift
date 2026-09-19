@@ -18,6 +18,82 @@ enum PrismTheme {
     static let accent = Color(red: 0.24, green: 0.58, blue: 0.96)
     /// Neutral titanium sheen
     static let titanium = Color(red: 0.62, green: 0.66, blue: 0.74)
+
+    /// Semantic aliases — prefer these over ad-hoc `Color.green` / `.orange` / `.red` / `.purple`.
+    static let success = emerald
+    static let warning = amber
+    static let danger = ruby
+    static let autoSwitch = violet
+
+    // MARK: - Semantic Text (dark notch / glass surfaces)
+    static let textPrimary = Color.white.opacity(0.92)
+    static let textBright = Color.white.opacity(0.68)
+    static let textSecondary = Color.white.opacity(0.55)
+    static let textTertiary = Color.white.opacity(0.40)
+    static let textOnAccent = Color.white
+    static let highlight = Color.white.opacity(0.18)
+    static let highlightSoft = Color.white.opacity(0.16)
+
+    // MARK: - Surfaces & Borders (dark glass)
+    static let surfaceQuiet = Color.white.opacity(0.03)
+    static let surfaceFaint = Color.white.opacity(0.018)
+    static let surfaceDim = Color.white.opacity(0.05)
+    static let surfaceSoft = Color.white.opacity(0.06)
+    static let surfaceMuted = Color.white.opacity(0.07)
+    static let surfaceFill = Color.white.opacity(0.08)
+    static let surfaceStrong = Color.white.opacity(0.12)
+    static let surfacePanel = Color.white.opacity(0.04)
+    static let surfaceHover = Color.white.opacity(0.10)
+    static let borderSubtle = Color.white.opacity(0.08)
+    static let borderSoft = Color.white.opacity(0.15)
+    static let borderStrong = Color.white.opacity(0.20)
+    static let trackFill = Color.primary.opacity(0.08)
+    static let trackSoft = Color.primary.opacity(0.07)
+
+    /// Soft tinted chip fill / stroke for status pills.
+    static func chipFill(_ tint: Color, opacity: Double = 0.18) -> Color { tint.opacity(opacity) }
+    static func chipStroke(_ tint: Color, opacity: Double = 0.35) -> Color { tint.opacity(opacity) }
+
+    // MARK: - Type Scale (notch / compact glass UI)
+    /// Large identity glyph (~24pt)
+    static let fontDisplay = Font.system(size: 24, weight: .bold)
+    /// Active identity glyph (~16pt)
+    static let fontTitle = Font.system(size: 16, weight: .bold)
+    /// Account display name (~15pt)
+    static let fontHeadline = Font.system(size: 15, weight: .bold)
+    /// Section / card title (~13pt)
+    static let fontSubheadline = Font.system(size: 13, weight: .bold)
+    /// Default body copy (~11.5pt)
+    static let fontBody = Font.system(size: 11.5, weight: .medium)
+    static let fontBodySemibold = Font.system(size: 11.5, weight: .semibold)
+    static let fontBodyBold = Font.system(size: 11.5, weight: .bold)
+    /// Compact controls / status (~11pt)
+    static let fontBodyCompact = Font.system(size: 11, weight: .semibold)
+    static let fontBodyCompactBold = Font.system(size: 11, weight: .bold)
+    static let fontBodyCompactMedium = Font.system(size: 11, weight: .medium)
+    /// Captions / reset lines (~10pt)
+    static let fontCaption = Font.system(size: 10, weight: .medium)
+    static let fontCaptionRegular = Font.system(size: 10, weight: .regular)
+    static let fontCaptionBold = Font.system(size: 10, weight: .bold)
+    /// Status chips / plan pills (~9.5pt rounded)
+    static let fontChip = Font.system(size: 9.5, weight: .bold, design: .rounded)
+    static let fontChipIcon = Font.system(size: 9.5, weight: .regular)
+    /// Micro labels on dense cards (~8–8.5pt)
+    static let fontMicro = Font.system(size: 8, weight: .bold)
+    static let fontMicroChip = Font.system(size: 8.5, weight: .bold, design: .rounded)
+    /// Quota / metric figures
+    static let fontMetric = Font.system(size: 12.5, weight: .bold, design: .rounded)
+    static let fontMetricLarge = Font.system(size: 18, weight: .bold, design: .rounded)
+    static let fontMetricSub = Font.system(size: 12, weight: .bold)
+    /// Monospaced digits / codes
+    static let fontMono = Font.system(size: 11, weight: .medium, design: .monospaced)
+    static let fontMonoBold = Font.system(size: 11, weight: .bold, design: .monospaced)
+    /// Section title / card avatar letter (~14pt)
+    static let fontSection = Font.system(size: 14, weight: .bold)
+    static let fontAvatar = fontSection
+    /// Filament / dense metric (~13.5pt rounded)
+    static let fontMetricDense = Font.system(size: 13.5, weight: .bold, design: .rounded)
+
     // MARK: - Dynamic State Resolvers
     static func quotaTint(percent: Int?) -> Color {
         guard let p = percent else { return titanium }
@@ -38,14 +114,16 @@ enum PrismTheme {
     // MARK: - Glass Materials & Specular Rim Light
     static let darkBackground = Color(red: 0.06, green: 0.07, blue: 0.10)
     static let lightBackground = Color(red: 0.95, green: 0.96, blue: 0.98)
+    /// Notch shell fill (matches physical-camera backdrop)
+    static let notchShell = Color(red: 0.08, green: 0.09, blue: 0.12)
 
     static var rimStroke: LinearGradient {
         LinearGradient(
             colors: [
                 Color.white.opacity(0.24),
-                Color.white.opacity(0.08),
-                Color.white.opacity(0.03),
-                Color.white.opacity(0.12)
+                borderSubtle,
+                surfaceQuiet,
+                surfaceStrong
             ],
             startPoint: .topLeading,
             endPoint: .bottomTrailing

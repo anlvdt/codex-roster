@@ -75,32 +75,32 @@ struct PrismFilamentView: View {
             // 5H Quota with live energy icon
             HStack(spacing: 3) {
                 Text("⚡")
-                    .font(.system(size: 11, weight: .bold))
+                    .font(PrismTheme.fontBodyCompactBold)
                     .foregroundStyle(fiveTint)
                     .fixedSize()
                 Text("5H")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.68))
+                    .font(PrismTheme.fontBodySemibold)
+                    .foregroundStyle(PrismTheme.textBright)
                     .fixedSize()
                 Text("\(fivePercent ?? 0)%")
-                    .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                    .font(PrismTheme.fontMetricDense)
                     .monospacedDigit()
                     .foregroundStyle(fiveTint)
                     .fixedSize()
             }
 
             Rectangle()
-                .fill(Color.white.opacity(0.18))
+                .fill(PrismTheme.highlight)
                 .frame(width: 1, height: 12)
 
             // Weekly Quota
             HStack(spacing: 3) {
                 Text(language.text("Tuần", "Wk"))
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.68))
+                    .font(PrismTheme.fontBodySemibold)
+                    .foregroundStyle(PrismTheme.textBright)
                     .fixedSize()
                 Text("\(weekPercent ?? 0)%")
-                    .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                    .font(PrismTheme.fontMetricDense)
                     .monospacedDigit()
                     .foregroundStyle(weekTint)
                     .fixedSize()
@@ -110,23 +110,23 @@ struct PrismFilamentView: View {
             if bankedCount > 0 {
                 HStack(spacing: 2) {
                     Text("⟲")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(Color.orange)
+                        .font(PrismTheme.fontBodyCompactBold)
+                        .foregroundStyle(PrismTheme.warning)
                         .fixedSize()
                     Text("\(bankedCount)")
-                        .font(.system(size: 12.5, weight: .bold, design: .rounded))
+                        .font(PrismTheme.fontMetric)
                         .monospacedDigit()
-                        .foregroundStyle(Color.orange)
+                        .foregroundStyle(PrismTheme.warning)
                         .fixedSize()
                 }
             } else if let weeklyResetDate {
                 HStack(spacing: 2) {
                     Text("↺")
-                        .font(.system(size: 10.5, weight: .bold))
+                        .font(PrismTheme.fontCaptionBold)
                         .foregroundStyle(.white.opacity(0.50))
                         .fixedSize()
                     Text(compactReset(weeklyResetDate))
-                        .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                        .font(PrismTheme.fontBodySemibold)
                         .foregroundStyle(.white.opacity(0.78))
                         .fixedSize()
                 }
@@ -141,7 +141,7 @@ struct PrismFilamentView: View {
         .overlay(
             Capsule().strokeBorder(
                 LinearGradient(
-                    colors: [Color.white.opacity(0.18), Color.white.opacity(0.04)],
+                    colors: [PrismTheme.highlight, PrismTheme.surfacePanel],
                     startPoint: .top,
                     endPoint: .bottom
                 ),
@@ -155,7 +155,7 @@ struct PrismFilamentView: View {
         HStack(spacing: 3.5) {
             // Live energy / activity indicator
             Text("⚡")
-                .font(.system(size: 11, weight: .bold))
+                .font(PrismTheme.fontBodyCompactBold)
                 .foregroundStyle(fiveTint)
                 .shadow(color: fiveTint.opacity(isRunning ? 0.85 : 0), radius: isRunning ? 3.5 : 0)
                 .fixedSize()
@@ -163,21 +163,21 @@ struct PrismFilamentView: View {
             // 5H Quota
             HStack(spacing: 2.5) {
                 Text(language.text("5H", "5H"))
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.68))
+                    .font(PrismTheme.fontBodySemibold)
+                    .foregroundStyle(PrismTheme.textBright)
                     .lineLimit(1)
                     .fixedSize()
 
                 if let fivePercent {
                     Text("\(fivePercent)%")
-                        .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                        .font(PrismTheme.fontMetricDense)
                         .monospacedDigit()
                         .foregroundStyle(fiveTint)
                         .lineLimit(1)
                         .fixedSize()
                 } else {
                     Text("—")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(PrismTheme.fontBody)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .fixedSize()
@@ -188,12 +188,12 @@ struct PrismFilamentView: View {
             if let fiveResetDate, fiveResetDate > Date() {
                 HStack(spacing: 2) {
                     Text("↺")
-                        .font(.system(size: 10.5, weight: .bold))
+                        .font(PrismTheme.fontCaptionBold)
                         .foregroundStyle(.white.opacity(0.50))
                         .fixedSize()
 
                     Text(compactReset(fiveResetDate))
-                        .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                        .font(PrismTheme.fontBodySemibold)
                         .foregroundStyle(.white.opacity(0.78))
                         .lineLimit(1)
                         .fixedSize()
@@ -201,7 +201,7 @@ struct PrismFilamentView: View {
                 .help(account?.usage?.fiveHour?.resetDescription(in: language.language) ?? "")
             } else if let plan = account?.planLabel, !plan.isEmpty {
                 Text(plan.uppercased())
-                    .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                    .font(PrismTheme.fontChip)
                     .foregroundStyle(fiveTint.opacity(0.85))
                     .padding(.horizontal, 4)
                     .padding(.vertical, 1.5)
@@ -222,21 +222,21 @@ struct PrismFilamentView: View {
             // Weekly Quota
             HStack(spacing: 2.5) {
                 Text(language.text("Tuần", "Wk"))
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.68))
+                    .font(PrismTheme.fontBodySemibold)
+                    .foregroundStyle(PrismTheme.textBright)
                     .lineLimit(1)
                     .fixedSize()
 
                 if let weekPercent {
                     Text("\(weekPercent)%")
-                        .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                        .font(PrismTheme.fontMetricDense)
                         .monospacedDigit()
                         .foregroundStyle(weekTint)
                         .lineLimit(1)
                         .fixedSize()
                 } else {
                     Text("—")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(PrismTheme.fontBody)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .fixedSize()
@@ -247,26 +247,26 @@ struct PrismFilamentView: View {
             if bankedCount > 0 {
                 HStack(spacing: 2) {
                     Text("⟲")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(Color.orange)
+                        .font(PrismTheme.fontBodyCompactBold)
+                        .foregroundStyle(PrismTheme.warning)
                         .fixedSize()
 
                     Text("\(bankedCount)")
-                        .font(.system(size: 12.5, weight: .bold, design: .rounded))
+                        .font(PrismTheme.fontMetric)
                         .monospacedDigit()
-                        .foregroundStyle(Color.orange)
+                        .foregroundStyle(PrismTheme.warning)
                         .fixedSize()
                 }
                 .help(language.text("\(bankedCount) lượt banked reset có thể dùng", "\(bankedCount) banked resets available"))
             } else if let weeklyResetDate {
                 HStack(spacing: 2) {
                     Text("↺")
-                        .font(.system(size: 10.5, weight: .bold))
+                        .font(PrismTheme.fontCaptionBold)
                         .foregroundStyle(.white.opacity(0.50))
                         .fixedSize()
 
                     Text(compactReset(weeklyResetDate))
-                        .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                        .font(PrismTheme.fontBodySemibold)
                         .foregroundStyle(.white.opacity(0.78))
                         .lineLimit(1)
                         .fixedSize()
@@ -316,8 +316,8 @@ struct PrismFilamentView: View {
         leftEarShape.strokeBorder(
             LinearGradient(
                 stops: [
-                    .init(color: Color.white.opacity(0.16), location: 0.0),
-                    .init(color: Color.white.opacity(0.06), location: 0.5),
+                    .init(color: PrismTheme.highlightSoft, location: 0.0),
+                    .init(color: PrismTheme.surfaceSoft, location: 0.5),
                     .init(color: Color.clear, location: 0.85)
                 ],
                 startPoint: .leading,
@@ -332,8 +332,8 @@ struct PrismFilamentView: View {
             LinearGradient(
                 stops: [
                     .init(color: Color.clear, location: 0.15),
-                    .init(color: Color.white.opacity(0.06), location: 0.5),
-                    .init(color: Color.white.opacity(0.16), location: 1.0)
+                    .init(color: PrismTheme.surfaceSoft, location: 0.5),
+                    .init(color: PrismTheme.highlightSoft, location: 1.0)
                 ],
                 startPoint: .leading,
                 endPoint: .trailing

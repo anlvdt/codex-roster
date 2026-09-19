@@ -175,7 +175,7 @@ struct NotchWindowView: View {
                     notchShape
                         .fill(.ultraThinMaterial)
                         .overlay {
-                            notchShape.fill(Color(red: 0.08, green: 0.09, blue: 0.12).opacity(0.62))
+                            notchShape.fill(PrismTheme.notchShell.opacity(0.62))
                         }
                 }
             }

@@ -2,6 +2,38 @@ import Foundation
 import Testing
 @testable import CodexRoster
 
+@Test func forceSwitchOrderedStepsDocumentSaveBeforeDesktopQuit() {
+    // Regression for session longevity: macOS must persist live auth.json into
+    // the roster before ChatGPTDesktop.prepareForAccountSwitch can escalate to
+    // SIGKILL (which otherwise freezes a stale already-consumed refresh token).
+    #expect(AccountActivationSafety.forceSwitchOrderedSteps == [
+        "preserveLiveSessionBeforeDesktopQuit",
+        "prepareForAccountSwitch",
+        "activate",
+        "relaunchAndConfirm",
+    ])
+    #expect(AccountActivationSafety.forceSwitchOrderedSteps.first == "preserveLiveSessionBeforeDesktopQuit")
+    #expect(
+        AccountActivationSafety.forceSwitchOrderedSteps.firstIndex(of: "preserveLiveSessionBeforeDesktopQuit")!
+            < AccountActivationSafety.forceSwitchOrderedSteps.firstIndex(of: "prepareForAccountSwitch")!
+    )
+}
+
+@Test func missingLiveAuthErrorDetectionMatchesSaveFailureWording() {
+    struct Probe: LocalizedError {
+        let errorDescription: String?
+    }
+    #expect(AccountActivationSafety.isMissingLiveAuthError(
+        Probe(errorDescription: "no live Codex auth bundle found at /tmp/.codex")
+    ))
+    #expect(AccountActivationSafety.isMissingLiveAuthError(
+        Probe(errorDescription: "No live auth present")
+    ))
+    #expect(!AccountActivationSafety.isMissingLiveAuthError(
+        Probe(errorDescription: "could not encrypt snapshot")
+    ))
+}
+
 @Test func trustedTiboSourceURLAcceptsOnlyCanonicalStatusLinks() {
     #expect(
         trustedTiboSourceURL("https://x.com/thsottiaux/status/2090964822422949999")?.absoluteString
@@ -139,8 +171,8 @@ import Testing
     #expect(resolved == secondNeedsLogin.id)
     #expect(resolved != buggyFirst)
 
-    // Missing captured ID may fall back; an unknown captured ID must not.
-    #expect(accountIDForReloginNotification(in: accounts, capturedID: nil) == firstNeedsLogin.id)
+    // Missing / unknown captured ID must never fall back to first requiresLogin.
+    #expect(accountIDForReloginNotification(in: accounts, capturedID: nil) == nil)
     #expect(accountIDForReloginNotification(in: accounts, capturedID: UUID()) == nil)
 }
 
@@ -177,6 +209,24 @@ import Testing
     #expect(account.triage == .resting)
     #expect(account.usageStatus(in: .english).contains("refresh safely on the next switch"))
     #expect(account.usageStatus(in: .vietnamese).contains("làm mới an toàn khi chuyển"))
+    #expect(RosterListFilter.deferredUnverified.matches(account))
+    #expect(!RosterListFilter.triage(.needsAction).matches(account))
+    #expect(!activationIsBlockedByUsageError(account.usageError))
+    #expect(usageErrorIsDeferredAccessTokenRefresh(account.usageError))
+    #expect(!usageErrorRequiresLogin(account.usageError))
+}
+
+@Test func usageErrorClassifiersMatchRustSourceOfTruth() {
+    #expect(usageErrorRequiresLogin("Login required [refresh_token_rejected]: dead"))
+    #expect(usageErrorRequiresLogin("token refresh failed: invalid_grant"))
+    #expect(usageErrorRequiresLogin("Your session has ended"))
+    #expect(!usageErrorRequiresLogin("Usage unavailable [access_token_unauthorized]: soft"))
+    #expect(usageErrorRequiresLocalRecovery("Local recovery required [local_snapshot_unreadable]"))
+    #expect(usageErrorRequiresLocalRecovery("credential key could not decrypt snapshot payload"))
+    #expect(activationIsBlockedByUsageError("login required"))
+    #expect(!activationIsBlockedByUsageError("Usage unavailable [access_token_unauthorized]: soft"))
+    #expect(CodexLoginPort.primary == 1455)
+    #expect(CodexLoginPort.fallback == 1457)
 }
 
 @Test func fiveHourQuotaRemainsPrimaryAndWeeklyStaysIndependent() throws {
@@ -206,7 +256,111 @@ import Testing
     )
 
     #expect(account.primaryQuotaWindow?.remainingPercent == 74)
-    #expect(account.switchQuotaScore == 22)
+    #expect(account.switchQuotaScore == 22_074)
     #expect(account.usageStatus(in: .vietnamese).contains("5 giờ còn 74%"))
     #expect(account.usageStatus(in: .vietnamese).contains("tuần còn 22%"))
+}
+
+@Test func weeklyQuotaSortOrdersBySwitchQuotaScoreNotUsableFirst() throws {
+    let decoder = JSONDecoder()
+    decoder.keyDecodingStrategy = .convertFromSnakeCase
+    let highWeeklyZeroFive = try decoder.decode(
+        AccountUsage.self,
+        from: Data(#"""
+        {
+            "five_hour":{"remaining_percent":0,"reset_at":[2099,132,10,0,0,0,0,0,0]},
+            "weekly":{"remaining_percent":84,"reset_at":[2099,136,10,0,0,0,0,0,0]}
+        }
+        """#.utf8)
+    )
+    let lowWeeklySomeFive = try decoder.decode(
+        AccountUsage.self,
+        from: Data(#"""
+        {
+            "five_hour":{"remaining_percent":14,"reset_at":[2099,132,10,0,0,0,0,0,0]},
+            "weekly":{"remaining_percent":2,"reset_at":[2099,136,10,0,0,0,0,0,0]}
+        }
+        """#.utf8)
+    )
+    let usableUsage = try decoder.decode(
+        AccountUsage.self,
+        from: Data(#"""
+        {
+            "five_hour":{"remaining_percent":40,"reset_at":[2099,132,10,0,0,0,0,0,0]},
+            "weekly":{"remaining_percent":80,"reset_at":[2099,136,10,0,0,0,0,0,0]}
+        }
+        """#.utf8)
+    )
+    let lowUsableUsage = try decoder.decode(
+        AccountUsage.self,
+        from: Data(#"""
+        {
+            "five_hour":{"remaining_percent":10,"reset_at":[2099,132,10,0,0,0,0,0,0]},
+            "weekly":{"remaining_percent":50,"reset_at":[2099,136,10,0,0,0,0,0,0]}
+        }
+        """#.utf8)
+    )
+    let exhaustedUsage = try decoder.decode(
+        AccountUsage.self,
+        from: Data(#"""
+        {
+            "five_hour":{"remaining_percent":0,"reset_at":[2099,132,10,0,0,0,0,0,0]},
+            "weekly":{"remaining_percent":0,"reset_at":[2099,136,10,0,0,0,0,0,0]}
+        }
+        """#.utf8)
+    )
+    let weeklyDeadUsage = try decoder.decode(
+        AccountUsage.self,
+        from: Data(#"""
+        {
+            "five_hour":{"remaining_percent":90,"reset_at":[2099,132,10,0,0,0,0,0,0]},
+            "weekly":{"remaining_percent":0,"reset_at":[2099,136,10,0,0,0,0,0,0]}
+        }
+        """#.utf8)
+    )
+    func account(email: String, plan: String, usage: AccountUsage?) -> SavedAccount {
+        SavedAccount(
+            id: UUID(),
+            provider: "open_ai",
+            email: email,
+            name: email,
+            customLabel: nil,
+            planLabel: plan,
+            environment: "macos",
+            isActive: false,
+            archived: false,
+            usage: usage,
+            usageError: nil
+        )
+    }
+    let highWeekly = account(email: "high-wk@example.com", plan: "Plus", usage: highWeeklyZeroFive)
+    let lowWeekly = account(email: "low-wk@example.com", plan: "Pro", usage: lowWeeklySomeFive)
+    let usable = account(email: "usable@example.com", plan: "Plus", usage: usableUsage)
+    let lowUsable = account(email: "low@example.com", plan: "Pro", usage: lowUsableUsage)
+    let exhausted = account(email: "done@example.com", plan: "Pro", usage: exhaustedUsage)
+    let weeklyDead = account(email: "weekly-dead@example.com", plan: "Pro", usage: weeklyDeadUsage)
+
+    // Usable-for-switch still requires both windows (or credits) — auto-switch only.
+    #expect(!highWeekly.isUsableForSwitch)
+    #expect(lowWeekly.isUsableForSwitch)
+    #expect(usable.isUsableForSwitch)
+    #expect(lowUsable.isUsableForSwitch)
+    #expect(!exhausted.isUsableForSwitch)
+    #expect(!weeklyDead.isUsableForSwitch)
+    #expect(weeklyDead.isExhaustedForSwitch)
+    #expect(weeklyDead.switchQuotaScore == -1)
+    #expect(highWeekly.switchQuotaScore == 84_000)
+    #expect(lowWeekly.switchQuotaScore == 2_014)
+    #expect(usable.switchQuotaScore == 80_040)
+    #expect(lowUsable.switchQuotaScore == 50_010)
+    // Display sort is weekly-first: Wk84/5H0 ranks above Wk2/5H14 even though
+    // only the latter is "usable" for switch.
+    #expect(accountSortIsOrderedByWeeklyQuota(highWeekly, lowWeekly))
+    #expect(!accountSortIsOrderedByWeeklyQuota(lowWeekly, highWeekly))
+    #expect(accountSortIsOrderedByWeeklyQuota(usable, exhausted))
+    #expect(!accountSortIsOrderedByWeeklyQuota(exhausted, usable))
+    #expect(accountSortIsOrderedByWeeklyQuota(usable, lowUsable))
+    #expect(!accountSortIsOrderedByWeeklyQuota(lowUsable, usable))
+    #expect(accountSortIsOrderedByWeeklyQuota(usable, weeklyDead))
+    #expect(accountSortIsOrderedByWeeklyQuota(highWeekly, weeklyDead))
 }

@@ -80,6 +80,25 @@ enum AccountTriage: Int, CaseIterable {
     }
 }
 
+/// Notch / companion roster filter chips. Deferred AT is soft (not needsAction)
+/// and gets its own "Unverified" chip so users do not re-login healthy accounts.
+enum RosterListFilter: Equatable {
+    case all
+    case triage(AccountTriage)
+    case deferredUnverified
+
+    func matches(_ account: SavedAccount) -> Bool {
+        switch self {
+        case .all:
+            return true
+        case .triage(let bucket):
+            return account.triage == bucket
+        case .deferredUnverified:
+            return account.hasDeferredAccessTokenRefresh
+        }
+    }
+}
+
 extension Color {
     /// Shared quota color ramp used by every quota indicator (sidebar, board,
     /// notch) so the thresholds never drift apart.
@@ -103,7 +122,7 @@ enum AccountSortMode: String, CaseIterable, Identifiable {
         case .planThenQuota:
             return language == .vietnamese ? "Gói → Quota" : "Plan → Quota"
         case .quotaThenPlan:
-            return language == .vietnamese ? "Quota → Gói" : "Quota → Plan"
+            return language == .vietnamese ? "Quota trước → Gói" : "Quota first → Plan"
         case .name:
             return language == .vietnamese ? "Tên hiển thị" : "Display name"
         case .email:
@@ -120,6 +139,16 @@ enum QuotaRefreshScope {
 enum AccountActivationSafety {
     static let processDrainAttempts = 20
 
+    /// Documented macOS force-switch ordering. Callers must preserve the live
+    /// session before quitting Desktop so a SIGKILL cannot leave a stale,
+    /// already-consumed refresh token as the roster's "latest" snapshot.
+    static let forceSwitchOrderedSteps = [
+        "preserveLiveSessionBeforeDesktopQuit",
+        "prepareForAccountSwitch",
+        "activate",
+        "relaunchAndConfirm",
+    ]
+
     static func arguments(accountID: UUID, forceDesktop: Bool = false) -> [String] {
         var arguments = ["activate", accountID.uuidString]
         if forceDesktop {
@@ -132,6 +161,12 @@ enum AccountActivationSafety {
         let message = error.localizedDescription.lowercased()
         return message.contains("account switch blocked")
             || message.contains("codex appears to be running")
+    }
+
+    static func isMissingLiveAuthError(_ error: Error) -> Bool {
+        let message = error.localizedDescription.lowercased()
+        return message.contains("no live codex auth")
+            || (message.contains("no live") && message.contains("auth"))
     }
 }
 
@@ -218,11 +253,16 @@ final class AccountStore: ObservableObject {
     private var legacyArchivedAccountIDs: Set<UUID>
     private let legacyAutoSwitchWhenExhaustedKey = "codexRoster.autoSwitchWhenExhausted"
     private let accountSortModeKey = "codexRoster.accountSortMode"
+    /// One-shot migration: force quota-first so users actually see remaining-quota order.
+    private let accountSortModeV2Key = "codexRoster.accountSortMode.v2"
     private let notchPanelEnabledKey = "codexRoster.notchPanelEnabled"
     private var autoSwitchTask: Task<Void, Never>?
     private var quotaRefreshTask: Task<Void, Never>?
     private var vibeUsageTask: Task<Void, Never>?
     private var autoSwitchAllExhaustedNotified = false
+    /// Set when decide reports `all_accounts_exhausted`. While true, monitoring
+    /// may still call decide to detect recovery, but must not close Desktop or apply.
+    private var autoSwitchPausedAllExhausted = false
     private var autoSwitchCooldownUntil: Date?
     private var isInteractiveLoginInProgress = false
     private var isAddAccountSession = false
@@ -248,17 +288,23 @@ final class AccountStore: ObservableObject {
         notchPanelEnabled = defaults.object(forKey: notchPanelEnabledKey) == nil
             ? true
             : defaults.bool(forKey: notchPanelEnabledKey)
-        if let raw = defaults.string(forKey: accountSortModeKey),
+        if defaults.bool(forKey: accountSortModeV2Key),
+           let raw = defaults.string(forKey: accountSortModeKey),
            let mode = AccountSortMode(rawValue: raw) {
             accountSortMode = mode
         } else {
-            accountSortMode = .planThenQuota
+            // Migrate once from the old key / plan-first default to quota-first.
+            accountSortMode = .quotaThenPlan
+            defaults.set(AccountSortMode.quotaThenPlan.rawValue, forKey: accountSortModeKey)
+            defaults.set(true, forKey: accountSortModeV2Key)
         }
     }
 
     func setAccountSortMode(_ mode: AccountSortMode) {
         accountSortMode = mode
-        UserDefaults.standard.set(mode.rawValue, forKey: accountSortModeKey)
+        let defaults = UserDefaults.standard
+        defaults.set(mode.rawValue, forKey: accountSortModeKey)
+        defaults.set(true, forKey: accountSortModeV2Key)
     }
 
     func setNotchPanelEnabled(_ enabled: Bool) {
@@ -268,19 +314,14 @@ final class AccountStore: ObservableObject {
 
     func sortedAccounts(_ accounts: [SavedAccount]) -> [SavedAccount] {
         accounts.sorted { left, right in
+            // Display order is weekly-first via switchQuotaScore (weekly×1000+5H;
+            // weekly depleted → -1). Usable-for-switch stays for auto-switch /
+            // Ready triage only — not a primary display key.
+            if left.switchQuotaScore != right.switchQuotaScore {
+                return accountSortIsOrderedByWeeklyQuota(left, right)
+            }
             switch accountSortMode {
-            case .planThenQuota:
-                if left.planSortRank != right.planSortRank {
-                    return left.planSortRank < right.planSortRank
-                }
-                if left.switchQuotaScore != right.switchQuotaScore {
-                    return left.switchQuotaScore > right.switchQuotaScore
-                }
-                return left.displayName.localizedCaseInsensitiveCompare(right.displayName) == .orderedAscending
-            case .quotaThenPlan:
-                if left.switchQuotaScore != right.switchQuotaScore {
-                    return left.switchQuotaScore > right.switchQuotaScore
-                }
+            case .planThenQuota, .quotaThenPlan:
                 if left.planSortRank != right.planSortRank {
                     return left.planSortRank < right.planSortRank
                 }
@@ -416,6 +457,16 @@ final class AccountStore: ObservableObject {
                 // OpenAI accepts the freshly persisted access token.
                 _ = try await self.cli.data(arguments: ["usage", saved.account.id.uuidString, "--json"])
             } catch {
+                // Soft OK: deferred AT unauthorized means the credential was saved;
+                // Desktop will refresh the access token on first use. Do not treat
+                // as login failure (mirrors waitForDesktopAcceptance).
+                if Self.isDeferredAccessTokenUsageError(error.localizedDescription) {
+                    self.clearPendingLoginFlags()
+                    self.newAccountLoginState = .saved(liveIdentity)
+                    try await self.load()
+                    self.lastQuotaRefreshAt = .now
+                    return
+                }
                 self.clearPendingLoginFlags()
                 try? await self.load()
                 throw CLIError(AppLanguage.text(
@@ -470,10 +521,14 @@ final class AccountStore: ObservableObject {
         let liveStatus = try await cli.decode(StatusOutput.self, arguments: ["status"])
         var began = false
         do {
-            // ChatGPT Desktop's bundled Codex app-server holds the fixed
-            // loopback port that `codex login` needs to open its browser.
-            // Close Desktop first so the sign-in window can actually open.
-            await closeDesktopForLogin()
+            // ChatGPT Desktop's bundled Codex app-server may hold the fixed
+            // loopback ports that `codex login` needs (1455 / fallback 1457).
+            // Only quit Desktop when a port is busy — and always save live auth
+            // first so we never kill Desktop on top of an unsaved RT.
+            if CodexLoginPort.isBusy {
+                try await preserveLiveSessionBeforeDesktopQuit()
+                await closeDesktopForLogin()
+            }
             try await beginAddAccountAfterProcessesDrain()
             began = true
             isAddAccountSession = true
@@ -509,8 +564,12 @@ final class AccountStore: ObservableObject {
             newAccountLoginState = .ready(current)
             return
         }
-        // Free the fixed login port before reopening the browser sign-in.
-        await closeDesktopForLogin()
+        // Free the fixed login port before reopening the browser sign-in,
+        // but only quit Desktop when the Codex login ports are actually busy.
+        if CodexLoginPort.isBusy {
+            try? await preserveLiveSessionBeforeDesktopQuit()
+            await closeDesktopForLogin()
+        }
         try CodexLoginLauncher.start()
         watchForNewAccount(after: nil)
     }
@@ -566,6 +625,13 @@ final class AccountStore: ObservableObject {
         do {
             _ = try await cli.data(arguments: ["usage", account.id.uuidString, "--json"])
         } catch {
+            // Soft OK: deferred AT unauthorized — credential saved; Desktop owns AT refresh.
+            if Self.isDeferredAccessTokenUsageError(error.localizedDescription) {
+                clearPendingLoginFlags()
+                newAccountLoginState = .idle
+                try await load()
+                return
+            }
             clearPendingLoginFlags()
             try? await load()
             throw CLIError(AppLanguage.text(
@@ -589,6 +655,8 @@ final class AccountStore: ObservableObject {
 
     /// Quit ChatGPT Desktop so `codex login` can bind its fixed loopback port
     /// and open the browser sign-in. Records which apps to reopen afterwards.
+    /// Callers must probe `CodexLoginPort.isBusy` first and preserve the live
+    /// session before invoking this.
     private func closeDesktopForLogin() async {
         guard ChatGPTDesktop.isRunning else { return }
         pendingLoginDesktopRelaunch = try? await ChatGPTDesktop.prepareForAccountSwitch(force: true)
@@ -619,9 +687,15 @@ final class AccountStore: ObservableObject {
     func activate(_ account: SavedAccount, force: Bool = false) {
         run(switching: true) {
             let desktopWasRunning = ChatGPTDesktop.isRunning
-            let relaunch = force
-                ? try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
-                : ChatGPTDesktop.RelaunchPlan.preferredDesktop()
+            // Force path: save live auth WHILE Desktop may still be running,
+            // then quit (graceful first), then activate (saves again), then relaunch.
+            let relaunch: ChatGPTDesktop.RelaunchPlan
+            if force {
+                try await self.preserveLiveSessionBeforeDesktopQuit()
+                relaunch = try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
+            } else {
+                relaunch = ChatGPTDesktop.RelaunchPlan.preferredDesktop()
+            }
             let activated: ActivateOutput
             do {
                 activated = try await self.activateAfterProcessesDrain(
@@ -667,6 +741,26 @@ final class AccountStore: ObservableObject {
             if self.accounts.contains(where: { $0.id == activated.account.id && $0.isActive }) {
                 self.lastQuotaRefreshAt = .now
             }
+        }
+    }
+
+    /// Persist the live `~/.codex` session into the roster before quitting Desktop.
+    /// Ignores missing-auth only; any other save failure aborts the switch so we
+    /// never force-quit on top of an unsaved live session.
+    private func preserveLiveSessionBeforeDesktopQuit() async throws {
+        let authPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/auth.json")
+        let hasLiveAuthFile = FileManager.default.fileExists(atPath: authPath.path)
+        do {
+            _ = try await cli.data(arguments: ["save", "--json"])
+        } catch {
+            if AccountActivationSafety.isMissingLiveAuthError(error) || !hasLiveAuthFile {
+                return
+            }
+            throw CLIError(AppLanguage.text(
+                "Không thể lưu phiên đang mở trước khi đóng ChatGPT. Chuyển tài khoản đã bị hủy để tránh mất phiên: \(error.localizedDescription)",
+                "Could not preserve the live session before quitting ChatGPT. The account switch was aborted to avoid losing the session: \(error.localizedDescription)"
+            ))
         }
     }
 
@@ -853,7 +947,13 @@ final class AccountStore: ObservableObject {
                     ? Array(self.accounts.filter { !self.isArchived($0) }.prefix(1))
                     : active
             case .allSaved:
-                targets = self.accounts.filter { !self.isArchived($0) }
+                // Session longevity: skip deferred / login-blocking rows on mass refresh.
+                targets = self.accounts.filter {
+                    !self.isArchived($0)
+                        && !$0.requiresLogin
+                        && !$0.requiresLocalRecovery
+                        && !$0.hasDeferredAccessTokenRefresh
+                }
             }
             for account in targets {
                 _ = try? await self.cli.data(arguments: ["usage", account.id.uuidString, "--json"])
@@ -875,7 +975,7 @@ final class AccountStore: ObservableObject {
 
     func refreshUsage(for accounts: [SavedAccount]) {
         let targets = accounts.filter {
-            !$0.archived && !$0.requiresLogin && !$0.requiresLocalRecovery
+            !$0.archived && !$0.requiresLogin && !$0.requiresLocalRecovery && !$0.hasDeferredAccessTokenRefresh
         }
         guard !targets.isEmpty else { return }
         run {
@@ -914,6 +1014,8 @@ final class AccountStore: ObservableObject {
             self.autoSwitchWhenExhausted = enabled
             self.autoSwitchState = nil
             self.autoSwitchAllExhaustedNotified = false
+            // Off→on clears the all-exhausted pause so monitoring can retry.
+            self.autoSwitchPausedAllExhausted = false
             if enabled {
                 Task { await self.checkAutoSwitchWhenExhausted() }
             }
@@ -944,7 +1046,10 @@ final class AccountStore: ObservableObject {
                 standardInput: password + "\n"
             )
             try await self.load()
-            self.backupStatusMessage = "Đã nhập bản sao lưu mã hóa."
+            self.backupStatusMessage = AppLanguage.text(
+                "Đã nhập bản sao lưu. Snapshot có thể giữ refresh token cũ hơn phiên Codex đang sống — hãy Save current trước, và đừng kích hoạt hàng vừa khôi phục một cách mù quáng (có thể buộc đăng nhập lại).",
+                "Backup imported. Restored snapshots may hold stale refresh tokens vs live Codex — save the current session first, and do not activate restored rows blindly (that can force re-login)."
+            )
         }
     }
 
@@ -952,7 +1057,10 @@ final class AccountStore: ObservableObject {
         run {
             _ = try await self.cli.data(arguments: ["restore-account-list-backup", "--json"])
             try await self.load()
-            self.backupStatusMessage = "Đã khôi phục danh sách từ bản sao lưu tự động gần nhất."
+            self.backupStatusMessage = AppLanguage.text(
+                "Đã khôi phục danh sách. Snapshot có thể giữ refresh token cũ hơn phiên Codex đang sống — hãy Save current trước, và đừng kích hoạt hàng vừa khôi phục một cách mù quáng (có thể buộc đăng nhập lại).",
+                "Account list restored. Restored snapshots may hold stale refresh tokens vs live Codex — save the current session first, and do not activate restored rows blindly (that can force re-login)."
+            )
         }
     }
 
@@ -960,7 +1068,10 @@ final class AccountStore: ObservableObject {
         run {
             _ = try await self.cli.data(arguments: ["restore-full-backup", "--json"])
             try await self.load()
-            self.backupStatusMessage = "Đã khôi phục toàn bộ tài khoản và phiên sao lưu tự động gần nhất."
+            self.backupStatusMessage = AppLanguage.text(
+                "Đã khôi phục phiên sao lưu. Snapshot có thể giữ refresh token cũ hơn phiên Codex đang sống — hãy Save current trước, và đừng kích hoạt hàng vừa khôi phục một cách mù quáng (có thể buộc đăng nhập lại).",
+                "Full backup restored. Restored snapshots may hold stale refresh tokens vs live Codex — save the current session first, and do not activate restored rows blindly (that can force re-login)."
+            )
         }
     }
 
@@ -1140,11 +1251,14 @@ final class AccountStore: ObservableObject {
         }
         do {
             // Always decide first — ChatGPT being open must not hide an exhausted active account.
+            // While paused (all exhausted), still decide so recovery can clear the pause,
+            // but never close Desktop / apply until a usable candidate exists.
             let decision: AutoSwitchOutput = try await cli.decode(AutoSwitchOutput.self, arguments: ["auto-switch"])
             switch decision.status {
             case "active_has_quota":
-                let wasExhausted = autoSwitchAllExhaustedNotified
+                let wasExhausted = autoSwitchAllExhaustedNotified || autoSwitchPausedAllExhausted
                 autoSwitchAllExhaustedNotified = false
+                autoSwitchPausedAllExhausted = false
                 autoSwitchState = nil
                 // Notify user when quota recovers after being exhausted
                 if wasExhausted {
@@ -1153,12 +1267,15 @@ final class AccountStore: ObservableObject {
             case "waiting_for_login":
                 autoSwitchState = .waitingForLogin
             case "all_accounts_exhausted":
+                autoSwitchPausedAllExhausted = true
                 if !autoSwitchAllExhaustedNotified {
                     autoSwitchState = .allAccountsExhausted
                     autoSwitchAllExhaustedNotified = true
                 }
+                // Stop switching attempts until active recovers or the user re-enables.
+                return
             case "banked_reset_available":
-                autoSwitchAllExhaustedNotified = false
+                // UI-only: banked resets are not spendable quota; never auto-switch here.
                 autoSwitchState = .bankedResetAvailable(
                     account: decision.candidateDisplayName
                         ?? AppLanguage.text("một tài khoản", "an account"),
@@ -1166,6 +1283,9 @@ final class AccountStore: ObservableObject {
                     isActive: decision.candidateAccountId == decision.activeAccountId
                 )
             case "ready":
+                // An eligible usable candidate exists — clear any all-exhausted pause.
+                autoSwitchPausedAllExhausted = false
+                autoSwitchAllExhaustedNotified = false
                 guard !isBusyForActions else { return }
                 guard !CodexActivityDetector.isTurnActive() else {
                     autoSwitchState = .generationInProgress
@@ -1176,12 +1296,13 @@ final class AccountStore: ObservableObject {
                 let previousAccountID = decision.activeAccountId
                 let candidateName = decision.candidateDisplayName
                     ?? AppLanguage.text("tài khoản khác", "another account")
-                // Close Desktop when open, switch ~/.codex, then reopen. A live
-                // Codex CLI must defer switching even after Desktop has quit.
+                // Save live auth first, then close Desktop, switch ~/.codex, reopen.
+                // A live Codex CLI must defer switching even after Desktop has quit.
                 var relaunch = ChatGPTDesktop.RelaunchPlan.preferredDesktop()
                 var didCloseDesktop = false
                 if ChatGPTDesktop.isRunning {
                     autoSwitchState = .closingDesktop
+                    try await self.preserveLiveSessionBeforeDesktopQuit()
                     relaunch = try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
                     didCloseDesktop = true
                 }
@@ -1380,24 +1501,19 @@ final class AccountStore: ObservableObject {
     }
 
     /// Whether a `usage` probe error means the target account is genuinely
-    /// signed out and the switch must roll back. Mirrors
-    /// `usage_error_requires_login` in `src/usage.rs`, the source of truth for
-    /// this classification: a plain access-token 401 is deliberately excluded
-    /// because the saved refresh token was not proven invalid.
+    /// signed out and the switch must roll back.
+    /// Source of truth: `usage_error_requires_login` in `src/usage.rs`.
+    /// A plain access-token 401 / deferred `[access_token_unauthorized]` is
+    /// deliberately excluded because the saved refresh token was not proven invalid.
     private static func usageErrorForcesRollback(_ message: String) -> Bool {
-        let error = message.lowercased()
-        if error.contains("login required")
-            || error.contains("usage authorization failed")
-            || error.contains("snapshot refresh token missing")
-            || error.contains("refresh_token_invalidated")
-            || error.contains("your session has ended") {
-            return true
-        }
-        return error.contains("token refresh failed")
-            && (error.contains("invalid_grant")
-                || error.contains("refresh token")
-                || error.contains("log out")
-                || error.contains("sign in"))
+        usageErrorRequiresLogin(message)
+    }
+
+    /// Soft post-login / post-switch AT failure: credential is saved, but the
+    /// access token was not yet accepted. Mirror Rust
+    /// `usage_error_is_deferred_access_token_refresh`.
+    private static func isDeferredAccessTokenUsageError(_ message: String) -> Bool {
+        usageErrorIsDeferredAccessTokenRefresh(message)
     }
 
     private func rollbackRejectedTarget(
@@ -1411,9 +1527,13 @@ final class AccountStore: ObservableObject {
                 "The previous session rollback point is unavailable."
             ))
         }
-        let relaunch = ChatGPTDesktop.isRunning
-            ? try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
-            : fallbackRelaunch
+        let relaunch: ChatGPTDesktop.RelaunchPlan
+        if ChatGPTDesktop.isRunning {
+            try await preserveLiveSessionBeforeDesktopQuit()
+            relaunch = try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
+        } else {
+            relaunch = fallbackRelaunch
+        }
         _ = try await activateAfterProcessesDrain(accountID: previousAccountID, waitForDrain: true)
         guard await relaunch.launchAndConfirm() else {
             throw CLIError(AppLanguage.text(
@@ -1626,6 +1746,42 @@ private enum CodexLoginLauncher {
     }
 }
 
+/// Codex CLI login callback ports (`codex-rs/login/src/server.rs`).
+/// DEFAULT_PORT = 1455, FALLBACK_PORT = 1457. Desktop's app-server may hold these.
+enum CodexLoginPort {
+    static let primary: UInt16 = 1455
+    static let fallback: UInt16 = 1457
+
+    static var isBusy: Bool {
+        isListening(port: primary) || isListening(port: fallback)
+    }
+
+    private static func isListening(port: UInt16) -> Bool {
+        var hints = addrinfo(
+            ai_flags: AI_NUMERICHOST | AI_NUMERICSERV,
+            ai_family: AF_INET,
+            ai_socktype: SOCK_STREAM,
+            ai_protocol: IPPROTO_TCP,
+            ai_addrlen: 0,
+            ai_canonname: nil,
+            ai_addr: nil,
+            ai_next: nil
+        )
+        var info: UnsafeMutablePointer<addrinfo>?
+        let portString = String(port)
+        guard getaddrinfo("127.0.0.1", portString, &hints, &info) == 0, let info else {
+            return false
+        }
+        defer { freeaddrinfo(info) }
+        let fd = socket(info.pointee.ai_family, info.pointee.ai_socktype, info.pointee.ai_protocol)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        // SO_REUSEADDR alone is not enough to detect a live listener; try connect.
+        let connected = connect(fd, info.pointee.ai_addr, info.pointee.ai_addrlen) == 0
+        return connected
+    }
+}
+
 private enum ChatGPTDesktop {
     /// ChatGPT Desktop on macOS currently ships as `com.openai.codex`.
     private static let bundleIdentifiers = ["com.openai.codex", "com.openai.chat"]
@@ -1634,6 +1790,9 @@ private enum ChatGPTDesktop {
         "/Applications/Codex.app",
     ]
     private static let terminatePollInterval: Duration = .milliseconds(50)
+    /// Wait long enough for ChatGPT/Codex to flush rotated refresh tokens on
+    /// graceful quit before escalating to forceTerminate / SIGKILL.
+    private static let gracefulTerminateDeadline: Duration = .seconds(8)
     private static let forceTerminateDeadline: Duration = .seconds(3)
     private static let launchConfirmDeadline: Duration = .seconds(6)
 
@@ -1750,9 +1909,17 @@ private enum ChatGPTDesktop {
             ))
         }
 
-        // A direct switch is explicitly destructive: quit Desktop immediately, but
-        // wait for it to exit before touching the shared Codex auth files.
+        // Prefer a graceful quit so Desktop can flush the latest rotated refresh
+        // token to disk. Callers that switch accounts must save the live session
+        // before invoking this with force: true.
         for app in runningApps {
+            app.terminate()
+        }
+        if await waitUntilQuit(deadline: gracefulTerminateDeadline) {
+            killOrphanDesktopCodexServers()
+            return relaunch
+        }
+        for app in runningApplications {
             app.forceTerminate()
             kill(app.processIdentifier, SIGTERM)
         }
@@ -2520,15 +2687,18 @@ struct SavedAccount: Identifiable, Decodable {
     }
 
     var requiresLogin: Bool {
-        usageError?.localizedCaseInsensitiveContains("login required") == true
+        // Source of truth: `usage_error_requires_login` in `src/usage.rs`.
+        usageErrorRequiresLogin(usageError)
     }
 
     var requiresLocalRecovery: Bool {
-        usageError?.localizedCaseInsensitiveContains("local recovery required") == true
+        // Source of truth: `usage_error_requires_local_recovery` in `src/usage.rs`.
+        usageErrorRequiresLocalRecovery(usageError)
     }
 
     var hasDeferredAccessTokenRefresh: Bool {
-        usageError?.localizedCaseInsensitiveContains("[access_token_unauthorized]") == true
+        // Source of truth: `usage_error_is_deferred_access_token_refresh` in `src/usage.rs`.
+        usageErrorIsDeferredAccessTokenRefresh(usageError)
     }
 
     var hasTransientUsageError: Bool {
@@ -2585,12 +2755,28 @@ struct SavedAccount: Identifiable, Decodable {
     }
 
     var isExhaustedForSwitch: Bool {
-        !hasUsableCredits && quotaWindowsForSwitch.contains { $0.isDepleted }
+        if hasUsableCredits { return false }
+        // Weekly depletion alone exhausts the account for switch purposes.
+        if let weekly = usage?.weekly, weekly.isDepleted { return true }
+        return quotaWindowsForSwitch.contains { $0.isDepleted }
     }
 
+    /// Weekly-dominant usability: a depleted weekly window blocks switch even
+    /// when 5H still has leftover, unless the account has usable credits.
     var isUsableForSwitch: Bool {
-        hasUsableCredits
-            || (!quotaWindowsForSwitch.isEmpty && quotaWindowsForSwitch.allSatisfy { !$0.isDepleted })
+        if hasUsableCredits { return true }
+        if let weekly = usage?.weekly {
+            if weekly.isDepleted { return false }
+            if let fiveHour = usage?.fiveHour {
+                return !fiveHour.isDepleted
+            }
+            return true
+        }
+        // No weekly window → fall back to five-hour only.
+        if let fiveHour = usage?.fiveHour {
+            return !fiveHour.isDepleted
+        }
+        return false
     }
 
     var canSwitchUsingBankedReset: Bool {
@@ -2601,8 +2787,18 @@ struct SavedAccount: Identifiable, Decodable {
         )
     }
 
+    /// Weekly-dominant ranking: `weekly * 1000 + fiveHour` so any weekly gap
+    /// outranks any 5H-only difference. Depleted weekly → `-1`.
     var switchQuotaScore: Int {
-        quotaWindowsForSwitch.map(\.remainingPercent).min() ?? -1
+        if let weekly = usage?.weekly {
+            if weekly.isDepleted { return -1 }
+            let five = usage?.fiveHour?.remainingPercent ?? 0
+            return weekly.remainingPercent * 1000 + five
+        }
+        if let fiveHour = usage?.fiveHour {
+            return fiveHour.isDepleted ? -1 : fiveHour.remainingPercent
+        }
+        return -1
     }
 
     /// Single source of truth for where an account belongs in the triage board.
@@ -2670,9 +2866,52 @@ func bankedResetSwitchIsAllowed(
     }
 }
 
+/// Display roster ordering by weekly-dominant `switchQuotaScore` (higher first).
+/// Weekly depleted scores `-1` so 5H leftovers do not float above healthy weekly.
+/// Mode tie-breakers apply only when scores tie. Keep `isUsableForSwitch` for
+/// auto-switch / Ready filters — not as a primary display sort key.
+func accountSortIsOrderedByWeeklyQuota(_ left: SavedAccount, _ right: SavedAccount) -> Bool {
+    left.switchQuotaScore > right.switchQuotaScore
+}
+
+/// Shared notch roster sizing: collapsed 260pt scroll area inside a 480pt deck;
+/// expanded fits all 2-column rows for typical ≤20 accounts.
+enum NotchRosterLayout {
+    static let collapsedDeckHeight: CGFloat = 480
+    static let collapsedRosterHeight: CGFloat = 260
+    static let rowHeight: CGFloat = 54
+    static let rowSpacing: CGFloat = 7
+    static let gridVerticalPadding: CGFloat = 6
+    /// Soft cap (~24 accounts) so pathological rosters stay screen-safe.
+    static let maxFittedRows = 12
+    static let rosterExpandedKey = "codex_roster_notch_roster_expanded"
+
+    static func rosterGridHeight(accountCount: Int, expanded: Bool) -> CGFloat {
+        guard expanded else { return collapsedRosterHeight }
+        let rows = max(1, Int(ceil(Double(max(accountCount, 0)) / 2.0)))
+        let fittedRows = min(rows, maxFittedRows)
+        return CGFloat(fittedRows) * rowHeight
+            + CGFloat(max(0, fittedRows - 1)) * rowSpacing
+            + gridVerticalPadding
+    }
+
+    static func deckHeight(accountCount: Int, expanded: Bool) -> CGFloat {
+        collapsedDeckHeight - collapsedRosterHeight
+            + rosterGridHeight(accountCount: accountCount, expanded: expanded)
+    }
+}
+
 func activationIsBlockedByUsageError(_ usageError: String?) -> Bool {
+    // Source of truth: `usage_error_blocks_activation` in `src/usage.rs`
+    // (= requires_login || requires_local_recovery). Deferred AT unauthorized
+    // deliberately does NOT block activation.
+    usageErrorRequiresLogin(usageError) || usageErrorRequiresLocalRecovery(usageError)
+}
+
+/// Mirrors `usage_error_requires_login` in `src/usage.rs` (source of truth).
+func usageErrorRequiresLogin(_ usageError: String?) -> Bool {
     let error = usageError?.lowercased() ?? ""
-    let requiresLogin = error.contains("login required")
+    return error.contains("login required")
         || error.contains("usage authorization failed")
         || error.contains("snapshot refresh token missing")
         || error.contains("refresh_token_invalidated")
@@ -2682,11 +2921,23 @@ func activationIsBlockedByUsageError(_ usageError: String?) -> Bool {
                 || error.contains("refresh token")
                 || error.contains("log out")
                 || error.contains("sign in")))
-    let requiresLocalRecovery = error.contains("local recovery required")
+}
+
+/// Mirrors `usage_error_requires_local_recovery` in `src/usage.rs` (source of truth).
+func usageErrorRequiresLocalRecovery(_ usageError: String?) -> Bool {
+    let error = usageError?.lowercased() ?? ""
+    return error.contains("local recovery required")
         || error.contains("decrypt")
         || error.contains("credential key")
         || error.contains("snapshot payload")
-    return requiresLogin || requiresLocalRecovery
+}
+
+/// Mirrors `usage_error_is_deferred_access_token_refresh` in `src/usage.rs`
+/// (source of truth). Soft signal only — never forces Login required.
+func usageErrorIsDeferredAccessTokenRefresh(_ usageError: String?) -> Bool {
+    let error = usageError?.lowercased() ?? ""
+    return error.contains("[access_token_unauthorized]")
+        || error.contains("access_token_unauthorized")
 }
 
 struct AccountUsage: Decodable {

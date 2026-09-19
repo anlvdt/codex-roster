@@ -15,6 +15,9 @@ use crate::operation_lock::OperationLock;
 use crate::repository::SnapshotRepository;
 use crate::secrets::{MigratingSecretStore, SecretStore};
 use crate::settings::{load_settings, save_settings};
+use crate::usage::{
+    usage_error_blocks_activation, usage_error_is_deferred_access_token_refresh,
+};
 
 use super::App;
 
@@ -65,6 +68,35 @@ where
         let now = OffsetDateTime::now_utc();
         let mut due_accounts = Vec::new();
         for account in &accounts {
+            if account.archived {
+                output
+                    .skipped
+                    .push(format!("{}: archived", account.email));
+                continue;
+            }
+            // Session longevity: never mass-probe deferred / login-blocking rows.
+            if account
+                .cached_usage_error
+                .as_deref()
+                .is_some_and(usage_error_blocks_activation)
+            {
+                output.skipped.push(format!(
+                    "{}: skipped login/local-recovery blocked usage error",
+                    account.email
+                ));
+                continue;
+            }
+            if account
+                .cached_usage_error
+                .as_deref()
+                .is_some_and(usage_error_is_deferred_access_token_refresh)
+            {
+                output.skipped.push(format!(
+                    "{}: skipped deferred access-token unauthorized",
+                    account.email
+                ));
+                continue;
+            }
             match self.usage(Some(account.id)) {
                 Ok(usage) => {
                     if usage

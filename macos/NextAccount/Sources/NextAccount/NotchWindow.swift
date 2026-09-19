@@ -73,6 +73,7 @@ struct NotchWindowView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.openWindow) private var openWindow
     @AppStorage("codex_roster_notch_pinned_live") private var isPinnedLive = false
+    @AppStorage(NotchRosterLayout.rosterExpandedKey) private var isRosterExpanded = false
 
     @State private var expansionState: NotchExpansionState = .collapsed
     @State private var hoverTask: Task<Void, Never>?
@@ -102,6 +103,17 @@ struct NotchWindowView: View {
         store.accounts.first { $0.isActive && !store.isArchived($0) }
     }
 
+    private var rosterAccountCount: Int {
+        store.accounts.filter { !$0.archived }.count
+    }
+
+    private var expandedPanelHeight: CGFloat {
+        NotchRosterLayout.deckHeight(
+            accountCount: rosterAccountCount,
+            expanded: isRosterExpanded
+        )
+    }
+
     private var compactHeight: CGFloat {
         notchInset > 0 ? notchInset : 32
     }
@@ -122,7 +134,7 @@ struct NotchWindowView: View {
         case .collapsed:
             return compactHeight
         case .droppingDown, .fullyExpanded:
-            return 480
+            return expandedPanelHeight
         }
     }
 
@@ -152,7 +164,7 @@ struct NotchWindowView: View {
                         ))
                 } else if expansionState == .droppingDown {
                     Color.clear
-                        .frame(height: 480)
+                        .frame(height: expandedPanelHeight)
                 } else {
                     compactBar
                         .transition(.opacity)
@@ -180,7 +192,7 @@ struct NotchWindowView: View {
         }
         .frame(
             width: isWindowExpanded ? maxExpandedWidth : compactWidth,
-            height: isWindowExpanded ? 480 : compactHeight,
+            height: isWindowExpanded ? expandedPanelHeight : compactHeight,
             alignment: .top
         )
         .preferredColorScheme(.dark)
@@ -190,6 +202,7 @@ struct NotchWindowView: View {
                 compactWidth: compactWidth,
                 compactHeight: compactHeight,
                 expandedWidth: maxExpandedWidth,
+                expandedHeight: expandedPanelHeight,
                 panelEnabled: store.notchPanelEnabled,
                 notchInset: $notchInset,
                 notchWidth: $notchWidth
@@ -247,16 +260,11 @@ struct NotchWindowView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showReloginAccount)) { notification in
             let id = (notification.object as? String).flatMap(UUID.init(uuidString:))
                 ?? notification.object as? UUID
-            if let id {
-                // Prefer the posted ID only — never fall back to "first requiresLogin"
-                // when a specific row was clicked (wrong-account Login bug).
-                guard let account = store.accounts.first(where: { $0.id == id }) else { return }
-                if !isExpanded { expand() }
-                accountForRelogin = account
-            } else if let account = store.accounts.first(where: { !store.isArchived($0) && $0.requiresLogin }) {
-                if !isExpanded { expand() }
-                accountForRelogin = account
-            }
+            // Require a concrete account UUID — never fall back to "first requiresLogin".
+            guard let id,
+                  let account = store.accounts.first(where: { $0.id == id }) else { return }
+            if !isExpanded { expand() }
+            accountForRelogin = account
         }
         .onReceive(NotificationCenter.default.publisher(for: .exportBackup)) { _ in
             if !isExpanded { expand() }
@@ -454,6 +462,7 @@ private struct NotchWindowConfigurator: NSViewRepresentable {
     let compactWidth: CGFloat
     let compactHeight: CGFloat
     let expandedWidth: CGFloat
+    let expandedHeight: CGFloat
     let panelEnabled: Bool
     @Binding var notchInset: CGFloat
     @Binding var notchWidth: CGFloat
@@ -513,7 +522,7 @@ private struct NotchWindowConfigurator: NSViewRepresentable {
             // Dynamic sizing: only occupy compact capsule bounds when collapsed so
             // menu-bar icons and menus remain directly clickable without interception.
             let targetWidth = isExpanded ? expandedWidth : compactWidth
-            let targetHeight = isExpanded ? CGFloat(480) : compactHeight
+            let targetHeight = isExpanded ? expandedHeight : compactHeight
             let x = screen.frame.midX - targetWidth / 2
             let y = screen.frame.maxY - targetHeight
             let targetFrame = NSRect(x: x, y: y, width: targetWidth, height: targetHeight)

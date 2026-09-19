@@ -1,0 +1,53 @@
+---
+description: Codex Roster hard rules — session longevity, quota-first sort, auto-switch never to exhausted accounts
+alwaysApply: true
+---
+
+# Codex Roster — hard product rules
+
+Obey these on every change in this repo unless the user explicitly overrides.
+
+## 1. Session longevity (highest priority)
+
+**Keep Codex/OpenAI login sessions alive as long as possible.**
+Only replace a session when impossible to keep (proven-dead RT, explicit re-login, or login-port conflict after live session was already saved).
+
+### Must
+- Save live `~/.codex` into the roster **before** quitting Desktop on switch or add/re-login.
+- Graceful Desktop quit first; force-kill only after waiting.
+- Quota/usage sweeps: access-token only — never auto-exchange refresh tokens for inactive saved accounts.
+- Activation: restore snapshot unchanged; Desktop/Codex owns refresh after launch.
+- Live `allow_refresh = false`.
+- Login required only for definite dead-session signals — not plain AT 401.
+
+### Never
+- `prove_saved_session_refresh` / `refresh_snapshot_if_access_token_stale` on activate, poll, auto-switch, or background health checks.
+- `SavedAccessToken` + `allow_refresh=true`, or live refresh while Desktop may own the RT.
+- Force-quit Desktop before saving the live session.
+- Mass-verify sessions by rotating RTs.
+- Clear deferred AT 401 by proving RT in the background.
+- Activate backup snapshot without saving current live session first.
+
+## 2. Quota sorting
+
+- Display order: **weekly-first** via `switchQuotaScore` (`weekly×1000 + fiveHour`; weekly dead → −1). Do **not** use usable-first for display (that wrongly ranks Wk2 above Wk84/5H0).
+- **Weekly dominates 5H:** if Weekly is depleted, 5H is irrelevant for rank (bottom).
+- Auto-switch / Ready still require `isUsableForSwitch` (both windows OK, or credits).
+- Grids iterate one sorted array **top→bottom, left→right** (row-major).
+- Notch roster: offer expand toggle to show all accounts without scrolling.
+
+## 3. Auto-switch
+
+- Switch **only** to an account with usable quota.
+- **Never** auto-switch to an exhausted account (enforce on decide, fresh revalidate gate, and apply pre-activate).
+- When all accounts are exhausted: **stop** — pause until quota recovers or user re-enables auto-switch.
+- Do not auto-switch for banked-reset-only.
+- Do not silent-target Free/Go.
+
+## 4. Row identity
+
+- Login / Delete / Activate / context menus bind by **captured account UUID**, never index or “first requiresLogin”.
+
+## Tradeoff
+
+Session longevity beats fresher quota, faster switches, and aggressive background validation.

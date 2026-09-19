@@ -252,7 +252,7 @@ struct PrismMetricsTableView: View {
             }
 
             VStack(spacing: 2) {
-                ForEach(store.accounts) { account in
+                ForEach(store.sortedAccounts(store.accounts.filter { !$0.archived })) { account in
                     HStack(spacing: 6) {
                         Circle()
                             .fill(account.isActive ? PrismTheme.emerald : (account.requiresLogin ? PrismTheme.amber : Color.secondary.opacity(0.4)))

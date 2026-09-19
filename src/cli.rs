@@ -583,6 +583,9 @@ pub fn run() -> Result<()> {
                 print_json(&serde_json::json!({ "created": created, "updated": updated }))?;
             } else {
                 println!("Imported {created} new and updated {updated} saved accounts");
+                eprintln!(
+                    "Warning: restored snapshots may hold stale refresh tokens vs live Codex. Save the current session first; do not activate restored rows blindly (that can force re-login)."
+                );
             }
             Ok(())
         }
@@ -601,6 +604,9 @@ pub fn run() -> Result<()> {
                 for account in &output.accounts {
                     println!("  {} <{}>", account.email, account.id);
                 }
+                eprintln!(
+                    "Warning: restored snapshots may hold stale refresh tokens vs live Codex. Save the current session first; do not activate restored rows blindly (that can force re-login)."
+                );
             }
             Ok(())
         }
@@ -610,6 +616,9 @@ pub fn run() -> Result<()> {
                 print_json(&serde_json::json!({ "accounts": accounts }))?;
             } else {
                 println!("Restored account list with {accounts} accounts");
+                eprintln!(
+                    "Warning: restored snapshots may hold stale refresh tokens vs live Codex. Save the current session first; do not activate restored rows blindly (that can force re-login)."
+                );
             }
             Ok(())
         }
@@ -619,6 +628,9 @@ pub fn run() -> Result<()> {
                 print_json(&serde_json::json!({ "accounts": accounts }))?;
             } else {
                 println!("Restored full backup with {accounts} accounts");
+                eprintln!(
+                    "Warning: restored snapshots may hold stale refresh tokens vs live Codex. Save the current session first; do not activate restored rows blindly (that can force re-login)."
+                );
             }
             Ok(())
         }

@@ -11,6 +11,7 @@ struct PrismQuickSwitchDeck: View {
     @Environment(\.colorScheme) private var colorScheme
 
     @AppStorage("codex_roster_notch_pinned_live") private var isPinnedLive = false
+    @AppStorage(NotchRosterLayout.rosterExpandedKey) private var isRosterExpanded = false
 
     var openDashboard: () -> Void = {}
     var openAddAccountFlow: () -> Void = {}
@@ -20,7 +21,7 @@ struct PrismQuickSwitchDeck: View {
     var openEditAccount: (SavedAccount) -> Void = { _ in }
     var openAbout: () -> Void = {}
 
-    @State private var rosterFilter: AccountTriage? = nil
+    @State private var rosterFilter: RosterListFilter = .all
     @State private var rosterSearch: String = ""
     @State private var justSwitchedID: UUID? = nil
 
@@ -30,10 +31,7 @@ struct PrismQuickSwitchDeck: View {
 
     private var filteredAccounts: [SavedAccount] {
         let matching = store.accounts.filter { account in
-            let matchesFilter: Bool = {
-                guard let filter = rosterFilter else { return true }
-                return account.triage == filter
-            }()
+            let matchesFilter = rosterFilter.matches(account)
             let matchesSearch: Bool = {
                 guard !rosterSearch.isEmpty else { return true }
                 return account.displayName.localizedCaseInsensitiveContains(rosterSearch)
@@ -42,6 +40,20 @@ struct PrismQuickSwitchDeck: View {
             return matchesFilter && matchesSearch
         }
         return store.sortedAccounts(matching)
+    }
+
+    private var rosterGridHeight: CGFloat {
+        NotchRosterLayout.rosterGridHeight(
+            accountCount: filteredAccounts.count,
+            expanded: isRosterExpanded
+        )
+    }
+
+    private var deckHeight: CGFloat {
+        NotchRosterLayout.deckHeight(
+            accountCount: filteredAccounts.count,
+            expanded: isRosterExpanded
+        )
     }
 
     private var switchableShortcutMap: [UUID: Int] {
@@ -59,13 +71,9 @@ struct PrismQuickSwitchDeck: View {
     }
 
     private var readyCandidates: [SavedAccount] {
-        store.accounts
-            .filter { !$0.isActive && !$0.archived && !$0.usageErrorBlocksActivation }
-            .sorted { a, b in
-                let aQuota = a.usage?.fiveHour?.displayRemainingPercent ?? -1
-                let bQuota = b.usage?.fiveHour?.displayRemainingPercent ?? -1
-                return aQuota > bQuota
-            }
+        store.sortedAccounts(
+            store.accounts.filter { !$0.isActive && !$0.archived && !$0.usageErrorBlocksActivation }
+        )
     }
 
     var body: some View {
@@ -79,7 +87,9 @@ struct PrismQuickSwitchDeck: View {
         .padding(.horizontal, 14)
         .padding(.top, 12)
         .padding(.bottom, 14)
-        .frame(width: 920, height: 480)
+        .frame(width: 920, height: deckHeight)
+        .animation(PrismTheme.snapSpring, value: isRosterExpanded)
+        .animation(PrismTheme.snapSpring, value: filteredAccounts.count)
     }
 
     // MARK: - Upper Deck (Left Wing 340pt | Center 188pt | Right Wing 340pt)
@@ -489,11 +499,51 @@ struct PrismQuickSwitchDeck: View {
                 Spacer()
 
                 // Filter pills
-                filterTab(label: language.text("Tất cả", "All"), filter: nil)
-                filterTab(label: language.text("Sẵn sàng", "Ready"), filter: .ready)
-                if store.accounts.contains(where: { $0.triage == .needsAction }) {
-                    filterTab(label: language.text("Login", "Action"), filter: .needsAction)
+                filterTab(label: language.text("Tất cả", "All"), filter: .all)
+                filterTab(label: language.text("Sẵn sàng", "Ready"), filter: .triage(.ready))
+                if store.accounts.contains(where: { $0.hasDeferredAccessTokenRefresh }) {
+                    filterTab(label: language.text("Chưa xác minh", "Unverified"), filter: .deferredUnverified)
                 }
+                if store.accounts.contains(where: { $0.triage == .needsAction }) {
+                    filterTab(label: language.text("Login", "Action"), filter: .triage(.needsAction))
+                }
+
+                // Expand roster to fit all rows (no scroll for typical ≤20)
+                Button {
+                    PrismTheme.triggerHaptic()
+                    withAnimation(PrismTheme.snapSpring) {
+                        isRosterExpanded.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 4.5) {
+                        Image(systemName: isRosterExpanded
+                              ? "arrow.down.right.and.arrow.up.left"
+                              : "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 10.5, weight: .bold))
+                        Text(language.text(
+                            isRosterExpanded ? "Thu gọn" : "Mở rộng",
+                            isRosterExpanded ? "Collapse" : "Expand"
+                        ))
+                        .font(.system(size: 11, weight: isRosterExpanded ? .bold : .medium))
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(
+                        Capsule()
+                            .fill(isRosterExpanded ? Color.accentColor.opacity(0.85) : Color.white.opacity(0.07))
+                            .overlay(Capsule().strokeBorder(
+                                isRosterExpanded ? Color.accentColor : Color.white.opacity(0.14),
+                                lineWidth: 0.8
+                            ))
+                    )
+                    .foregroundStyle(isRosterExpanded ? Color.white : Color.primary)
+                }
+                .buttonStyle(.plain)
+                .pointingHandCursor()
+                .help(language.text(
+                    "Xem tất cả account không cần scroll",
+                    "See every account without scrolling"
+                ))
 
                 // Prominent Pin Live Pill Button (30pt height)
                 Button {
@@ -574,6 +624,8 @@ struct PrismQuickSwitchDeck: View {
                     GridItem(.flexible(), spacing: 10)
                 ]
 
+                // ForEach order is LTR row-major (top→bottom, left→right) for
+                // this fixed 2-column grid — same order as `sortedAccounts`.
                 LazyVGrid(columns: columns, spacing: 7) {
                     ForEach(filteredAccounts) { account in
                         PrismCompactAccountCard(
@@ -587,7 +639,7 @@ struct PrismQuickSwitchDeck: View {
                 }
                 .padding(.vertical, 3)
             }
-            .frame(height: 260)
+            .frame(height: rosterGridHeight)
         }
         .padding(12)
         .background(
@@ -597,7 +649,7 @@ struct PrismQuickSwitchDeck: View {
         )
     }
 
-    private func filterTab(label: String, filter: AccountTriage?) -> some View {
+    private func filterTab(label: String, filter: RosterListFilter) -> some View {
         let isSelected = rosterFilter == filter
         return Button {
             PrismTheme.triggerHaptic()
@@ -720,6 +772,16 @@ private struct PrismCompactAccountCard: View {
                             isLunaActive ? "Codex đang chạy bằng Luna Reserve" : "Tài khoản có Luna Reserve",
                             isLunaActive ? "Codex active on Luna Reserve" : "Account has Luna Reserve"
                         ))
+                    }
+
+                    if account.hasDeferredAccessTokenRefresh {
+                        Text(language.text("Chưa xác minh", "Unverified"))
+                            .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.secondary.opacity(0.16)))
+                            .foregroundStyle(.secondary)
+                            .help(account.usageStatus(in: language.language))
                     }
                 }
                 HStack(spacing: 4) {

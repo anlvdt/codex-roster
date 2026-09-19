@@ -239,16 +239,11 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showReloginAccount)) { notification in
             let id = (notification.object as? String).flatMap(UUID.init(uuidString:))
                 ?? notification.object as? UUID
-            if let id {
-                // Prefer the posted ID only — never fall back to "first requiresLogin"
-                // when a specific row was clicked (wrong-account Login bug).
-                guard let account = store.accounts.first(where: { $0.id == id }) else { return }
-                selection = id
-                presentRelogin(account)
-            } else if let account = store.accounts.first(where: { !store.isArchived($0) && $0.requiresLogin }) {
-                selection = account.id
-                presentRelogin(account)
-            }
+            // Require a concrete account UUID — never fall back to "first requiresLogin".
+            guard let id,
+                  let account = store.accounts.first(where: { $0.id == id }) else { return }
+            selection = id
+            presentRelogin(account)
         }
         .onReceive(NotificationCenter.default.publisher(for: .exportBackup)) { _ in
             backupOperation = .export
@@ -981,7 +976,10 @@ struct AutomationSettingsView: View {
             }
             Button(language.text("Hủy", "Cancel"), role: .cancel) {}
         } message: {
-            Text(language.text("Danh sách hiện tại sẽ được thay bằng bản sao tự động gần nhất trên máy này.", "The current account list will be replaced by this Mac's most recent automatic backup."))
+            Text(language.text(
+                "Danh sách hiện tại sẽ được thay bằng bản sao tự động gần nhất. Snapshot khôi phục có thể giữ refresh token cũ hơn phiên Codex đang sống — hãy Save current trước và đừng kích hoạt hàng vừa khôi phục một cách mù quáng (có thể buộc đăng nhập lại).",
+                "The current account list will be replaced by this Mac's most recent automatic backup. Restored snapshots may hold stale refresh tokens vs live Codex — save the current session first and do not activate restored rows blindly (that can force re-login)."
+            ))
         }
         .background {
             Color.clear
@@ -1546,6 +1544,8 @@ private struct AccountTriageBoard: View {
             .pointingHandCursor()
 
             if !isCollapsed {
+                // Adaptive columns still fill LTR row-major: ForEach order from
+                // `sortedAccounts` is the visible quota order (top→bottom, left→right).
                 LazyVGrid(
                     columns: [GridItem(.adaptive(minimum: 268, maximum: 420), spacing: 10, alignment: .top)],
                     alignment: .leading,
@@ -4592,17 +4592,17 @@ func accountForContextMenuAction(in accounts: [SavedAccount], capturedID: UUID) 
     accounts.first { $0.id == capturedID }
 }
 
-/// Account ID to post with `.showReloginAccount`. Always the clicked row when present;
-/// only fall back to the first sign-in-required account when no row was specified.
+/// Account ID to post with `.showReloginAccount`. Always the clicked row when present.
+/// Callers without a captured ID must no-op or open add-account — never pick
+/// "first requiresLogin" (wrong-row Login bug).
 func accountIDForReloginNotification(
     in accounts: [SavedAccount],
     capturedID: UUID?,
     isArchived: (SavedAccount) -> Bool = { $0.archived }
 ) -> UUID? {
-    if let capturedID {
-        return accountForContextMenuAction(in: accounts, capturedID: capturedID)?.id
-    }
-    return accounts.first { !isArchived($0) && $0.requiresLogin }?.id
+    _ = isArchived
+    guard let capturedID else { return nil }
+    return accountForContextMenuAction(in: accounts, capturedID: capturedID)?.id
 }
 
 struct CopyEmailButton: View {

@@ -67,6 +67,16 @@ if grep -F -q 'refresh_snapshot_if_access_token_stale(&snapshot)' <<<"$activatio
   exit 1
 fi
 
+# prove_saved_session_refresh exchanges single-use RTs. It may live only in
+# src/usage.rs (definition + unit tests). Any call site elsewhere is a footgun.
+while IFS= read -r match; do
+  file="${match%%:*}"
+  if [[ "$file" != "$root_dir/src/usage.rs" ]]; then
+    echo "prove_saved_session_refresh must stay confined to src/usage.rs; found: $match" >&2
+    exit 1
+  fi
+done < <(grep -R -n -F --include='*.rs' 'prove_saved_session_refresh(' "$root_dir/src" || true)
+
 if grep -F -A 2 'UsageSource::SavedAccessToken,' \
   "$root_dir/src/app/service.rs" | grep -F -q 'true'; then
   echo "Unsafe background refresh-token rotation detected for a saved account." >&2

@@ -16,7 +16,7 @@ struct PrismBentoStudioView: View {
     var editAccount: (SavedAccount) -> Void = { _ in }
     var deleteAccount: (SavedAccount) -> Void = { _ in }
 
-    @State private var rosterFilter: AccountTriage? = nil
+    @State private var rosterFilter: RosterListFilter = .all
     @State private var rosterSearch: String = ""
     @State private var isShowingMetricsTable = false
 
@@ -26,10 +26,7 @@ struct PrismBentoStudioView: View {
 
     private var filteredAccounts: [SavedAccount] {
         let matching = store.accounts.filter { account in
-            let matchesFilter: Bool = {
-                guard let filter = rosterFilter else { return true }
-                return account.triage == filter
-            }()
+            let matchesFilter = rosterFilter.matches(account)
             let matchesSearch: Bool = {
                 guard !rosterSearch.isEmpty else { return true }
                 return account.displayName.localizedCaseInsensitiveContains(rosterSearch)
@@ -41,9 +38,9 @@ struct PrismBentoStudioView: View {
     }
 
     private var readyCandidates: [SavedAccount] {
-        store.accounts
-            .filter { !$0.isActive && !$0.archived && !$0.usageErrorBlocksActivation }
-            .sorted { ($0.usage?.fiveHour?.displayRemainingPercent ?? 0) > ($1.usage?.fiveHour?.displayRemainingPercent ?? 0) }
+        store.sortedAccounts(
+            store.accounts.filter { !$0.isActive && !$0.archived && !$0.usageErrorBlocksActivation }
+        )
     }
 
     var body: some View {
@@ -407,10 +404,13 @@ struct PrismBentoStudioView: View {
 
                 if !isShowingMetricsTable {
                     // Filter tabs
-                    filterTab(label: language.text("Tất cả", "All"), filter: nil)
-                    filterTab(label: language.text("Sẵn sàng", "Ready"), filter: .ready)
+                    filterTab(label: language.text("Tất cả", "All"), filter: .all)
+                    filterTab(label: language.text("Sẵn sàng", "Ready"), filter: .triage(.ready))
+                    if store.accounts.contains(where: { $0.hasDeferredAccessTokenRefresh }) {
+                        filterTab(label: language.text("Chưa xác minh", "Unverified"), filter: .deferredUnverified)
+                    }
                     if store.accounts.contains(where: { $0.triage == .needsAction }) {
-                        filterTab(label: language.text("Login", "Action"), filter: .needsAction)
+                        filterTab(label: language.text("Login", "Action"), filter: .triage(.needsAction))
                     }
                 }
                 // Add Account Button
@@ -452,7 +452,7 @@ struct PrismBentoStudioView: View {
         .prismGlass(cornerRadius: 12)
     }
 
-    private func filterTab(label: String, filter: AccountTriage?) -> some View {
+    private func filterTab(label: String, filter: RosterListFilter) -> some View {
         let isSelected = rosterFilter == filter
         return Button {
             PrismTheme.triggerHaptic()
@@ -636,6 +636,16 @@ private struct PrismAccountRosterRow: View {
                             isLunaActive ? "Codex đang chạy Luna Reserve" : "Tài khoản có Luna Reserve",
                             isLunaActive ? "Codex active on Luna Reserve" : "Account has Luna Reserve"
                         ))
+                    }
+
+                    if account.hasDeferredAccessTokenRefresh {
+                        Text(language.text("Chưa xác minh", "Unverified"))
+                            .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.secondary.opacity(0.16)))
+                            .foregroundStyle(.secondary)
+                            .help(account.usageStatus(in: language.language))
                     }
                 }
                 HStack(spacing: 4) {

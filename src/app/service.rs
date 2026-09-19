@@ -199,17 +199,23 @@ where
             // Fresh paid cache skips network/decrypt. Unlabeled or Free must refetch
             // so a stale Plus/Pro roster label cannot hide a Free downgrade, and so
             // a paid account missing plan_label can still become eligible.
+            // Deferred AT unauthorized with fresh usable cache is also eligible —
+            // never call usage(Some) on deferred (early-bail / no RT prove).
             if cached_usage_is_fresh(candidate.cached_usage.as_ref(), now) && confirmed_paid {
                 if is_usable_for_switch(candidate.cached_usage.as_ref()) {
                     usable_candidate_ids.insert(candidate.id);
                 }
                 continue;
             }
+            if candidate
+                .cached_usage_error
+                .as_deref()
+                .is_some_and(usage_error_is_deferred_access_token_refresh)
+            {
+                continue;
+            }
             match self.usage(Some(candidate.id)) {
-                Ok(output)
-                    if is_usable_for_switch(Some(&output.usage))
-                        && !is_free_plan_label(output.usage.plan_label.as_deref()) =>
-                {
+                Ok(output) if fresh_usage_passes_auto_switch_gate(&output.usage) => {
                     usable_candidate_ids.insert(candidate.id);
                 }
                 _ => {}
@@ -231,6 +237,8 @@ where
         // Never tell the GUI to quit ChatGPT on a cache-only guess. A stale
         // >0% window on the only other row (often the same exhausted identity)
         // would otherwise close Desktop every 10s and bounce the session.
+        // `ready` is returned only after revalidated_auto_switch_candidate gates
+        // on fresh usable (non-exhausted, non-Free) AT usage.
         for cached in ranked {
             if let Some(candidate) =
                 self.revalidated_auto_switch_candidate(cached.id, &active, &settings, now)
@@ -368,6 +376,21 @@ where
             ));
         };
 
+        // Final belt: never activate an exhausted / unusable candidate even if a
+        // preferred id or list row slipped past revalidation.
+        if !is_usable_for_switch(candidate.usage.as_ref())
+            || is_exhausted_for_switch(candidate.usage.as_ref())
+        {
+            return Ok(auto_switch_output(
+                enabled,
+                "all_accounts_exhausted",
+                Some(active.id),
+                None,
+                None,
+                Some("No eligible saved account has usable quota.".to_owned()),
+            ));
+        }
+
         let warnings = self.activation_preflight_warnings();
         if !warnings.is_empty() && !force {
             return Ok(auto_switch_output(
@@ -407,7 +430,22 @@ where
         settings: &crate::settings::AppSettings,
         now: time::OffsetDateTime,
     ) -> Option<AccountView> {
-        if self.usage(Some(candidate_id)).is_err() {
+        // Session longevity: deferred AT + fresh usable paid cache is enough for
+        // candidacy. Do not call usage(Some) — that early-bails deferred and must
+        // never exchange RTs here. Activation still restores the snapshot unchanged
+        // so Codex/Desktop owns refresh after launch.
+        if let Some(account) = self.list().ok()?.accounts.into_iter().find(|account| {
+            account.id == candidate_id
+                && deferred_fresh_usable_auto_switch_candidate(account, active, settings, now)
+        }) {
+            return Some(account);
+        }
+
+        // AT-only probe (usage never rotates RT here). Gate on the fresh payload
+        // before trusting list eligibility, so a stale roster row cannot make an
+        // exhausted account look ready/activate-able.
+        let output = self.usage(Some(candidate_id)).ok()?;
+        if !fresh_usage_passes_auto_switch_gate(&output.usage) {
             return None;
         }
         self.list().ok()?.accounts.into_iter().find(|account| {
@@ -1335,19 +1373,72 @@ fn window_is_depleted(remaining_percent: u8) -> bool {
 }
 
 fn is_exhausted_for_switch(usage: Option<&AccountUsageView>) -> bool {
-    !has_usable_credits(usage)
-        && quota_windows(usage).any(|window| window_is_depleted(window.remaining_percent))
+    if has_usable_credits(usage) {
+        return false;
+    }
+    // Weekly depletion alone exhausts the account for switch purposes.
+    if usage
+        .and_then(|usage| usage.weekly.as_ref())
+        .is_some_and(|weekly| window_is_depleted(weekly.remaining_percent))
+    {
+        return true;
+    }
+    quota_windows(usage).any(|window| window_is_depleted(window.remaining_percent))
 }
 
+/// Weekly-dominant usability: a depleted weekly window blocks switch even when
+/// 5H still has leftover, unless the account has usable credits. Missing weekly
+/// falls back to five-hour-only.
 fn is_usable_for_switch(usage: Option<&AccountUsageView>) -> bool {
     if has_usable_credits(usage) {
         return true;
     }
-    let windows = quota_windows(usage).collect::<Vec<_>>();
-    !windows.is_empty()
-        && windows
-            .iter()
-            .all(|window| !window_is_depleted(window.remaining_percent))
+    let Some(usage) = usage else {
+        return false;
+    };
+    if let Some(weekly) = usage.weekly.as_ref() {
+        if window_is_depleted(weekly.remaining_percent) {
+            return false;
+        }
+        return usage
+            .five_hour
+            .as_ref()
+            .map(|five| !window_is_depleted(five.remaining_percent))
+            .unwrap_or(true);
+    }
+    usage
+        .five_hour
+        .as_ref()
+        .is_some_and(|five| !window_is_depleted(five.remaining_percent))
+}
+
+/// Live revalidation gate: fresh AT usage must be spendable, not exhausted, and
+/// not Free/Go. Used by `revalidated_auto_switch_candidate` before list eligibility.
+fn fresh_usage_passes_auto_switch_gate(usage: &AccountUsageView) -> bool {
+    is_usable_for_switch(Some(usage))
+        && !is_exhausted_for_switch(Some(usage))
+        && !is_free_plan_label(usage.plan_label.as_deref())
+}
+
+/// Deferred AT unauthorized accounts with a still-fresh usable paid cache may be
+/// auto-switch candidates without a network usage probe. Never marks Login required.
+fn deferred_fresh_usable_auto_switch_candidate(
+    candidate: &AccountView,
+    active: &AccountView,
+    settings: &crate::settings::AppSettings,
+    now: time::OffsetDateTime,
+) -> bool {
+    candidate
+        .usage_error
+        .as_deref()
+        .is_some_and(usage_error_is_deferred_access_token_refresh)
+        && candidate
+            .usage
+            .as_ref()
+            .is_some_and(|usage| {
+                cached_usage_is_fresh(Some(usage), now) && fresh_usage_passes_auto_switch_gate(usage)
+            })
+        && is_eligible_auto_switch_candidate(candidate, active, settings, now, None)
 }
 
 fn has_usable_credits(usage: Option<&AccountUsageView>) -> bool {
@@ -1478,11 +1569,29 @@ fn is_cached_auto_switch_hint(
         && !is_in_auto_switch_cooldown(settings, candidate.id, now)
 }
 
-fn switch_quota_score(usage: Option<&AccountUsageView>) -> u8 {
-    quota_windows(usage)
-        .map(|window| window.remaining_percent)
-        .min()
-        .unwrap_or_default()
+/// Weekly-dominant ranking: `weekly * 1000 + five_hour` so any weekly gap
+/// outranks any 5H-only difference. Depleted weekly (or missing usable windows)
+/// scores `-1`.
+fn switch_quota_score(usage: Option<&AccountUsageView>) -> i32 {
+    let Some(usage) = usage else {
+        return -1;
+    };
+    if let Some(weekly) = usage.weekly.as_ref() {
+        if window_is_depleted(weekly.remaining_percent) {
+            return -1;
+        }
+        let five = usage
+            .five_hour
+            .as_ref()
+            .map(|window| i32::from(window.remaining_percent))
+            .unwrap_or(0);
+        return i32::from(weekly.remaining_percent) * 1000 + five;
+    }
+    match usage.five_hour.as_ref() {
+        Some(five) if window_is_depleted(five.remaining_percent) => -1,
+        Some(five) => i32::from(five.remaining_percent),
+        None => -1,
+    }
 }
 
 fn is_in_auto_switch_cooldown(
@@ -1576,7 +1685,10 @@ mod tests {
 
     use super::*;
     use crate::codex::auth_json_fixture;
-    use crate::usage::deferred_access_token_unauthorized_message;
+    use crate::usage::{
+        deferred_access_token_unauthorized_message, usage_error_blocks_activation,
+        usage_error_is_deferred_access_token_refresh,
+    };
     use time::OffsetDateTime;
 
     use crate::model::SnapshotFile;
@@ -1924,6 +2036,65 @@ mod tests {
 
         assert!(is_exhausted_for_switch(Some(&usage)));
         assert!(!is_usable_for_switch(Some(&usage)));
+    }
+
+    #[test]
+    fn auto_switch_weekly_depleted_blocks_leftover_five_hour() {
+        let now = OffsetDateTime::now_utc();
+        let weekly_dead = AccountUsageView {
+            source: UsageSource::SavedAccessToken,
+            fetched_at: now,
+            five_hour: Some(UsageWindowView {
+                used_percent: 10,
+                remaining_percent: 90,
+                reset_at: now,
+            }),
+            weekly: Some(UsageWindowView {
+                used_percent: 100,
+                remaining_percent: 0,
+                reset_at: now,
+            }),
+            credits: None,
+            banked_resets: None,
+            plan_label: Some("Pro".to_owned()),
+            subscription_active_until: None,
+            luna_reserve: None,
+        };
+        assert!(is_exhausted_for_switch(Some(&weekly_dead)));
+        assert!(!is_usable_for_switch(Some(&weekly_dead)));
+        assert_eq!(switch_quota_score(Some(&weekly_dead)), -1);
+
+        let high_weekly = AccountUsageView {
+            five_hour: Some(UsageWindowView {
+                used_percent: 95,
+                remaining_percent: 5,
+                reset_at: now,
+            }),
+            weekly: Some(UsageWindowView {
+                used_percent: 40,
+                remaining_percent: 60,
+                reset_at: now,
+            }),
+            ..weekly_dead.clone()
+        };
+        let low_weekly = AccountUsageView {
+            five_hour: Some(UsageWindowView {
+                used_percent: 1,
+                remaining_percent: 99,
+                reset_at: now,
+            }),
+            weekly: Some(UsageWindowView {
+                used_percent: 50,
+                remaining_percent: 50,
+                reset_at: now,
+            }),
+            ..weekly_dead
+        };
+        assert!(is_usable_for_switch(Some(&high_weekly)));
+        assert!(is_usable_for_switch(Some(&low_weekly)));
+        assert_eq!(switch_quota_score(Some(&high_weekly)), 60_005);
+        assert_eq!(switch_quota_score(Some(&low_weekly)), 50_099);
+        assert!(switch_quota_score(Some(&high_weekly)) > switch_quota_score(Some(&low_weekly)));
     }
 
     #[test]
@@ -2300,6 +2471,321 @@ mod tests {
         )
         .expect("paid usable account");
         assert_eq!(picked.id, paid.id);
+    }
+
+    #[test]
+    fn auto_switch_exhausted_zero_percent_never_passes_fresh_gate_or_eligibility() {
+        // Exhausted 0% 5H/Weekly must never be eligible, and revalidation's fresh
+        // usage gate must reject it (returns None path in revalidated_*).
+        let now = OffsetDateTime::now_utc();
+        let settings = crate::settings::AppSettings::default();
+        let window = |remaining: u8| UsageWindowView {
+            used_percent: 100u8.saturating_sub(remaining),
+            remaining_percent: remaining,
+            reset_at: now,
+        };
+        let exhausted_usage = AccountUsageView {
+            source: UsageSource::SavedAccessToken,
+            fetched_at: now,
+            five_hour: Some(window(0)),
+            weekly: Some(window(0)),
+            credits: None,
+            banked_resets: None,
+            plan_label: Some("Pro".to_owned()),
+            subscription_active_until: None,
+            luna_reserve: None,
+        };
+        let exhausted = AccountView {
+            id: Uuid::new_v4(),
+            provider: crate::model::AiProvider::OpenAi,
+            email: "exhausted@example.com".to_owned(),
+            subject: Some("subject-exhausted".to_owned()),
+            name: None,
+            custom_label: None,
+            plan_label: Some("Pro".to_owned()),
+            environment: EnvironmentKind::Linux,
+            is_active: false,
+            created_at: now,
+            updated_at: now,
+            last_activated_at: None,
+            archived: false,
+            usage: Some(exhausted_usage.clone()),
+            usage_error: None,
+        };
+        let mut active = exhausted.clone();
+        active.id = Uuid::new_v4();
+        active.email = "active@example.com".to_owned();
+        active.subject = Some("subject-active".to_owned());
+        active.is_active = true;
+
+        assert!(is_exhausted_for_switch(Some(&exhausted_usage)));
+        assert!(!is_usable_for_switch(Some(&exhausted_usage)));
+        assert!(!fresh_usage_passes_auto_switch_gate(&exhausted_usage));
+        assert!(!is_eligible_auto_switch_candidate(
+            &exhausted, &active, &settings, now, None
+        ));
+        // Preferred exhausted id: apply's revalidation + final belt both refuse.
+        let preferred_exhausted_would_activate = fresh_usage_passes_auto_switch_gate(
+            exhausted.usage.as_ref().expect("usage"),
+        ) && is_eligible_auto_switch_candidate(
+            &exhausted, &active, &settings, now, None
+        );
+        assert!(
+            !preferred_exhausted_would_activate,
+            "apply must not activate a preferred exhausted id"
+        );
+        let apply_status = if preferred_exhausted_would_activate {
+            "switched"
+        } else {
+            "all_accounts_exhausted"
+        };
+        assert_eq!(apply_status, "all_accounts_exhausted");
+    }
+
+    #[test]
+    fn deferred_fresh_usable_cache_is_auto_switch_candidate_without_network() {
+        let now = OffsetDateTime::now_utc();
+        let settings = crate::settings::AppSettings::default();
+        let window = |remaining: u8| UsageWindowView {
+            used_percent: 100u8.saturating_sub(remaining),
+            remaining_percent: remaining,
+            reset_at: now,
+        };
+        let usable = AccountUsageView {
+            source: UsageSource::SavedAccessToken,
+            fetched_at: now,
+            five_hour: Some(window(40)),
+            weekly: Some(window(80)),
+            credits: None,
+            banked_resets: None,
+            plan_label: Some("Pro".to_owned()),
+            subscription_active_until: None,
+            luna_reserve: None,
+        };
+        let deferred = AccountView {
+            id: Uuid::new_v4(),
+            provider: crate::model::AiProvider::OpenAi,
+            email: "deferred@example.com".to_owned(),
+            subject: Some("subject-deferred".to_owned()),
+            name: None,
+            custom_label: None,
+            plan_label: Some("Pro".to_owned()),
+            environment: EnvironmentKind::Linux,
+            is_active: false,
+            created_at: now,
+            updated_at: now,
+            last_activated_at: None,
+            archived: false,
+            usage: Some(usable.clone()),
+            usage_error: Some(deferred_access_token_unauthorized_message()),
+        };
+        let mut active = deferred.clone();
+        active.id = Uuid::new_v4();
+        active.email = "active@example.com".to_owned();
+        active.subject = Some("subject-active".to_owned());
+        active.is_active = true;
+        active.usage_error = None;
+        active.usage = Some(AccountUsageView {
+            source: UsageSource::SavedAccessToken,
+            fetched_at: now,
+            five_hour: Some(window(0)),
+            weekly: Some(window(0)),
+            credits: None,
+            banked_resets: None,
+            plan_label: Some("Pro".to_owned()),
+            subscription_active_until: None,
+            luna_reserve: None,
+        });
+
+        assert!(usage_error_is_deferred_access_token_refresh(
+            deferred.usage_error.as_deref().expect("deferred")
+        ));
+        assert!(!usage_error_blocks_activation(
+            deferred.usage_error.as_deref().expect("deferred")
+        ));
+        assert!(deferred_fresh_usable_auto_switch_candidate(
+            &deferred, &active, &settings, now
+        ));
+        assert!(is_eligible_auto_switch_candidate(
+            &deferred, &active, &settings, now, None
+        ));
+
+        // Login-required must never qualify via the deferred soft path.
+        let mut login_required = deferred.clone();
+        login_required.usage_error =
+            Some("Login required [refresh_token_rejected]: OpenAI rejected the saved refresh token.".to_owned());
+        assert!(!deferred_fresh_usable_auto_switch_candidate(
+            &login_required, &active, &settings, now
+        ));
+    }
+
+    #[test]
+    fn auto_switch_mixed_roster_only_usable_candidate_can_be_ready() {
+        let now = OffsetDateTime::now_utc();
+        let settings = crate::settings::AppSettings::default();
+        let window = |remaining: u8| UsageWindowView {
+            used_percent: 100u8.saturating_sub(remaining),
+            remaining_percent: remaining,
+            reset_at: now,
+        };
+        let account = |email: &str, plan: &str, remaining: u8, active: bool| AccountView {
+            id: Uuid::new_v4(),
+            provider: crate::model::AiProvider::OpenAi,
+            email: email.to_owned(),
+            subject: Some(format!("subject-{email}")),
+            name: None,
+            custom_label: None,
+            plan_label: Some(plan.to_owned()),
+            environment: EnvironmentKind::Linux,
+            is_active: active,
+            created_at: now,
+            updated_at: now,
+            last_activated_at: None,
+            archived: false,
+            usage: Some(AccountUsageView {
+                source: UsageSource::SavedAccessToken,
+                fetched_at: now,
+                five_hour: Some(window(remaining)),
+                weekly: Some(window(remaining)),
+                credits: None,
+                banked_resets: None,
+                plan_label: Some(plan.to_owned()),
+                subscription_active_until: None,
+                luna_reserve: None,
+            }),
+            usage_error: None,
+        };
+        let active = account("active@example.com", "Plus", 0, true);
+        let exhausted = account("exhausted@example.com", "Pro", 0, false);
+        let usable = account("usable@example.com", "Pro", 40, false);
+        let roster = [active.clone(), exhausted.clone(), usable.clone()];
+
+        assert!(!fresh_usage_passes_auto_switch_gate(
+            exhausted.usage.as_ref().expect("usage")
+        ));
+        assert!(fresh_usage_passes_auto_switch_gate(
+            usable.usage.as_ref().expect("usage")
+        ));
+        assert!(!is_eligible_auto_switch_candidate(
+            &exhausted, &active, &settings, now, None
+        ));
+        assert!(is_eligible_auto_switch_candidate(
+            &usable, &active, &settings, now, None
+        ));
+
+        let ranked = ranked_cached_auto_switch_candidates(
+            &roster,
+            &active,
+            &settings,
+            now,
+            None,
+        );
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].id, usable.id);
+
+        // decide's ready path: only a fresh-gated usable id may become the candidate.
+        let ready_candidate = ranked.into_iter().find(|candidate| {
+            fresh_usage_passes_auto_switch_gate(candidate.usage.as_ref().expect("usage"))
+                && is_eligible_auto_switch_candidate(candidate, &active, &settings, now, None)
+        });
+        assert_eq!(
+            ready_candidate.as_ref().map(|c| c.id),
+            Some(usable.id),
+            "mixed roster must only surface the usable account as ready"
+        );
+        assert_ne!(
+            ready_candidate.as_ref().map(|c| c.id),
+            Some(exhausted.id)
+        );
+    }
+
+    #[test]
+    fn auto_switch_all_exhausted_has_no_usable_candidate_for_decide_or_apply() {
+        // Contract for decide/apply: when every paid sibling is at 0% (banked
+        // resets do not count), ranking is empty → status is
+        // all_accounts_exhausted and apply must not activate anyone.
+        let now = OffsetDateTime::now_utc();
+        let settings = crate::settings::AppSettings::default();
+        let window = |remaining: u8| UsageWindowView {
+            used_percent: 100u8.saturating_sub(remaining),
+            remaining_percent: remaining,
+            reset_at: now,
+        };
+        let account = |email: &str, plan: &str, remaining: u8, banked: i64, active: bool| {
+            AccountView {
+                id: Uuid::new_v4(),
+                provider: crate::model::AiProvider::OpenAi,
+                email: email.to_owned(),
+                subject: Some(format!("subject-{email}")),
+                name: None,
+                custom_label: None,
+                plan_label: Some(plan.to_owned()),
+                environment: EnvironmentKind::Linux,
+                is_active: active,
+                created_at: now,
+                updated_at: now,
+                last_activated_at: None,
+                archived: false,
+                usage: Some(AccountUsageView {
+                    source: UsageSource::SavedAccessToken,
+                    fetched_at: now,
+                    five_hour: Some(window(remaining)),
+                    weekly: Some(window(remaining)),
+                    credits: None,
+                    banked_resets: (banked > 0).then_some(crate::model::BankedResetSummaryView {
+                        available_count: banked,
+                        credits: None,
+                    }),
+                    plan_label: Some(plan.to_owned()),
+                    subscription_active_until: None,
+                    luna_reserve: None,
+                }),
+                usage_error: None,
+            }
+        };
+        let active = account("active@example.com", "Plus", 0, 0, true);
+        let exhausted = account("exhausted@example.com", "Pro", 0, 0, false);
+        let banked_only = account("banked@example.com", "Pro", 0, 2, false);
+        let roster = [active.clone(), exhausted.clone(), banked_only.clone()];
+
+        assert!(is_exhausted_for_switch(active.usage.as_ref()));
+        assert!(!is_usable_for_switch(exhausted.usage.as_ref()));
+        assert!(!is_usable_for_switch(banked_only.usage.as_ref()));
+        assert!(!fresh_usage_passes_auto_switch_gate(
+            exhausted.usage.as_ref().expect("usage")
+        ));
+        assert!(!is_eligible_auto_switch_candidate(
+            &exhausted, &active, &settings, now, None
+        ));
+        assert!(!is_eligible_auto_switch_candidate(
+            &banked_only, &active, &settings, now, None
+        ));
+
+        let ranked = ranked_cached_auto_switch_candidates(
+            &roster,
+            &active,
+            &settings,
+            now,
+            None,
+        );
+        assert!(
+            ranked.is_empty(),
+            "all-exhausted roster must not surface a switch candidate"
+        );
+        assert!(
+            best_cached_auto_switch_candidate(&roster, &active, &settings, now, None).is_none()
+        );
+
+        // Mirrors apply_auto_switch's empty-candidate / final-belt branch: no activation.
+        let apply_status = if ranked.is_empty()
+            || ranked.iter().any(|c| {
+                !is_usable_for_switch(c.usage.as_ref()) || is_exhausted_for_switch(c.usage.as_ref())
+            }) {
+            "all_accounts_exhausted"
+        } else {
+            "ready"
+        };
+        assert_eq!(apply_status, "all_accounts_exhausted");
     }
 
     #[test]
@@ -2690,6 +3176,9 @@ mod tests {
     }
 
     #[test]
+    // Defense-in-depth for the macOS force-switch path: Desktop must save/flush
+    // first, but activate itself always re-saves the live session under AuthLock
+    // before restoring the target snapshot (see AccountActivationSafety.forceSwitchOrderedSteps).
     fn activate_preserves_latest_live_tokens_before_switching() {
         let temp = tempdir().expect("tempdir");
         let env = AppEnv {

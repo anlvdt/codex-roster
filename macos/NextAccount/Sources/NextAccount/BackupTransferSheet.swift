@@ -46,6 +46,15 @@ struct BackupTransferSheet: View {
             .foregroundStyle(.secondary)
 
             if !isExport {
+                Text(language.text(
+                    "Cảnh báo: snapshot nhập vào có thể giữ refresh token cũ hơn phiên Codex đang sống. Hãy Save current trước; đừng kích hoạt hàng vừa nhập một cách mù quáng — có thể buộc đăng nhập lại.",
+                    "Warning: imported snapshots may hold stale refresh tokens vs live Codex. Save the current session first; do not activate imported rows blindly — that can force re-login."
+                ))
+                .font(.caption)
+                .foregroundStyle(.orange)
+            }
+
+            if !isExport {
                 HStack {
                     Button(language.text("Chọn file backup…", "Choose backup file…")) {
                         selectedURL = chooseImportFile()

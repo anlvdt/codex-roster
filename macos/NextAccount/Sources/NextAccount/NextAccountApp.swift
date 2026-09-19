@@ -188,12 +188,15 @@ struct CodexRosterApp: App {
         }
         .defaultSize(width: 720, height: 560)
 
-        Settings {
+        // Named Window (not Settings scene): LSUIElement/.accessory apps often
+        // never surface showSettingsWindow:, so the notch menu opens this id.
+        Window(language.text("Cài đặt", "Settings"), id: "settings") {
             AutomationSettingsView()
                 .environmentObject(store)
                 .environmentObject(language)
                 .environment(\.locale, language.language.locale)
         }
+        .defaultSize(width: 470, height: 580)
     }
 
 }
@@ -283,7 +286,7 @@ private struct AccountSidebar: View {
             Button { selection = account.id } label: {
                 HStack(spacing: 10) {
                     Text(String(account.displayName.prefix(1)).uppercased())
-                        .font(.system(size: 11, weight: .bold))
+                        .font(PrismTheme.fontBodyCompactBold)
                         .foregroundStyle(PrismTheme.quotaTint(percent: account.usage?.fiveHour?.displayRemainingPercent))
                         .frame(width: 24, height: 24)
                         .background(Circle().fill(PrismTheme.quotaTint(percent: account.usage?.fiveHour?.displayRemainingPercent).opacity(0.15)))
@@ -387,7 +390,7 @@ private struct AccountSidebar: View {
         return Button { showingSessionSafety.toggle() } label: {
             HStack(spacing: 9) {
                 Image(systemName: isBlocked ? "exclamationmark.triangle.fill" : "lock.shield.fill")
-                    .foregroundStyle(isBlocked ? Color.orange : Color.green)
+                    .foregroundStyle(isBlocked ? PrismTheme.warning : PrismTheme.success)
                 Text(isBlocked
                     ? language.text(
                         "\(store.status?.processWarnings.count ?? 0) tiến trình Codex đang chạy",
@@ -613,7 +616,7 @@ private struct ProviderStatusRow: View {
                     } else {
                         Text(language.text("\(readyAccounts.count) sẵn sàng · \(attentionCount) cần đăng nhập", "\(readyAccounts.count) ready · \(attentionCount) need sign-in"))
                             .font(.caption)
-                            .foregroundStyle(attentionCount == 0 ? Color.secondary : Color.orange)
+                            .foregroundStyle(attentionCount == 0 ? Color.secondary : PrismTheme.warning)
                     }
                 } else if providerState == nil && store.isLoadingProviderStatus {
                     Text(language.text("Đang kiểm tra phiên local…", "Checking local session…"))
@@ -625,7 +628,7 @@ private struct ProviderStatusRow: View {
                         "\(savedCount) saved · \(hasLiveSession ? "live session" : "no live session")"
                     ))
                         .font(.caption)
-                        .foregroundStyle(hasLiveSession ? Color.secondary : Color.orange)
+                        .foregroundStyle(hasLiveSession ? Color.secondary : PrismTheme.warning)
                 }
             }
 
@@ -663,7 +666,7 @@ private struct ProviderStatusRow: View {
                     systemImage: hasLiveSession ? "checkmark.circle.fill" : "circle"
                 )
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(hasLiveSession ? Color.green : Color.secondary)
+                .foregroundStyle(hasLiveSession ? PrismTheme.success : Color.secondary)
             }
         }
         .padding(.vertical, 14)
@@ -853,7 +856,8 @@ struct AutomationSettingsView: View {
 /// The single most useful thing the user can do right now. Derived from the
 /// same `AccountTriage` buckets the board renders, so the banner can never
 /// recommend something the board contradicts.
-private enum NextAction {
+/// Shared by Ops `NextActionBanner` and the notch next-action caption.
+enum NextAction {
     case addAccount
     case switchTo(SavedAccount)
     case redeemBankedReset(SavedAccount)
@@ -908,6 +912,122 @@ private enum NextAction {
             .min { $0.1 < $1.1 }?
             .0
     }
+
+    @MainActor
+    func headline(language: LanguageStore) -> String {
+        switch self {
+        case .addAccount:
+            language.text("Thêm tài khoản đầu tiên", "Add your first account")
+        case .switchTo(let account):
+            language.text("Chuyển sang \(account.displayName)", "Switch to \(account.displayName)")
+        case .redeemBankedReset(let account):
+            language.text("Dùng banked reset của \(account.displayName)", "Redeem \(account.displayName)'s banked reset")
+        case .waitForReset:
+            language.text("Tất cả tài khoản đang nghỉ", "Every account is resting")
+        case .signIn(let accounts):
+            accounts.count == 1
+                ? language.text("Đăng nhập lại \(accounts[0].displayName)", "Sign in to \(accounts[0].displayName)")
+                : language.text("Đăng nhập lại \(accounts.count) tài khoản", "Sign in to \(accounts.count) accounts")
+        case .recover(let account):
+            language.text("Khôi phục \(account.displayName)", "Recover \(account.displayName)")
+        case .retryQuota(let accounts):
+            language.text("Thử lại quota cho \(accounts.count) tài khoản", "Retry quota for \(accounts.count) accounts")
+        case .allClear(let active):
+            active.map { language.text("Đang dùng \($0.displayName)", "Running on \($0.displayName)") }
+                ?? language.text("Mọi thứ ổn", "Everything is ready")
+        }
+    }
+
+    @MainActor
+    func detail(language: LanguageStore) -> String {
+        switch self {
+        case .addAccount:
+            language.text(
+                "Roster chưa có tài khoản nào để chuyển đổi.",
+                "Roster has no accounts to switch between yet."
+            )
+        case .switchTo(let account):
+            language.text(
+                "Phiên hiện tại không dùng được; \(account.displayName) còn \(Self.quotaSummary(account, language: language)).",
+                "The current session is unusable; \(account.displayName) has \(Self.quotaSummary(account, language: language))."
+            )
+        case .redeemBankedReset(let account):
+            language.text(
+                "Không còn tài khoản nào còn quota. \(account.displayName) giữ \(account.usage?.bankedResets?.availableCount ?? 0) banked reset — chuyển sang rồi redeem trong Codex.",
+                "No account has quota left. \(account.displayName) holds \(account.usage?.bankedResets?.availableCount ?? 0) banked reset — switch there, then redeem it inside Codex."
+            )
+        case .waitForReset(let account):
+            language.text(
+                "Cửa sổ sớm nhất là \(account.displayName), \(Self.resetSummary(account, language: language)).",
+                "The earliest window belongs to \(account.displayName), \(Self.resetSummary(account, language: language))."
+            )
+        case .signIn(let accounts):
+            language.text(
+                "Phiên đã hết hạn: \(accounts.prefix(3).map(\.displayName).joined(separator: ", ")).",
+                "Expired sessions: \(accounts.prefix(3).map(\.displayName).joined(separator: ", "))."
+            )
+        case .recover(let account):
+            language.text(
+                "Snapshot của \(account.email) không đọc được trên máy này.",
+                "The snapshot for \(account.email) cannot be read on this Mac."
+            )
+        case .retryQuota:
+            language.text(
+                "Không lấy được quota — thường là mạng chập chờn, thử lại là đủ.",
+                "Quota could not be fetched — usually a flaky network; a retry is enough."
+            )
+        case .allClear(let active):
+            if let active {
+                language.text(
+                    "Còn \(Self.quotaSummary(active, language: language)). Không có việc gì cần bạn xử lý.",
+                    "\(Self.quotaSummary(active, language: language)) left. Nothing needs your attention."
+                )
+            } else {
+                language.text(
+                    "Không có tài khoản nào cần xử lý.",
+                    "No account needs attention."
+                )
+            }
+        }
+    }
+
+    /// Compact 1–2 line caption for the notch (skips all-clear noise).
+    @MainActor
+    func compactCaption(language: LanguageStore) -> String? {
+        guard !isAllClear else { return nil }
+        let head = headline(language: language)
+        switch self {
+        case .waitForReset(let account):
+            return "\(head) · \(Self.resetSummary(account, language: language))"
+        case .switchTo(let account):
+            return "\(head) · \(Self.quotaSummary(account, language: language))"
+        case .redeemBankedReset(let account):
+            let count = account.usage?.bankedResets?.availableCount ?? 0
+            return "\(head) · ×\(count)"
+        default:
+            return head
+        }
+    }
+
+    @MainActor
+    private static func quotaSummary(_ account: SavedAccount, language: LanguageStore) -> String {
+        let parts = [
+            account.usage?.fiveHour.map { language.text("5 giờ \($0.displayRemainingPercent)%", "5-hour \($0.displayRemainingPercent)%") },
+            account.usage?.weekly.map { language.text("tuần \($0.displayRemainingPercent)%", "weekly \($0.displayRemainingPercent)%") },
+        ].compactMap { $0 }
+        if parts.isEmpty {
+            return language.text("quota chưa xác minh", "unverified quota")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    @MainActor
+    private static func resetSummary(_ account: SavedAccount, language: LanguageStore) -> String {
+        guard let window = account.quotaWindowsForSwitch.min(by: { $0.resetAt.value < $1.resetAt.value }) else {
+            return language.text("chưa rõ thời điểm đặt lại", "with no known reset time")
+        }
+        return window.resetDescription(in: language.language).lowercased()
+    }
 }
 
 private struct NextActionBanner: View {
@@ -925,9 +1045,9 @@ private struct NextActionBanner: View {
                 .frame(width: 34)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(headline(for: action))
+                Text(action.headline(language: language))
                     .font(.headline)
-                Text(detail(for: action))
+                Text(action.detail(language: language))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -969,82 +1089,6 @@ private struct NextActionBanner: View {
         case .recover: .red
         case .retryQuota: .orange
         case .allClear: .green
-        }
-    }
-
-    private func headline(for action: NextAction) -> String {
-        switch action {
-        case .addAccount:
-            language.text("Thêm tài khoản đầu tiên", "Add your first account")
-        case .switchTo(let account):
-            language.text("Chuyển sang \(account.displayName)", "Switch to \(account.displayName)")
-        case .redeemBankedReset(let account):
-            language.text("Dùng banked reset của \(account.displayName)", "Redeem \(account.displayName)'s banked reset")
-        case .waitForReset:
-            language.text("Tất cả tài khoản đang nghỉ", "Every account is resting")
-        case .signIn(let accounts):
-            accounts.count == 1
-                ? language.text("Đăng nhập lại \(accounts[0].displayName)", "Sign in to \(accounts[0].displayName)")
-                : language.text("Đăng nhập lại \(accounts.count) tài khoản", "Sign in to \(accounts.count) accounts")
-        case .recover(let account):
-            language.text("Khôi phục \(account.displayName)", "Recover \(account.displayName)")
-        case .retryQuota(let accounts):
-            language.text("Thử lại quota cho \(accounts.count) tài khoản", "Retry quota for \(accounts.count) accounts")
-        case .allClear(let active):
-            active.map { language.text("Đang dùng \($0.displayName)", "Running on \($0.displayName)") }
-                ?? language.text("Mọi thứ ổn", "Everything is ready")
-        }
-    }
-
-    private func detail(for action: NextAction) -> String {
-        switch action {
-        case .addAccount:
-            language.text(
-                "Roster chưa có tài khoản nào để chuyển đổi.",
-                "Roster has no accounts to switch between yet."
-            )
-        case .switchTo(let account):
-            language.text(
-                "Phiên hiện tại không dùng được; \(account.displayName) còn \(quotaSummary(account)).",
-                "The current session is unusable; \(account.displayName) has \(quotaSummary(account))."
-            )
-        case .redeemBankedReset(let account):
-            language.text(
-                "Không còn tài khoản nào còn quota. \(account.displayName) giữ \(account.usage?.bankedResets?.availableCount ?? 0) banked reset — chuyển sang rồi redeem trong Codex.",
-                "No account has quota left. \(account.displayName) holds \(account.usage?.bankedResets?.availableCount ?? 0) banked reset — switch there, then redeem it inside Codex."
-            )
-        case .waitForReset(let account):
-            language.text(
-                "Cửa sổ sớm nhất là \(account.displayName), \(resetSummary(account)).",
-                "The earliest window belongs to \(account.displayName), \(resetSummary(account))."
-            )
-        case .signIn(let accounts):
-            language.text(
-                "Phiên đã hết hạn: \(accounts.prefix(3).map(\.displayName).joined(separator: ", ")).",
-                "Expired sessions: \(accounts.prefix(3).map(\.displayName).joined(separator: ", "))."
-            )
-        case .recover(let account):
-            language.text(
-                "Snapshot của \(account.email) không đọc được trên máy này.",
-                "The snapshot for \(account.email) cannot be read on this Mac."
-            )
-        case .retryQuota:
-            language.text(
-                "Không lấy được quota — thường là mạng chập chờn, thử lại là đủ.",
-                "Quota could not be fetched — usually a flaky network; a retry is enough."
-            )
-        case .allClear(let active):
-            if let active {
-                language.text(
-                    "Còn \(quotaSummary(active)). Không có việc gì cần bạn xử lý.",
-                    "\(quotaSummary(active)) left. Nothing needs your attention."
-                )
-            } else {
-                language.text(
-                    "Không có tài khoản nào cần xử lý.",
-                    "No account needs attention."
-                )
-            }
         }
     }
 
@@ -1090,23 +1134,6 @@ private struct NextActionBanner: View {
         }
     }
 
-    private func quotaSummary(_ account: SavedAccount) -> String {
-        let parts = [
-            account.usage?.fiveHour.map { language.text("5 giờ \($0.displayRemainingPercent)%", "5-hour \($0.displayRemainingPercent)%") },
-            account.usage?.weekly.map { language.text("tuần \($0.displayRemainingPercent)%", "weekly \($0.displayRemainingPercent)%") },
-        ].compactMap { $0 }
-        if parts.isEmpty {
-            return language.text("quota chưa xác minh", "unverified quota")
-        }
-        return parts.joined(separator: " · ")
-    }
-
-    private func resetSummary(_ account: SavedAccount) -> String {
-        guard let window = account.quotaWindowsForSwitch.min(by: { $0.resetAt.value < $1.resetAt.value }) else {
-            return language.text("chưa rõ thời điểm đặt lại", "with no known reset time")
-        }
-        return window.resetDescription(in: language.language).lowercased()
-    }
 }
 
 private struct AccountTriageBoard: View {
@@ -1559,7 +1586,7 @@ private struct TriageAccountCard: View {
             if let activeUntil = account.paidSubscriptionActiveUntil {
                 Text(compactSubscriptionUntil(activeUntil, language: language.language))
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(activeUntil < Date() ? Color.red : Color.secondary)
+                    .foregroundStyle(activeUntil < Date() ? PrismTheme.danger : Color.secondary)
             }
         }
     }
@@ -1623,10 +1650,10 @@ private struct TriageAccountCard: View {
                     .monospacedDigit()
             }
             .font(.caption2.weight(.semibold))
-            .foregroundStyle(Color.purple)
+            .foregroundStyle(PrismTheme.autoSwitch)
             .padding(.horizontal, 4)
             .padding(.vertical, 1)
-            .background(Capsule().fill(Color.purple.opacity(0.15)))
+            .background(Capsule().fill(PrismTheme.autoSwitch.opacity(0.15)))
             .help(language.text(
                 isLunaActive ? "Codex đang chạy bằng Luna Reserve" : "Tài khoản có Luna Reserve",
                 isLunaActive ? "Codex is active on Luna Reserve" : "Account has Luna Reserve"
@@ -2040,7 +2067,7 @@ private struct TokenMetric: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 5) {
                 Image(systemName: "circle.fill")
-                    .font(.system(size: 7))
+                    .font(PrismTheme.fontMicro)
                     .foregroundStyle(.tint)
                 Text(title)
                     .font(.subheadline.weight(.medium))
@@ -2343,7 +2370,7 @@ private struct OpenAIStatusCard: View {
                         ForEach(status.codexComponents) { component in
                             Label(component.name, systemImage: component.isOperational ? "circle.fill" : "exclamationmark.circle.fill")
                                 .font(.caption)
-                                .foregroundStyle(component.isOperational ? Color.secondary : Color.orange)
+                                .foregroundStyle(component.isOperational ? Color.secondary : PrismTheme.warning)
                                 .lineLimit(1)
                         }
                     }
@@ -2920,7 +2947,7 @@ private struct AccountDetail: View {
                                 .fill(PrismTheme.quotaTint(percent: account.usage?.fiveHour?.displayRemainingPercent).opacity(0.18))
                                 .frame(width: 52, height: 52)
                             Image(systemName: account.aiProvider.icon)
-                                .font(.system(size: 24, weight: .bold))
+                                .font(PrismTheme.fontDisplay)
                                 .foregroundStyle(PrismTheme.quotaTint(percent: account.usage?.fiveHour?.displayRemainingPercent))
                         }
                         .overlay(
@@ -3597,7 +3624,7 @@ private struct LunaReserveCard: View {
                 HStack(alignment: .firstTextBaseline) {
                     Label("Luna Reserve (GPT-5.6 Luna)", systemImage: "moon.stars.fill")
                         .font(.headline)
-                        .foregroundStyle(Color.purple)
+                        .foregroundStyle(PrismTheme.autoSwitch)
                     Spacer()
                     if isLunaActive {
                         Text(language.text("Đang hoạt động", "Active in Codex"))
@@ -3609,10 +3636,10 @@ private struct LunaReserveCard: View {
                     } else if account.isLunaReserveAllowed {
                         Text(language.text("Sẵn sàng bật", "Ready to enable"))
                             .font(.caption.weight(.bold))
-                            .foregroundStyle(Color.purple)
+                            .foregroundStyle(PrismTheme.autoSwitch)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 3)
-                            .background(Capsule().fill(Color.purple.opacity(0.16)))
+                            .background(Capsule().fill(PrismTheme.autoSwitch.opacity(0.16)))
                     }
                 }
 
@@ -3666,7 +3693,7 @@ private struct LunaReserveCard: View {
                             .font(.caption.weight(.bold))
                         }
                         .buttonStyle(.borderedProminent)
-                        .tint(Color.purple)
+                        .tint(PrismTheme.autoSwitch)
                         .disabled(store.isBusyForActions)
                     }
                 }
@@ -3740,7 +3767,7 @@ private struct BankedResetCreditRow: View {
                                 .fontWeight(.semibold)
                             Text("· \(expiry.formatted(date: .abbreviated, time: .shortened))")
                         }
-                        .foregroundStyle(expiry < Date() ? Color.red : Color.secondary)
+                        .foregroundStyle(expiry < Date() ? PrismTheme.danger : Color.secondary)
                     } else {
                         Text(language.text("Không có ngày hết hạn", "No expiry reported"))
                     }
@@ -3775,8 +3802,15 @@ struct MenuBarView: View {
     }
 
     private func openSettings() {
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        // Mirror openAbout: Settings scene + showSettingsWindow: is a no-op for
+        // this .accessory / statusBar notch app.
+        openWindow(id: "settings")
         NSApplication.shared.activate(ignoringOtherApps: true)
+        DispatchQueue.main.async {
+            NSApplication.shared.windows
+                .first(where: { $0.identifier?.rawValue == "settings" })?
+                .makeKeyAndOrderFront(nil)
+        }
     }
 
     private func openReloginFlow(_ accountID: UUID) {
@@ -3946,7 +3980,7 @@ private struct MenuBarUpdateStatus: View {
             }
             .padding(.horizontal, 9)
             .padding(.vertical, 7)
-            .background(Color.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
+            .background(PrismTheme.warning.opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
 
         case .idle, .upToDate:
             EmptyView()

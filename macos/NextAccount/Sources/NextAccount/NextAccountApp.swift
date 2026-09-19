@@ -239,7 +239,10 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showReloginAccount)) { notification in
             let id = (notification.object as? String).flatMap(UUID.init(uuidString:))
                 ?? notification.object as? UUID
-            if let id, let account = store.accounts.first(where: { $0.id == id }) {
+            if let id {
+                // Prefer the posted ID only — never fall back to "first requiresLogin"
+                // when a specific row was clicked (wrong-account Login bug).
+                guard let account = store.accounts.first(where: { $0.id == id }) else { return }
                 selection = id
                 presentRelogin(account)
             } else if let account = store.accounts.first(where: { !store.isArchived($0) && $0.requiresLogin }) {
@@ -300,17 +303,18 @@ struct ContentView: View {
                 get: { accountForDeletion != nil },
                 set: { if !$0 { accountForDeletion = nil } }
             ),
-            titleVisibility: .visible
-        ) {
+            titleVisibility: .visible,
+            presenting: accountForDeletion
+        ) { account in
+            // Use the presented snapshot — not live @State — so dismiss/clear cannot
+            // retarget delete to a different (or nil) account.
             Button(language.text("Xóa", "Remove"), role: .destructive) {
-                if let accountForDeletion {
-                    store.delete(accountForDeletion)
-                }
+                store.delete(account)
                 accountForDeletion = nil
             }
             Button(language.text("Hủy", "Cancel"), role: .cancel) { accountForDeletion = nil }
-        } message: {
-            Text(language.text("Thao tác này xóa \(accountForDeletion?.email ?? "tài khoản này") khỏi Codex Roster.", "This removes \(accountForDeletion?.email ?? "this account") from Codex Roster."))
+        } message: { account in
+            Text(language.text("Thao tác này xóa \(account.email) khỏi Codex Roster.", "This removes \(account.email) from Codex Roster."))
         }
     }
 
@@ -331,8 +335,8 @@ struct ContentView: View {
                     selection = nil
                 },
                 restore: { store.restore(selected) },
-                remove: { accountForDeletion = selected },
-                relogin: { presentRelogin(selected) }
+                remove: { accountForDeletion = $0 },
+                relogin: { presentRelogin($0) }
             )
         } else {
             PrismBentoStudioView(
@@ -1555,7 +1559,7 @@ private struct AccountTriageBoard: View {
                             isSelected: selectedAccountIDs.contains(account.id),
                             toggleSelection: { toggleSelection(account) },
                             openDetails: { selection = account.id },
-                            relogin: { relogin(account) }
+                            relogin: relogin
                         )
                     }
                 }
@@ -1637,10 +1641,12 @@ private struct TriageAccountCard: View {
     let isSelected: Bool
     let toggleSelection: () -> Void
     let openDetails: () -> Void
-    let relogin: () -> Void
+    let relogin: (SavedAccount) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        // Freeze card identity — LazyVGrid must not retarget Login to another row.
+        let targetID = account.id
+        return VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .top, spacing: 8) {
                 if isSelecting {
                     Toggle(isOn: Binding(get: { isSelected }, set: { _ in toggleSelection() })) {
@@ -1713,6 +1719,7 @@ private struct TriageAccountCard: View {
                     lineWidth: isSelected ? 1.5 : 1
                 )
         )
+        .id(targetID)
     }
 
     @ViewBuilder
@@ -1806,7 +1813,10 @@ private struct TriageAccountCard: View {
         switch bucket {
         case .needsAction:
             if account.requiresLogin {
-                Button(language.text("Đăng nhập lại", "Sign in"), action: relogin)
+                Button(language.text("Đăng nhập lại", "Sign in")) {
+                    guard let target = accountForContextMenuAction(in: store.accounts, capturedID: account.id) else { return }
+                    relogin(target)
+                }
                     .controlSize(.small)
                     .tint(.orange)
             } else if account.requiresLocalRecovery {
@@ -3063,8 +3073,11 @@ private struct AccountDetail: View {
     let edit: () -> Void
     let archive: () -> Void
     let restore: () -> Void
-    let remove: () -> Void
-    let relogin: () -> Void
+    /// Must receive the detail's current `account` at tap time — never a parent-captured
+    /// `selected` snapshot that can diverge after roster refresh / selection changes.
+    let remove: (SavedAccount) -> Void
+    /// Same capture rule as remove — Login must target this detail's account, not selection.
+    let relogin: (SavedAccount) -> Void
 
     private var isArchived: Bool { store.isArchived(account) }
     private var serverSessionRevoked: Bool {
@@ -3119,7 +3132,9 @@ private struct AccountDetail: View {
                             copyAccountEmail(account.email)
                         }
                         Divider()
-                        Button(language.text("Xóa tài khoản", "Remove account"), role: .destructive, action: remove)
+                        Button(language.text("Xóa tài khoản", "Remove account"), role: .destructive) {
+                            remove(account)
+                        }
                             .disabled(store.isBusyForActions)
                     } label: {
                         Image(systemName: "ellipsis")
@@ -3129,7 +3144,9 @@ private struct AccountDetail: View {
                     .help(language.text("Thao tác khác", "More actions"))
                     .accessibilityLabel(language.text("Thao tác khác", "More actions"))
                     if !isArchived && account.requiresLogin {
-                        Button(language.text("Đăng nhập lại", "Sign in again"), action: relogin)
+                        Button(language.text("Đăng nhập lại", "Sign in again")) {
+                            relogin(account)
+                        }
                             .buttonStyle(.borderedProminent)
                             .tint(.orange)
                             .disabled(store.isBusyForActions)
@@ -3220,7 +3237,9 @@ private struct AccountDetail: View {
                         ))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
-                        Button(language.text("Bắt đầu đăng nhập lại…", "Start sign-in again…"), action: relogin)
+                        Button(language.text("Bắt đầu đăng nhập lại…", "Start sign-in again…")) {
+                            relogin(account)
+                        }
                             .buttonStyle(.borderedProminent)
                             .tint(.orange)
                             .disabled(store.isBusyForActions || isArchived)
@@ -3939,9 +3958,10 @@ struct MenuBarView: View {
         }
     }
 
-    private func openReloginFlow() {
-        let accountID = store.accounts.first { !store.isArchived($0) && $0.requiresLogin }?.id
-        NotificationCenter.default.post(name: .showReloginAccount, object: accountID?.uuidString)
+    private func openReloginFlow(_ accountID: UUID) {
+        // Always post the clicked row's ID — never substitute "first requiresLogin".
+        guard let id = accountIDForReloginNotification(in: store.accounts, capturedID: accountID) else { return }
+        NotificationCenter.default.post(name: .showReloginAccount, object: id.uuidString)
     }
 
     private func openAddAccountFlow() {
@@ -4563,6 +4583,26 @@ func copyAccountEmails(_ emails: [String]) {
     guard !emails.isEmpty else { return }
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(emails.joined(separator: "\n"), forType: .string)
+}
+
+/// Resolve a roster action target by the row's captured account ID.
+/// Never use list index, the currently selected account, or "first requiresLogin"
+/// — those are classic SwiftUI LazyVStack/LazyVGrid wrong-row Login/delete bugs.
+func accountForContextMenuAction(in accounts: [SavedAccount], capturedID: UUID) -> SavedAccount? {
+    accounts.first { $0.id == capturedID }
+}
+
+/// Account ID to post with `.showReloginAccount`. Always the clicked row when present;
+/// only fall back to the first sign-in-required account when no row was specified.
+func accountIDForReloginNotification(
+    in accounts: [SavedAccount],
+    capturedID: UUID?,
+    isArchived: (SavedAccount) -> Bool = { $0.archived }
+) -> UUID? {
+    if let capturedID {
+        return accountForContextMenuAction(in: accounts, capturedID: capturedID)?.id
+    }
+    return accounts.first { !isArchived($0) && $0.requiresLogin }?.id
 }
 
 struct CopyEmailButton: View {

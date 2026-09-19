@@ -14,7 +14,8 @@ struct PrismQuickSwitchDeck: View {
 
     var openDashboard: () -> Void = {}
     var openAddAccountFlow: () -> Void = {}
-    var openReloginFlow: () -> Void = {}
+    /// Must receive the clicked row's account ID — never pick "first requiresLogin".
+    var openReloginFlow: (UUID) -> Void = { _ in }
     var openBackupFlow: (BackupOperation) -> Void = { _ in }
     var openEditAccount: (SavedAccount) -> Void = { _ in }
     var openAbout: () -> Void = {}
@@ -575,7 +576,13 @@ struct PrismQuickSwitchDeck: View {
 
                 LazyVGrid(columns: columns, spacing: 7) {
                     ForEach(filteredAccounts) { account in
-                        compactGridAccountCard(account, shortcutIndex: switchableShortcutMap[account.id])
+                        PrismCompactAccountCard(
+                            account: account,
+                            shortcutIndex: switchableShortcutMap[account.id],
+                            justSwitchedID: $justSwitchedID,
+                            openEditAccount: openEditAccount,
+                            openReloginFlow: openReloginFlow
+                        )
                     }
                 }
                 .padding(.vertical, 3)
@@ -609,13 +616,53 @@ struct PrismQuickSwitchDeck: View {
         .pointingHandCursor()
     }
 
-    private func compactGridAccountCard(_ account: SavedAccount, shortcutIndex: Int?) -> some View {
+    private func miniRadarMetric(title: String, percent: Int) -> some View {
+        let tint = percent >= 50 ? PrismTheme.amber : PrismTheme.emerald
+        return HStack(spacing: 3) {
+            Text(title)
+                .font(.system(size: 9.5))
+                .foregroundStyle(.secondary)
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.primary.opacity(0.08))
+                    Capsule()
+                        .fill(tint)
+                        .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(percent) / 100.0)))
+                }
+            }
+            .frame(height: 3.5)
+            Text("\(percent)%")
+                .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(tint)
+        }
+        .padding(.horizontal, 5)
+        .padding(.vertical, 3)
+        .background(RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(0.03)))
+    }
+}
+
+/// Dedicated card so LazyVGrid context menus capture this card's account ID,
+/// not a recycled parent-helper closure from another switchboard cell.
+private struct PrismCompactAccountCard: View {
+    @EnvironmentObject private var store: AccountStore
+    @EnvironmentObject private var language: LanguageStore
+
+    let account: SavedAccount
+    let shortcutIndex: Int?
+    @Binding var justSwitchedID: UUID?
+    let openEditAccount: (SavedAccount) -> Void
+    let openReloginFlow: (UUID) -> Void
+
+    var body: some View {
+        // Freeze the row identity for Login / menu actions — never use selection
+        // or "first account that requires login".
+        let targetID = account.id
         let quota = account.usage?.fiveHour?.displayRemainingPercent
         let week = account.usage?.weekly?.displayRemainingPercent
         let isJustSwitched = justSwitchedID == account.id
 
         return HStack(spacing: 8) {
-            // Keycap Chip (1..6 for switchable accounts) or Initial
             if let shortcutIndex {
                 Text("\(shortcutIndex)")
                     .font(.system(size: 11, weight: .bold, design: .monospaced))
@@ -634,7 +681,6 @@ struct PrismQuickSwitchDeck: View {
                     .background(Circle().fill(PrismTheme.quotaTint(percent: quota).opacity(0.15)))
             }
 
-            // Name & Email
             VStack(alignment: .leading, spacing: 1.5) {
                 HStack(spacing: 4) {
                     Text(account.displayName)
@@ -689,11 +735,8 @@ struct PrismQuickSwitchDeck: View {
 
             Spacer(minLength: 4)
 
-            // Micro Quota Bar & Percent
-            // Dual Quota Telemetry (5H & Wk)
             PrismFilamentBar(fivePercent: quota, weekPercent: week, width: 34, height: 3.5, showLabels: true)
 
-            // Action Button
             if account.isActive {
                 HStack(spacing: 3) {
                     Image(systemName: "checkmark.circle.fill")
@@ -707,7 +750,8 @@ struct PrismQuickSwitchDeck: View {
                 .background(Capsule().fill(PrismTheme.emerald.opacity(0.16)))
             } else if account.requiresLogin {
                 Button {
-                    openReloginFlow()
+                    guard accountForContextMenuAction(in: store.accounts, capturedID: targetID) != nil else { return }
+                    openReloginFlow(targetID)
                 } label: {
                     Text(language.text("Login", "Login"))
                         .font(.system(size: 12.5, weight: .bold))
@@ -723,9 +767,10 @@ struct PrismQuickSwitchDeck: View {
                     Button {
                         PrismTheme.triggerHaptic()
                         withAnimation(PrismTheme.pressFeedback) {
-                            justSwitchedID = account.id
+                            justSwitchedID = targetID
                         }
-                        store.activate(account, force: true)
+                        guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
+                        store.activate(target, force: true)
                     } label: {
                         Text(language.text("Đổi", "Swap"))
                             .font(.system(size: 12.5, weight: .bold))
@@ -745,9 +790,10 @@ struct PrismQuickSwitchDeck: View {
                     Button {
                         PrismTheme.triggerHaptic()
                         withAnimation(PrismTheme.pressFeedback) {
-                            justSwitchedID = account.id
+                            justSwitchedID = targetID
                         }
-                        store.activate(account, force: true)
+                        guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
+                        store.activate(target, force: true)
                     } label: {
                         Text(language.text("Đổi", "Swap"))
                             .font(.system(size: 12.5, weight: .bold))
@@ -773,67 +819,49 @@ struct PrismQuickSwitchDeck: View {
         )
         .contextMenu {
             Button {
-                store.activate(account, force: true)
+                guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
+                store.activate(target, force: true)
             } label: {
                 Label(language.text("Kích hoạt", "Activate"), systemImage: "bolt.fill")
             }
             Button {
                 PrismTheme.triggerHaptic()
-                copyAccountEmail(account.email)
+                guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
+                copyAccountEmail(target.email)
             } label: {
                 Label(language.text("Sao chép email", "Copy email"), systemImage: "doc.on.doc")
             }
             Button {
-                openEditAccount(account)
+                guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
+                openEditAccount(target)
             } label: {
                 Label(language.text("Sửa nhãn", "Edit label"), systemImage: "pencil")
             }
             if account.hasLunaReserve && !store.isLunaReserveActive(for: account) {
                 Button {
                     PrismTheme.triggerHaptic()
-                    store.enableLunaReserve(account)
+                    guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
+                    store.enableLunaReserve(target)
                 } label: {
                     Label(language.text("Bật Luna Reserve", "Enable Luna Reserve"), systemImage: "moon.stars.fill")
                 }
             }
             if account.requiresLogin {
                 Button {
-                    openReloginFlow()
+                    guard accountForContextMenuAction(in: store.accounts, capturedID: targetID) != nil else { return }
+                    openReloginFlow(targetID)
                 } label: {
                     Label(language.text("Đăng nhập lại", "Sign in again"), systemImage: "arrow.clockwise")
                 }
             }
             Divider()
             Button(role: .destructive) {
-                store.delete(account)
+                guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
+                store.delete(target)
             } label: {
                 Label(language.text("Xóa", "Delete"), systemImage: "trash")
             }
         }
-    }
-
-    private func miniRadarMetric(title: String, percent: Int) -> some View {
-        let tint = percent >= 50 ? PrismTheme.amber : PrismTheme.emerald
-        return HStack(spacing: 3) {
-            Text(title)
-                .font(.system(size: 9.5))
-                .foregroundStyle(.secondary)
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.primary.opacity(0.08))
-                    Capsule()
-                        .fill(tint)
-                        .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(percent) / 100.0)))
-                }
-            }
-            .frame(height: 3.5)
-            Text("\(percent)%")
-                .font(.system(size: 10.5, weight: .bold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(tint)
-        }
-        .padding(.horizontal, 5)
-        .padding(.vertical, 3)
-        .background(RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(0.03)))
+        .id(targetID)
     }
 }

@@ -212,7 +212,7 @@ pub fn usage_error_message(error: &anyhow::Error) -> String {
     } else if usage_error_requires_local_recovery(&rendered) {
         "Local recovery required [local_snapshot_unreadable]: the saved session could not be decrypted. Restore an automatic backup before signing in again.".to_owned()
     } else if usage_error_reason_code(&rendered) == "access_token_unauthorized" {
-        "Usage unavailable [access_token_unauthorized]: OpenAI rejected the current access token, but the saved refresh token was not proven invalid.".to_owned()
+        deferred_access_token_unauthorized_message()
     } else {
         let detail = rendered.lines().next().unwrap_or("unknown error");
         format!("Usage unavailable: {detail}")
@@ -260,6 +260,23 @@ pub fn usage_error_is_deferred_access_token_refresh(error: &str) -> bool {
         .to_ascii_lowercase()
         .contains("[access_token_unauthorized]")
         || usage_error_reason_code(error) == "access_token_unauthorized"
+}
+
+/// True only when a refresh/prove failure is a clear OAuth session end
+/// (`invalid_grant`, session revoked, missing refresh token) — not transient
+/// network/race errors that happen to mention "refresh token".
+pub fn usage_error_is_definite_login_required(error: &str) -> bool {
+    matches!(
+        usage_error_reason_code(error),
+        "server_session_revoked" | "refresh_token_rejected" | "refresh_token_missing"
+    )
+}
+
+/// Sticky deferred marker for inactive accounts whose access token was rejected
+/// but whose refresh grant was not proven dead. Kept as a shared string so prove
+/// soft-failures and first-pass AT 401s stay interchangeable.
+pub fn deferred_access_token_unauthorized_message() -> String {
+    "Usage unavailable [access_token_unauthorized]: OpenAI rejected the current access token, but the saved refresh token was not proven invalid.".to_owned()
 }
 
 fn usage_error_reason_code(error: &str) -> &'static str {
@@ -1178,6 +1195,31 @@ fn parse_luna_reserve(value: &Value) -> Option<LunaReserveView> {
     None
 }
 
+/// Prove that an inactive saved account's OAuth grant still exists by always
+/// attempting a refresh-token exchange (not only when the access token is near
+/// expiry). On success, returns a snapshot with rotated tokens; on failure,
+/// returns the refresh error so [`usage_error_message`] can classify
+/// `invalid_grant` / session-ended as Login required.
+///
+/// Callers must only use this for **inactive saved** accounts. Live / active
+/// Codex-owned sessions never take this path — refreshing a copy of the live
+/// refresh token would invalidate the token still present in `~/.codex`.
+pub fn prove_saved_session_refresh(snapshot: &SnapshotBlob) -> Result<SnapshotBlob> {
+    prove_saved_session_refresh_with(snapshot, refresh_auth)
+}
+
+fn prove_saved_session_refresh_with<F>(
+    snapshot: &SnapshotBlob,
+    refresh: F,
+) -> Result<SnapshotBlob>
+where
+    F: FnOnce(&SnapshotAuth) -> Result<SnapshotAuth>,
+{
+    let auth = snapshot_auth(snapshot)?;
+    let refreshed = refresh(&auth)?;
+    update_snapshot_auth(snapshot, &refreshed)
+}
+
 /// Ensure a saved snapshot carries a usable (non-expired) access token before it
 /// is restored into `~/.codex`. When the access token is near expiry and a
 /// refresh token is present, rotate the tokens now and hand back the refreshed
@@ -1512,6 +1554,90 @@ mod tests {
             changed: false,
         };
         assert!(needs_proactive_refresh(&auth));
+    }
+
+    #[test]
+    fn prove_saved_session_refresh_always_attempts_refresh_even_when_access_token_is_fresh() {
+        let far = OffsetDateTime::now_utc() + Duration::days(1);
+        let snapshot = auth_snapshot(json!({
+            "tokens": {
+                "access_token": jwt_with_exp(far.unix_timestamp()),
+                "refresh_token": "refresh",
+                "account_id": "acct"
+            },
+            "last_refresh": "2026-01-01T00:00:00Z"
+        }));
+        let mut refresh_calls = 0;
+
+        let proven = prove_saved_session_refresh_with(&snapshot, |auth| {
+            refresh_calls += 1;
+            assert!(!needs_proactive_refresh(auth));
+            Ok(SnapshotAuth {
+                access_token: "proven-access".to_owned(),
+                refresh_token: Some("proven-refresh".to_owned()),
+                id_token: None,
+                account_id: auth.account_id.clone(),
+                last_refresh: Some(OffsetDateTime::now_utc()),
+                changed: true,
+            })
+        })
+        .expect("prove must refresh even with a fresh access token");
+
+        assert_eq!(refresh_calls, 1);
+        let auth = snapshot_auth(&proven).expect("proven auth");
+        assert_eq!(auth.access_token, "proven-access");
+        assert_eq!(auth.refresh_token.as_deref(), Some("proven-refresh"));
+    }
+
+    #[test]
+    fn prove_saved_session_refresh_surfaces_refresh_failure_for_login_classification() {
+        let far = OffsetDateTime::now_utc() + Duration::days(1);
+        let snapshot = auth_snapshot(json!({
+            "tokens": {
+                "access_token": jwt_with_exp(far.unix_timestamp()),
+                "refresh_token": "dead-refresh"
+            }
+        }));
+
+        let error = prove_saved_session_refresh_with(&snapshot, |_| {
+            Err(anyhow!(
+                "{}",
+                r#"token refresh failed with 401 Unauthorized: {"error":{"message":"Your session has ended. Please log in again.","code":"refresh_token_invalidated"}}"#
+            ))
+        })
+        .expect_err("dead grant must surface");
+
+        let message = usage_error_message(&error);
+        assert_eq!(usage_error_label(&message), "Login required");
+        assert!(message.contains("[server_session_revoked]"));
+        assert!(usage_error_blocks_activation(&message));
+        assert!(usage_error_is_definite_login_required(&format!("{error:#}")));
+    }
+
+    #[test]
+    fn transient_refresh_failure_is_not_definite_login_required() {
+        let transient =
+            anyhow!("token refresh failed: connection reset while contacting refresh token endpoint");
+        assert!(
+            !usage_error_is_definite_login_required(&format!("{transient:#}")),
+            "broad 'refresh token' mention must not sticky-lock accounts"
+        );
+        // Prove soft-fail stores the deferred AT marker (not usage_error_message,
+        // whose broader classifier still treats some refresh wording as login).
+        let soft = deferred_access_token_unauthorized_message();
+        assert!(usage_error_is_deferred_access_token_refresh(&soft));
+        assert!(!usage_error_blocks_activation(&soft));
+    }
+
+    #[test]
+    fn invalid_grant_refresh_failure_is_definite_login_required() {
+        let dead = anyhow!(
+            "token refresh failed with 400: invalid_grant: refresh token was already used"
+        );
+        assert!(usage_error_is_definite_login_required(&format!("{dead:#}")));
+        let message = usage_error_message(&dead);
+        assert_eq!(usage_error_label(&message), "Login required");
+        assert!(usage_error_blocks_activation(&message));
     }
 
     #[test]

@@ -462,6 +462,12 @@ where
 
     /// Save and back up the live session before starting device login.
     ///
+    /// Critical: write the *current* live credentials into that account's saved
+    /// snapshot before the add/re-login marker is set. Codex login may replace
+    /// `~/.codex` auth; without this write-back, any tokens Codex already
+    /// rotated in the live files would be lost and the previous account would
+    /// later fail prove/refresh with a dead refresh token.
+    ///
     /// The existing live auth remains available for Codex to reuse a trusted
     /// session, and cancel still restores the backed-up session if login changes it.
     pub fn begin_add_account_session(&self) -> Result<()> {
@@ -469,7 +475,9 @@ where
         // Login is an explicit credential transaction, not an account switch.
         // Leave Desktop running and pause Roster background work via the marker.
         if codex::try_read_live_auth_bundle(&self.env)?.is_some() {
-            self.save_current_inner(true)?;
+            self.save_current_inner(true).context(
+                "could not preserve the active Codex session before starting add-account login",
+            )?;
         }
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         codex::begin_add_account_session(&self.env)
@@ -817,8 +825,30 @@ where
     }
 
     pub fn refresh_saved_usage_cache(&self) -> Result<()> {
+        // Same skip set as refresh_stale_saved_usage: never mass-call usage(Some)
+        // across archived / login-blocked / deferred-AT accounts (that burns RTs).
+        if codex::add_account_session_active(&self.env) {
+            return Ok(());
+        }
         let accounts = self.repository.list_accounts(&self.env.kind)?;
         for account in accounts {
+            if account.archived {
+                continue;
+            }
+            if account
+                .cached_usage_error
+                .as_deref()
+                .is_some_and(usage_error_blocks_activation)
+            {
+                continue;
+            }
+            if account
+                .cached_usage_error
+                .as_deref()
+                .is_some_and(usage_error_is_deferred_access_token_refresh)
+            {
+                continue;
+            }
             let _ = self.usage(Some(account.id));
         }
         Ok(())
@@ -828,9 +858,16 @@ where
     /// whole roster picks up an off-schedule ChatGPT reset without waiting for a
     /// manual refresh or an auto-switch decision. Accounts that still have quota
     /// in every window (fresh cache) are skipped to avoid needless network and
-    /// token churn; accounts that need a fresh login are skipped because they
-    /// cannot be refreshed without the user.
+    /// token churn. Deferred access-token unauthorized accounts are also skipped
+    /// here — re-probing them on every display poll burns single-use refresh
+    /// tokens and races with add/re-login. RT proof is deferred until
+    /// activation/switch (Codex owns refresh then).
+    /// Accounts that need a fresh login or local recovery are skipped because
+    /// they cannot be refreshed without the user.
     pub fn refresh_stale_saved_usage(&self) -> Result<()> {
+        if codex::add_account_session_active(&self.env) {
+            return Ok(());
+        }
         let accounts = self.repository.list_accounts(&self.env.kind)?;
         let now = time::OffsetDateTime::now_utc();
         for account in accounts {
@@ -841,6 +878,14 @@ where
                 .cached_usage_error
                 .as_deref()
                 .is_some_and(usage_error_blocks_activation)
+            {
+                continue;
+            }
+            // Do not mass-prove deferred AT accounts on display/background sweeps.
+            if account
+                .cached_usage_error
+                .as_deref()
+                .is_some_and(usage_error_is_deferred_access_token_refresh)
             {
                 continue;
             }
@@ -858,6 +903,9 @@ where
     /// whole list. GUI frontends (macOS/Windows) call short-lived CLI processes
     /// and never host the background worker, so this gives them one entry point.
     pub fn refresh_usage_for_display(&self) -> Result<()> {
+        if codex::add_account_session_active(&self.env) {
+            return Ok(());
+        }
         let _ = self.usage(None);
         self.refresh_stale_saved_usage()
     }
@@ -934,6 +982,11 @@ where
                 if self.is_live_saved_account(account_id)? {
                     return self.usage_with_auth_lock(None);
                 }
+                // Session longevity: never auto-prove / exchange RTs on usage or
+                // quota sweeps for inactive saved accounts. A prior AT 401 is
+                // sticky-deferred until the user activates/switches — Codex owns
+                // refresh then. Re-probing here burned single-use RTs and mass-
+                // marked accounts Login required.
                 if self
                     .repository
                     .get_account(&self.env.kind, account_id)?
@@ -980,6 +1033,8 @@ where
                         Ok(output)
                     }
                     Err(error) => {
+                        // AT 401 → deferred [access_token_unauthorized] only.
+                        // Do not call prove_saved_session_refresh here (hot path).
                         self.persist_rotated_saved_auth(account_id, &error)?;
                         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
                         let _ = self.repository.record_usage_error(
@@ -1521,6 +1576,7 @@ mod tests {
 
     use super::*;
     use crate::codex::auth_json_fixture;
+    use crate::usage::deferred_access_token_unauthorized_message;
     use time::OffsetDateTime;
 
     use crate::model::SnapshotFile;
@@ -1587,7 +1643,7 @@ mod tests {
     }
 
     #[test]
-    fn inactive_unauthorized_access_token_is_not_probed_again() {
+    fn deferred_unauthorized_saved_account_is_permanently_bailed_until_activation() {
         let temp = tempdir().expect("tempdir");
         let env = AppEnv {
             kind: EnvironmentKind::Linux,
@@ -1625,7 +1681,10 @@ mod tests {
             .usage(Some(saved.id))
             .expect_err("probe must be deferred");
 
-        assert!(format!("{error:#}").contains("deferred until this account is activated"));
+        assert!(
+            format!("{error:#}").contains("deferred until this account is activated"),
+            "deferred AT unauthorized must early-bail (no RT prove on usage path): {error:#}"
+        );
         let account = app
             .repository
             .get_account(&app.env.kind, saved.id)
@@ -1636,6 +1695,179 @@ mod tests {
                 .cached_usage_error
                 .as_deref()
                 .is_some_and(usage_error_is_deferred_access_token_refresh)
+        );
+    }
+
+    #[test]
+    fn begin_add_account_persists_latest_live_tokens_before_login_marker() {
+        let temp = tempdir().expect("tempdir");
+        let env = AppEnv {
+            kind: EnvironmentKind::Linux,
+            home_dir: temp.path().to_path_buf(),
+            codex_root: temp.path().join(".codex"),
+            app_data_dir: temp.path().join("app"),
+        };
+        std::fs::create_dir_all(&env.codex_root).expect("codex root");
+        std::fs::write(
+            env.codex_root.join("auth.json"),
+            auth_json_fixture("live@example.com", "sub-live", Some("pro")),
+        )
+        .expect("auth");
+        std::fs::write(env.codex_root.join("cap_sid"), "sid").expect("cap");
+
+        let app = App::new(
+            env.clone(),
+            SnapshotRepository::new(&env.app_data_dir, MemorySecretStore::default()),
+        );
+        let live_id = app.save_current().expect("initial save").account.id;
+
+        let mut rotated: serde_json::Value = serde_json::from_str(&auth_json_fixture(
+            "live@example.com",
+            "sub-live",
+            Some("pro"),
+        ))
+        .expect("fixture json");
+        rotated["tokens"]["refresh_token"] = serde_json::json!("rotated-live-refresh");
+        rotated["tokens"]["access_token"] = serde_json::json!("rotated-live-access");
+        std::fs::write(
+            env.codex_root.join("auth.json"),
+            serde_json::to_string_pretty(&rotated).expect("serialize"),
+        )
+        .expect("write rotated live auth");
+
+        app.begin_add_account_session()
+            .expect("begin must save live then set marker");
+        assert!(app.add_account_session_active());
+
+        let (_, snapshot) = app
+            .repository
+            .load_snapshot(&app.env.kind, live_id)
+            .expect("load preserved snapshot");
+        let auth_file = snapshot
+            .files
+            .iter()
+            .find(|file| file.name == "auth.json")
+            .expect("auth.json in snapshot");
+        let auth_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&auth_file.bytes_base64)
+            .expect("decode snapshot auth");
+        let saved_auth: serde_json::Value =
+            serde_json::from_slice(&auth_bytes).expect("parse snapshot auth");
+        assert_eq!(
+            saved_auth["tokens"]["refresh_token"].as_str(),
+            Some("rotated-live-refresh"),
+            "begin-add must write back the current live RT before login can replace ~/.codex"
+        );
+
+        let usage_error = app
+            .usage(None)
+            .expect_err("usage must pause while add-account is active");
+        assert!(
+            format!("{usage_error:#}").contains("login is in progress"),
+            "unexpected usage error during login: {usage_error:#}"
+        );
+        app.refresh_stale_saved_usage()
+            .expect("stale sweep must no-op during login");
+        app.refresh_usage_for_display()
+            .expect("display refresh must no-op during login");
+
+        app.cancel_add_account_session().expect("cancel");
+    }
+
+    #[test]
+    fn refresh_stale_saved_usage_skips_deferred_access_token_accounts() {
+        let temp = tempdir().expect("tempdir");
+        let env = AppEnv {
+            kind: EnvironmentKind::Linux,
+            home_dir: temp.path().to_path_buf(),
+            codex_root: temp.path().join(".codex"),
+            app_data_dir: temp.path().join("app"),
+        };
+        std::fs::create_dir_all(&env.codex_root).expect("codex root");
+        let repo = SnapshotRepository::new(&env.app_data_dir, MemorySecretStore::default());
+        let saved = repo
+            .save_snapshot(
+                &env.kind,
+                &DisplayIdentity {
+                    email: "deferred@example.com".to_owned(),
+                    subject: Some("sub-deferred".to_owned()),
+                    name: None,
+                    plan_label: Some("Plus".to_owned()),
+                },
+                &SnapshotBlob {
+                    schema_version: 1,
+                    files: vec![],
+                },
+            )
+            .expect("save")
+            .0;
+        // Fresh cached quota would normally skip, but the regression forced a
+        // reprove for deferred accounts even then — ensure that path is gone.
+        let fresh_usage = AccountUsageView {
+            source: UsageSource::SavedAccessToken,
+            fetched_at: OffsetDateTime::now_utc(),
+            five_hour: Some(UsageWindowView {
+                used_percent: 10,
+                remaining_percent: 90,
+                reset_at: OffsetDateTime::now_utc(),
+            }),
+            weekly: Some(UsageWindowView {
+                used_percent: 10,
+                remaining_percent: 90,
+                reset_at: OffsetDateTime::now_utc(),
+            }),
+            credits: None,
+            banked_resets: None,
+            plan_label: Some("Plus".to_owned()),
+            subscription_active_until: None,
+            luna_reserve: None,
+        };
+        repo.replace_snapshot_without_backup(
+            &env.kind,
+            saved.id,
+            &DisplayIdentity {
+                email: "deferred@example.com".to_owned(),
+                subject: Some("sub-deferred".to_owned()),
+                name: None,
+                plan_label: Some("Plus".to_owned()),
+            },
+            &SnapshotBlob {
+                schema_version: 1,
+                files: vec![],
+            },
+            Some(fresh_usage),
+        )
+        .expect("seed fresh usage");
+        repo.record_usage_error(
+            &env.kind,
+            saved.id,
+            deferred_access_token_unauthorized_message(),
+        )
+        .expect("record deferred");
+
+        let app = App::new(env, repo);
+        app.refresh_stale_saved_usage()
+            .expect("deferred accounts must be skipped by display/background sweeps");
+
+        let account = app
+            .repository
+            .get_account(&app.env.kind, saved.id)
+            .expect("load")
+            .expect("account");
+        assert!(
+            account
+                .cached_usage_error
+                .as_deref()
+                .is_some_and(usage_error_is_deferred_access_token_refresh),
+            "sweep must not escalate or clear deferred status: {:?}",
+            account.cached_usage_error
+        );
+        assert!(
+            !account
+                .cached_usage_error
+                .as_deref()
+                .is_some_and(|error| error.contains("Login required")),
+            "sweep must not mark deferred accounts Login required"
         );
     }
 

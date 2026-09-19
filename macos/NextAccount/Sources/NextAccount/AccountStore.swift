@@ -2610,6 +2610,8 @@ struct SavedAccount: Identifiable, Decodable {
     /// re-implementing the same filter chain.
     var triage: AccountTriage {
         if archived { return .archived }
+        // Deferred AT refresh is soft: do not force .needsAction. Cached quota
+        // still drives Ready/Resting; Codex refreshes the AT on next switch.
         if requiresLogin || requiresLocalRecovery || hasTransientUsageError {
             return .needsAction
         }

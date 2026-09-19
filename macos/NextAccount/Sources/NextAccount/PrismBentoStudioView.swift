@@ -434,7 +434,13 @@ struct PrismBentoStudioView: View {
                 ScrollView {
                     LazyVStack(spacing: 3.5) {
                         ForEach(Array(filteredAccounts.enumerated()), id: \.element.id) { index, account in
-                            accountRow(account, index: index + 1)
+                            PrismAccountRosterRow(
+                                account: account,
+                                index: index + 1,
+                                relogin: relogin,
+                                editAccount: editAccount,
+                                deleteAccount: deleteAccount
+                            )
                         }
                     }
                     .padding(.vertical, 1)
@@ -463,165 +469,6 @@ struct PrismBentoStudioView: View {
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
-    }
-
-    private func accountRow(_ account: SavedAccount, index: Int) -> some View {
-        let quota = account.usage?.fiveHour?.displayRemainingPercent
-        let week = account.usage?.weekly?.displayRemainingPercent
-
-        return HStack(spacing: 8) {
-            // Roster Sequence Number
-            Text("\(index)")
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .foregroundStyle(.secondary.opacity(0.8))
-                .frame(width: 16, alignment: .trailing)
-
-            // Initial Avatar
-            Text(String(account.displayName.prefix(1)).uppercased())
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(PrismTheme.quotaTint(percent: quota))
-                .frame(width: 24, height: 24)
-                .background(Circle().fill(PrismTheme.quotaTint(percent: quota).opacity(0.14)))
-            // Name & Email
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 4) {
-                    Text(account.displayName)
-                        .font(.system(size: 12.5, weight: .semibold))
-                        .lineLimit(1)
-
-                    if let banked = account.usage?.bankedResets?.availableCount, banked > 0 {
-                        HStack(spacing: 2) {
-                            Image(systemName: "arrow.counterclockwise.circle.fill")
-                                .font(.system(size: 8))
-                            Text("+\(banked)")
-                                .font(.system(size: 8.5, weight: .bold, design: .rounded))
-                        }
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(Capsule().fill(Color.orange.opacity(0.18)))
-                        .foregroundStyle(Color.orange)
-                        .help(language.text(
-                            "\(banked) lượt banked reset có thể dùng",
-                            "\(banked) banked resets available"
-                        ))
-                    }
-
-                    if account.hasLunaReserve {
-                        let isLunaActive = store.isLunaReserveActive(for: account)
-                        HStack(spacing: 2) {
-                            Image(systemName: isLunaActive ? "moon.stars.fill" : "moon.fill")
-                                .font(.system(size: 8))
-                            Text(isLunaActive ? "Luna" : "Reserve")
-                                .font(.system(size: 8.5, weight: .bold, design: .rounded))
-                        }
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(Capsule().fill(Color.purple.opacity(0.18)))
-                        .foregroundStyle(Color.purple)
-                        .help(language.text(
-                            isLunaActive ? "Codex đang chạy Luna Reserve" : "Tài khoản có Luna Reserve",
-                            isLunaActive ? "Codex active on Luna Reserve" : "Account has Luna Reserve"
-                        ))
-                    }
-                }
-                HStack(spacing: 4) {
-                    Text(account.email)
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-
-                    CopyEmailButton(email: account.email, iconSize: 11.5)
-                }
-            }
-
-            Spacer(minLength: 4)
-
-            // Dual Quota Telemetry (5H & Wk)
-            PrismFilamentBar(fivePercent: quota, weekPercent: week, width: 32, height: 3, showLabels: true)
-
-            // Action Button
-            if account.isActive {
-                Text(language.text("Đang dùng", "Active"))
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(PrismTheme.emerald)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(PrismTheme.emerald.opacity(0.16)))
-            } else if account.requiresLogin {
-                Button {
-                    relogin(account)
-                } label: {
-                    Text(language.text("Login", "Login"))
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(PrismTheme.amber)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(PrismTheme.amber.opacity(0.18)))
-                }
-                .buttonStyle(.plain)
-                .pointingHandCursor()
-            } else if !account.usageErrorBlocksActivation {
-                Button {
-                    PrismTheme.triggerHaptic()
-                    store.activate(account, force: true)
-                } label: {
-                    Text(language.text("Đổi", "Swap"))
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(Color.accentColor)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(Color.accentColor.opacity(0.14)))
-                }
-                .buttonStyle(.plain)
-                .pointingHandCursor()
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4.5)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.primary.opacity(account.isActive ? 0.05 : 0.015))
-        )
-        .contextMenu {
-            Button {
-                store.activate(account, force: true)
-            } label: {
-                Label(language.text("Kích hoạt", "Activate"), systemImage: "bolt.fill")
-            }
-            Button {
-                PrismTheme.triggerHaptic()
-                copyAccountEmail(account.email)
-            } label: {
-                Label(language.text("Sao chép email", "Copy email"), systemImage: "doc.on.doc")
-            }
-            Button {
-                editAccount(account)
-            } label: {
-                Label(language.text("Sửa nhãn", "Edit label"), systemImage: "pencil")
-            }
-            if account.hasLunaReserve && !store.isLunaReserveActive(for: account) {
-                Button {
-                    PrismTheme.triggerHaptic()
-                    store.enableLunaReserve(account)
-                } label: {
-                    Label(language.text("Bật Luna Reserve", "Enable Luna Reserve"), systemImage: "moon.stars.fill")
-                }
-            }
-            if account.requiresLogin {
-                Button {
-                    relogin(account)
-                } label: {
-                    Label(language.text("Đăng nhập lại", "Sign in again"), systemImage: "arrow.clockwise")
-                }
-            }
-            Divider()
-            Button(role: .destructive) {
-                deleteAccount(account)
-            } label: {
-                Label(language.text("Xóa", "Delete"), systemImage: "trash")
-            }
-        }
     }
 
     // MARK: - 3. Radar, Service Health & Automation Card
@@ -717,5 +564,184 @@ struct PrismBentoStudioView: View {
         .padding(.vertical, 2.5)
         .background(RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.04)))
         .help("\(provider.compactName): \(count) \(language.text("tài khoản", "accounts"))")
+    }
+}
+
+/// Dedicated row view so LazyVStack context menus capture this row's account ID,
+/// not a recycled parent-helper closure from another roster row.
+private struct PrismAccountRosterRow: View {
+    @EnvironmentObject private var store: AccountStore
+    @EnvironmentObject private var language: LanguageStore
+
+    let account: SavedAccount
+    let index: Int
+    let relogin: (SavedAccount) -> Void
+    let editAccount: (SavedAccount) -> Void
+    let deleteAccount: (SavedAccount) -> Void
+
+    var body: some View {
+        // Freeze the row identity for menu actions — never use selection or list index.
+        let targetID = account.id
+        let quota = account.usage?.fiveHour?.displayRemainingPercent
+        let week = account.usage?.weekly?.displayRemainingPercent
+
+        return HStack(spacing: 8) {
+            Text("\(index)")
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundStyle(.secondary.opacity(0.8))
+                .frame(width: 16, alignment: .trailing)
+
+            Text(String(account.displayName.prefix(1)).uppercased())
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(PrismTheme.quotaTint(percent: quota))
+                .frame(width: 24, height: 24)
+                .background(Circle().fill(PrismTheme.quotaTint(percent: quota).opacity(0.14)))
+
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 4) {
+                    Text(account.displayName)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .lineLimit(1)
+
+                    if let banked = account.usage?.bankedResets?.availableCount, banked > 0 {
+                        HStack(spacing: 2) {
+                            Image(systemName: "arrow.counterclockwise.circle.fill")
+                                .font(.system(size: 8))
+                            Text("+\(banked)")
+                                .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                        }
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.orange.opacity(0.18)))
+                        .foregroundStyle(Color.orange)
+                        .help(language.text(
+                            "\(banked) lượt banked reset có thể dùng",
+                            "\(banked) banked resets available"
+                        ))
+                    }
+
+                    if account.hasLunaReserve {
+                        let isLunaActive = store.isLunaReserveActive(for: account)
+                        HStack(spacing: 2) {
+                            Image(systemName: isLunaActive ? "moon.stars.fill" : "moon.fill")
+                                .font(.system(size: 8))
+                            Text(isLunaActive ? "Luna" : "Reserve")
+                                .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                        }
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.purple.opacity(0.18)))
+                        .foregroundStyle(Color.purple)
+                        .help(language.text(
+                            isLunaActive ? "Codex đang chạy Luna Reserve" : "Tài khoản có Luna Reserve",
+                            isLunaActive ? "Codex active on Luna Reserve" : "Account has Luna Reserve"
+                        ))
+                    }
+                }
+                HStack(spacing: 4) {
+                    Text(account.email)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    CopyEmailButton(email: account.email, iconSize: 11.5)
+                }
+            }
+
+            Spacer(minLength: 4)
+
+            PrismFilamentBar(fivePercent: quota, weekPercent: week, width: 32, height: 3, showLabels: true)
+
+            if account.isActive {
+                Text(language.text("Đang dùng", "Active"))
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(PrismTheme.emerald)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(PrismTheme.emerald.opacity(0.16)))
+            } else if account.requiresLogin {
+                Button {
+                    guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
+                    relogin(target)
+                } label: {
+                    Text(language.text("Login", "Login"))
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(PrismTheme.amber)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(PrismTheme.amber.opacity(0.18)))
+                }
+                .buttonStyle(.plain)
+                .pointingHandCursor()
+            } else if !account.usageErrorBlocksActivation {
+                Button {
+                    PrismTheme.triggerHaptic()
+                    guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
+                    store.activate(target, force: true)
+                } label: {
+                    Text(language.text("Đổi", "Swap"))
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.14)))
+                }
+                .buttonStyle(.plain)
+                .pointingHandCursor()
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4.5)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.primary.opacity(account.isActive ? 0.05 : 0.015))
+        )
+        .contextMenu {
+            Button {
+                guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
+                store.activate(target, force: true)
+            } label: {
+                Label(language.text("Kích hoạt", "Activate"), systemImage: "bolt.fill")
+            }
+            Button {
+                PrismTheme.triggerHaptic()
+                guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
+                copyAccountEmail(target.email)
+            } label: {
+                Label(language.text("Sao chép email", "Copy email"), systemImage: "doc.on.doc")
+            }
+            Button {
+                guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
+                editAccount(target)
+            } label: {
+                Label(language.text("Sửa nhãn", "Edit label"), systemImage: "pencil")
+            }
+            if account.hasLunaReserve && !store.isLunaReserveActive(for: account) {
+                Button {
+                    PrismTheme.triggerHaptic()
+                    guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
+                    store.enableLunaReserve(target)
+                } label: {
+                    Label(language.text("Bật Luna Reserve", "Enable Luna Reserve"), systemImage: "moon.stars.fill")
+                }
+            }
+            if account.requiresLogin {
+                Button {
+                    guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
+                    relogin(target)
+                } label: {
+                    Label(language.text("Đăng nhập lại", "Sign in again"), systemImage: "arrow.clockwise")
+                }
+            }
+            Divider()
+            Button(role: .destructive) {
+                guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
+                deleteAccount(target)
+            } label: {
+                Label(language.text("Xóa", "Delete"), systemImage: "trash")
+            }
+        }
+        .id(targetID)
     }
 }

@@ -247,7 +247,10 @@ struct NotchWindowView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showReloginAccount)) { notification in
             let id = (notification.object as? String).flatMap(UUID.init(uuidString:))
                 ?? notification.object as? UUID
-            if let id, let account = store.accounts.first(where: { $0.id == id }) {
+            if let id {
+                // Prefer the posted ID only — never fall back to "first requiresLogin"
+                // when a specific row was clicked (wrong-account Login bug).
+                guard let account = store.accounts.first(where: { $0.id == id }) else { return }
                 if !isExpanded { expand() }
                 accountForRelogin = account
             } else if let account = store.accounts.first(where: { !store.isArchived($0) && $0.requiresLogin }) {

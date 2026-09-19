@@ -12,6 +12,9 @@ use crate::secrets::MigratingSecretStore;
 use super::App;
 
 pub const AUTO_SWITCH_POLL_SECONDS: u64 = 60;
+/// While every account is exhausted (or only banked resets remain), back off
+/// so decide does not fan-out AT probes every minute.
+pub const AUTO_SWITCH_EXHAUSTED_BACKOFF_SECONDS: u64 = 300;
 
 static AUTO_SWITCH_RUN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static AUTO_SWITCH_CHECK_LISTENERS: OnceLock<Mutex<Vec<Sender<()>>>> = OnceLock::new();
@@ -23,11 +26,15 @@ pub fn spawn_auto_switch_worker(env: AppEnv) {
             .name("auto-switch-monitor".to_owned())
             .spawn(move || {
                 loop {
-                    if let Err(error) = run_auto_switch_for_env(env.clone()) {
-                        eprintln!("auto-switch monitor failed: {error:#}");
-                    }
+                    let next_sleep = match run_auto_switch_for_env(env.clone()) {
+                        Ok(seconds) => seconds,
+                        Err(error) => {
+                            eprintln!("auto-switch monitor failed: {error:#}");
+                            AUTO_SWITCH_POLL_SECONDS
+                        }
+                    };
                     notify_auto_switch_checked();
-                    thread::sleep(StdDuration::from_secs(AUTO_SWITCH_POLL_SECONDS));
+                    thread::sleep(StdDuration::from_secs(next_sleep));
                 }
             });
     });
@@ -44,7 +51,7 @@ fn notify_auto_switch_checked() {
     listeners.retain(|listener| listener.send(()).is_ok());
 }
 
-fn run_auto_switch_for_env(env: AppEnv) -> Result<()> {
+fn run_auto_switch_for_env(env: AppEnv) -> Result<u64> {
     let _run_guard = AUTO_SWITCH_RUN_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -55,19 +62,28 @@ fn run_auto_switch_for_env(env: AppEnv) -> Result<()> {
     );
     let app = App::new(env, repository);
     if !app.auto_switch_enabled()? {
-        return Ok(());
+        return Ok(AUTO_SWITCH_POLL_SECONDS);
     }
 
     let decision = app.auto_switch(false)?;
-    if decision.status != "ready" {
-        return Ok(());
+    match decision.status.as_str() {
+        "ready" => {}
+        "all_accounts_exhausted" | "banked_reset_available" => {
+            return Ok(AUTO_SWITCH_EXHAUSTED_BACKOFF_SECONDS);
+        }
+        _ => return Ok(AUTO_SWITCH_POLL_SECONDS),
     }
 
     let applied = app.auto_switch_with_candidate(true, decision.candidate_account_id, false)?;
     if applied.status != "switched" {
-        return Ok(());
+        let backoff = if applied.status == "all_accounts_exhausted" {
+            AUTO_SWITCH_EXHAUSTED_BACKOFF_SECONDS
+        } else {
+            AUTO_SWITCH_POLL_SECONDS
+        };
+        return Ok(backoff);
     }
 
     let _ = app.list().context("reload roster after auto-switch")?;
-    Ok(())
+    Ok(AUTO_SWITCH_POLL_SECONDS)
 }

@@ -214,6 +214,15 @@ where
             {
                 continue;
             }
+            // Exhausted/unusable caches never pass cached_usage_is_fresh (depleted
+            // windows). Without a backoff, decide would AT-probe every saved
+            // account every poll while all-exhausted — sticky deferred storms.
+            // Re-probe after the backoff so off-schedule resets still surface.
+            if confirmed_paid
+                && exhausted_cached_usage_skips_probe(candidate.cached_usage.as_ref(), now)
+            {
+                continue;
+            }
             match self.usage(Some(candidate.id)) {
                 Ok(output) if fresh_usage_passes_auto_switch_gate(&output.usage) => {
                     usable_candidate_ids.insert(candidate.id);
@@ -1668,6 +1677,20 @@ fn cached_usage_is_fresh(
     })
 }
 
+/// Trust a recently fetched unusable/exhausted cache long enough to stop
+/// all-exhausted decide from mass AT-probing the roster every 60s.
+const EXHAUSTED_USAGE_PROBE_BACKOFF: time::Duration = time::Duration::minutes(10);
+
+fn exhausted_cached_usage_skips_probe(
+    usage: Option<&AccountUsageView>,
+    now: time::OffsetDateTime,
+) -> bool {
+    usage.is_some_and(|usage| {
+        !is_usable_for_switch(Some(usage))
+            && now - usage.fetched_at < EXHAUSTED_USAGE_PROBE_BACKOFF
+    })
+}
+
 fn account_display_name(account: &AccountView) -> String {
     account
         .custom_label
@@ -2540,6 +2563,49 @@ mod tests {
             "all_accounts_exhausted"
         };
         assert_eq!(apply_status, "all_accounts_exhausted");
+    }
+
+    #[test]
+    fn exhausted_cached_usage_skips_probe_within_backoff_then_allows_refetch() {
+        let now = OffsetDateTime::now_utc();
+        let window = |remaining: u8| UsageWindowView {
+            used_percent: 100u8.saturating_sub(remaining),
+            remaining_percent: remaining,
+            reset_at: now,
+        };
+        let recent_exhausted = AccountUsageView {
+            source: UsageSource::SavedAccessToken,
+            fetched_at: now - time::Duration::minutes(2),
+            five_hour: Some(window(0)),
+            weekly: Some(window(0)),
+            credits: None,
+            banked_resets: None,
+            plan_label: Some("Pro".to_owned()),
+            subscription_active_until: None,
+            luna_reserve: None,
+        };
+        let stale_exhausted = AccountUsageView {
+            fetched_at: now - time::Duration::minutes(11),
+            ..recent_exhausted.clone()
+        };
+        let usable = AccountUsageView {
+            source: UsageSource::SavedAccessToken,
+            fetched_at: now - time::Duration::minutes(2),
+            five_hour: Some(window(40)),
+            weekly: Some(window(80)),
+            credits: None,
+            banked_resets: None,
+            plan_label: Some("Pro".to_owned()),
+            subscription_active_until: None,
+            luna_reserve: None,
+        };
+
+        assert!(exhausted_cached_usage_skips_probe(Some(&recent_exhausted), now));
+        assert!(!exhausted_cached_usage_skips_probe(Some(&stale_exhausted), now));
+        assert!(!exhausted_cached_usage_skips_probe(Some(&usable), now));
+        assert!(!exhausted_cached_usage_skips_probe(None, now));
+        // Exhausted caches are never "fresh" — backoff is what stops the fan-out.
+        assert!(!cached_usage_is_fresh(Some(&recent_exhausted), now));
     }
 
     #[test]

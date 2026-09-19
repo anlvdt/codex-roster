@@ -1086,7 +1086,16 @@ final class AccountStore: ObservableObject {
         autoSwitchTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.checkAutoSwitchWhenExhausted()
-                try? await Task.sleep(for: self?.quotaPollInterval ?? .seconds(60))
+                // While all accounts are exhausted, decide still runs (to spot
+                // active recovery) but poll much slower — matches Rust worker
+                // backoff and avoids mass AT probes every minute.
+                let interval: Duration
+                if self?.autoSwitchPausedAllExhausted == true {
+                    interval = .seconds(300)
+                } else {
+                    interval = self?.quotaPollInterval ?? .seconds(60)
+                }
+                try? await Task.sleep(for: interval)
             }
         }
     }

@@ -2961,9 +2961,21 @@ func accountSortIsOrderedByWeeklyQuota(_ left: SavedAccount, _ right: SavedAccou
 
 /// Shared notch roster sizing: collapsed 260pt scroll area inside a 480pt deck;
 /// expanded fits all 2-column rows for typical ≤20 accounts.
+///
+/// `nextActionCaptionHeight` is reserved in the total so a live caption never
+/// clips the roster; when all-clear (caption hidden) that budget becomes bottom
+/// breathing room under the roster card — not a mid-deck gap.
 enum NotchRosterLayout {
     static let collapsedDeckHeight: CGFloat = 480
     static let collapsedRosterHeight: CGFloat = 260
+    /// Compact next-action caption between upper wings and roster.
+    static let nextActionCaptionHeight: CGFloat = 22
+    /// Outer chrome around the panoramic deck (keep in sync with PrismQuickSwitchDeck).
+    static let deckHorizontalInset: CGFloat = 18
+    static let deckTopInset: CGFloat = 10
+    static let deckBottomInset: CGFloat = 22
+    /// Spacing between upper wings / caption / roster (tight — leftover goes below roster).
+    static let deckSectionSpacing: CGFloat = 6
     static let rowHeight: CGFloat = 54
     static let rowSpacing: CGFloat = 7
     static let gridVerticalPadding: CGFloat = 6
@@ -2983,6 +2995,7 @@ enum NotchRosterLayout {
     static func deckHeight(accountCount: Int, expanded: Bool) -> CGFloat {
         collapsedDeckHeight - collapsedRosterHeight
             + rosterGridHeight(accountCount: accountCount, expanded: expanded)
+            + nextActionCaptionHeight
     }
 }
 

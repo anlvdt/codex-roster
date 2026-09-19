@@ -71,7 +71,6 @@ struct NotchWindowView: View {
     @EnvironmentObject private var language: LanguageStore
     @EnvironmentObject private var updater: GitHubUpdater
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.openWindow) private var openWindow
     @AppStorage("codex_roster_notch_pinned_live") private var isPinnedLive = false
     @AppStorage(NotchRosterLayout.rosterExpandedKey) private var isRosterExpanded = false
 
@@ -232,7 +231,11 @@ struct NotchWindowView: View {
         }
         .task {
             store.startCoreMonitoring()
+            store.refreshTokenUsage(silently: true)
+            store.refreshResetOutlook(silently: true)
+            store.refreshOpenAIStatus(silently: true)
             store.refreshProviderStatus(silently: true)
+            store.ensureAutomaticFullBackup()
             updater.startAutomaticChecks(currentVersion: AppInfo.shortVersion)
             NotchGlobalHotKey.shared.registerIfNeeded()
             if isPinnedLive && !isExpanded {
@@ -251,7 +254,10 @@ struct NotchWindowView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .showDashboard)) { _ in
-            openDashboard()
+            // Second-instance / Dock reopen: reveal the notch (no companion window).
+            guard store.notchPanelEnabled else { return }
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            if !isExpanded { expand() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .showAddAccount)) { _ in
             if !isExpanded { expand() }
@@ -293,15 +299,13 @@ struct NotchWindowView: View {
             collapseTask?.cancel()
             removeKeyMonitors()
         }
-    }
-
-    private func openDashboard() {
-        openWindow(id: "dashboard")
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        DispatchQueue.main.async {
-            NSApplication.shared.windows
-                .first(where: { $0.identifier?.rawValue == "dashboard" })?
-                .makeKeyAndOrderFront(nil)
+        .alert("Codex Roster", isPresented: Binding(
+            get: { store.errorMessage != nil },
+            set: { if !$0 { store.errorMessage = nil } }
+        )) {
+            Button(language.text("Đồng ý", "OK"), role: .cancel) { store.errorMessage = nil }
+        } message: {
+            Text(store.errorMessage ?? "")
         }
     }
 

@@ -9,6 +9,7 @@ import Testing
     #expect(AccountActivationSafety.forceSwitchOrderedSteps == [
         "preserveLiveSessionBeforeDesktopQuit",
         "prepareForAccountSwitch",
+        "clearDesktopWebSessionCache",
         "activate",
         "relaunchAndConfirm",
     ])
@@ -16,6 +17,14 @@ import Testing
     #expect(
         AccountActivationSafety.forceSwitchOrderedSteps.firstIndex(of: "preserveLiveSessionBeforeDesktopQuit")!
             < AccountActivationSafety.forceSwitchOrderedSteps.firstIndex(of: "prepareForAccountSwitch")!
+    )
+    #expect(
+        AccountActivationSafety.forceSwitchOrderedSteps.firstIndex(of: "prepareForAccountSwitch")!
+            < AccountActivationSafety.forceSwitchOrderedSteps.firstIndex(of: "clearDesktopWebSessionCache")!
+    )
+    #expect(
+        AccountActivationSafety.forceSwitchOrderedSteps.firstIndex(of: "clearDesktopWebSessionCache")!
+            < AccountActivationSafety.forceSwitchOrderedSteps.firstIndex(of: "activate")!
     )
 }
 

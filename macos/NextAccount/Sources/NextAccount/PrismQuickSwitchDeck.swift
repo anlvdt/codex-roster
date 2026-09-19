@@ -13,7 +13,7 @@ struct PrismQuickSwitchDeck: View {
     @AppStorage("codex_roster_notch_pinned_live") private var isPinnedLive = false
     @AppStorage(NotchRosterLayout.rosterExpandedKey) private var isRosterExpanded = false
 
-    var openDashboard: () -> Void = {}
+    var openSettings: () -> Void = {}
     var openAddAccountFlow: () -> Void = {}
     /// Must receive the clicked row's account ID — never pick "first requiresLogin".
     var openReloginFlow: (UUID) -> Void = { _ in }
@@ -586,8 +586,11 @@ struct PrismQuickSwitchDeck: View {
 
                 // Utility Menu
                 Menu {
-                    Button { openDashboard() } label: {
-                        Label(language.text("Mở cửa sổ phụ", "Open detached window"), systemImage: "macwindow")
+                    Button { openSettings() } label: {
+                        Label(
+                            language.text("Cài đặt…", "Settings…"),
+                            systemImage: "gearshape"
+                        )
                     }
                     Button { openBackupFlow(.export) } label: {
                         Label(language.text("Sao lưu", "Export backup"), systemImage: "square.and.arrow.up")

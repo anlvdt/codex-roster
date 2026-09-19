@@ -145,6 +145,7 @@ enum AccountActivationSafety {
     static let forceSwitchOrderedSteps = [
         "preserveLiveSessionBeforeDesktopQuit",
         "prepareForAccountSwitch",
+        "clearDesktopWebSessionCache",
         "activate",
         "relaunchAndConfirm",
     ]
@@ -693,6 +694,11 @@ final class AccountStore: ObservableObject {
             if force {
                 try await self.preserveLiveSessionBeforeDesktopQuit()
                 relaunch = try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
+                // Chromium profile cookies/local storage can keep a logged-out UI
+                // even after ~/.codex/auth.json was restored. Clear web session
+                // caches only while Desktop is fully quit so launch rehydrates
+                // from the restored auth files.
+                ChatGPTDesktop.clearWebSessionCache()
             } else {
                 relaunch = ChatGPTDesktop.RelaunchPlan.preferredDesktop()
             }
@@ -710,10 +716,16 @@ final class AccountStore: ObservableObject {
                 }
                 throw error
             }
+            // Give the filesystem a beat after restore before Desktop opens and
+            // races a partial auth.json read.
+            try? await Task.sleep(for: .milliseconds(250))
             let launched = await relaunch.launchAndConfirm()
             let accepted: Bool
             if launched {
-                accepted = await self.waitForDesktopAcceptance(accountID: activated.account.id)
+                accepted = await self.waitForDesktopAcceptance(
+                    accountID: activated.account.id,
+                    expectedEmail: activated.account.email
+                )
             } else {
                 accepted = false
             }
@@ -1313,6 +1325,7 @@ final class AccountStore: ObservableObject {
                     autoSwitchState = .closingDesktop
                     try await self.preserveLiveSessionBeforeDesktopQuit()
                     relaunch = try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
+                    ChatGPTDesktop.clearWebSessionCache()
                     didCloseDesktop = true
                 }
                 autoSwitchState = .switchingAccount
@@ -1341,10 +1354,16 @@ final class AccountStore: ObservableObject {
                     return
                 }
                 autoSwitchState = .relaunchingDesktop
+                try? await Task.sleep(for: .milliseconds(250))
                 var launched = await relaunch.launchAndConfirm()
                 var accepted: Bool
+                let expectedEmail = self.accounts.first(where: { $0.id == applied.candidateAccountId })?.email
+                    ?? candidateName
                 if launched, let candidateID = applied.candidateAccountId {
-                    accepted = await waitForDesktopAcceptance(accountID: candidateID)
+                    accepted = await waitForDesktopAcceptance(
+                        accountID: candidateID,
+                        expectedEmail: expectedEmail
+                    )
                 } else {
                     accepted = false
                 }
@@ -1353,7 +1372,10 @@ final class AccountStore: ObservableObject {
                     try? await Task.sleep(for: .seconds(1))
                     launched = await relaunch.launchAndConfirm()
                     if launched, let candidateID = applied.candidateAccountId {
-                        accepted = await waitForDesktopAcceptance(accountID: candidateID)
+                        accepted = await waitForDesktopAcceptance(
+                            accountID: candidateID,
+                            expectedEmail: expectedEmail
+                        )
                     }
                 }
                 guard accepted else {
@@ -1476,37 +1498,46 @@ final class AccountStore: ObservableObject {
         applyRoster(status: loadedStatus, accounts: loadedAccounts.accounts)
     }
 
-    private func waitForDesktopAcceptance(accountID: UUID) async -> Bool {
-        // Give the official Desktop auth manager first ownership of the restored
-        // refresh token before Roster performs a read-only access-token probe.
-        try? await Task.sleep(for: .seconds(3))
-        let deadline = ContinuousClock.now + .seconds(8)
+    private func waitForDesktopAcceptance(accountID: UUID, expectedEmail: String) async -> Bool {
+        // Give Desktop time to open and either rehydrate from restored auth.json
+        // or reject a proven-dead session. Acceptance is based on the LIVE
+        // ~/.codex identity — never on a saved-account usage probe (that only
+        // checks the snapshot bytes and can report OK while the UI still shows
+        // "Sign in to ChatGPT").
+        try? await Task.sleep(for: .seconds(2))
+        let deadline = ContinuousClock.now + .seconds(12)
+        var sawMatchingLiveIdentity = false
         while ContinuousClock.now < deadline {
             do {
-                _ = try await cli.data(arguments: [
-                    "usage", accountID.uuidString, "--json",
-                ])
-                // Usage succeeded: the restored access token is valid and live.
-                return true
-            } catch {
-                // A merely-expired access token is NOT a rejection. The probe runs
-                // read-only (it never rotates the refresh token), so on a not
-                // recently used account it returns a plain 401 until the official
-                // Desktop refreshes the session lazily on first use — exactly what
-                // the legacy flow relied on. Only a *proven-dead* session
-                // (revoked/reused/invalid refresh token) justifies a rollback.
-                // Mirrors `usage_error_requires_login` in src/usage.rs.
-                if Self.usageErrorForcesRollback(error.localizedDescription) {
-                    return false
+                let status = try await cli.decode(StatusOutput.self, arguments: ["status"])
+                guard let live = status.currentAccount else {
+                    try? await Task.sleep(for: .milliseconds(400))
+                    continue
                 }
-                try? await Task.sleep(for: .milliseconds(500))
+                let emailMatches = live.email.caseInsensitiveCompare(expectedEmail) == .orderedSame
+                let idMatches = status.currentAccountSavedId == accountID
+                guard emailMatches || idMatches else {
+                    try? await Task.sleep(for: .milliseconds(400))
+                    continue
+                }
+                sawMatchingLiveIdentity = true
+                do {
+                    // Live usage probe (no account-id) — AT-only, no RT prove.
+                    _ = try await cli.data(arguments: ["usage", "--json"])
+                    return true
+                } catch {
+                    if Self.usageErrorForcesRollback(error.localizedDescription) {
+                        return false
+                    }
+                    // Expired AT / deferred is fine: Desktop owns refresh once
+                    // live identity already matches the target.
+                    return true
+                }
+            } catch {
+                try? await Task.sleep(for: .milliseconds(400))
             }
         }
-        // No positive confirmation within the window, but nothing proved the
-        // target dead either. Trust the official Desktop to refresh on first use
-        // (legacy ownership model) rather than bouncing the user back with a
-        // false rejection over a merely-expired access token.
-        return true
+        return sawMatchingLiveIdentity
     }
 
     /// Whether a `usage` probe error means the target account is genuinely
@@ -1540,10 +1571,12 @@ final class AccountStore: ObservableObject {
         if ChatGPTDesktop.isRunning {
             try await preserveLiveSessionBeforeDesktopQuit()
             relaunch = try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
+            ChatGPTDesktop.clearWebSessionCache()
         } else {
             relaunch = fallbackRelaunch
         }
         _ = try await activateAfterProcessesDrain(accountID: previousAccountID, waitForDrain: true)
+        try? await Task.sleep(for: .milliseconds(250))
         guard await relaunch.launchAndConfirm() else {
             throw CLIError(AppLanguage.text(
                 "Đã phục hồi dữ liệu phiên trước nhưng không thể mở lại ChatGPT.",
@@ -1949,6 +1982,49 @@ private enum ChatGPTDesktop {
             "Không thể đóng hoàn toàn ChatGPT Desktop trước khi chuyển tài khoản.",
             "Could not fully quit ChatGPT Desktop before switching accounts."
         ))
+    }
+
+    /// Drop Chromium web-session caches so Desktop rehydrates from restored
+    /// `~/.codex/auth.json` instead of a stale logged-out cookie jar.
+    /// Call only after Desktop processes have fully quit.
+    static func clearWebSessionCache() {
+        guard !isRunning else { return }
+        let supportRoot = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Codex", isDirectory: true)
+        let profileDirs = ["Default", "codex-browser-app"].map {
+            supportRoot.appendingPathComponent($0, isDirectory: true)
+        }
+        let fileNames = [
+            "Cookies",
+            "Cookies-journal",
+            "Network Persistent State",
+            "TransportSecurity",
+        ]
+        let directoryNames = [
+            "Local Storage",
+            "Session Storage",
+            "Service Worker",
+            "IndexedDB",
+            "Cache Storage",
+            "Code Cache",
+            "GPUCache",
+        ]
+        let fm = FileManager.default
+        for profile in profileDirs where fm.fileExists(atPath: profile.path) {
+            for name in fileNames {
+                let url = profile.appendingPathComponent(name)
+                try? fm.removeItem(at: url)
+            }
+            for name in directoryNames {
+                let url = profile.appendingPathComponent(name, isDirectory: true)
+                try? fm.removeItem(at: url)
+            }
+        }
+        // Stale singleton locks can make the next launch attach to a half-dead
+        // profile and keep showing the sign-in screen.
+        for name in ["SingletonLock", "SingletonCookie", "SingletonSocket"] {
+            try? fm.removeItem(at: supportRoot.appendingPathComponent(name))
+        }
     }
 
     private static func resolvedAppURLs(for bundleIDs: [String]) -> [URL] {

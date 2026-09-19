@@ -152,23 +152,6 @@ struct CodexRosterApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
         .defaultPosition(.top)
-
-        Window("Codex Roster", id: "dashboard") {
-            ContentView()
-                .environmentObject(store)
-                .environmentObject(language)
-                .environmentObject(updater)
-                .environment(\.locale, language.language.locale)
-                .task {
-                    store.startCoreMonitoring()
-                    store.refreshTokenUsage(silently: true)
-                    store.refreshResetOutlook(silently: true)
-                    store.refreshOpenAIStatus(silently: true)
-                    store.ensureAutomaticFullBackup()
-                }
-        }
-        .defaultSize(width: 415, height: 490)
-        .windowResizability(.contentSize)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button(language.text("Thêm tài khoản…", "Add account…")) {
@@ -216,168 +199,11 @@ struct CodexRosterApp: App {
 }
 
 struct ContentView: View {
-    @EnvironmentObject private var store: AccountStore
-    @EnvironmentObject private var language: LanguageStore
-    @State private var selection: UUID?
-    /// Owned here so the sidebar signal rows and the board render one filter.
-    @State private var triageFocus: AccountTriage?
-    @State private var accountForDeletion: SavedAccount?
-    @State private var accountForEditing: SavedAccount?
-    @State private var accountForRelogin: SavedAccount?
-    @State private var reloginQueue: [UUID] = []
-    @State private var showingAddAccount = false
-    @State private var backupOperation: BackupOperation?
-
+    /// Legacy companion host removed — notch owns sheets and switching.
+    /// Kept as an empty stub so older call sites / previews do not break the module.
     var body: some View {
-        detailContent
-            .frame(width: 415, height: 490)
-            .fixedSize()
-        .toolbar { AccountToolbar(showingAddAccount: $showingAddAccount) }
-        .onReceive(NotificationCenter.default.publisher(for: .showAddAccount)) { _ in
-            showingAddAccount = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .showReloginAccount)) { notification in
-            let id = (notification.object as? String).flatMap(UUID.init(uuidString:))
-                ?? notification.object as? UUID
-            // Require a concrete account UUID — never fall back to "first requiresLogin".
-            guard let id,
-                  let account = store.accounts.first(where: { $0.id == id }) else { return }
-            selection = id
-            presentRelogin(account)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .exportBackup)) { _ in
-            backupOperation = .export
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .importBackup)) { _ in
-            backupOperation = .import
-        }
-        .overlay {
-            if store.isBusyForActions {
-                ProgressView()
-                    .controlSize(.large)
-                    .accessibilityLabel(language.text("Đang xử lý", "Working"))
-                    .padding(24)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-            }
-        }
-        .sheet(isPresented: $showingAddAccount) {
-            AddAccountSheet()
-                .environmentObject(store)
-                .environmentObject(language)
-        }
-        .sheet(item: $accountForRelogin, onDismiss: presentNextQueuedRelogin) { account in
-            ReloginAccountSheet(
-                account: account,
-                queuedCount: reloginQueue.count,
-                cancelQueue: { reloginQueue.removeAll() }
-            )
-                .environmentObject(store)
-                .environmentObject(language)
-        }
-        .sheet(item: $backupOperation) { operation in
-            BackupTransferSheet(operation: operation)
-                .environmentObject(store)
-                .environmentObject(language)
-        }
-        .sheet(item: $accountForEditing) { account in
-            AccountEditorSheet(account: account)
-                .environmentObject(store)
-                .environmentObject(language)
-        }
-        .alert("Codex Roster", isPresented: Binding(
-            get: { store.errorMessage != nil },
-            set: { if !$0 { store.errorMessage = nil } }
-        )) {
-            Button(language.text("Đồng ý", "OK"), role: .cancel) { store.errorMessage = nil }
-        } message: {
-            Text(store.errorMessage ?? "")
-        }
-        .confirmationDialog(
-            language.text("Xóa tài khoản đã lưu?", "Remove saved account?"),
-            isPresented: Binding(
-                get: { accountForDeletion != nil },
-                set: { if !$0 { accountForDeletion = nil } }
-            ),
-            titleVisibility: .visible,
-            presenting: accountForDeletion
-        ) { account in
-            // Use the presented snapshot — not live @State — so dismiss/clear cannot
-            // retarget delete to a different (or nil) account.
-            Button(language.text("Xóa", "Remove"), role: .destructive) {
-                store.delete(account)
-                accountForDeletion = nil
-            }
-            Button(language.text("Hủy", "Cancel"), role: .cancel) { accountForDeletion = nil }
-        } message: { account in
-            Text(language.text("Thao tác này xóa \(account.email) khỏi Codex Roster.", "This removes \(account.email) from Codex Roster."))
-        }
+        EmptyView()
     }
-
-    private func requestActivation(for account: SavedAccount) {
-        store.activate(account, force: true)
-    }
-
-    @ViewBuilder
-    private var detailContent: some View {
-        if let selected = selectedAccount {
-            AccountDetail(
-                account: selected,
-                home: { selection = nil },
-                activate: { requestActivation(for: selected) },
-                edit: { accountForEditing = selected },
-                archive: {
-                    store.archive(selected)
-                    selection = nil
-                },
-                restore: { store.restore(selected) },
-                remove: { accountForDeletion = $0 },
-                relogin: { presentRelogin($0) }
-            )
-        } else {
-            PrismBentoStudioView(
-                selection: $selection,
-                relogin: presentRelogin,
-                reloginAll: startReloginQueue,
-                openAddAccount: { showingAddAccount = true },
-                openBackup: { backupOperation = $0 },
-                editAccount: { accountForEditing = $0 },
-                deleteAccount: { accountForDeletion = $0 }
-            )
-        }
-    }
-
-    private var selectedAccount: SavedAccount? {
-        store.accounts.first { $0.id == selection }
-    }
-
-    private func presentRelogin(_ account: SavedAccount) {
-        reloginQueue.removeAll()
-        selection = account.id
-        accountForRelogin = account
-    }
-
-    private func startReloginQueue(_ accounts: [SavedAccount]) {
-        let pending = accounts.filter { !store.isArchived($0) && $0.requiresLogin }
-        guard let first = pending.first else { return }
-        reloginQueue = pending.dropFirst().map(\.id)
-        selection = first.id
-        accountForRelogin = first
-    }
-
-    private func presentNextQueuedRelogin() {
-        while let nextID = reloginQueue.first {
-            reloginQueue.removeFirst()
-            guard let account = store.accounts.first(where: {
-                $0.id == nextID && !store.isArchived($0) && $0.requiresLogin
-            }) else { continue }
-            selection = account.id
-            DispatchQueue.main.async {
-                accountForRelogin = account
-            }
-            return
-        }
-    }
-
 }
 
 private struct AccountSidebar: View {
@@ -3936,7 +3762,7 @@ struct MenuBarView: View {
 
     var body: some View {
         PrismQuickSwitchDeck(
-            openDashboard: openDashboard,
+            openSettings: openSettings,
             openAddAccountFlow: openAddAccountFlow,
             openReloginFlow: openReloginFlow,
             openBackupFlow: openBackupFlow,
@@ -3948,14 +3774,9 @@ struct MenuBarView: View {
         }
     }
 
-    private func openDashboard() {
-        openWindow(id: "dashboard")
+    private func openSettings() {
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
-        DispatchQueue.main.async {
-            NSApplication.shared.windows
-                .first(where: { $0.identifier?.rawValue == "dashboard" })?
-                .makeKeyAndOrderFront(nil)
-        }
     }
 
     private func openReloginFlow(_ accountID: UUID) {
@@ -4349,7 +4170,7 @@ private struct AboutView: View {
                         AboutBullet(icon: "arrow.counterclockwise", text: language.text("Khôi phục danh sách hoặc phiên sao lưu gần nhất sau khi xác nhận.", "Restore the latest account list or saved sessions after confirmation."))
                     }
                     AboutFeatureGroup(title: language.text("Trải nghiệm hệ thống", "System experience")) {
-                        AboutBullet(icon: "macbook", text: language.text("Notch hiển thị quota hiện tại, chuyển nhanh, trạng thái dịch vụ, refresh, mở dashboard và thoát ứng dụng; bật/tắt trong Cài đặt, mở bằng ⌃⌥R và đóng bằng Esc.", "The notch shows current quota, quick switching, service state, refresh, dashboard access, and quit; toggle it in Settings, open it with ⌃⌥R, and close it with Esc."))
+                        AboutBullet(icon: "macbook", text: language.text("Notch là bảng điều khiển chính: quota, chuyển nhanh, tự chuyển, trạng thái dịch vụ, refresh, cài đặt và thoát. Bật/tắt trong Cài đặt, mở bằng ⌃⌥R, đóng bằng Esc.", "The notch is the main control surface: quota, quick switching, auto-switch, service state, refresh, settings, and quit. Toggle it in Settings, open with ⌃⌥R, close with Esc."))
                         AboutBullet(icon: "power", text: language.text("Tùy chọn mở Codex Roster khi đăng nhập macOS; hỗ trợ phím tắt, Dark Mode và song ngữ Việt–Anh (mặc định Tiếng Việt).", "Optionally launch at macOS sign-in; supports keyboard shortcuts, Dark Mode, and Vietnamese–English (Vietnamese by default)."))
                         AboutBullet(icon: "desktopcomputer", text: language.text("macOS là nền tảng duy nhất đang được phát triển và phát hành; app Windows và Linux hiện tạm dừng, mã nguồn được giữ lại để bảo trì trong tương lai.", "macOS is the only actively developed and released platform; Windows and Linux apps are paused, with source retained for future maintenance."))
                     }

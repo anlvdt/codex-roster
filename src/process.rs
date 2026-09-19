@@ -73,17 +73,18 @@ pub fn is_force_skippable_process(process: &RunningCodexProcess) -> bool {
         || is_background_server_process(process)
 }
 
-/// Background server subcommands (`codex app-server`, `codex mcp`) are
-/// non-interactive daemons, not a live coding session. The Desktop backend
-/// runs `app-server`, and third-party tools (e.g. codex-chatgpt-web) keep one
+/// Background server subcommands (`app-server`, `mcp`, `mcp-server`) are
+/// non-interactive daemons, not a live coding session. Role alone is enough:
+/// those values are only assigned when the argv contains that subcommand
+/// (including `node …/codex.js app-server`). The Desktop backend runs
+/// `app-server`, and third-party tools (e.g. codex-chatgpt-web) keep one
 /// long-lived against the shared `~/.codex` home. They never hold a foreground
 /// login the way an interactive `codex` / `codex exec` session does, so
 /// `--force` may step past them exactly as it already does for the plugin and
 /// Desktop-owned app-server. Without this, such a daemon makes account
 /// switching impossible even with `--force`.
 fn is_background_server_process(process: &RunningCodexProcess) -> bool {
-    is_codex_bin_name(&process.executable.to_ascii_lowercase())
-        && matches!(process.role.as_str(), "app-server" | "mcp" | "mcp-server")
+    matches!(process.role.as_str(), "app-server" | "mcp" | "mcp-server")
 }
 
 fn is_desktop_like_process(process: &RunningCodexProcess) -> bool {
@@ -274,17 +275,13 @@ fn classify_process(command: &[String]) -> (String, Option<String>) {
         return (role, summarize_args(command));
     }
 
-    let mut positional = command
-        .iter()
-        .skip(1)
-        .filter(|token| !token.is_empty())
-        .peekable();
-    if let Some(token) = positional.next()
+    let mut tokens = command.iter().skip(1).filter(|token| !token.is_empty());
+    if let Some(token) = skip_config_flags(&mut tokens)
         && !token.starts_with('-')
     {
         return (
             token.to_ascii_lowercase(),
-            summarize_tokens(positional.cloned()),
+            summarize_tokens(tokens.cloned()),
         );
     }
 
@@ -306,19 +303,36 @@ fn classify_wrapped_codex_command(command: &[String]) -> Option<(String, Option<
     if script_name != "codex.js" {
         return None;
     }
-    let mut positional = command
-        .iter()
-        .skip(2)
-        .filter(|token| !token.is_empty())
-        .peekable();
-    let token = positional.next()?;
+    let mut tokens = command.iter().skip(2).filter(|token| !token.is_empty());
+    let token = skip_config_flags(&mut tokens)?;
     if token.starts_with('-') {
-        return Some(("process".to_owned(), summarize_tokens(positional.cloned())));
+        return Some(("process".to_owned(), summarize_tokens(tokens.cloned())));
     }
     Some((
         token.to_ascii_lowercase(),
-        summarize_tokens(positional.cloned()),
+        summarize_tokens(tokens.cloned()),
     ))
+}
+
+/// Skip leading flags before the first positional subcommand.
+///
+/// Consumes long `--…` flags and `-c <value>` (Codex config override) pairs.
+/// Other lone short flags without a following value fall through unchanged.
+fn skip_config_flags<'a, I>(tokens: &mut I) -> Option<&'a String>
+where
+    I: Iterator<Item = &'a String>,
+{
+    while let Some(token) = tokens.next() {
+        if token.starts_with("--") {
+            continue;
+        }
+        if token == "-c" {
+            let _ = tokens.next();
+            continue;
+        }
+        return Some(token);
+    }
+    None
 }
 
 fn detect_flag_value(command: &[String], prefix: &str) -> Option<String> {
@@ -512,6 +526,53 @@ mod tests {
             summary: None,
             origin: Some("cli".to_owned()),
         }));
+        // `node …/codex.js app-server` has executable `node`, not `codex`, but
+        // the role alone marks it as a background daemon `--force` may skip.
+        assert!(is_force_skippable_process(&RunningCodexProcess {
+            pid: 8,
+            executable: "node".to_owned(),
+            role: "app-server".to_owned(),
+            summary: None,
+            origin: Some("cli".to_owned()),
+        }));
+        // Interactive wrapped CLI sessions still block under `--force`.
+        assert!(!is_force_skippable_process(&RunningCodexProcess {
+            pid: 9,
+            executable: "node".to_owned(),
+            role: "exec".to_owned(),
+            summary: None,
+            origin: Some("cli".to_owned()),
+        }));
+        assert!(!is_force_skippable_process(&RunningCodexProcess {
+            pid: 10,
+            executable: "node".to_owned(),
+            role: "resume".to_owned(),
+            summary: None,
+            origin: Some("cli".to_owned()),
+        }));
+    }
+
+    #[test]
+    fn classify_process_skips_config_flag_before_subcommand() {
+        let (role, _) = classify_process(&[
+            "codex".to_owned(),
+            "-c".to_owned(),
+            "model=gpt-5".to_owned(),
+            "app-server".to_owned(),
+        ]);
+        assert_eq!(role, "app-server");
+    }
+
+    #[test]
+    fn classify_wrapped_codex_skips_config_flag_before_subcommand() {
+        let (role, _) = classify_process(&[
+            "node".to_owned(),
+            "/opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js".to_owned(),
+            "-c".to_owned(),
+            "x=y".to_owned(),
+            "app-server".to_owned(),
+        ]);
+        assert_eq!(role, "app-server");
     }
 
     #[test]

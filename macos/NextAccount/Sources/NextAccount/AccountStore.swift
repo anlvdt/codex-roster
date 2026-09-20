@@ -719,6 +719,9 @@ final class AccountStore: ObservableObject {
             // Give the filesystem a beat after restore before Desktop opens and
             // races a partial auth.json read.
             try? await Task.sleep(for: .milliseconds(250))
+            // Re-clear immediately before relaunch so partition cookies that
+            // survived an earlier miss cannot keep the Sign-in screen.
+            ChatGPTDesktop.clearWebSessionCache()
             let launched = await relaunch.launchAndConfirm()
             let accepted: Bool
             if launched {
@@ -827,6 +830,8 @@ final class AccountStore: ObservableObject {
             let relaunch = ChatGPTDesktop.isRunning
                 ? try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
                 : ChatGPTDesktop.RelaunchPlan.preferredDesktop()
+            // Drop stale Electron cookies so relaunch rehydrates from live auth.json.
+            ChatGPTDesktop.clearWebSessionCache()
             await relaunch.launchAndConfirm()
         }
     }
@@ -1355,6 +1360,9 @@ final class AccountStore: ObservableObject {
                 }
                 autoSwitchState = .relaunchingDesktop
                 try? await Task.sleep(for: .milliseconds(250))
+                // Always clear before relaunch — including when Desktop was already
+                // quit (the earlier branch only clears after a live quit).
+                ChatGPTDesktop.clearWebSessionCache()
                 var launched = await relaunch.launchAndConfirm()
                 var accepted: Bool
                 let expectedEmail = self.accounts.first(where: { $0.id == applied.candidateAccountId })?.email
@@ -1987,12 +1995,29 @@ private enum ChatGPTDesktop {
     /// Drop Chromium web-session caches so Desktop rehydrates from restored
     /// `~/.codex/auth.json` instead of a stale logged-out cookie jar.
     /// Call only after Desktop processes have fully quit.
+    ///
+    /// ChatGPT Desktop also keeps a full session under
+    /// `Default/Partitions/codex-browser-app` — clearing only the top-level
+    /// `Default` / `codex-browser-app` roots leaves Sign-in cookies behind.
     static func clearWebSessionCache() {
         guard !isRunning else { return }
         let supportRoot = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Codex", isDirectory: true)
-        let profileDirs = ["Default", "codex-browser-app"].map {
+        let fm = FileManager.default
+        var profileDirs = ["Default", "codex-browser-app"].map {
             supportRoot.appendingPathComponent($0, isDirectory: true)
+        }
+        let partitionsRoot = supportRoot
+            .appendingPathComponent("Default", isDirectory: true)
+            .appendingPathComponent("Partitions", isDirectory: true)
+        if let partitions = try? fm.contentsOfDirectory(
+            at: partitionsRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            profileDirs.append(contentsOf: partitions.filter {
+                (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            })
         }
         let fileNames = [
             "Cookies",
@@ -2008,16 +2033,21 @@ private enum ChatGPTDesktop {
             "Cache Storage",
             "Code Cache",
             "GPUCache",
+            "WebStorage",
         ]
-        let fm = FileManager.default
         for profile in profileDirs where fm.fileExists(atPath: profile.path) {
             for name in fileNames {
-                let url = profile.appendingPathComponent(name)
-                try? fm.removeItem(at: url)
+                try? fm.removeItem(at: profile.appendingPathComponent(name))
             }
             for name in directoryNames {
-                let url = profile.appendingPathComponent(name, isDirectory: true)
-                try? fm.removeItem(at: url)
+                try? fm.removeItem(at: profile.appendingPathComponent(name, isDirectory: true))
+            }
+            // Newer Chromium profiles store cookies under Network/.
+            let network = profile.appendingPathComponent("Network", isDirectory: true)
+            if fm.fileExists(atPath: network.path) {
+                for name in fileNames {
+                    try? fm.removeItem(at: network.appendingPathComponent(name))
+                }
             }
         }
         // Stale singleton locks can make the next launch attach to a half-dead
@@ -2920,6 +2950,27 @@ struct SavedAccount: Identifiable, Decodable {
         return 4
     }
 
+    /// Explicit Free/Go label for UI chips — empty/unknown plans stay unlabeled.
+    var showsFreePlanChip: Bool {
+        planLabelHasFreeOrGoWord(planLabel)
+    }
+
+    /// Monthly spend-control remaining % when the usage API publishes `credit_limit`.
+    /// Free ChatGPT message caps are not a separate window in this model — do not
+    /// invent a monthly % from weekly/5H.
+    var monthlyQuotaRemainingPercent: Int? {
+        guard let limit = usage?.credits?.creditLimit else { return nil }
+        let rounded = Int(limit.remainingPercent.rounded())
+        return max(0, min(100, rounded))
+    }
+
+    /// Closest non-window signal when monthly % is absent (personal credit balance).
+    var creditsBalanceDisplay: String? {
+        guard let credits = usage?.credits, credits.hasDisplayableBalance else { return nil }
+        if credits.unlimited { return "∞" }
+        return credits.balance
+    }
+
     var hasLunaReserve: Bool {
         usage?.lunaReserve != nil
     }
@@ -2934,6 +2985,16 @@ struct SavedAccount: Identifiable, Decodable {
 
 }
 
+func planLabelHasFreeOrGoWord(_ planLabel: String?) -> Bool {
+    let normalizedPlan = (planLabel ?? "").replacingOccurrences(of: "-", with: " ")
+        .replacingOccurrences(of: "_", with: " ")
+    let planWords = normalizedPlan.split(whereSeparator: \.isWhitespace)
+    return planWords.contains {
+        $0.localizedCaseInsensitiveCompare("free") == .orderedSame
+            || $0.localizedCaseInsensitiveCompare("go") == .orderedSame
+    }
+}
+
 func bankedResetSwitchIsAllowed(
     planLabel: String?,
     usageError: String?,
@@ -2945,10 +3006,7 @@ func bankedResetSwitchIsAllowed(
         .replacingOccurrences(of: "_", with: " ")
     let planWords = normalizedPlan.split(whereSeparator: \.isWhitespace)
     guard !planWords.isEmpty else { return false }
-    return !planWords.contains {
-        $0.localizedCaseInsensitiveCompare("free") == .orderedSame
-            || $0.localizedCaseInsensitiveCompare("go") == .orderedSame
-    }
+    return !planLabelHasFreeOrGoWord(planLabel)
 }
 
 /// Display roster ordering by weekly-dominant `switchQuotaScore` (higher first).
@@ -2976,7 +3034,8 @@ enum NotchRosterLayout {
     static let deckBottomInset: CGFloat = 22
     /// Spacing between upper wings / caption / roster (tight — leftover goes below roster).
     static let deckSectionSpacing: CGFloat = 6
-    static let rowHeight: CGFloat = 54
+    /// Name + email + optional status line under a 2-column roster cell.
+    static let rowHeight: CGFloat = 62
     static let rowSpacing: CGFloat = 7
     static let gridVerticalPadding: CGFloat = 6
     /// Soft cap (~24 accounts) so pathological rosters stay screen-safe.
@@ -3075,6 +3134,20 @@ struct UsageCreditLimit: Decodable {
                 : String(format: "%.1f", value)
         }
         return "\(format(used ?? 0)) / \(format(limit))"
+    }
+
+    func resetDescription(in language: AppLanguage) -> String? {
+        guard let resetsAt else { return nil }
+        guard resetsAt.value > Date() else {
+            return language == .vietnamese ? "Đang chờ đặt lại" : "Reset pending"
+        }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        formatter.locale = language.locale
+        let relative = formatter.localizedString(for: resetsAt.value, relativeTo: Date())
+        return language == .vietnamese
+            ? "Đặt lại \(relative)"
+            : "Resets \(relative)"
     }
 }
 

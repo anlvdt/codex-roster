@@ -113,7 +113,9 @@ where
         })
     }
 
-    pub fn auto_resume_session_status(&self) -> Result<crate::model::AutoResumeSessionStatusOutput> {
+    pub fn auto_resume_session_status(
+        &self,
+    ) -> Result<crate::model::AutoResumeSessionStatusOutput> {
         let settings = load_settings(&self.env.app_data_dir)?;
         Ok(crate::model::AutoResumeSessionStatusOutput {
             enabled: settings.auto_resume_session,
@@ -1517,12 +1519,9 @@ fn deferred_fresh_usable_auto_switch_candidate(
         .usage_error
         .as_deref()
         .is_some_and(usage_error_is_deferred_access_token_refresh)
-        && candidate
-            .usage
-            .as_ref()
-            .is_some_and(|usage| {
-                cached_usage_is_fresh(Some(usage), now) && fresh_usage_passes_auto_switch_gate(usage)
-            })
+        && candidate.usage.as_ref().is_some_and(|usage| {
+            cached_usage_is_fresh(Some(usage), now) && fresh_usage_passes_auto_switch_gate(usage)
+        })
         && is_eligible_auto_switch_candidate(candidate, active, settings, now, None)
 }
 
@@ -1785,8 +1784,7 @@ fn exhausted_cached_usage_skips_probe(
     now: time::OffsetDateTime,
 ) -> bool {
     usage.is_some_and(|usage| {
-        !is_usable_for_switch(Some(usage))
-            && now - usage.fetched_at < EXHAUSTED_USAGE_PROBE_BACKOFF
+        !is_usable_for_switch(Some(usage)) && now - usage.fetched_at < EXHAUSTED_USAGE_PROBE_BACKOFF
     })
 }
 
@@ -2647,11 +2645,9 @@ mod tests {
             &exhausted, &active, &settings, now, None
         ));
         // Preferred exhausted id: apply's revalidation + final belt both refuse.
-        let preferred_exhausted_would_activate = fresh_usage_passes_auto_switch_gate(
-            exhausted.usage.as_ref().expect("usage"),
-        ) && is_eligible_auto_switch_candidate(
-            &exhausted, &active, &settings, now, None
-        );
+        let preferred_exhausted_would_activate =
+            fresh_usage_passes_auto_switch_gate(exhausted.usage.as_ref().expect("usage"))
+                && is_eligible_auto_switch_candidate(&exhausted, &active, &settings, now, None);
         assert!(
             !preferred_exhausted_would_activate,
             "apply must not activate a preferred exhausted id"
@@ -2699,8 +2695,14 @@ mod tests {
             luna_reserve: None,
         };
 
-        assert!(exhausted_cached_usage_skips_probe(Some(&recent_exhausted), now));
-        assert!(!exhausted_cached_usage_skips_probe(Some(&stale_exhausted), now));
+        assert!(exhausted_cached_usage_skips_probe(
+            Some(&recent_exhausted),
+            now
+        ));
+        assert!(!exhausted_cached_usage_skips_probe(
+            Some(&stale_exhausted),
+            now
+        ));
         assert!(!exhausted_cached_usage_skips_probe(Some(&usable), now));
         assert!(!exhausted_cached_usage_skips_probe(None, now));
         // Exhausted caches are never "fresh" — backoff is what stops the fan-out.
@@ -2777,10 +2779,15 @@ mod tests {
 
         // Login-required must never qualify via the deferred soft path.
         let mut login_required = deferred.clone();
-        login_required.usage_error =
-            Some("Login required [refresh_token_rejected]: OpenAI rejected the saved refresh token.".to_owned());
+        login_required.usage_error = Some(
+            "Login required [refresh_token_rejected]: OpenAI rejected the saved refresh token."
+                .to_owned(),
+        );
         assert!(!deferred_fresh_usable_auto_switch_candidate(
-            &login_required, &active, &settings, now
+            &login_required,
+            &active,
+            &settings,
+            now
         ));
     }
 
@@ -2932,13 +2939,7 @@ mod tests {
             &usable, &active, &settings, now, None
         ));
 
-        let ranked = ranked_cached_auto_switch_candidates(
-            &roster,
-            &active,
-            &settings,
-            now,
-            None,
-        );
+        let ranked = ranked_cached_auto_switch_candidates(&roster, &active, &settings, now, None);
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].id, usable.id);
 
@@ -2952,10 +2953,7 @@ mod tests {
             Some(usable.id),
             "mixed roster must only surface the usable account as ready"
         );
-        assert_ne!(
-            ready_candidate.as_ref().map(|c| c.id),
-            Some(exhausted.id)
-        );
+        assert_ne!(ready_candidate.as_ref().map(|c| c.id), Some(exhausted.id));
     }
 
     #[test]
@@ -2970,8 +2968,8 @@ mod tests {
             remaining_percent: remaining,
             reset_at: now,
         };
-        let account = |email: &str, plan: &str, remaining: u8, banked: i64, active: bool| {
-            AccountView {
+        let account =
+            |email: &str, plan: &str, remaining: u8, banked: i64, active: bool| AccountView {
                 id: Uuid::new_v4(),
                 provider: crate::model::AiProvider::OpenAi,
                 email: email.to_owned(),
@@ -3000,8 +2998,7 @@ mod tests {
                     luna_reserve: None,
                 }),
                 usage_error: None,
-            }
-        };
+            };
         let active = account("active@example.com", "Plus", 0, 0, true);
         let exhausted = account("exhausted@example.com", "Pro", 0, 0, false);
         let banked_only = account("banked@example.com", "Pro", 0, 2, false);
@@ -3017,16 +3014,14 @@ mod tests {
             &exhausted, &active, &settings, now, None
         ));
         assert!(!is_eligible_auto_switch_candidate(
-            &banked_only, &active, &settings, now, None
-        ));
-
-        let ranked = ranked_cached_auto_switch_candidates(
-            &roster,
+            &banked_only,
             &active,
             &settings,
             now,
-            None,
-        );
+            None
+        ));
+
+        let ranked = ranked_cached_auto_switch_candidates(&roster, &active, &settings, now, None);
         assert!(
             ranked.is_empty(),
             "all-exhausted roster must not surface a switch candidate"

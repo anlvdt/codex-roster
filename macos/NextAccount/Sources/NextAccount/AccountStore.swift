@@ -219,6 +219,18 @@ enum NewAccountLoginState: Equatable {
     case failed(String)
 }
 
+/// How "Add account" should treat the live Codex / ChatGPT Desktop session.
+enum AddAccountMode: String, CaseIterable, Identifiable {
+    /// Capture login into a roster snapshot only. Does not touch live `~/.codex`,
+    /// does not quit Desktop, and does not activate or auto-resume the new row.
+    case enrollOnly
+    /// Existing flow: `codex login` against live `~/.codex` (may free login ports
+    /// by quitting Desktop), then leave the new credentials as the live session.
+    case addAndSwitch
+
+    var id: String { rawValue }
+}
+
 @MainActor
 final class AccountStore: ObservableObject {
     @Published private(set) var status: StatusOutput?
@@ -231,6 +243,7 @@ final class AccountStore: ObservableObject {
     @Published private(set) var openAIStatus: OpenAIServiceStatus?
     @Published private(set) var providerStates: [ProviderState] = []
     @Published private(set) var autoSwitchWhenExhausted: Bool
+    @Published private(set) var autoResumeSession: Bool
     @Published private(set) var autoSwitchState: AutoSwitchState?
     @Published private(set) var isCheckingAutoSwitch = false
     @Published private(set) var launchAtLoginEnabled: Bool
@@ -247,8 +260,12 @@ final class AccountStore: ObservableObject {
     @Published private(set) var accountSortMode: AccountSortMode
     @Published private(set) var newAccountLoginState: NewAccountLoginState = .idle
     @Published private(set) var isPendingLogin = false
+    /// Which add path is in flight (nil when idle). Used by the add sheet to resume UI.
+    @Published private(set) var pendingAddAccountMode: AddAccountMode?
     /// Short bilingual progress line during Desktop accept / clear+relaunch retry.
     @Published private(set) var switchPhaseMessage: String?
+    /// Brief notch/menu caption after Auto-resume opens a remembered workspace.
+    @Published private(set) var sessionResumeCaption: String?
     @Published var errorMessage: String?
 
     private let cli = AccountHubCLI()
@@ -269,10 +286,14 @@ final class AccountStore: ObservableObject {
     private var autoSwitchCooldownUntil: Date?
     private var isInteractiveLoginInProgress = false
     private var isAddAccountSession = false
+    /// Isolated-home enroll path; mutually exclusive with `isAddAccountSession`.
+    private var isEnrollOnlyLogin = false
+    private var enrollOnlyCodexHome: URL?
     private var expectedReloginEmail: String?
     private var newAccountLoginWatchTask: Task<Void, Never>?
     /// Desktop apps to reopen after an interactive `codex login` finishes.
     /// Set when we close ChatGPT Desktop to free the fixed login port.
+    /// Never set for enroll-only adds.
     private var pendingLoginDesktopRelaunch: ChatGPTDesktop.RelaunchPlan?
     private var resetNotificationTask: Task<Void, Never>?
     private var coreBootstrapStarted = false
@@ -287,6 +308,7 @@ final class AccountStore: ObservableObject {
                 .compactMap(UUID.init(uuidString:))
         )
         autoSwitchWhenExhausted = false
+        autoResumeSession = true
         launchAtLoginEnabled = LaunchAtLogin.isEnabled
         notchPanelEnabled = defaults.object(forKey: notchPanelEnabledKey) == nil
             ? true
@@ -431,13 +453,19 @@ final class AccountStore: ObservableObject {
         }
     }
 
-    func startNewAccountLogin() {
+    func startNewAccountLogin(mode: AddAccountMode = .addAndSwitch) {
         guard !isBusyForActions, newAccountLoginState != .waiting else { return }
         isInteractiveLoginInProgress = true
         isPendingLogin = true
+        pendingAddAccountMode = mode
         newAccountLoginState = .waiting
         run {
-            try await self.beginOrResumeAddAccountLogin(expectedEmail: nil)
+            switch mode {
+            case .enrollOnly:
+                try await self.beginEnrollOnlyLogin()
+            case .addAndSwitch:
+                try await self.beginOrResumeAddAccountLogin(expectedEmail: nil)
+            }
         }
     }
 
@@ -445,6 +473,10 @@ final class AccountStore: ObservableObject {
         guard case let .ready(expectedIdentity) = newAccountLoginState, !isBusyForActions else { return }
         newAccountLoginState = .saving
         run {
+            if self.isEnrollOnlyLogin {
+                try await self.saveEnrollOnlyAccount(expectedIdentity: expectedIdentity)
+                return
+            }
             let liveStatus: StatusOutput = try await self.cli.decode(StatusOutput.self, arguments: ["status"])
             guard let liveIdentity = liveStatus.currentAccount,
                   liveIdentity.matches(expectedIdentity) else {
@@ -452,6 +484,16 @@ final class AccountStore: ObservableObject {
                     "Phiên Codex đã thay đổi. Hãy chờ app nhận diện lại tài khoản mới rồi lưu.",
                     "The Codex session changed. Wait for the app to detect the new account again before saving."
                 ))
+            }
+            try await self.load()
+            do {
+                try self.ensureNotDuplicateNewAccount(liveIdentity)
+            } catch {
+                if self.isAddAccountSession {
+                    _ = try? await self.cli.data(arguments: ["cancel-add-account", "--json"])
+                }
+                self.clearPendingLoginFlags()
+                throw error
             }
             let saveCommand = self.isAddAccountSession ? "save-added-account" : "save"
             let saved: SaveOutput = try await self.cli.decode(SaveOutput.self, arguments: [saveCommand])
@@ -487,17 +529,24 @@ final class AccountStore: ObservableObject {
     func resetNewAccountLogin() {
         newAccountLoginWatchTask?.cancel()
         newAccountLoginWatchTask = nil
+        CodexLoginLauncher.stop()
         clearPendingLoginFlags()
         newAccountLoginState = .idle
     }
 
-    /// Cancel an unfinished add/re-login and restore the previous live Codex session.
+    /// Cancel an unfinished add/re-login.
+    /// Enroll-only discards the isolated login home and leaves live `~/.codex` alone.
+    /// Add-and-switch restores the previous live Codex session via cancel-add-account.
     func cancelPendingLogin() {
         run {
             self.newAccountLoginWatchTask?.cancel()
             self.newAccountLoginWatchTask = nil
             CodexLoginLauncher.stop()
-            _ = try await self.cli.data(arguments: ["cancel-add-account", "--json"])
+            if self.isEnrollOnlyLogin {
+                self.removeEnrollOnlyHome()
+            } else {
+                _ = try await self.cli.data(arguments: ["cancel-add-account", "--json"])
+            }
             self.clearPendingLoginFlags()
             self.newAccountLoginState = .idle
             try await self.load()
@@ -508,6 +557,7 @@ final class AccountStore: ObservableObject {
     func startRelogin(for account: SavedAccount) {
         isInteractiveLoginInProgress = true
         isPendingLogin = true
+        pendingAddAccountMode = .addAndSwitch
         newAccountLoginState = .waiting
         run {
             try await self.beginOrResumeAddAccountLogin(expectedEmail: account.email)
@@ -535,9 +585,10 @@ final class AccountStore: ObservableObject {
             try await beginAddAccountAfterProcessesDrain()
             began = true
             isAddAccountSession = true
+            isEnrollOnlyLogin = false
             expectedReloginEmail = expectedEmail
             isPendingLogin = true
-            try CodexLoginLauncher.start()
+            try CodexLoginLauncher.start(codexHome: nil)
             watchForNewAccount(after: liveStatus.currentAccount)
         } catch {
             if began {
@@ -553,8 +604,40 @@ final class AccountStore: ObservableObject {
         }
     }
 
+    /// Enroll a new account into the roster without replacing live `~/.codex`
+    /// or restarting ChatGPT Desktop. Login writes into an isolated CODEX_HOME;
+    /// the resulting auth.json is imported as a snapshot only.
+    private func beginEnrollOnlyLogin() async throws {
+        // Fixed OAuth callback ports — cannot free them without quitting Desktop,
+        // which this mode forbids. Fail clearly so the user can pick Add & switch.
+        if CodexLoginPort.isBusy {
+            throw CLIError(AppLanguage.text(
+                "Cổng đăng nhập Codex (1455/1457) đang bị ChatGPT Desktop hoặc tiến trình khác giữ. Chế độ Chỉ thêm không được đóng Desktop — hãy chọn Thêm & chuyển (có thể đóng Desktop để giải phóng cổng), hoặc tạm thoát Desktop rồi thử lại.",
+                "Codex login ports (1455/1457) are held by ChatGPT Desktop or another process. Add-only mode will not quit Desktop — choose Add & switch (may quit Desktop to free the ports), or quit Desktop yourself and retry."
+            ))
+        }
+        removeEnrollOnlyHome()
+        let home = try Self.makeEnrollOnlyCodexHome()
+        enrollOnlyCodexHome = home
+        isEnrollOnlyLogin = true
+        isAddAccountSession = false
+        expectedReloginEmail = nil
+        isPendingLogin = true
+        do {
+            try CodexLoginLauncher.start(codexHome: home)
+            watchForEnrollOnlyAccount(at: home)
+        } catch {
+            CodexLoginLauncher.stop()
+            removeEnrollOnlyHome()
+            clearPendingLoginFlags()
+            newAccountLoginState = .idle
+            throw error
+        }
+    }
+
     private func resumePendingLogin(expectedEmail: String?) async throws {
         isAddAccountSession = true
+        isEnrollOnlyLogin = false
         expectedReloginEmail = expectedEmail
         isInteractiveLoginInProgress = true
         isPendingLogin = true
@@ -564,6 +647,10 @@ final class AccountStore: ObservableObject {
         if let current = status?.currentAccount,
            addStatus.authChanged,
            expectedEmail.map({ current.email.caseInsensitiveCompare($0) == .orderedSame }) ?? true {
+            if shouldRefuseDuplicateEnrollment(current) {
+                await abortDuplicateEnrollment(current)
+                return
+            }
             newAccountLoginState = .ready(current)
             return
         }
@@ -573,7 +660,7 @@ final class AccountStore: ObservableObject {
             try? await preserveLiveSessionBeforeDesktopQuit()
             await closeDesktopForLogin()
         }
-        try CodexLoginLauncher.start()
+        try CodexLoginLauncher.start(codexHome: nil)
         watchForNewAccount(after: nil)
     }
 
@@ -596,11 +683,204 @@ final class AccountStore: ObservableObject {
                    current.email.caseInsensitiveCompare(expected) != .orderedSame {
                     continue
                 }
+                if self.shouldRefuseDuplicateEnrollment(current) {
+                    await self.abortDuplicateEnrollment(current)
+                    return
+                }
                 self.status = status
                 self.newAccountLoginState = .ready(current)
                 return
             }
         }
+    }
+
+    private func watchForEnrollOnlyAccount(at home: URL) {
+        newAccountLoginWatchTask?.cancel()
+        let authURL = home.appendingPathComponent("auth.json")
+        newAccountLoginWatchTask = Task { [weak self] in
+            guard let self else { return }
+            var lastSize: Int = -1
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled else { return }
+                guard case .waiting = self.newAccountLoginState else { return }
+                guard let data = try? Data(contentsOf: authURL), !data.isEmpty else {
+                    continue
+                }
+                // Wait until the write settles (login can rewrite auth.json).
+                if data.count != lastSize {
+                    lastSize = data.count
+                    continue
+                }
+                guard let identity = Self.identityFromAuthJSON(data) else { continue }
+                if self.shouldRefuseDuplicateEnrollment(identity) {
+                    await self.abortDuplicateEnrollment(identity)
+                    return
+                }
+                self.newAccountLoginState = .ready(identity)
+                return
+            }
+        }
+    }
+
+    /// Relogin of the same email is a credential refresh, not a duplicate enrollment.
+    private func shouldRefuseDuplicateEnrollment(_ identity: AccountIdentity) -> Bool {
+        if let expected = expectedReloginEmail,
+           identity.email.caseInsensitiveCompare(expected) == .orderedSame {
+            return false
+        }
+        return existingRosterAccount(matching: identity) != nil
+    }
+
+    private func existingRosterAccount(matching identity: AccountIdentity) -> SavedAccount? {
+        accounts.first { account in
+            identity.matches(AccountIdentity(email: account.email, subject: account.subject))
+        }
+    }
+
+    private func ensureNotDuplicateNewAccount(_ identity: AccountIdentity) throws {
+        guard shouldRefuseDuplicateEnrollment(identity) else { return }
+        throw CLIError(Self.duplicateAccountAlreadyInRosterMessage)
+    }
+
+    private static var duplicateAccountAlreadyInRosterMessage: String {
+        AppLanguage.text(
+            "Tài khoản đã có trong danh bạ",
+            "Account already in roster"
+        )
+    }
+
+    /// Refuse enrollment of an identity already in the roster: no second row, no switch.
+    /// Add-only cleans the temp enroll home; add-and-switch cancels the add session.
+    private func abortDuplicateEnrollment(_ identity: AccountIdentity) async {
+        CodexLoginLauncher.stop()
+        newAccountLoginWatchTask?.cancel()
+        newAccountLoginWatchTask = nil
+        if isEnrollOnlyLogin {
+            removeEnrollOnlyHome()
+        } else if isAddAccountSession {
+            _ = try? await cli.data(arguments: ["cancel-add-account", "--json"])
+        }
+        clearPendingLoginFlags()
+        let email = identity.email
+        newAccountLoginState = .failed(AppLanguage.text(
+            "Tài khoản đã có trong danh bạ (\(email)). Không tạo dòng mới và không chuyển tài khoản.",
+            "Account already in roster (\(email)). No new row was created and no switch was performed."
+        ))
+    }
+
+    private func saveEnrollOnlyAccount(expectedIdentity: AccountIdentity) async throws {
+        guard let home = enrollOnlyCodexHome else {
+            throw CLIError(AppLanguage.text(
+                "Không tìm thấy thư mục đăng nhập tạm cho chế độ Chỉ thêm.",
+                "The temporary enroll-only login home is missing."
+            ))
+        }
+        do {
+            try await load()
+            try ensureNotDuplicateNewAccount(expectedIdentity)
+        } catch {
+            removeEnrollOnlyHome()
+            clearPendingLoginFlags()
+            throw error
+        }
+        let authPath = home.appendingPathComponent("auth.json").path
+        guard FileManager.default.fileExists(atPath: authPath) else {
+            throw CLIError(AppLanguage.text(
+                "Chưa có credential trong thư mục đăng nhập tạm. Hãy hoàn tất đăng nhập OpenAI rồi thử lại.",
+                "No credential in the temporary login home yet. Finish the OpenAI browser sign-in, then try again."
+            ))
+        }
+        // `decode` always appends `--json`; do not pass it here or clap rejects duplicates.
+        let imported: ImportJsonOutput = try await cli.decode(
+            ImportJsonOutput.self,
+            arguments: ["import-json", authPath]
+        )
+        guard let account = imported.accounts.first else {
+            throw CLIError(AppLanguage.text(
+                "Import thành công nhưng không trả về tài khoản.",
+                "Import succeeded but returned no account."
+            ))
+        }
+        let identity = AccountIdentity(email: account.email, subject: account.subject)
+        guard identity.matches(expectedIdentity) else {
+            throw CLIError(AppLanguage.text(
+                "Credential vừa lưu là \(account.email), không khớp \(expectedIdentity.email).",
+                "Saved credential is \(account.email), which does not match \(expectedIdentity.email)."
+            ))
+        }
+        do {
+            _ = try await cli.data(arguments: ["usage", account.id.uuidString, "--json"])
+        } catch {
+            if Self.isDeferredAccessTokenUsageError(error.localizedDescription) {
+                removeEnrollOnlyHome()
+                clearPendingLoginFlags()
+                newAccountLoginState = .saved(identity)
+                try await load()
+                lastQuotaRefreshAt = .now
+                return
+            }
+            removeEnrollOnlyHome()
+            clearPendingLoginFlags()
+            try? await load()
+            throw CLIError(AppLanguage.text(
+                "OpenAI chưa chấp nhận credential mới. Tài khoản đã được giữ lại nhưng chưa được đánh dấu đăng nhập thành công.",
+                "OpenAI did not accept the new credential. The account was preserved but sign-in was not marked successful."
+            ))
+        }
+        removeEnrollOnlyHome()
+        clearPendingLoginFlags()
+        newAccountLoginState = .saved(identity)
+        try await load()
+        lastQuotaRefreshAt = .now
+    }
+
+    private static func makeEnrollOnlyCodexHome() throws -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let root = base
+            .appendingPathComponent("Codex Roster", isDirectory: true)
+            .appendingPathComponent("enroll-only-login", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    private func removeEnrollOnlyHome() {
+        guard let home = enrollOnlyCodexHome else { return }
+        enrollOnlyCodexHome = nil
+        try? FileManager.default.removeItem(at: home)
+    }
+
+    /// Parse email/subject from a Codex auth.json without touching live `~/.codex`.
+    private static func identityFromAuthJSON(_ data: Data) -> AccountIdentity? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tokens = root["tokens"] as? [String: Any],
+              let access = tokens["access_token"] as? String, !access.isEmpty,
+              let refresh = tokens["refresh_token"] as? String, !refresh.isEmpty,
+              let idToken = tokens["id_token"] as? String,
+              let claims = decodeJWTPayload(idToken),
+              let email = claims["email"] as? String,
+              !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        let subject = claims["sub"] as? String
+        return AccountIdentity(email: email, subject: subject)
+    }
+
+    private static func decodeJWTPayload(_ token: String) -> [String: Any]? {
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count >= 2 else { return nil }
+        var payload = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let pad = (4 - payload.count % 4) % 4
+        if pad > 0 { payload += String(repeating: "=", count: pad) }
+        guard let data = Data(base64Encoded: payload),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return json
     }
 
     /// Save the live Codex session after re-login and confirm the target account recovered.
@@ -651,8 +931,14 @@ final class AccountStore: ObservableObject {
         CodexLoginLauncher.stop()
         isInteractiveLoginInProgress = false
         isAddAccountSession = false
+        isEnrollOnlyLogin = false
         expectedReloginEmail = nil
         isPendingLogin = false
+        pendingAddAccountMode = nil
+        // Enroll-only never quits Desktop; add-and-switch may have closed it for ports.
+        if enrollOnlyCodexHome != nil {
+            removeEnrollOnlyHome()
+        }
         relaunchDesktopAfterLogin()
     }
 
@@ -693,6 +979,9 @@ final class AccountStore: ObservableObject {
             // Force path: save live auth WHILE Desktop may still be running,
             // then quit (graceful first), then activate (saves again), then relaunch.
             let relaunch: ChatGPTDesktop.RelaunchPlan
+            // One full partition clear per switch is required before relaunch;
+            // skip a duplicate wipe when the post-quit clear already ran.
+            var didClearWebSession = false
             if force {
                 try await self.preserveLiveSessionBeforeDesktopQuit()
                 relaunch = try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
@@ -700,7 +989,7 @@ final class AccountStore: ObservableObject {
                 // even after ~/.codex/auth.json was restored. Clear web session
                 // caches only while Desktop is fully quit so launch rehydrates
                 // from the restored auth files.
-                ChatGPTDesktop.clearWebSessionCache()
+                ChatGPTDesktop.clearWebSessionCacheOnce(didClear: &didClearWebSession)
             } else {
                 relaunch = ChatGPTDesktop.RelaunchPlan.preferredDesktop()
             }
@@ -718,12 +1007,12 @@ final class AccountStore: ObservableObject {
                 }
                 throw error
             }
-            // Give the filesystem a beat after restore before Desktop opens and
+            // Brief filesystem beat after restore before Desktop opens and
             // races a partial auth.json read.
-            try? await Task.sleep(for: .milliseconds(250))
-            // Re-clear immediately before relaunch so partition cookies that
-            // survived an earlier miss cannot keep the Sign-in screen.
-            ChatGPTDesktop.clearWebSessionCache()
+            try? await Task.sleep(for: .milliseconds(100))
+            // Ensure a clear happened before relaunch (no-op if already cleared
+            // and Desktop stayed quit).
+            ChatGPTDesktop.clearWebSessionCacheOnce(didClear: &didClearWebSession)
             let launched = await relaunch.launchAndConfirm()
             let acceptance: DesktopAcceptanceResult
             if launched {
@@ -756,6 +1045,7 @@ final class AccountStore: ObservableObject {
             if self.accounts.contains(where: { $0.id == activated.account.id && $0.isActive }) {
                 self.lastQuotaRefreshAt = .now
             }
+            await self.applySessionResumeIfNeeded(activated.sessionResume)
         }
     }
 
@@ -776,6 +1066,245 @@ final class AccountStore: ObservableObject {
                 "Không thể lưu phiên đang mở trước khi đóng ChatGPT. Chuyển tài khoản đã bị hủy để tránh mất phiên: \(error.localizedDescription)",
                 "Could not preserve the live session before quitting ChatGPT. The account switch was aborted to avoid losing the session: \(error.localizedDescription)"
             ))
+        }
+    }
+
+    /// After a successful activate, reopen the *target* account's last remembered
+    /// Codex workspace. Prefers `codex app <cwd>`, then Desktop deep-link, then
+    /// Finder. Does not burn RTs and cannot inject Desktop thread UI across accounts.
+    private func applySessionResumeIfNeeded(_ hint: SessionResumeHint?) async {
+        guard autoResumeSession else { return }
+        guard let hint else {
+            sessionResumeCaption = AppLanguage.text(
+                "Auto-resume: không có gợi ý phiên sau khi đổi tài khoản",
+                "Auto-resume: no session hint after account switch"
+            )
+            scheduleSessionResumeCaptionClear()
+            return
+        }
+        guard hint.enabled else { return }
+
+        switch hint.status {
+        case "missing":
+            sessionResumeCaption = AppLanguage.text(
+                "Chưa nhớ workspace cho tài khoản này — mở dự án một lần rồi đổi lại",
+                "No remembered workspace for this account — open a project once, then switch again"
+            )
+            scheduleSessionResumeCaptionClear()
+            return
+        case "cwd_gone":
+            if let sessionID = hint.sessionId, !sessionID.isEmpty {
+                sessionResumeCaption = AppLanguage.text(
+                    "Thư mục đã nhớ không còn — `codex resume \(shortSessionID(sessionID))`",
+                    "Remembered folder is gone — `codex resume \(shortSessionID(sessionID))`"
+                )
+            } else {
+                sessionResumeCaption = AppLanguage.text(
+                    "Thư mục workspace đã nhớ không còn trên máy",
+                    "Remembered workspace folder is gone on this Mac"
+                )
+            }
+            scheduleSessionResumeCaptionClear()
+            return
+        case "rollout_gone":
+            sessionResumeCaption = AppLanguage.text(
+                "Rollout đã nhớ không còn trên máy",
+                "Remembered rollout is no longer on this Mac"
+            )
+            scheduleSessionResumeCaptionClear()
+            return
+        case "ready", "ready_cli":
+            break
+        default:
+            sessionResumeCaption = AppLanguage.text(
+                "Auto-resume: trạng thái \(hint.status)",
+                "Auto-resume: status \(hint.status)"
+            )
+            scheduleSessionResumeCaptionClear()
+            return
+        }
+
+        // Desktop just finished acceptance — brief settle before asking it to open a workspace.
+        try? await Task.sleep(for: .milliseconds(1200))
+
+        if let cwd = hint.cwd, !cwd.isEmpty, FileManager.default.fileExists(atPath: cwd) {
+            let projectName = URL(fileURLWithPath: cwd).lastPathComponent
+            sessionResumeCaption = AppLanguage.text(
+                "Đang khôi phục phiên · \(projectName)",
+                "Resuming session · \(projectName)"
+            )
+            let result = await openRememberedWorkspace(cwd: cwd, sessionID: hint.sessionId)
+            switch result {
+            case .openedDesktop:
+                sessionResumeCaption = AppLanguage.text(
+                    "Đã khôi phục workspace · \(projectName)",
+                    "Restored workspace · \(projectName)"
+                )
+            case .openedFinder:
+                sessionResumeCaption = AppLanguage.text(
+                    "Đã mở thư mục · \(projectName) (Desktop deep-link lỗi)",
+                    "Opened folder · \(projectName) (Desktop deep-link failed)"
+                )
+            case .failed:
+                if let sessionID = hint.sessionId, !sessionID.isEmpty {
+                    sessionResumeCaption = AppLanguage.text(
+                        "Khôi phục thất bại — `codex resume \(shortSessionID(sessionID))` · \(projectName)",
+                        "Resume failed — `codex resume \(shortSessionID(sessionID))` · \(projectName)"
+                    )
+                } else {
+                    sessionResumeCaption = AppLanguage.text(
+                        "Không mở được workspace đã nhớ · \(projectName)",
+                        "Could not open the remembered workspace · \(projectName)"
+                    )
+                }
+            }
+            scheduleSessionResumeCaptionClear()
+            return
+        }
+
+        if let sessionID = hint.sessionId, !sessionID.isEmpty {
+            sessionResumeCaption = AppLanguage.text(
+                "Đã nhớ session \(shortSessionID(sessionID)) — mở bằng `codex resume \(shortSessionID(sessionID))`",
+                "Remembered session \(shortSessionID(sessionID)) — open with `codex resume \(shortSessionID(sessionID))`"
+            )
+            scheduleSessionResumeCaptionClear()
+            return
+        }
+
+        sessionResumeCaption = AppLanguage.text(
+            "Auto-resume: không có cwd/session để khôi phục",
+            "Auto-resume: no cwd/session to restore"
+        )
+        scheduleSessionResumeCaptionClear()
+    }
+
+    private func scheduleSessionResumeCaptionClear() {
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(10))
+            sessionResumeCaption = nil
+        }
+    }
+
+    private func shortSessionID(_ id: String) -> String {
+        guard id.count > 8 else { return id }
+        return String(id.prefix(8))
+    }
+
+    private enum SessionResumeOpenResult {
+        case openedDesktop
+        case openedFinder
+        case failed
+    }
+
+    /// Opens the remembered project for the account just switched *to*.
+    /// Waits for `codex app` exit status (previous MVP returned success on spawn alone).
+    private func openRememberedWorkspace(cwd: String, sessionID: String?) async -> SessionResumeOpenResult {
+        if await runCodexAppWorkspace(cwd) {
+            return .openedDesktop
+        }
+        if await openCodexDesktopDeepLink(cwd: cwd) {
+            return .openedDesktop
+        }
+        if await openFolderInFinder(cwd) {
+            return .openedFinder
+        }
+        _ = sessionID // reserved for future non-interactive resume hooks
+        return .failed
+    }
+
+    private func runCodexAppWorkspace(_ cwd: String) async -> Bool {
+        let candidates = [
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".local/bin/codex").path,
+            "/opt/homebrew/bin/codex",
+            "/usr/local/bin/codex",
+        ]
+        for binary in candidates where FileManager.default.isExecutableFile(atPath: binary) {
+            let ok = await runProcessAndWait(
+                executable: binary,
+                arguments: ["app", cwd],
+                timeoutSeconds: 12
+            )
+            if ok {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Same LaunchServices path Roster uses to relaunch Desktop, with a workspace URL.
+    private func openCodexDesktopDeepLink(cwd: String) async -> Bool {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: ":/?#[]@!$&'()*+,;=")
+        let encodedPath = cwd.addingPercentEncoding(withAllowedCharacters: allowed) ?? cwd
+        let url = "codex://threads/new?path=\(encodedPath)"
+        let bundleIDs = ["com.openai.codex", "com.openai.chat"]
+        for bundleID in bundleIDs {
+            if await runProcessAndWait(
+                executable: "/usr/bin/open",
+                arguments: ["-b", bundleID, url],
+                timeoutSeconds: 8
+            ) {
+                return true
+            }
+        }
+        for path in ["/Applications/ChatGPT.app", "/Applications/Codex.app"]
+        where FileManager.default.fileExists(atPath: path) {
+            if await runProcessAndWait(
+                executable: "/usr/bin/open",
+                arguments: ["-a", path, url],
+                timeoutSeconds: 8
+            ) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func openFolderInFinder(_ cwd: String) async -> Bool {
+        if await runProcessAndWait(
+            executable: "/usr/bin/open",
+            arguments: [cwd],
+            timeoutSeconds: 6
+        ) {
+            return true
+        }
+        return await MainActor.run {
+            NSWorkspace.shared.open(URL(fileURLWithPath: cwd))
+        }
+    }
+
+    private func runProcessAndWait(
+        executable: String,
+        arguments: [String],
+        timeoutSeconds: Double
+    ) async -> Bool {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: executable)
+                process.arguments = arguments
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                do {
+                    try process.run()
+                } catch {
+                    continuation.resume(returning: false)
+                    return
+                }
+                let deadline = Date().addingTimeInterval(timeoutSeconds)
+                while process.isRunning, Date() < deadline {
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
+                if process.isRunning {
+                    process.terminate()
+                    process.waitUntilExit()
+                    continuation.resume(returning: false)
+                    return
+                }
+                process.waitUntilExit()
+                continuation.resume(returning: process.terminationStatus == 0)
+            }
         }
     }
 
@@ -916,6 +1445,7 @@ final class AccountStore: ObservableObject {
         isAddAccountSession = true
         isInteractiveLoginInProgress = true
         isPendingLogin = true
+        pendingAddAccountMode = .addAndSwitch
         newAccountLoginState = .waiting
         if addStatus.authChanged,
            let current = try? await cli.decode(StatusOutput.self, arguments: ["status"]).currentAccount {
@@ -1036,6 +1566,15 @@ final class AccountStore: ObservableObject {
             if enabled {
                 Task { await self.checkAutoSwitchWhenExhausted() }
             }
+        }
+    }
+
+    func setAutoResumeSession(_ enabled: Bool) {
+        run {
+            _ = try await self.cli.data(
+                arguments: ["auto-resume-session", enabled ? "--enable" : "--disable", "--json"]
+            )
+            self.autoResumeSession = enabled
         }
     }
 
@@ -1237,7 +1776,10 @@ final class AccountStore: ObservableObject {
         async let accounts: AccountListOutput = cli.decode(AccountListOutput.self, arguments: ["list"])
         async let settings: AutoStartUsageWindowsStatus = cli.decode(AutoStartUsageWindowsStatus.self, arguments: ["auto-start-usage-windows"])
         async let autoSwitch: AutoSwitchOutput = cli.decode(AutoSwitchOutput.self, arguments: ["auto-switch", "--status"])
-        let (loadedStatus, loadedAccounts, loadedSettings, loadedAutoSwitch) = try await (status, accounts, settings, autoSwitch)
+        async let autoResume: AutoResumeSessionStatus = cli.decode(AutoResumeSessionStatus.self, arguments: ["auto-resume-session"])
+        let (loadedStatus, loadedAccounts, loadedSettings, loadedAutoSwitch, loadedAutoResume) = try await (
+            status, accounts, settings, autoSwitch, autoResume
+        )
         applyRoster(status: loadedStatus, accounts: loadedAccounts.accounts)
         let pendingLegacyArchives = legacyArchivedAccountIDs.intersection(Set(loadedAccounts.accounts.map(\.id)))
         if !pendingLegacyArchives.isEmpty {
@@ -1252,6 +1794,7 @@ final class AccountStore: ObservableObject {
             applyRoster(status: loadedStatus, accounts: refreshedAccounts.accounts)
         }
         self.autoStartUsageWindows = loadedSettings.enabled
+        self.autoResumeSession = loadedAutoResume.enabled
         if !loadedAutoSwitch.enabled,
            UserDefaults.standard.object(forKey: legacyAutoSwitchWhenExhaustedKey) != nil,
            UserDefaults.standard.bool(forKey: legacyAutoSwitchWhenExhaustedKey) {
@@ -1326,11 +1869,12 @@ final class AccountStore: ObservableObject {
                 // A live Codex CLI must defer switching even after Desktop has quit.
                 var relaunch = ChatGPTDesktop.RelaunchPlan.preferredDesktop()
                 var didCloseDesktop = false
+                var didClearWebSession = false
                 if ChatGPTDesktop.isRunning {
                     autoSwitchState = .closingDesktop
                     try await self.preserveLiveSessionBeforeDesktopQuit()
                     relaunch = try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
-                    ChatGPTDesktop.clearWebSessionCache()
+                    ChatGPTDesktop.clearWebSessionCacheOnce(didClear: &didClearWebSession)
                     didCloseDesktop = true
                 }
                 autoSwitchState = .switchingAccount
@@ -1359,10 +1903,11 @@ final class AccountStore: ObservableObject {
                     return
                 }
                 autoSwitchState = .relaunchingDesktop
-                try? await Task.sleep(for: .milliseconds(250))
-                // Always clear before relaunch — including when Desktop was already
-                // quit (the earlier branch only clears after a live quit).
-                ChatGPTDesktop.clearWebSessionCache()
+                try? await Task.sleep(for: .milliseconds(100))
+                // Required before relaunch — no-op when the post-quit clear already
+                // ran and Desktop stayed quit; still clears when Desktop was already
+                // quit at decide time (post-quit branch skipped).
+                ChatGPTDesktop.clearWebSessionCacheOnce(didClear: &didClearWebSession)
                 var launched = await relaunch.launchAndConfirm()
                 var acceptance: DesktopAcceptanceResult = .timedOut
                 let expectedEmail = self.accounts.first(where: { $0.id == applied.candidateAccountId })?.email
@@ -1408,6 +1953,7 @@ final class AccountStore: ObservableObject {
                 autoSwitchState = .switched(applied.candidateDisplayName ?? candidateName)
                 autoSwitchAllExhaustedNotified = false
                 autoSwitchCooldownUntil = Date.now.addingTimeInterval(30)
+                await self.applySessionResumeIfNeeded(applied.sessionResume)
             default:
                 autoSwitchState = .checkFailed
             }
@@ -1551,29 +2097,35 @@ final class AccountStore: ObservableObject {
         // ~/.codex identity — never on a saved-account usage probe (that only
         // checks the snapshot bytes and can report OK while the UI still shows
         // "Sign in to ChatGPT").
-        try? await Task.sleep(for: .seconds(2))
+        // Fast path: Desktop already running → poll immediately after a short
+        // beat. Cold launch still gets a longer head start before the loop.
+        if ChatGPTDesktop.isRunning {
+            try? await Task.sleep(for: .milliseconds(400))
+        } else {
+            try? await Task.sleep(for: .milliseconds(800))
+        }
         let deadline = ContinuousClock.now + .seconds(12)
         var sawMatchingLiveIdentity = false
         while ContinuousClock.now < deadline {
             guard ChatGPTDesktop.isRunning else {
-                try? await Task.sleep(for: .milliseconds(400))
+                try? await Task.sleep(for: .milliseconds(250))
                 continue
             }
             do {
                 let status = try await cli.decode(StatusOutput.self, arguments: ["status"])
                 guard let live = status.currentAccount else {
-                    try? await Task.sleep(for: .milliseconds(400))
+                    try? await Task.sleep(for: .milliseconds(250))
                     continue
                 }
                 let emailMatches = live.email.caseInsensitiveCompare(expectedEmail) == .orderedSame
                 let idMatches = status.currentAccountSavedId == accountID
                 guard emailMatches || idMatches else {
-                    try? await Task.sleep(for: .milliseconds(400))
+                    try? await Task.sleep(for: .milliseconds(250))
                     continue
                 }
                 sawMatchingLiveIdentity = true
                 // Settle: first match alone is weak — Desktop may still be on Sign-in.
-                try? await Task.sleep(for: .milliseconds(900))
+                try? await Task.sleep(for: .milliseconds(500))
                 guard ChatGPTDesktop.isRunning else { continue }
                 let settled = try await cli.decode(StatusOutput.self, arguments: ["status"])
                 let settledEmail = settled.currentAccount?.email
@@ -1582,7 +2134,7 @@ final class AccountStore: ObservableObject {
                 } ?? false
                 let settledIDMatches = settled.currentAccountSavedId == accountID
                 guard settledEmailMatches || settledIDMatches else {
-                    try? await Task.sleep(for: .milliseconds(400))
+                    try? await Task.sleep(for: .milliseconds(250))
                     continue
                 }
                 do {
@@ -1598,7 +2150,7 @@ final class AccountStore: ObservableObject {
                     return .accepted
                 }
             } catch {
-                try? await Task.sleep(for: .milliseconds(400))
+                try? await Task.sleep(for: .milliseconds(250))
             }
         }
         // Never silent false-OK: a fleeting match without settle is uncertain.
@@ -1658,15 +2210,17 @@ final class AccountStore: ObservableObject {
             ))
         }
         let relaunch: ChatGPTDesktop.RelaunchPlan
+        var didClearWebSession = false
         if ChatGPTDesktop.isRunning {
             try await preserveLiveSessionBeforeDesktopQuit()
             relaunch = try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
-            ChatGPTDesktop.clearWebSessionCache()
+            ChatGPTDesktop.clearWebSessionCacheOnce(didClear: &didClearWebSession)
         } else {
             relaunch = fallbackRelaunch
         }
         _ = try await activateAfterProcessesDrain(accountID: previousAccountID, waitForDrain: true)
-        try? await Task.sleep(for: .milliseconds(250))
+        try? await Task.sleep(for: .milliseconds(100))
+        ChatGPTDesktop.clearWebSessionCacheOnce(didClear: &didClearWebSession)
         guard await relaunch.launchAndConfirm() else {
             throw CLIError(AppLanguage.text(
                 "Đã phục hồi dữ liệu phiên trước nhưng không thể mở lại ChatGPT.",
@@ -1725,7 +2279,10 @@ enum AutoSwitchState: Equatable {
 
 private struct AccountHubCLI {
     func decode<T: Decodable>(_ type: T.Type, arguments: [String]) async throws -> T {
-        let data = try await data(arguments: arguments + ["--json"])
+        // Idempotent: callers must not pass `--json` themselves, but tolerate it
+        // so a stray flag never becomes `cannot be used multiple times`.
+        let jsonArgs = arguments.contains("--json") ? arguments : arguments + ["--json"]
+        let data = try await data(arguments: jsonArgs)
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         do {
@@ -1844,7 +2401,9 @@ private struct CLIError: LocalizedError {
 private enum CodexLoginLauncher {
     private static var process: Process?
 
-    static func start() throws {
+    /// Start `codex login`. When `codexHome` is set, login writes credentials
+    /// only into that isolated home (enroll-only); live `~/.codex` is untouched.
+    static func start(codexHome: URL?) throws {
         // `codex login` opens its own browser sign-in (loopback/PKCE) — no device
         // code. Run it quietly: the browser is the only UI the user needs.
         stop()
@@ -1857,6 +2416,11 @@ private enum CodexLoginLauncher {
             login.arguments = ["codex", "-c", "cli_auth_credentials_store=\"file\"", "login"]
         }
         login.currentDirectoryURL = FileManager.default.temporaryDirectory
+        var environment = ProcessInfo.processInfo.environment
+        if let codexHome {
+            environment["CODEX_HOME"] = codexHome.path
+        }
+        login.environment = environment
         login.standardOutput = FileHandle.nullDevice
         login.standardError = FileHandle.nullDevice
         try login.run()
@@ -1959,9 +2523,9 @@ private enum ChatGPTDesktop {
         @discardableResult
         func launchAndConfirm() async -> Bool {
             // LaunchServices often rejects an immediate reopen after force-quit.
-            try? await Task.sleep(for: .milliseconds(350))
+            try? await Task.sleep(for: .milliseconds(150))
             await openDesktop()
-            if await waitUntilRunning(deadline: .seconds(3)) {
+            if await waitUntilRunning(deadline: .seconds(2)) {
                 return true
             }
             await openDesktop()
@@ -2147,6 +2711,16 @@ private enum ChatGPTDesktop {
         }
     }
 
+    /// Clear once per switch path. Skips a duplicate wipe when the same switch
+    /// already cleared while Desktop stayed quit — still runs before relaunch
+    /// when the post-quit clear was skipped (Desktop already quit).
+    static func clearWebSessionCacheOnce(didClear: inout Bool) {
+        guard !didClear else { return }
+        guard !isRunning else { return }
+        clearWebSessionCache()
+        didClear = true
+    }
+
     private static func resolvedAppURLs(for bundleIDs: [String]) -> [URL] {
         var urls: [URL] = []
         var seen = Set<URL>()
@@ -2272,6 +2846,13 @@ private struct SaveOutput: Decodable {
     let account: SavedAccount
 }
 
+private struct ImportJsonOutput: Decodable {
+    let format: String
+    let created: Int
+    let updated: Int
+    let accounts: [SavedAccount]
+}
+
 struct AccountIdentity: Decodable, Equatable {
     let email: String
     let subject: String?
@@ -2317,6 +2898,16 @@ struct ProviderState: Identifiable, Decodable {
 struct ActivateOutput: Decodable {
     let account: SavedAccount
     let previousAccountId: UUID?
+    let sessionResume: SessionResumeHint?
+}
+
+struct SessionResumeHint: Decodable {
+    let enabled: Bool
+    let accountId: UUID?
+    let sessionId: String?
+    let cwd: String?
+    let rolloutPath: String?
+    let status: String
 }
 
 struct TokenUsageSummary: Decodable {
@@ -2801,6 +3392,7 @@ struct SavedAccount: Identifiable, Decodable {
     let id: UUID
     let provider: String
     let email: String
+    let subject: String?
     let name: String?
     let customLabel: String?
     let planLabel: String?
@@ -2818,6 +3410,7 @@ struct SavedAccount: Identifiable, Decodable {
             id: id,
             provider: provider,
             email: email,
+            subject: subject,
             name: name,
             customLabel: customLabel,
             planLabel: planLabel,
@@ -2836,6 +3429,7 @@ struct SavedAccount: Identifiable, Decodable {
         id: UUID,
         provider: String,
         email: String,
+        subject: String? = nil,
         name: String?,
         customLabel: String?,
         planLabel: String?,
@@ -2851,6 +3445,7 @@ struct SavedAccount: Identifiable, Decodable {
         self.id = id
         self.provider = provider
         self.email = email
+        self.subject = subject
         self.name = name
         self.customLabel = customLabel
         self.planLabel = planLabel
@@ -3356,6 +3951,10 @@ struct AutoStartUsageWindowsStatus: Decodable {
     let enabled: Bool
 }
 
+struct AutoResumeSessionStatus: Decodable {
+    let enabled: Bool
+}
+
 struct AddAccountStatusOutput: Decodable {
     let active: Bool
     let authChanged: Bool
@@ -3369,6 +3968,7 @@ struct AutoSwitchOutput: Decodable {
     let candidateDisplayName: String?
     let detail: String?
     let bankedResetCount: Int?
+    let sessionResume: SessionResumeHint?
 }
 
 enum AIProvider: String, CaseIterable, Identifiable, Decodable {

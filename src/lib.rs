@@ -17,6 +17,7 @@ pub mod provider_store;
 pub mod repository;
 pub mod reset_tracker;
 pub mod secrets;
+pub mod session_resume;
 pub mod settings;
 mod time_display;
 pub mod token_usage;

@@ -8,18 +8,39 @@ use uuid::Uuid;
 
 use crate::file_store::replace_file_with_recovery;
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppSettings {
     #[serde(default)]
     pub auto_start_usage_windows: bool,
     #[serde(default)]
     pub auto_switch_when_exhausted: bool,
+    /// Remember the outgoing Codex rollout (session id + cwd) on switch and
+    /// reopen that account's last workspace after a later activate. Default on.
+    #[serde(default = "default_auto_resume_session")]
+    pub auto_resume_session: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_auto_switch_at: Option<OffsetDateTime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_auto_switch_target: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_auto_switch_from: Option<Uuid>,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            auto_start_usage_windows: false,
+            auto_switch_when_exhausted: false,
+            auto_resume_session: true,
+            last_auto_switch_at: None,
+            last_auto_switch_target: None,
+            last_auto_switch_from: None,
+        }
+    }
+}
+
+fn default_auto_resume_session() -> bool {
+    true
 }
 
 pub fn load_settings(app_data_dir: &Path) -> Result<AppSettings> {
@@ -60,6 +81,7 @@ mod tests {
         let settings = load_settings(temp.path()).expect("load settings");
 
         assert!(!settings.auto_start_usage_windows);
+        assert!(settings.auto_resume_session);
     }
 
     #[test]

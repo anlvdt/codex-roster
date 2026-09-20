@@ -247,6 +247,8 @@ final class AccountStore: ObservableObject {
     @Published private(set) var accountSortMode: AccountSortMode
     @Published private(set) var newAccountLoginState: NewAccountLoginState = .idle
     @Published private(set) var isPendingLogin = false
+    /// Short bilingual progress line during Desktop accept / clear+relaunch retry.
+    @Published private(set) var switchPhaseMessage: String?
     @Published var errorMessage: String?
 
     private let cli = AccountHubCLI()
@@ -723,16 +725,17 @@ final class AccountStore: ObservableObject {
             // survived an earlier miss cannot keep the Sign-in screen.
             ChatGPTDesktop.clearWebSessionCache()
             let launched = await relaunch.launchAndConfirm()
-            let accepted: Bool
+            let acceptance: DesktopAcceptanceResult
             if launched {
-                accepted = await self.waitForDesktopAcceptance(
+                acceptance = await self.confirmDesktopAcceptanceWithOneRetry(
                     accountID: activated.account.id,
-                    expectedEmail: activated.account.email
+                    expectedEmail: activated.account.email,
+                    relaunch: relaunch
                 )
             } else {
-                accepted = false
+                acceptance = .timedOut
             }
-            guard accepted else {
+            guard acceptance == .accepted else {
                 do {
                     try await self.rollbackRejectedTarget(
                         rejectedAccountID: activated.account.id,
@@ -746,10 +749,7 @@ final class AccountStore: ObservableObject {
                         "ChatGPT rejected the target account and the previous session could not be restored automatically: \(error.localizedDescription)"
                     ))
                 }
-                throw CLIError(AppLanguage.text(
-                    "ChatGPT không chấp nhận tài khoản đích; phiên trước đã được khôi phục an toàn.",
-                    "ChatGPT rejected the target account; the previous session was restored safely."
-                ))
+                throw CLIError(Self.desktopAcceptanceFailureMessage(acceptance))
             }
             self.applyActivatedAccount(activated.account)
             try await self.reloadAccountsAfterSwitch()
@@ -1364,29 +1364,28 @@ final class AccountStore: ObservableObject {
                 // quit (the earlier branch only clears after a live quit).
                 ChatGPTDesktop.clearWebSessionCache()
                 var launched = await relaunch.launchAndConfirm()
-                var accepted: Bool
+                var acceptance: DesktopAcceptanceResult = .timedOut
                 let expectedEmail = self.accounts.first(where: { $0.id == applied.candidateAccountId })?.email
                     ?? candidateName
                 if launched, let candidateID = applied.candidateAccountId {
-                    accepted = await waitForDesktopAcceptance(
+                    acceptance = await confirmDesktopAcceptanceWithOneRetry(
                         accountID: candidateID,
-                        expectedEmail: expectedEmail
+                        expectedEmail: expectedEmail,
+                        relaunch: relaunch
                     )
-                } else {
-                    accepted = false
-                }
-                // Retry relaunch up to 2 times if it fails
-                for _ in 1...2 where !accepted {
+                } else if !launched {
+                    // Launch itself failed — try open again once before giving up.
                     try? await Task.sleep(for: .seconds(1))
                     launched = await relaunch.launchAndConfirm()
                     if launched, let candidateID = applied.candidateAccountId {
-                        accepted = await waitForDesktopAcceptance(
+                        acceptance = await confirmDesktopAcceptanceWithOneRetry(
                             accountID: candidateID,
-                            expectedEmail: expectedEmail
+                            expectedEmail: expectedEmail,
+                            relaunch: relaunch
                         )
                     }
                 }
-                guard accepted else {
+                guard acceptance == .accepted else {
                     do {
                         try await rollbackRejectedTarget(
                             rejectedAccountID: applied.candidateAccountId,
@@ -1394,10 +1393,7 @@ final class AccountStore: ObservableObject {
                             fallbackRelaunch: relaunch
                         )
                         try? await reloadAccountsAfterSwitch()
-                        errorMessage = AppLanguage.text(
-                            "ChatGPT không chấp nhận tài khoản tự động chọn; phiên trước đã được khôi phục.",
-                            "ChatGPT rejected the automatically selected account; the previous session was restored."
-                        )
+                        errorMessage = Self.desktopAcceptanceFailureMessage(acceptance)
                     } catch {
                         errorMessage = AppLanguage.text(
                             "Tài khoản đích bị từ chối và rollback thất bại: \(error.localizedDescription)",
@@ -1484,6 +1480,7 @@ final class AccountStore: ObservableObject {
             defer {
                 isWorking = false
                 isSwitching = false
+                switchPhaseMessage = nil
             }
             do {
                 try await operation()
@@ -1506,7 +1503,49 @@ final class AccountStore: ObservableObject {
         applyRoster(status: loadedStatus, accounts: loadedAccounts.accounts)
     }
 
-    private func waitForDesktopAcceptance(accountID: UUID, expectedEmail: String) async -> Bool {
+    /// After relaunch: wait for a settled live identity match. Never treat the
+    /// first matching `~/.codex` email/ID alone as success — Desktop can still
+    /// flash Sign-in. One clear+relaunch retry is allowed when acceptance is weak.
+    private func confirmDesktopAcceptanceWithOneRetry(
+        accountID: UUID,
+        expectedEmail: String,
+        relaunch: ChatGPTDesktop.RelaunchPlan
+    ) async -> DesktopAcceptanceResult {
+        defer { switchPhaseMessage = nil }
+        switchPhaseMessage = AppLanguage.text(
+            "Đang xác nhận ChatGPT đã nhận phiên…",
+            "Confirming ChatGPT accepted the session…"
+        )
+        let first = await waitForDesktopAcceptance(accountID: accountID, expectedEmail: expectedEmail)
+        if first == .accepted || first == .rejected {
+            return first
+        }
+
+        // Weak / timed-out: one longevity-safe clear+relaunch retry (no RT prove).
+        switchPhaseMessage = AppLanguage.text(
+            "ChatGPT chưa ổn định — lưu phiên, xóa cache web và mở lại…",
+            "ChatGPT unsettled — saving session, clearing web cache, and relaunching…"
+        )
+        do {
+            if ChatGPTDesktop.isRunning {
+                try await preserveLiveSessionBeforeDesktopQuit()
+                _ = try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
+            }
+            ChatGPTDesktop.clearWebSessionCache()
+            guard await relaunch.launchAndConfirm() else {
+                return .timedOut
+            }
+            switchPhaseMessage = AppLanguage.text(
+                "Đang xác nhận lại sau khi mở lại ChatGPT…",
+                "Re-confirming after ChatGPT relaunch…"
+            )
+            return await waitForDesktopAcceptance(accountID: accountID, expectedEmail: expectedEmail)
+        } catch {
+            return first == .uncertain ? .uncertain : .timedOut
+        }
+    }
+
+    private func waitForDesktopAcceptance(accountID: UUID, expectedEmail: String) async -> DesktopAcceptanceResult {
         // Give Desktop time to open and either rehydrate from restored auth.json
         // or reject a proven-dead session. Acceptance is based on the LIVE
         // ~/.codex identity — never on a saved-account usage probe (that only
@@ -1516,6 +1555,10 @@ final class AccountStore: ObservableObject {
         let deadline = ContinuousClock.now + .seconds(12)
         var sawMatchingLiveIdentity = false
         while ContinuousClock.now < deadline {
+            guard ChatGPTDesktop.isRunning else {
+                try? await Task.sleep(for: .milliseconds(400))
+                continue
+            }
             do {
                 let status = try await cli.decode(StatusOutput.self, arguments: ["status"])
                 guard let live = status.currentAccount else {
@@ -1529,23 +1572,62 @@ final class AccountStore: ObservableObject {
                     continue
                 }
                 sawMatchingLiveIdentity = true
+                // Settle: first match alone is weak — Desktop may still be on Sign-in.
+                try? await Task.sleep(for: .milliseconds(900))
+                guard ChatGPTDesktop.isRunning else { continue }
+                let settled = try await cli.decode(StatusOutput.self, arguments: ["status"])
+                let settledEmail = settled.currentAccount?.email
+                let settledEmailMatches = settledEmail.map {
+                    $0.caseInsensitiveCompare(expectedEmail) == .orderedSame
+                } ?? false
+                let settledIDMatches = settled.currentAccountSavedId == accountID
+                guard settledEmailMatches || settledIDMatches else {
+                    try? await Task.sleep(for: .milliseconds(400))
+                    continue
+                }
                 do {
                     // Live usage probe (no account-id) — AT-only, no RT prove.
                     _ = try await cli.data(arguments: ["usage", "--json"])
-                    return true
+                    return .accepted
                 } catch {
                     if Self.usageErrorForcesRollback(error.localizedDescription) {
-                        return false
+                        return .rejected
                     }
                     // Expired AT / deferred is fine: Desktop owns refresh once
-                    // live identity already matches the target.
-                    return true
+                    // live identity has settled on the target.
+                    return .accepted
                 }
             } catch {
                 try? await Task.sleep(for: .milliseconds(400))
             }
         }
-        return sawMatchingLiveIdentity
+        // Never silent false-OK: a fleeting match without settle is uncertain.
+        return sawMatchingLiveIdentity ? .uncertain : .timedOut
+    }
+
+    private static func desktopAcceptanceFailureMessage(_ result: DesktopAcceptanceResult) -> String {
+        switch result {
+        case .accepted:
+            return AppLanguage.text(
+                "ChatGPT không chấp nhận tài khoản đích; phiên trước đã được khôi phục an toàn.",
+                "ChatGPT rejected the target account; the previous session was restored safely."
+            )
+        case .rejected:
+            return AppLanguage.text(
+                "ChatGPT từ chối phiên đích (cần đăng nhập lại); phiên trước đã được khôi phục.",
+                "ChatGPT rejected the target session (sign-in required); the previous session was restored."
+            )
+        case .uncertain:
+            return AppLanguage.text(
+                "Phiên ~/.codex đã khớp nhưng ChatGPT chưa xác nhận ổn định (có thể vẫn Sign-in). Phiên trước đã được khôi phục — hãy thử Đổi lại hoặc Mở lại ChatGPT.",
+                "Live ~/.codex matched but ChatGPT acceptance is uncertain (Sign-in may still show). Previous session restored — try Switch again or Relaunch ChatGPT."
+            )
+        case .timedOut:
+            return AppLanguage.text(
+                "ChatGPT không xác nhận phiên đích kịp thời; phiên trước đã được khôi phục.",
+                "ChatGPT did not confirm the target session in time; the previous session was restored."
+            )
+        }
     }
 
     /// Whether a `usage` probe error means the target account is genuinely
@@ -1617,6 +1699,14 @@ final class AccountStore: ObservableObject {
         }
     }
 
+}
+
+enum DesktopAcceptanceResult: Equatable {
+    case accepted
+    case rejected
+    /// Live identity matched at least once, but Desktop never settled.
+    case uncertain
+    case timedOut
 }
 
 enum AutoSwitchState: Equatable {

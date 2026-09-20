@@ -1,6 +1,13 @@
 import SwiftUI
 import AppKit
 
+/// Quota window cadence used to scale reset-proximity color bands.
+enum QuotaResetWindowKind {
+    case fiveHour
+    case weekly
+    case monthly
+}
+
 /// Design tokens, bioluminescent tints, haptics, and physics for the Neo-Prism UI system.
 enum PrismTheme {
     // MARK: - Bioluminescent State Tints
@@ -109,6 +116,53 @@ enum PrismTheme {
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
+    }
+
+    /// Soft lime between emerald and amber — “approaching reset” mid band.
+    private static let resetNearMid = Color(red: 0.42, green: 0.82, blue: 0.45)
+    /// Cooler green for monthly proximity (distinguishes from 5h/weekly).
+    private static let resetMonthlyNear = Color(red: 0.32, green: 0.78, blue: 0.62)
+    /// Muted amber when still far from reset.
+    private static let resetFarMuted = Color(red: 0.72, green: 0.58, blue: 0.36)
+
+    /// Maps time-until-reset → tint. Closer to reset = greener; farther = amber/muted.
+    /// `kind` retunes band thresholds to each window’s natural cadence.
+    static func resetProximityTint(
+        resetAt: Date?,
+        kind: QuotaResetWindowKind = .fiveHour,
+        now: Date = Date()
+    ) -> Color {
+        guard let resetAt else { return textSecondary }
+        let remaining = resetAt.timeIntervalSince(now)
+        if remaining <= 0 { return emerald }
+
+        let hours = remaining / 3600.0
+        switch kind {
+        case .fiveHour:
+            // Horizon ~5h — tight bands so “soon” reads green quickly.
+            if hours <= 0.5 { return emerald }
+            if hours <= 1.5 { return resetNearMid }
+            if hours <= 3.0 { return amber }
+            return resetFarMuted
+        case .weekly:
+            if hours <= 6 { return emerald }
+            if hours <= 24 { return resetNearMid }
+            if hours <= 72 { return amber }
+            return textSecondary
+        case .monthly:
+            if hours <= 24 { return emerald }
+            if hours <= 72 { return resetMonthlyNear }
+            if hours <= 168 { return amber }
+            return textSecondary
+        }
+    }
+
+    static func resetProximityTint(
+        window: UsageWindow,
+        kind: QuotaResetWindowKind,
+        now: Date = Date()
+    ) -> Color {
+        resetProximityTint(resetAt: window.resetAt.value, kind: kind, now: now)
     }
 
     // MARK: - Glass Materials & Specular Rim Light

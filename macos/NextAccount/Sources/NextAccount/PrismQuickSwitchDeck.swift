@@ -284,7 +284,7 @@ struct PrismQuickSwitchDeck: View {
                 ))
             }
 
-            // Quotas: 5h & Weekly
+            // Quotas: 5h & Weekly (+ monthly when credit_limit exists)
             HStack(spacing: 10) {
                 // 5-Hour Window
                 VStack(alignment: .leading, spacing: 4) {
@@ -309,7 +309,9 @@ struct PrismQuickSwitchDeck: View {
                     if let five {
                         Text(five.resetDescription(in: language.language))
                             .font(PrismTheme.fontCaptionRegular)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(
+                                PrismTheme.resetProximityTint(window: five, kind: .fiveHour)
+                            )
                             .lineLimit(1)
                     }
                 }
@@ -347,13 +349,88 @@ struct PrismQuickSwitchDeck: View {
                     if let week {
                         Text(week.resetDescription(in: language.language))
                             .font(PrismTheme.fontCaptionRegular)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(
+                                PrismTheme.resetProximityTint(window: week, kind: .weekly)
+                            )
                             .lineLimit(1)
                     }
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
                 .background(RoundedRectangle(cornerRadius: 10).fill(PrismTheme.surfaceQuiet))
+
+                if let monthPercent = activeAccount?.monthlyQuotaRemainingPercent {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(language.text("Hạn mức tháng", "Monthly"))
+                                .font(PrismTheme.fontBody)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text("\(monthPercent)%")
+                                .font(PrismTheme.fontMetricLarge)
+                                .monospacedDigit()
+                                .foregroundStyle(PrismTheme.quotaTint(percent: monthPercent))
+                        }
+
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(PrismTheme.trackFill)
+                                Capsule()
+                                    .fill(PrismTheme.quotaGradient(percent: monthPercent))
+                                    .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(monthPercent) / 100.0)))
+                            }
+                        }
+                        .frame(height: 6)
+
+                        if let limit = activeAccount?.usage?.credits?.creditLimit {
+                            if let reset = limit.resetDescription(in: language.language) {
+                                Text(reset)
+                                    .font(PrismTheme.fontCaptionRegular)
+                                    .foregroundStyle(
+                                        PrismTheme.resetProximityTint(
+                                            resetAt: limit.resetsAt?.value,
+                                            kind: .monthly
+                                        )
+                                    )
+                                    .lineLimit(1)
+                            }
+                            Text(limit.displayText)
+                                .font(PrismTheme.fontCaptionRegular)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        } else {
+                            Text(language.text("Hạn mức tháng từ API", "Monthly cap from API"))
+                                .font(PrismTheme.fontCaptionRegular)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(PrismTheme.surfaceQuiet))
+                } else if let active = activeAccount, active.showsFreePlanChip {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(language.text("Gói Free", "Free plan"))
+                            .font(PrismTheme.fontBody)
+                            .foregroundStyle(.secondary)
+                        Text(language.text(
+                            "Không có % tháng từ API",
+                            "No monthly % from API"
+                        ))
+                            .font(PrismTheme.fontCaptionRegular)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                        if let balance = active.creditsBalanceDisplay {
+                            Text(language.text("Tín dụng: \(balance)", "Credits: \(balance)"))
+                                .font(PrismTheme.fontCaption)
+                                .foregroundStyle(PrismTheme.accent)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(PrismTheme.surfaceQuiet))
+                }
             }
         }
         .padding(12)
@@ -494,20 +571,33 @@ struct PrismQuickSwitchDeck: View {
                 }
                 Button {
                     PrismTheme.triggerHaptic()
-                    store.refresh()
+                    // Longevity-safe: AT-only usage for every saved account
+                    // (skips deferred/login rows; never prove_saved_session_refresh).
+                    store.refreshUsage(scope: .allSaved)
                     store.refreshTokenUsage(silently: true)
                     store.refreshResetOutlook(silently: true)
                     store.refreshOpenAIStatus(silently: true)
                 } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(PrismTheme.fontBodyCompact)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 24, height: 24)
-                        .background(Circle().fill(PrismTheme.surfaceSoft))
+                    Group {
+                        if store.isBusyForActions {
+                            ProgressView()
+                                .controlSize(.mini)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(PrismTheme.fontBodyCompact)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(width: 24, height: 24)
+                    .background(Circle().fill(PrismTheme.surfaceSoft))
                 }
                 .buttonStyle(.plain)
-                .disabled(store.isBusyForActions)
-                .help(language.text("Làm mới", "Refresh"))
+                .disabled(store.isBusyForActions || store.accounts.isEmpty)
+                .help(language.text(
+                    "Làm mới tất cả quota tài khoản (chỉ access token)",
+                    "Refresh all account quotas (access token only)"
+                ))
+                .accessibilityLabel(language.text("Làm mới tất cả", "Refresh all"))
             }
 
             if let summary = store.tokenUsage {
@@ -544,6 +634,9 @@ struct PrismQuickSwitchDeck: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 6)
             }
+
+            // Fills the short-wing gap under Usage: repo + live app version.
+            usageWingFooter
         }
         .padding(12)
         .background(
@@ -551,6 +644,43 @@ struct PrismQuickSwitchDeck: View {
                 .fill(PrismTheme.surfacePanel)
                 .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(PrismTheme.surfaceFill, lineWidth: 0.8))
         )
+    }
+
+    private var githubRepoURL: URL {
+        URL(string: "https://github.com/anlvdt/codex-roster")!
+    }
+
+    private var usageWingFooter: some View {
+        HStack(spacing: 8) {
+            Button {
+                PrismTheme.triggerHaptic()
+                openURL(githubRepoURL)
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                        .font(PrismTheme.fontMicro)
+                    Text("anlvdt/codex-roster")
+                        .font(PrismTheme.fontCaption)
+                        .lineLimit(1)
+                }
+                .foregroundStyle(PrismTheme.accent)
+            }
+            .buttonStyle(.plain)
+            .pointingHandCursor()
+            .help(githubRepoURL.absoluteString)
+            .accessibilityLabel(language.text("Mở repo GitHub", "Open GitHub repository"))
+
+            Spacer(minLength: 4)
+
+            Text("v\(AppInfo.shortVersion)")
+                .font(PrismTheme.fontMono)
+                .foregroundStyle(PrismTheme.textSecondary)
+                .help(language.text(
+                    "Phiên bản \(AppInfo.shortVersion)",
+                    "Version \(AppInfo.shortVersion)"
+                ))
+        }
+        .padding(.top, 2)
     }
 
     private func telemetryPill(title: String, value: String, accent: String?) -> some View {
@@ -635,7 +765,28 @@ struct PrismQuickSwitchDeck: View {
                     openAddAccountFlow()
                 }
 
+                toolbarIconButton(
+                    systemName: "arrow.clockwise",
+                    active: false,
+                    help: language.text("Làm mới tất cả", "Refresh all"),
+                    busy: store.isBusyForActions,
+                    disabled: store.isBusyForActions || store.accounts.isEmpty
+                ) {
+                    // Longevity-safe: AT-only usage for every saved account.
+                    store.refreshUsage(scope: .allSaved)
+                }
+
                 Menu {
+                    Button {
+                        store.refreshUsage(scope: .allSaved)
+                    } label: {
+                        Label(
+                            language.text("Làm mới tất cả", "Refresh all"),
+                            systemImage: "arrow.clockwise"
+                        )
+                    }
+                    .disabled(store.isBusyForActions || store.accounts.isEmpty)
+                    Divider()
                     Button { openSettings() } label: {
                         Label(language.text("Cài đặt…", "Settings…"), systemImage: "gearshape")
                     }
@@ -701,24 +852,35 @@ struct PrismQuickSwitchDeck: View {
         systemName: String,
         active: Bool,
         help: String,
+        busy: Bool = false,
+        disabled: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
         Button {
             PrismTheme.triggerHaptic()
             action()
         } label: {
-            Image(systemName: systemName)
-                .font(PrismTheme.fontBodyCompactBold)
-                .frame(width: 26, height: 26)
-                .background(
-                    Circle()
-                        .fill(active ? PrismTheme.accent.opacity(0.9) : PrismTheme.surfaceFill)
-                )
-                .foregroundStyle(active ? PrismTheme.textOnAccent : Color.primary)
+            Group {
+                if busy {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    Image(systemName: systemName)
+                        .font(PrismTheme.fontBodyCompactBold)
+                }
+            }
+            .frame(width: 26, height: 26)
+            .background(
+                Circle()
+                    .fill(active ? PrismTheme.accent.opacity(0.9) : PrismTheme.surfaceFill)
+            )
+            .foregroundStyle(active ? PrismTheme.textOnAccent : Color.primary)
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
         .help(help)
+        .disabled(disabled || busy)
+        .accessibilityLabel(help)
     }
 
     private func filterTab(label: String, filter: RosterListFilter) -> some View {
@@ -786,6 +948,19 @@ private struct PrismCompactAccountCard: View {
                         .font(PrismTheme.fontMetric)
                         .lineLimit(1)
 
+                    if account.showsFreePlanChip {
+                        Text(language.text("FREE", "FREE"))
+                            .font(PrismTheme.fontMicroChip)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(PrismTheme.surfaceStrong))
+                            .foregroundStyle(PrismTheme.textSecondary)
+                            .help(language.text(
+                                "Gói Free/Go — tự chuyển không nhắm tài khoản này",
+                                "Free/Go plan — auto-switch will not target this account"
+                            ))
+                    }
+
                     if let banked = account.usage?.bankedResets?.availableCount, banked > 0 {
                         HStack(spacing: 2) {
                             Image(systemName: "arrow.counterclockwise.circle.fill")
@@ -820,30 +995,50 @@ private struct PrismCompactAccountCard: View {
                             isLunaActive ? "Codex active on Luna Reserve" : "Account has Luna Reserve"
                         ))
                     }
+
+                    if let balance = account.creditsBalanceDisplay, account.monthlyQuotaRemainingPercent == nil {
+                        Text(language.text("Cr \(balance)", "Cr \(balance)"))
+                            .font(PrismTheme.fontMicroChip)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(PrismTheme.chipFill(PrismTheme.accent, opacity: 0.14)))
+                            .foregroundStyle(PrismTheme.accent)
+                            .help(language.text(
+                                "Số dư tín dụng ChatGPT (không có hạn mức tháng % từ API)",
+                                "ChatGPT credit balance (no monthly % from API)"
+                            ))
+                    }
+                }
+
+                HStack(spacing: 4) {
+                    Text(account.email)
+                        .font(PrismTheme.fontCaption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    CopyEmailButton(email: account.email, iconSize: 11.5)
                 }
 
                 if let status = rowStatus {
                     Text(status.text)
-                        .font(PrismTheme.fontCaption)
+                        .font(PrismTheme.fontChip)
                         .foregroundStyle(status.tint)
                         .lineLimit(1)
                         .help(account.usageStatus(in: language.language))
-                } else {
-                    HStack(spacing: 4) {
-                        Text(account.email)
-                            .font(PrismTheme.fontCaption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-
-                        CopyEmailButton(email: account.email, iconSize: 11.5)
-                    }
                 }
             }
 
             Spacer(minLength: 4)
 
-            PrismFilamentBar(fivePercent: quota, weekPercent: week, width: 34, height: 3.5, showLabels: true)
+            PrismFilamentBar(
+                fivePercent: quota,
+                weekPercent: week,
+                monthPercent: account.monthlyQuotaRemainingPercent,
+                width: 34,
+                height: 3.5,
+                showLabels: true
+            )
 
             if account.isActive {
                 HStack(spacing: 3) {
@@ -971,10 +1166,10 @@ private struct PrismCompactAccountCard: View {
         .id(targetID)
     }
 
-    /// Switch only when usable or redeemable banked — exhausted rows show status instead.
+    /// Manual Switch when activation is not blocked — Free/exhausted rows stay
+    /// switchable by hand. Shortcuts / Ready / auto-switch keep `isUsableForSwitch`.
     private var canOfferSwitch: Bool {
         !account.usageErrorBlocksActivation
-            && (account.isUsableForSwitch || account.restingHasBankedReset)
     }
 
     /// Explicit row state so users don't infer from 0% bars alone.
@@ -994,7 +1189,7 @@ private struct PrismCompactAccountCard: View {
                 let count = account.usage?.bankedResets?.availableCount ?? 0
                 return (language.text("Banked ×\(count)", "Banked ×\(count)"), PrismTheme.warning)
             }
-            return (exhaustedStatusText, PrismTheme.textSecondary)
+            return exhaustedStatus
         }
         if account.hasDeferredAccessTokenRefresh {
             return (language.text("Chưa xác minh", "Unverified"), PrismTheme.textSecondary)
@@ -1002,19 +1197,32 @@ private struct PrismCompactAccountCard: View {
         return nil
     }
 
-    private var exhaustedStatusText: String {
+    private var exhaustedStatus: (text: String, tint: Color) {
         if let weekly = account.usage?.weekly, weekly.isDepleted {
-            return language.text(
-                "Hết tuần · \(weekly.resetDescription(in: language.language))",
-                "Weekly exhausted · \(weekly.resetDescription(in: language.language))"
+            return (
+                language.text(
+                    "Hết tuần · \(weekly.resetDescription(in: language.language))",
+                    "Weekly exhausted · \(weekly.resetDescription(in: language.language))"
+                ),
+                PrismTheme.resetProximityTint(window: weekly, kind: .weekly)
             )
         }
         guard let window = account.quotaWindowsForSwitch.min(by: { $0.resetAt.value < $1.resetAt.value }) else {
-            return language.text("Hết quota", "Out of quota")
+            return (language.text("Hết quota", "Out of quota"), PrismTheme.textSecondary)
         }
-        return language.text(
-            "Hết · \(window.resetDescription(in: language.language))",
-            "Exhausted · \(window.resetDescription(in: language.language))"
+        let kind: QuotaResetWindowKind = {
+            if let weekly = account.usage?.weekly,
+               weekly.resetAt.value == window.resetAt.value {
+                return .weekly
+            }
+            return .fiveHour
+        }()
+        return (
+            language.text(
+                "Hết · \(window.resetDescription(in: language.language))",
+                "Exhausted · \(window.resetDescription(in: language.language))"
+            ),
+            PrismTheme.resetProximityTint(window: window, kind: kind)
         )
     }
 }

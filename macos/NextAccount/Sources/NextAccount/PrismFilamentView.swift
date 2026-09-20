@@ -120,14 +120,15 @@ struct PrismFilamentView: View {
                         .fixedSize()
                 }
             } else if let weeklyResetDate {
+                let resetTint = PrismTheme.resetProximityTint(resetAt: weeklyResetDate, kind: .weekly)
                 HStack(spacing: 2) {
                     Text("↺")
                         .font(PrismTheme.fontCaptionBold)
-                        .foregroundStyle(.white.opacity(0.50))
+                        .foregroundStyle(resetTint.opacity(0.72))
                         .fixedSize()
                     Text(compactReset(weeklyResetDate))
                         .font(PrismTheme.fontBodySemibold)
-                        .foregroundStyle(.white.opacity(0.78))
+                        .foregroundStyle(resetTint)
                         .fixedSize()
                 }
             }
@@ -186,15 +187,16 @@ struct PrismFilamentView: View {
 
             // 5H Reset Countdown (or Plan Tag if full)
             if let fiveResetDate, fiveResetDate > Date() {
+                let resetTint = PrismTheme.resetProximityTint(resetAt: fiveResetDate, kind: .fiveHour)
                 HStack(spacing: 2) {
                     Text("↺")
                         .font(PrismTheme.fontCaptionBold)
-                        .foregroundStyle(.white.opacity(0.50))
+                        .foregroundStyle(resetTint.opacity(0.72))
                         .fixedSize()
 
                     Text(compactReset(fiveResetDate))
                         .font(PrismTheme.fontBodySemibold)
-                        .foregroundStyle(.white.opacity(0.78))
+                        .foregroundStyle(resetTint)
                         .lineLimit(1)
                         .fixedSize()
                 }
@@ -259,15 +261,16 @@ struct PrismFilamentView: View {
                 }
                 .help(language.text("\(bankedCount) lượt banked reset có thể dùng", "\(bankedCount) banked resets available"))
             } else if let weeklyResetDate {
+                let resetTint = PrismTheme.resetProximityTint(resetAt: weeklyResetDate, kind: .weekly)
                 HStack(spacing: 2) {
                     Text("↺")
                         .font(PrismTheme.fontCaptionBold)
-                        .foregroundStyle(.white.opacity(0.50))
+                        .foregroundStyle(resetTint.opacity(0.72))
                         .fixedSize()
 
                     Text(compactReset(weeklyResetDate))
                         .font(PrismTheme.fontBodySemibold)
-                        .foregroundStyle(.white.opacity(0.78))
+                        .foregroundStyle(resetTint)
                         .lineLimit(1)
                         .fixedSize()
                 }

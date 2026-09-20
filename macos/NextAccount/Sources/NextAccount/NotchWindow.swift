@@ -172,10 +172,12 @@ struct NotchWindowView: View {
             .frame(width: currentWidth, height: currentHeight)
             .background {
                 if isExpanded {
+                    // Prefer a denser shell over ultra-thin frost so roster text
+                    // stays readable while keeping the camera-notch tint.
                     notchShape
-                        .fill(.ultraThinMaterial)
+                        .fill(.regularMaterial)
                         .overlay {
-                            notchShape.fill(PrismTheme.notchShell.opacity(0.62))
+                            notchShape.fill(PrismTheme.notchShell.opacity(0.88))
                         }
                 }
             }

@@ -148,6 +148,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Remember Codex rollout cwd/session on switch; reopen workspace after activate.
+    AutoResumeSession {
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
+        #[arg(long)]
+        disable: bool,
+        #[arg(long)]
+        json: bool,
+    },
     AutoSwitch {
         #[arg(long, conflicts_with_all = ["disable", "apply", "status"])]
         enable: bool,
@@ -670,6 +679,28 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::AutoResumeSession {
+            enable,
+            disable,
+            json,
+        }) => {
+            let status = if enable {
+                app.set_auto_resume_session(true)?
+            } else if disable {
+                app.set_auto_resume_session(false)?
+            } else {
+                app.auto_resume_session_status()?
+            };
+            if json {
+                print_json(&status)?;
+            } else {
+                println!(
+                    "Auto-resume session: {}",
+                    if status.enabled { "enabled" } else { "disabled" }
+                );
+            }
+            Ok(())
+        }
         Some(Command::AutoSwitch {
             enable,
             disable,
@@ -693,6 +724,7 @@ pub fn run() -> Result<()> {
                     candidate_display_name: None,
                     detail: None,
                     banked_reset_count: 0,
+                    session_resume: None,
                 }
             } else {
                 app.auto_switch_with_candidate(apply, account_id, force)?

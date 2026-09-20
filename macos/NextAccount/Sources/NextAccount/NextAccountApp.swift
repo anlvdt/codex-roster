@@ -699,6 +699,13 @@ struct AutomationSettingsView: View {
                 Label(language.text("Tự động hóa", "Automation"), systemImage: "gearshape.2")
                     .font(.headline)
                     .padding(.bottom, 2)
+                Text(language.text(
+                    "Khi thêm tài khoản: chọn Chỉ thêm (giữ phiên live/Desktop) hoặc Thêm & chuyển. Chỉ thêm dùng CODEX_HOME tạm và import snapshot — không tắt Desktop. Nếu cổng 1455/1457 bận, Chỉ thêm sẽ báo lỗi.",
+                    "When adding an account: choose Add only (keep the live session/Desktop) or Add & switch. Add only uses a temporary CODEX_HOME and imports a snapshot — it never quits Desktop. If ports 1455/1457 are busy, Add only fails."
+                ))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Divider()
                 Toggle(language.text("Tự động kiểm tra cửa sổ quota đến hạn", "Automatically check due quota windows"), isOn: Binding(
                     get: { store.autoStartUsageWindows },
                     set: { store.setAutoStartUsageWindows($0) }
@@ -743,6 +750,17 @@ struct AutomationSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                Toggle(language.text("Tự khôi phục phiên / Auto-resume session", "Auto-resume session"), isOn: Binding(
+                    get: { store.autoResumeSession },
+                    set: { store.setAutoResumeSession($0) }
+                ))
+                .disabled(store.isBusyForActions)
+                Text(language.text(
+                    "Trước khi Đổi/auto-switch: nhớ rollout Codex (session id + thư mục dự án) của tài khoản đang rời. Sau khi vào tài khoản đích thành công: mở lại workspace đã nhớ của tài khoản đó (`codex app`). Không chuyển được thread ChatGPT Desktop giữa các tài khoản; dùng `codex resume <id>` cho CLI.",
+                    "Before Đổi/auto-switch: remember that account’s Codex rollout (session id + project folder). After a successful switch onto an account: reopen that account’s remembered workspace (`codex app`). ChatGPT Desktop threads cannot move across accounts; use `codex resume <id>` for CLI."
+                ))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Toggle(language.text("Mở Codex Roster khi đăng nhập macOS", "Open Codex Roster at login"), isOn: Binding(
                     get: { store.launchAtLoginEnabled },
                     set: { store.setLaunchAtLogin($0) }
@@ -794,7 +812,7 @@ struct AutomationSettingsView: View {
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(width: 470, height: 580)
+        .frame(width: 470, height: 660)
         .confirmationDialog(
             language.text("Khôi phục phiên sao lưu?", "Restore saved sessions?"),
             isPresented: $confirmingFullBackupRestore,
@@ -2774,7 +2792,12 @@ struct AddAccountSheet: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @Environment(\.dismiss) private var dismiss
-    @State private var didStart = false
+    @State private var selectedMode: AddAccountMode = .enrollOnly
+    @State private var didStartLogin = false
+
+    private var isChoosingMode: Bool {
+        !didStartLogin && store.newAccountLoginState == .idle
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -2782,86 +2805,25 @@ struct AddAccountSheet: View {
                 .font(.title2.weight(.bold))
                 .foregroundStyle(.tint)
 
-            Text(language.text(
-                "Hoàn tất đăng nhập OpenAI trong cửa sổ vừa mở. Roster sẽ tự nhận diện và lưu tài khoản mới.",
-                "Finish signing in to OpenAI in the window that just opened. Roster will detect and save the new account automatically."
-            ))
-            .foregroundStyle(.secondary)
-
-            GroupBox {
-                HStack(spacing: 12) {
-                    if isFinished {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.title2)
-                            .foregroundStyle(.green)
-                    } else {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(progressTitle).font(.headline)
-                        Text(saveStatusText)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(4)
-            }
-
-            if case let .saved(identity) = store.newAccountLoginState {
-                Label(language.text(
-                    "Đã lưu \(identity.email) vào Codex Roster.",
-                    "Saved \(identity.email) to Codex Roster."
-                ), systemImage: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-            } else if case let .failed(message) = store.newAccountLoginState {
-                Text(message)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
-            }
-
-            Label(language.text(
-                "Phiên Codex hiện tại được sao lưu trước khi đăng nhập mới. Hủy sẽ khôi phục phiên trước.",
-                "The current Codex session is backed up before a new sign-in. Cancel restores the previous session."
-            ), systemImage: "lock.shield")
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-
-            HStack {
-                if case .failed = store.newAccountLoginState {
-                    Button(language.text("Thử lại", "Try again")) {
-                        store.resetNewAccountLogin()
-                        store.startNewAccountLogin()
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-                Spacer()
-                Button(store.isPendingLogin
-                    ? language.text("Hủy", "Cancel")
-                    : language.text("Đóng", "Close")) {
-                    if store.isPendingLogin {
-                        store.cancelPendingLogin()
-                    } else {
-                        store.resetNewAccountLogin()
-                    }
-                    dismiss()
-                }
-                .disabled(store.isWorking)
+            if isChoosingMode {
+                modeChooser
+            } else {
+                progressBody
             }
         }
         .padding(24)
-        .frame(width: 500)
+        .frame(width: 520)
         .interactiveDismissDisabled(store.isPendingLogin)
         .onAppear {
-            guard !didStart else { return }
-            didStart = true
-            if case .idle = store.newAccountLoginState {
-                store.startNewAccountLogin()
-            } else if case .ready = store.newAccountLoginState {
-                Task {
-                    try? await Task.sleep(for: .milliseconds(150))
-                    store.saveDetectedNewAccount()
+            // Resume an in-flight login (app relaunch / sheet reopen).
+            if store.isPendingLogin || store.newAccountLoginState != .idle {
+                didStartLogin = true
+                selectedMode = store.pendingAddAccountMode ?? .addAndSwitch
+                if case .ready = store.newAccountLoginState {
+                    Task {
+                        try? await Task.sleep(for: .milliseconds(150))
+                        store.saveDetectedNewAccount()
+                    }
                 }
             }
         }
@@ -2885,6 +2847,192 @@ struct AddAccountSheet: View {
         }
     }
 
+    @ViewBuilder
+    private var modeChooser: some View {
+        Text(language.text(
+            "Chọn rõ trước khi đăng nhập — tránh giữ phiên cũ khi bạn muốn chuyển, và tránh đổi phiên khi bạn chỉ muốn thêm vào danh sách.",
+            "Choose explicitly before signing in — avoid staying on the old account when you meant to switch, and avoid switching when you only wanted to enroll."
+        ))
+        .foregroundStyle(.secondary)
+
+        Picker(selection: $selectedMode) {
+            Text(language.text("Chỉ thêm · không đổi phiên", "Add only · don’t switch"))
+                .tag(AddAccountMode.enrollOnly)
+            Text(language.text("Thêm & chuyển", "Add & switch"))
+                .tag(AddAccountMode.addAndSwitch)
+        } label: {
+            EmptyView()
+        }
+        .pickerStyle(.segmented)
+
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(modeDetailTitle)
+                    .font(.headline)
+                Text(modeDetailBody)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(4)
+        }
+
+        if selectedMode == .enrollOnly, CodexLoginPort.isBusy {
+            Label(language.text(
+                "Cổng 1455/1457 đang bận — Chỉ thêm sẽ báo lỗi trừ khi bạn thoát Desktop trước (hoặc chọn Thêm & chuyển).",
+                "Ports 1455/1457 are busy — Add only will fail unless you quit Desktop first (or choose Add & switch)."
+            ), systemImage: "exclamationmark.triangle.fill")
+            .font(.footnote)
+            .foregroundStyle(.orange)
+        }
+
+        HStack {
+            Spacer()
+            Button(language.text("Đóng", "Close")) {
+                dismiss()
+            }
+            Button(startButtonTitle) {
+                didStartLogin = true
+                store.startNewAccountLogin(mode: selectedMode)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(store.isBusyForActions)
+            .keyboardShortcut(.defaultAction)
+        }
+    }
+
+    @ViewBuilder
+    private var progressBody: some View {
+        Text(progressIntro)
+            .foregroundStyle(.secondary)
+
+        GroupBox {
+            HStack(spacing: 12) {
+                if isFinished {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(.green)
+                } else {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(progressTitle).font(.headline)
+                    Text(saveStatusText)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(4)
+        }
+
+        if case let .saved(identity) = store.newAccountLoginState {
+            Label(language.text(
+                selectedMode == .enrollOnly
+                    ? "Đã lưu \(identity.email) vào roster. Phiên đang dùng không đổi."
+                    : "Đã lưu \(identity.email) vào Codex Roster.",
+                selectedMode == .enrollOnly
+                    ? "Saved \(identity.email) to the roster. The live session is unchanged."
+                    : "Saved \(identity.email) to Codex Roster."
+            ), systemImage: "checkmark.circle.fill")
+            .foregroundStyle(.green)
+        } else if case let .failed(message) = store.newAccountLoginState {
+            Text(message)
+                .font(.footnote)
+                .foregroundStyle(.red)
+        }
+
+        Label(progressSafetyNote, systemImage: "lock.shield")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+
+        HStack {
+            if case .failed = store.newAccountLoginState {
+                Button(language.text("Thử lại", "Try again")) {
+                    store.resetNewAccountLogin()
+                    didStartLogin = false
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            Spacer()
+            Button(store.isPendingLogin
+                ? language.text("Hủy", "Cancel")
+                : language.text("Đóng", "Close")) {
+                if store.isPendingLogin {
+                    store.cancelPendingLogin()
+                } else {
+                    store.resetNewAccountLogin()
+                }
+                dismiss()
+            }
+            .disabled(store.isWorking)
+        }
+    }
+
+    private var startButtonTitle: String {
+        switch selectedMode {
+        case .enrollOnly:
+            return language.text("Thêm (giữ phiên)", "Add (keep session)")
+        case .addAndSwitch:
+            return language.text("Thêm & chuyển", "Add & switch")
+        }
+    }
+
+    private var modeDetailTitle: String {
+        switch selectedMode {
+        case .enrollOnly:
+            return language.text("Chỉ ghi vào roster", "Roster snapshot only")
+        case .addAndSwitch:
+            return language.text("Đăng nhập thành phiên đang dùng", "Become the live session")
+        }
+    }
+
+    private var modeDetailBody: String {
+        switch selectedMode {
+        case .enrollOnly:
+            return language.text(
+                "Đăng nhập vào thư mục tạm (CODEX_HOME riêng), import auth.json vào roster. Không ghi đè ~/.codex, không tắt Desktop, không kích hoạt / auto-resume tài khoản mới. Nếu cổng 1455/1457 đang bị Desktop giữ — không thể Chỉ thêm.",
+                "Signs in under an isolated CODEX_HOME, then imports auth.json into the roster. Does not overwrite ~/.codex, quit Desktop, or activate / auto-resume the new account. If ports 1455/1457 are held by Desktop, Add only cannot run."
+            )
+        case .addAndSwitch:
+            return language.text(
+                "Sao lưu phiên hiện tại, đăng nhập vào ~/.codex (có thể đóng Desktop nếu cổng login bận), rồi để credential mới làm phiên live. Hủy sẽ khôi phục phiên trước.",
+                "Backs up the current session, signs into ~/.codex (may quit Desktop if login ports are busy), and leaves the new credential as the live session. Cancel restores the previous session."
+            )
+        }
+    }
+
+    private var progressIntro: String {
+        switch selectedMode {
+        case .enrollOnly:
+            return language.text(
+                "Hoàn tất đăng nhập OpenAI trong cửa sổ vừa mở. Roster lưu snapshot rồi giữ nguyên phiên đang dùng.",
+                "Finish signing in to OpenAI in the window that just opened. Roster saves a snapshot and keeps the current live session."
+            )
+        case .addAndSwitch:
+            return language.text(
+                "Hoàn tất đăng nhập OpenAI trong cửa sổ vừa mở. Roster sẽ tự nhận diện và lưu tài khoản mới làm phiên hiện tại.",
+                "Finish signing in to OpenAI in the window that just opened. Roster will detect and save the new account as the live session."
+            )
+        }
+    }
+
+    private var progressSafetyNote: String {
+        switch selectedMode {
+        case .enrollOnly:
+            return language.text(
+                "Phiên live và Desktop không bị đụng tới. Hủy chỉ xóa thư mục đăng nhập tạm.",
+                "The live session and Desktop are left alone. Cancel only discards the temporary login home."
+            )
+        case .addAndSwitch:
+            return language.text(
+                "Phiên Codex hiện tại được sao lưu trước khi đăng nhập mới. Hủy sẽ khôi phục phiên trước.",
+                "The current Codex session is backed up before a new sign-in. Cancel restores the previous session."
+            )
+        }
+    }
+
     private var isFinished: Bool {
         if case .saved = store.newAccountLoginState { return true }
         return false
@@ -2904,7 +3052,14 @@ struct AddAccountSheet: View {
         case .idle:
             return language.text("Đang mở trang đăng nhập OpenAI…", "Opening OpenAI sign-in…")
         case .waiting:
-            return language.text("Không cần bấm thêm — Roster đang theo dõi phiên Codex.", "No more clicks needed — Roster is watching the Codex session.")
+            return language.text(
+                selectedMode == .enrollOnly
+                    ? "Không cần bấm thêm — Roster đang theo dõi credential trong thư mục tạm."
+                    : "Không cần bấm thêm — Roster đang theo dõi phiên Codex.",
+                selectedMode == .enrollOnly
+                    ? "No more clicks needed — Roster is watching credentials in the temporary home."
+                    : "No more clicks needed — Roster is watching the Codex session."
+            )
         case .ready(let identity):
             return language.text("Đã nhận diện \(identity.email).", "Detected \(identity.email).")
         case .saving:
@@ -4006,6 +4161,12 @@ private struct MenuBarOperationStatus: View {
     @EnvironmentObject private var language: LanguageStore
 
     private var message: String {
+        if let resume = store.sessionResumeCaption {
+            return resume
+        }
+        if let phase = store.switchPhaseMessage {
+            return phase
+        }
         if store.isSwitching {
             return language.text("Đang chuyển tài khoản…", "Switching account…")
         }

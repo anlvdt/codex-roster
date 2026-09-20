@@ -79,7 +79,10 @@ struct PrismQuickSwitchDeck: View {
     }
 
     private var nextActionCaption: String? {
-        NextAction.resolve(in: store).compactCaption(language: language)
+        if let resume = store.sessionResumeCaption {
+            return resume
+        }
+        return NextAction.resolve(in: store).compactCaption(language: language)
     }
 
     var body: some View {

@@ -303,6 +303,29 @@ pub struct AutoSwitchOutput {
     pub detail: Option<String>,
     /// A reset is available, but has not been redeemed into immediately usable quota.
     pub banked_reset_count: i64,
+    /// Target-account resume hint after a successful switch (optional).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_resume: Option<SessionResumeHint>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionResumeHint {
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_path: Option<String>,
+    /// disabled | missing | ready | ready_cli | cwd_gone | rollout_gone
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AutoResumeSessionStatusOutput {
+    pub enabled: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -339,6 +362,9 @@ pub struct ActivateOutput {
     pub account: AccountView,
     pub previous_account_id: Option<Uuid>,
     pub warnings: Vec<RunningCodexProcess>,
+    /// Resume hint for the account just activated (when Auto-resume is on).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_resume: Option<SessionResumeHint>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]

@@ -18,6 +18,9 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
 - Inspect, save, restore, switch, and monitor supported Claude Code, Cursor, and Grok Build accounts through the provider CLI. Provider snapshots are stored separately from the legacy OpenAI roster so identical emails cannot collide across providers.
 - Show the active account's quota in the MacBook notch and account quota/reset state in the sidebar.
 - Launch the OpenAI browser sign-in flow without reading passwords, verification codes, or browser cookies.
+- **Add account** offers an explicit choice at add time:
+  - **Add only · don’t switch** — signs in under an isolated `CODEX_HOME`, imports `auth.json` into the roster, and leaves live `~/.codex` / ChatGPT Desktop on the current account (no Desktop quit, no web-session clear, no activate, no auto-resume of the new row).
+  - **Add & switch** — existing flow: backs up the live session, runs `codex login` against `~/.codex` (may quit Desktop only when login ports 1455/1457 are busy), and leaves the new credential as the live session.
 - Close and relaunch ChatGPT/Codex Desktop after a confirmed account switch.
 - Refresh local Codex token statistics, public OpenAI Status, and reset signals from [Tibo / @thsottiaux on X](https://x.com/thsottiaux), normalized through the independent [Codex Reset radar](https://codex-reset.com/) when X truncates long posts.
 - Sync usage to [VibeCafe](https://vibecafe.ai/) via the optional [`@vibe-cafe/vibe-usage`](https://github.com/vibe-cafe/vibe-usage) collector; its token and estimated-cost statistics remain separate from OpenAI quota/banked-reset credits.
@@ -66,6 +69,17 @@ That is expected. Codex Roster keeps only a local encryption key for saved snaps
 
 Never share a snapshot file, password, browser cookie, access token, or refresh token.
 
+### Add account modes (edge cases)
+
+| Mode | Live `~/.codex` | Desktop | New row becomes active? |
+| --- | --- | --- | --- |
+| **Add only · don’t switch** | Untouched (login uses a temporary `CODEX_HOME`, then `import-json`) | Left running; never quit / never clear web session | No — activate only if you ask later |
+| **Add & switch** | Replaced by the new login after backup | May quit briefly if ports 1455/1457 are busy, then relaunch | Yes — new credential stays live |
+
+**Login port conflict (1455 / 1457):** ChatGPT Desktop’s bundled Codex app-server often holds these fixed OAuth callback ports. **Add only** refuses to start when they are busy (it will not quit Desktop). Free the ports by quitting Desktop yourself, or use **Add & switch**, which may quit Desktop after saving the live session. Relogin of an existing row still uses the add-and-switch style path (replace that account’s credentials).
+
+**How add-only completes without becoming live:** `codex login` runs with `CODEX_HOME` pointed at `~/Library/Application Support/Codex Roster/enroll-only-login/<uuid>/`. When that home’s `auth.json` contains tokens, Roster imports it into the snapshot store and deletes the temporary home. Active account identity and Desktop stay on the previous session.
+
 ### Install and run
 
 Download the latest macOS ZIP from [Releases](https://github.com/anlvdt/codex-roster/releases), unzip it, and move **Codex Roster.app** to Applications. macOS may require you to approve the first launch because the application is independently distributed.
@@ -101,6 +115,7 @@ codex-roster export OUTPUT.codexroster [--password-stdin] [--json]
 codex-roster import INPUT.codexroster [--password-stdin] [--json]
 codex-roster restore-full-backup [--json]
 codex-roster auto-start-usage-windows [--enable|--disable] [--run] [--json]
+codex-roster auto-resume-session [--enable|--disable] [--json]
 codex-roster auto-switch [--enable|--disable|--status|--apply] [--json]
 codex-roster token-usage [--json]
 codex-roster vibe-usage [init|sync|summary|status]
@@ -137,6 +152,9 @@ swift build --package-path macos/NextAccount
 - Qua CLI provider, có thể kiểm tra, lưu, khôi phục, chuyển và theo dõi tài khoản Claude Code, Cursor và Grok Build. Snapshot của các provider này được lưu tách khỏi roster OpenAI cũ để cùng một email ở nhiều provider không bị đụng nhau.
 - Hiển thị quota tài khoản đang dùng tại notch MacBook; hiển thị quota và thời điểm reset ở sidebar.
 - Mở luồng đăng nhập thiết bị OpenAI mà không đọc mật khẩu, mã xác thực hay cookie trình duyệt.
+- **Thêm tài khoản** hỏi rõ lựa chọn lúc thêm:
+  - **Chỉ thêm · không đổi phiên** — đăng nhập vào `CODEX_HOME` tạm, import `auth.json` vào roster, giữ nguyên `~/.codex` / ChatGPT Desktop trên tài khoản hiện tại (không tắt Desktop, không xóa web session, không kích hoạt / auto-resume hàng mới).
+  - **Thêm & chuyển** — luồng cũ: sao lưu phiên live, `codex login` vào `~/.codex` (có thể đóng Desktop nếu cổng 1455/1457 bận), để credential mới làm phiên đang dùng.
 - Đóng rồi mở lại ChatGPT/Codex Desktop sau khi bạn xác nhận chuyển tài khoản.
 - Theo dõi token Codex cục bộ, trạng thái công khai OpenAI và tín hiệu reset từ [Tibo / @thsottiaux trên X](https://x.com/thsottiaux); dùng radar độc lập [Codex Reset](https://codex-reset.com/) để chuẩn hóa khi X cắt ngắn bài đăng dài.
 - Nếu đã cấu hình VibeCafe qua collector tùy chọn [`@vibe-cafe/vibe-usage`](https://github.com/vibe-cafe/vibe-usage), Roster tự đồng bộ mỗi 30 phút và hiển thị thống kê API chính thức trong Status: token, chi phí ước tính, số phiên và thời gian hoạt động trong 7 ngày; các thống kê này tách biệt với quota/banked reset credit của OpenAI.
@@ -183,6 +201,17 @@ macOS có thể hiện hộp thoại kiểu:
 - Codex Roster không hỏi mật khẩu OpenAI qua hộp thoại này; chỉ nhập mật khẩu Keychain đăng nhập của Mac nếu macOS yêu cầu.
 
 Không gửi file snapshot, mật khẩu backup, cookie trình duyệt, access token hay refresh token cho bất kỳ ai.
+
+### Chế độ thêm tài khoản (trường hợp biên)
+
+| Chế độ | `~/.codex` live | Desktop | Hàng mới thành active? |
+| --- | --- | --- | --- |
+| **Chỉ thêm · không đổi phiên** | Không đụng (login dùng `CODEX_HOME` tạm, rồi `import-json`) | Để chạy; không tắt / không xóa web session | Không — chỉ kích hoạt khi bạn chủ động Đổi |
+| **Thêm & chuyển** | Thay bằng login mới sau khi sao lưu | Có thể tắt tạm nếu cổng 1455/1457 bận, rồi mở lại | Có — credential mới ở lại làm phiên live |
+
+**Xung đột cổng login (1455 / 1457):** app-server Codex trong ChatGPT Desktop thường giữ các cổng OAuth cố định này. **Chỉ thêm** từ chối chạy khi cổng bận (không được tắt Desktop). Hãy thoát Desktop thủ công, hoặc dùng **Thêm & chuyển** (có thể tắt Desktop sau khi đã lưu phiên live). Đăng nhập lại một hàng đã có vẫn đi theo kiểu Thêm & chuyển.
+
+**Cách Chỉ thêm hoàn tất mà không thành phiên live:** `codex login` chạy với `CODEX_HOME` trỏ tới `~/Library/Application Support/Codex Roster/enroll-only-login/<uuid>/`. Khi `auth.json` trong thư mục đó có token, Roster import vào kho snapshot rồi xóa thư mục tạm. Tài khoản đang active và Desktop giữ nguyên phiên cũ.
 
 ### Cài đặt và chạy
 

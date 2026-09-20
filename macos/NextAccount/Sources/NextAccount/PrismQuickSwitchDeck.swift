@@ -177,21 +177,15 @@ struct PrismQuickSwitchDeck: View {
                                 .foregroundStyle(PrismTheme.accent)
                         }
 
-                        if let banked = activeAccount?.usage?.bankedResets?.availableCount, banked > 0 {
-                            HStack(spacing: 2.5) {
-                                Image(systemName: "arrow.counterclockwise.circle.fill")
-                                    .font(PrismTheme.fontChipIcon)
-                                Text("+\(banked) banked")
-                                    .font(PrismTheme.fontChip)
-                            }
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill(PrismTheme.chipFill(PrismTheme.warning)))
-                            .foregroundStyle(PrismTheme.warning)
-                            .help(language.text(
-                                "\(banked) lượt reset dự phòng (banked reset) có sẵn trong Codex",
-                                "\(banked) banked rate-limit resets available in Codex"
-                            ))
+                        if let banked = activeAccount?.bankedResetCount, banked > 0 {
+                            PrismBankedResetCountBadge(
+                                count: banked,
+                                style: .identity,
+                                helpText: language.text(
+                                    "\(banked) lượt reset dự phòng (banked reset) có sẵn trong Codex",
+                                    "\(banked) banked rate-limit resets available in Codex"
+                                )
+                            )
                         }
 
                         if let active = activeAccount, active.hasLunaReserve {
@@ -720,6 +714,27 @@ struct PrismQuickSwitchDeck: View {
                     .padding(.vertical, 2)
                     .background(Capsule().fill(PrismTheme.surfaceSoft))
 
+                if store.totalBankedResetsAcrossRoster > 0 {
+                    let total = store.totalBankedResetsAcrossRoster
+                    HStack(spacing: 3) {
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(PrismTheme.fontMicro)
+                        Text("\(total)")
+                            .font(PrismTheme.fontChip)
+                            .monospacedDigit()
+                        Text(language.text("banked", "banked"))
+                            .font(PrismTheme.fontMicroChip)
+                    }
+                    .foregroundStyle(PrismTheme.warning)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(PrismTheme.chipFill(PrismTheme.warning, opacity: 0.14)))
+                    .help(language.text(
+                        "Tổng \(total) banked reset trên toàn roster — chỉ hiển thị, không tự redeem.",
+                        "\(total) banked resets across the roster — display only, never auto-redeemed."
+                    ))
+                }
+
                 Spacer(minLength: 6)
 
                 filterTab(label: language.text("Tất cả", "All"), filter: .all)
@@ -964,21 +979,16 @@ private struct PrismCompactAccountCard: View {
                             ))
                     }
 
-                    if let banked = account.usage?.bankedResets?.availableCount, banked > 0 {
-                        HStack(spacing: 2) {
-                            Image(systemName: "arrow.counterclockwise.circle.fill")
-                                .font(PrismTheme.fontMicro)
-                            Text("+\(banked)")
-                                .font(PrismTheme.fontChip)
-                        }
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(Capsule().fill(PrismTheme.chipFill(PrismTheme.warning)))
-                        .foregroundStyle(PrismTheme.warning)
-                        .help(language.text(
-                            "\(banked) lượt banked reset có thể dùng",
-                            "\(banked) banked resets available"
-                        ))
+                    if account.bankedResetCount > 0 {
+                        let banked = account.bankedResetCount
+                        PrismBankedResetCountBadge(
+                            count: banked,
+                            style: .card,
+                            helpText: language.text(
+                                "\(banked) lượt banked reset có thể dùng",
+                                "\(banked) banked resets available"
+                            )
+                        )
                     }
 
                     if account.hasLunaReserve {
@@ -1189,7 +1199,7 @@ private struct PrismCompactAccountCard: View {
         }
         if !account.isUsableForSwitch {
             if account.restingHasBankedReset {
-                let count = account.usage?.bankedResets?.availableCount ?? 0
+                let count = account.bankedResetCount
                 return (language.text("Banked ×\(count)", "Banked ×\(count)"), PrismTheme.warning)
             }
             return exhaustedStatus

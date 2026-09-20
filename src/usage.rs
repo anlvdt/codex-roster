@@ -681,11 +681,26 @@ impl ResetCreditDetailsResponse {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        // Prefer the higher of the API summary and the detailed available rows —
+        // either side can under-report when the other is truncated or stale.
         Ok(BankedResetSummaryView {
-            available_count: self.available_count,
+            available_count: effective_banked_available_count(self.available_count, &credits),
             credits: Some(credits),
         })
     }
+}
+
+/// Total redeemable banked resets for an account.
+///
+/// OpenAI may return `available_count` without listing every credit, or list
+/// more `available` rows than the summary field. Take the max so roster UI and
+/// auto-switch messaging never under-count.
+fn effective_banked_available_count(reported: i64, credits: &[BankedResetCreditView]) -> i64 {
+    let from_credits = credits
+        .iter()
+        .filter(|credit| credit.status.eq_ignore_ascii_case("available"))
+        .count() as i64;
+    reported.max(0).max(from_credits)
 }
 
 fn snapshot_auth(snapshot: &SnapshotBlob) -> Result<SnapshotAuth> {
@@ -1399,6 +1414,40 @@ mod tests {
             credits[0].expires_at.map(|value| value.unix_timestamp()),
             Some(1_789_948_800)
         );
+    }
+
+    #[test]
+    fn detailed_banked_resets_prefer_taller_available_credit_list() {
+        let details: ResetCreditDetailsResponse = serde_json::from_value(json!({
+            "available_count": 1,
+            "credits": [
+                {
+                    "id": "credit-1",
+                    "reset_type": "codex_rate_limits",
+                    "status": "available",
+                    "granted_at": "2026-08-22T00:00:00Z",
+                    "expires_at": "2026-09-21T00:00:00Z"
+                },
+                {
+                    "id": "credit-2",
+                    "reset_type": "codex_rate_limits",
+                    "status": "available",
+                    "granted_at": "2026-08-23T00:00:00Z",
+                    "expires_at": "2026-09-22T00:00:00Z"
+                },
+                {
+                    "id": "credit-3",
+                    "reset_type": "codex_rate_limits",
+                    "status": "redeemed",
+                    "granted_at": "2026-07-01T00:00:00Z",
+                    "expires_at": null
+                }
+            ]
+        }))
+        .expect("details payload");
+
+        let view = details.into_view().expect("details view");
+        assert_eq!(view.available_count, 2);
     }
 
     #[test]

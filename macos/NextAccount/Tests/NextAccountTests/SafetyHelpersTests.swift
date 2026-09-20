@@ -104,6 +104,62 @@ import Testing
     ))
 }
 
+@Test func bankedResetTotalPrefersTallerAvailableCreditList() {
+    let now = RustDate(value: Date(timeIntervalSince1970: 1_700_000_000))
+    let underReported = BankedResetSummary(
+        availableCount: 1,
+        credits: [
+            BankedResetCredit(
+                id: "a",
+                resetType: "codex_rate_limits",
+                status: "available",
+                grantedAt: now,
+                expiresAt: nil,
+                title: nil,
+                description: nil
+            ),
+            BankedResetCredit(
+                id: "b",
+                resetType: "codex_rate_limits",
+                status: "available",
+                grantedAt: now,
+                expiresAt: nil,
+                title: nil,
+                description: nil
+            ),
+            BankedResetCredit(
+                id: "c",
+                resetType: "codex_rate_limits",
+                status: "redeemed",
+                grantedAt: now,
+                expiresAt: nil,
+                title: nil,
+                description: nil
+            ),
+        ]
+    )
+    #expect(underReported.totalAvailableCount == 2)
+
+    let summaryOnly = BankedResetSummary(availableCount: 4, credits: nil)
+    #expect(summaryOnly.totalAvailableCount == 4)
+
+    let cappedList = BankedResetSummary(
+        availableCount: 3,
+        credits: [
+            BankedResetCredit(
+                id: "only",
+                resetType: "codex_rate_limits",
+                status: "available",
+                grantedAt: now,
+                expiresAt: nil,
+                title: nil,
+                description: nil
+            )
+        ]
+    )
+    #expect(cappedList.totalAvailableCount == 3)
+}
+
 @Test func contextMenuDeleteResolvesByCapturedAccountIDNotListIndex() {
     let first = SavedAccount(
         id: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,

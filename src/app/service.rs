@@ -1552,7 +1552,16 @@ fn has_usable_credits(usage: Option<&AccountUsageView>) -> bool {
 fn banked_reset_count(usage: Option<&AccountUsageView>) -> i64 {
     usage
         .and_then(|usage| usage.banked_resets.as_ref())
-        .map(|resets| resets.available_count.max(0))
+        .map(|resets| {
+            let from_credits = resets
+                .credits
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .filter(|credit| credit.status.eq_ignore_ascii_case("available"))
+                .count() as i64;
+            resets.available_count.max(0).max(from_credits)
+        })
         .unwrap_or_default()
 }
 

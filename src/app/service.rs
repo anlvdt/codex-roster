@@ -71,10 +71,10 @@ where
         let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
 
-        if let Some(target_id) = account_id {
-            if !self.is_live_saved_account(target_id)? {
-                self.activate(target_id)?;
-            }
+        if let Some(target_id) = account_id
+            && !self.is_live_saved_account(target_id)?
+        {
+            self.activate(target_id)?;
         }
 
         let live = codex::try_read_live_auth_bundle(&self.env)?

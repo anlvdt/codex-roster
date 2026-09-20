@@ -1,0 +1,36 @@
+---
+description: IMMUTABLE hard policy — ChatGPT Desktop Sign-in-on-switch fix. Do not weaken, remove, or bypass without explicit user override in the current message.
+alwaysApply: true
+---
+
+# ChatGPT Desktop — Sign-in-on-switch (immutable)
+
+**Hard policy. Do not weaken, remove, or bypass without explicit user override in the current message.**
+
+Proven fix: `f04706e` + later harden. Obey on every change that touches account activate, force-switch, auto-switch relaunch, or `resyncChatGPTDesktop`.
+
+## Root cause
+
+Restoring `~/.codex/auth.json` is **not** enough. ChatGPT Desktop’s Electron profile under `~/Library/Application Support/Codex` keeps a web session (cookies / local storage). After an account switch that leaves this cache intact, Desktop can show **Sign in** even though the roster auth snapshot is correct.
+
+## Mandatory on every activate / force-switch / auto-switch relaunch / resyncChatGPTDesktop
+
+1. **Save live `~/.codex` into the roster BEFORE quitting Desktop** (session longevity).
+2. **Graceful quit Desktop**, then **clear the web session cache**.
+3. **`clearWebSessionCache` MUST wipe all of:**
+   - `Default/` (and related top-level session dirs as already done)
+   - `Default/Partitions/*` (especially `Partitions/codex-browser-app` — Cookies, Local Storage, Session Storage)
+   - `Network/` cookies
+   - `WebStorage`
+   Incomplete clears that only hit `Default/` or `codex-browser-app/` top-level are **FORBIDDEN** — that is why Sign-in returned.
+4. **Clear again immediately before relaunch** if any path skipped clear when Desktop already quit.
+5. **`waitForDesktopAcceptance` must use LIVE status/identity** (expected email). Never probe the saved snapshot as acceptance.
+6. **`AccountActivationSafety.forceSwitchOrderedSteps` must keep `clearDesktopWebSessionCache` in the ordered steps.**
+7. **Do not reintroduce** `showSettingsWindow`-style or cookie-preserving shortcuts that skip the clear.
+
+## Never
+
+- Skip or narrow `clearWebSessionCache` / `clearDesktopWebSessionCache`.
+- Treat restored `auth.json` alone as sufficient for a clean Desktop session.
+- Use snapshot probe instead of live Desktop identity for acceptance.
+- Remove `clearDesktopWebSessionCache` from `forceSwitchOrderedSteps`.

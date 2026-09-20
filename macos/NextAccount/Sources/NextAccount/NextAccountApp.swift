@@ -209,6 +209,9 @@ struct ContentView: View {
     }
 }
 
+#if DEBUG
+// Unreachable Ops/Dashboard surfaces retained for local previews only.
+// Production UI is notch-first (MenuBarView / PrismQuickSwitchDeck).
 private struct AccountSidebar: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
@@ -685,6 +688,7 @@ private struct ProviderStatusRow: View {
         .font(.caption.monospacedDigit())
     }
 }
+#endif
 
 /// Automation and recovery are settings, not status, so they answer to the
 /// standard Settings shortcut instead of trailing the Overview scroll.
@@ -697,7 +701,8 @@ struct AutomationSettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 Label(language.text("Tự động hóa", "Automation"), systemImage: "gearshape.2")
-                    .font(.headline)
+                    .font(PrismTheme.fontSection)
+                    .foregroundStyle(PrismTheme.textBright)
                     .padding(.bottom, 2)
                 Toggle(language.text("Tự động kiểm tra cửa sổ quota đến hạn", "Automatically check due quota windows"), isOn: Binding(
                     get: { store.autoStartUsageWindows },
@@ -708,8 +713,8 @@ struct AutomationSettingsView: View {
                     "Kiểm tra các cửa sổ quota tuần đã đến hạn theo lịch nền. Việc này không đăng nhập lại các tài khoản không hoạt động; theo dõi quota live vẫn chạy riêng khi app hoạt động.",
                     "Checks due weekly quota windows in the background. It does not sign into inactive accounts; live quota monitoring runs separately while the app is active."
                 ))
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(PrismTheme.fontCaption)
+                .foregroundStyle(PrismTheme.textSecondary)
                 if store.isRefreshingQuotaInBackground {
                     HStack(spacing: 6) {
                         ProgressView()
@@ -733,11 +738,11 @@ struct AutomationSettingsView: View {
                 ))
                 .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
                 Text(language.text(
-                    "Khi tài khoản Codex (~/.codex) còn 0%: tìm tài khoản còn quota → force-quit ChatGPT → chuyển phiên → mở lại Desktop. Nhãn phiên theo ~/.codex, không đọc cookie đăng nhập riêng trong ChatGPT.",
-                    "When the Codex account (~/.codex) hits 0%: find an account with quota → force-quit ChatGPT → switch session → relaunch Desktop. The session label follows ~/.codex and does not read a separate ChatGPT cookie login."
+                    "Khi tài khoản Codex (~/.codex) còn 0%: tìm tài khoản còn quota → lưu phiên đang mở → đóng ChatGPT (ưu tiên thoát mềm, chỉ force khi cần) → xóa cache web Desktop → chuyển phiên → mở lại Desktop. Nhãn phiên theo ~/.codex, không đọc cookie đăng nhập riêng trong ChatGPT.",
+                    "When the Codex account (~/.codex) hits 0%: find an account with quota → save the live session → quit ChatGPT (graceful first; force only if needed) → clear Desktop web cache → switch session → relaunch Desktop. The session label follows ~/.codex and does not read a separate ChatGPT cookie login."
                 ))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(PrismTheme.fontCaption)
+                    .foregroundStyle(PrismTheme.textSecondary)
                 if let autoSwitchState = store.autoSwitchState {
                     Text(autoSwitchStatusText(autoSwitchState))
                         .font(.caption)
@@ -856,7 +861,7 @@ struct AutomationSettingsView: View {
 /// The single most useful thing the user can do right now. Derived from the
 /// same `AccountTriage` buckets the board renders, so the banner can never
 /// recommend something the board contradicts.
-/// Shared by Ops `NextActionBanner` and the notch next-action caption.
+/// Shared by the notch next-action caption (and DEBUG Ops previews).
 enum NextAction {
     case addAccount
     case switchTo(SavedAccount)
@@ -1030,6 +1035,7 @@ enum NextAction {
     }
 }
 
+#if DEBUG
 private struct NextActionBanner: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
@@ -2769,6 +2775,7 @@ private func formattedVietnamResetDate(_ value: String, language: AppLanguage) -
     let weekday = symbolFormatter.weekdaySymbols[(components.weekday ?? 1) - 1]
     return "around \(timeFormatter.string(from: date)) \(weekday), \(dateFormatter.string(from: date))"
 }
+#endif
 
 struct AddAccountSheet: View {
     @EnvironmentObject private var store: AccountStore
@@ -2917,6 +2924,7 @@ struct AddAccountSheet: View {
     }
 }
 
+#if DEBUG
 private struct AccountDetail: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
@@ -3323,6 +3331,7 @@ private struct DiagnosticMetric: View {
         .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
     }
 }
+#endif
 
 struct ReloginAccountSheet: View {
     @EnvironmentObject private var store: AccountStore
@@ -3512,6 +3521,7 @@ struct AccountEditorSheet: View {
     }
 }
 
+#if DEBUG
 private struct UsageCard: View {
     @EnvironmentObject private var language: LanguageStore
     let title: String
@@ -3780,6 +3790,7 @@ private struct BankedResetCreditRow: View {
         .accessibilityElement(children: .combine)
     }
 }
+#endif
 
 struct MenuBarView: View {
     @EnvironmentObject private var store: AccountStore
@@ -3788,14 +3799,18 @@ struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        PrismQuickSwitchDeck(
-            openSettings: openSettings,
-            openAddAccountFlow: openAddAccountFlow,
-            openReloginFlow: openReloginFlow,
-            openBackupFlow: openBackupFlow,
-            openEditAccount: openEditAccount,
-            openAbout: openAbout
-        )
+        VStack(alignment: .leading, spacing: 8) {
+            MenuBarUpdateStatus()
+            MenuBarOperationStatus()
+            PrismQuickSwitchDeck(
+                openSettings: openSettings,
+                openAddAccountFlow: openAddAccountFlow,
+                openReloginFlow: openReloginFlow,
+                openBackupFlow: openBackupFlow,
+                openEditAccount: openEditAccount,
+                openAbout: openAbout
+            )
+        }
         .onAppear {
             refreshMenuBar()
         }
@@ -3853,6 +3868,7 @@ struct MenuBarView: View {
     }
 }
 
+#if DEBUG
 private struct MenuBarLiveSignals: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
@@ -3931,6 +3947,7 @@ private struct MenuBarLiveSignals: View {
         return "\(outlook.chance24Hours)% / 24H"
     }
 }
+#endif
 
 private struct MenuBarUpdateStatus: View {
     @EnvironmentObject private var updater: GitHubUpdater
@@ -3941,9 +3958,10 @@ private struct MenuBarUpdateStatus: View {
         case .available(let update):
             HStack(spacing: 7) {
                 Image(systemName: "arrow.down.app.fill")
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(PrismTheme.accent)
                 Text(language.text("Có bản \(update.version)", "Version \(update.version) available"))
-                    .font(.caption.weight(.semibold))
+                    .font(PrismTheme.fontCaptionBold)
+                    .foregroundStyle(PrismTheme.textBright)
                 Spacer()
                 Button(language.text("Cập nhật", "Update")) {
                     updater.installAvailableUpdate()
@@ -3952,26 +3970,27 @@ private struct MenuBarUpdateStatus: View {
             }
             .padding(.horizontal, 9)
             .padding(.vertical, 7)
-            .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
+            .background(PrismTheme.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
 
         case .checking, .downloading, .installing:
             HStack(spacing: 7) {
                 ProgressView()
                     .controlSize(.small)
                 Text(statusText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(PrismTheme.fontCaption)
+                    .foregroundStyle(PrismTheme.textSecondary)
             }
             .padding(.horizontal, 9)
             .padding(.vertical, 7)
+            .background(PrismTheme.surfaceQuiet, in: RoundedRectangle(cornerRadius: 9))
 
         case .failed:
             HStack(spacing: 7) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(PrismTheme.warning)
                 Text(language.text("Không thể kiểm tra cập nhật", "Could not check for updates"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(PrismTheme.fontCaption)
+                    .foregroundStyle(PrismTheme.textSecondary)
                 Spacer()
                 Button(language.text("Thử lại", "Retry")) {
                     updater.checkForUpdates(currentVersion: AppInfo.shortVersion)
@@ -3982,7 +4001,20 @@ private struct MenuBarUpdateStatus: View {
             .padding(.vertical, 7)
             .background(PrismTheme.warning.opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
 
-        case .idle, .upToDate:
+        case .upToDate:
+            HStack(spacing: 7) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(PrismTheme.emerald)
+                Text(language.text("Đã là bản mới nhất", "You're up to date"))
+                    .font(PrismTheme.fontCaption)
+                    .foregroundStyle(PrismTheme.textSecondary)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .background(PrismTheme.emerald.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
+
+        case .idle:
             EmptyView()
         }
     }
@@ -4006,6 +4038,9 @@ private struct MenuBarOperationStatus: View {
     @EnvironmentObject private var language: LanguageStore
 
     private var message: String {
+        if let phase = store.switchPhaseMessage, !phase.isEmpty {
+            return phase
+        }
         if store.isSwitching {
             return language.text("Đang chuyển tài khoản…", "Switching account…")
         }
@@ -4016,7 +4051,7 @@ private struct MenuBarOperationStatus: View {
             return language.text("Đang kiểm tra quota…", "Checking quota…")
         }
         if store.errorMessage != nil {
-            return language.text("Cập nhật thất bại", "Update failed")
+            return language.text("Thao tác thất bại", "Action failed")
         }
         guard let state = store.autoSwitchState else { return "" }
         switch state {
@@ -4049,44 +4084,47 @@ private struct MenuBarOperationStatus: View {
     }
 
     private var tint: Color {
-        if store.isBusyForActions || store.isCheckingAutoSwitch { return .secondary }
-        if store.errorMessage != nil { return .orange }
+        if store.switchPhaseMessage != nil { return PrismTheme.accent }
+        if store.isBusyForActions || store.isCheckingAutoSwitch { return PrismTheme.textSecondary }
+        if store.errorMessage != nil { return PrismTheme.warning }
         switch store.autoSwitchState {
-        case .some(.switched): return .green
+        case .some(.switched): return PrismTheme.emerald
         case .some(.closingDesktop), .some(.switchingAccount), .some(.relaunchingDesktop),
-             .some(.generationInProgress): return .secondary
-        case .some(.waitingForLogin), .some(.allAccountsExhausted), .some(.bankedResetAvailable), .some(.desktopRelaunchFailed), .some(.waitingForProcesses), .some(.checkFailed): return .orange
-        case .none: return .secondary
+             .some(.generationInProgress): return PrismTheme.textSecondary
+        case .some(.waitingForLogin), .some(.allAccountsExhausted), .some(.bankedResetAvailable), .some(.desktopRelaunchFailed), .some(.waitingForProcesses), .some(.checkFailed): return PrismTheme.warning
+        case .none: return PrismTheme.textSecondary
         }
     }
 
     var body: some View {
-        HStack(spacing: 8) {
-            if store.isBusyForActions || store.isCheckingAutoSwitch {
-                ProgressView()
-                    .controlSize(.small)
-            } else {
-                Image(systemName: store.errorMessage == nil ? "info.circle.fill" : "exclamationmark.triangle.fill")
-            }
-            Text(message)
-                .font(.caption.weight(.medium))
-                .lineLimit(2)
-            Spacer(minLength: 4)
-            if store.errorMessage != nil {
-                Button {
-                    store.errorMessage = nil
-                } label: {
-                    Image(systemName: "xmark")
+        if !message.isEmpty {
+            HStack(spacing: 8) {
+                if store.isBusyForActions || store.isCheckingAutoSwitch || store.switchPhaseMessage != nil {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: store.errorMessage == nil ? "info.circle.fill" : "exclamationmark.triangle.fill")
                 }
-                .buttonStyle(.plain)
-                .help(language.text("Đóng thông báo", "Dismiss"))
-                .accessibilityLabel(language.text("Đóng thông báo", "Dismiss"))
+                Text(message)
+                    .font(PrismTheme.fontCaptionBold)
+                    .lineLimit(2)
+                Spacer(minLength: 4)
+                if store.errorMessage != nil {
+                    Button {
+                        store.errorMessage = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(.plain)
+                    .help(language.text("Đóng thông báo", "Dismiss"))
+                    .accessibilityLabel(language.text("Đóng thông báo", "Dismiss"))
+                }
             }
+            .foregroundStyle(tint)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
         }
-        .foregroundStyle(tint)
-        .padding(.horizontal, 9)
-        .padding(.vertical, 7)
-        .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
     }
 }
 
@@ -4126,11 +4164,12 @@ private struct AboutView: View {
                         Text("Codex Roster")
                             .font(.title.weight(.bold))
                             .lineLimit(1)
-                        Text(language.text("Quản lý tài khoản ChatGPT dùng với Codex", "ChatGPT account manager for Codex"))
+                        Text(language.text("Quản lý tài khoản ChatGPT dùng với Codex — điều khiển từ notch", "ChatGPT account manager for Codex — notch-first controls"))
+                            .font(PrismTheme.fontBody)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         Text(language.text("Phiên bản", "Version") + " " + appVersion)
-                            .font(.body)
+                            .font(PrismTheme.fontBody)
                             .foregroundStyle(.tertiary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -4189,7 +4228,7 @@ private struct AboutView: View {
                     AboutFeatureGroup(title: language.text("Tài khoản & phiên", "Accounts & sessions")) {
                         AboutBullet(icon: "person.badge.plus", text: language.text("Mở đăng nhập OpenAI trên trình duyệt, sau đó lưu phiên Codex đang dùng mà không đọc mật khẩu, mã xác thực hoặc cookie trình duyệt.", "Open the OpenAI browser sign-in, then save the active Codex session without reading passwords, verification codes, or browser cookies."))
                         AboutBullet(icon: "pencil", text: language.text("Đặt tên, sửa, tìm kiếm, lưu trữ, khôi phục và xóa từng tài khoản đã lưu.", "Label, edit, search, archive, restore, and remove each saved account."))
-                        AboutBullet(icon: "tablecells", text: language.text("Một bảng tài khoản duy nhất trong Tổng quan, kèm tìm kiếm, lọc trạng thái, sắp xếp và thao tác hàng loạt.", "A single account table in Overview with search, status filters, sorting, and bulk actions."))
+                        AboutBullet(icon: "tablecells", text: language.text("Danh bạ notch với tìm kiếm, lọc Ready/Unverified, sắp xếp và Đổi thủ công kể cả khi hết quota.", "Notch roster with search, Ready/Unverified filters, sorting, and manual Switch even when quota is exhausted."))
                     }
                     AboutFeatureGroup(title: language.text("Quota & chuyển tài khoản", "Quota & switching")) {
                         AboutBullet(icon: "gauge.with.dots.needle.50percent", text: language.text("Theo dõi quota Codex, thời điểm reset và gói ChatGPT; làm mới tài khoản đang dùng mỗi phút hoặc kiểm tra toàn bộ theo yêu cầu.", "Track Codex quota, reset timing, and ChatGPT plan; refresh the active account every minute or check every account on demand."))

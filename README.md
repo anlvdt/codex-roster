@@ -16,7 +16,7 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
 
 - Save, label, archive, restore, and safely switch OpenAI / Codex account snapshots.
 - Inspect, save, restore, switch, and monitor supported Claude Code, Cursor, and Grok Build accounts through the provider CLI. Provider snapshots are stored separately from the legacy OpenAI roster so identical emails cannot collide across providers.
-- Show the active account's quota in the MacBook notch and account quota/reset state in the sidebar.
+- Show the active account's quota in the MacBook notch and switch accounts from the notch roster (Ready filter = usable quota; manual Switch still works for Free/exhausted).
 - Launch the OpenAI browser sign-in flow without reading passwords, verification codes, or browser cookies.
 - Close and relaunch ChatGPT/Codex Desktop after a confirmed account switch.
 - Refresh local Codex token statistics, public OpenAI Status, and reset signals from [Tibo / @thsottiaux on X](https://x.com/thsottiaux), normalized through the independent [Codex Reset radar](https://codex-reset.com/) when X truncates long posts.
@@ -30,21 +30,21 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
 
 Codex exposes two independent usage windows: `primary_window` is the rolling **5-hour** allowance and `secondary_window` is the **weekly** allowance. Roster labels and displays both instead of collapsing them into one percentage. An account is immediately usable only while every reported window still has quota; a healthy 5-hour window does not override an exhausted weekly limit, and vice versa.
 
-**Auto-switch when quota is exhausted** is opt-in. It refreshes the active Codex account (`~/.codex`), prefers candidate quota cached within about 15 minutes, and revalidates the chosen candidate on apply (`--account-id`). It switches only when the active account is at `0%` and another saved account has usable quota in every reported window. On macOS, it waits while the active ChatGPT session is still writing Codex rollout events; once idle, it closes Desktop, applies the new `~/.codex` session, then relaunches Desktop so the UI matches Roster. If every account is exhausted, it leaves the current session untouched.
+**Auto-switch when quota is exhausted** is opt-in. It refreshes the active Codex account (`~/.codex`), prefers candidate quota cached within about 15 minutes, and revalidates the chosen candidate on apply (`--account-id`). It switches only when the active account is at `0%` and another saved account has usable quota in every reported window. On macOS, it waits while the active ChatGPT session is still writing Codex rollout events; once idle, it saves the live session, quits Desktop (graceful first), clears Desktop web-session cache, applies the new `~/.codex` session, then relaunches Desktop so the UI matches Roster. If every account is exhausted, it leaves the current session untouched.
 
 A banked rate-limit reset is reported separately from immediately usable quota. Roster identifies the account and reset count instead of silently consuming an irreversible reset or switching to an account that is still at `0%`; redeem the reset explicitly in Codex, then the next background check can use the refreshed quota.
 
-The Overview groups every account into one of five states and leads with the single next action worth taking (switch, redeem a banked reset, sign in again, retry a quota read, or nothing at all):
+The notch roster groups every account into one of five states and leads with the single next action worth taking (switch, redeem a banked reset, sign in again, retry a quota read, or nothing at all):
 
 | State | Meaning |
 | --- | --- |
 | **Needs action** | Sign-in expired, local recovery required, or a quota read failed. |
 | **In use** | The current `~/.codex` session. |
-| **Ready** | Session healthy and quota available — switchable right now. |
-| **Resting** | Out of quota, waiting to reset. Still switchable when it holds a banked reset to redeem in Codex. |
+| **Ready** | Session healthy and quota available — switchable right now (auto-switch / keyboard 1–9). |
+| **Resting** | Out of quota, waiting to reset. Still manually switchable; banked resets remain visible. |
 | **Archived** | Set aside and excluded from auto-switch. |
 
-The sidebar signals, the Overview banner, and the account board all read from the same state, so they can never disagree. Accounts can be sorted by ChatGPT plan (Pro → Plus → Free), remaining quota, display name, or email. The notch panel shows quick-switch candidates using the same sort order.
+Notch filters, next-action captions, and account cards read from the same triage state. Accounts can be sorted by ChatGPT plan (Pro → Plus → Free), remaining quota, display name, or email.
 
 ### Backup and recovery
 
@@ -135,7 +135,7 @@ swift build --package-path macos/NextAccount
 
 - Lưu, đặt tên, lưu trữ, khôi phục và chuyển an toàn các phiên tài khoản OpenAI / Codex.
 - Qua CLI provider, có thể kiểm tra, lưu, khôi phục, chuyển và theo dõi tài khoản Claude Code, Cursor và Grok Build. Snapshot của các provider này được lưu tách khỏi roster OpenAI cũ để cùng một email ở nhiều provider không bị đụng nhau.
-- Hiển thị quota tài khoản đang dùng tại notch MacBook; hiển thị quota và thời điểm reset ở sidebar.
+- Hiển thị quota tài khoản đang dùng tại notch MacBook và chuyển tài khoản từ danh bạ notch (bộ lọc Ready = còn quota usable; Đổi thủ công vẫn dùng được với Free/hết quota).
 - Mở luồng đăng nhập thiết bị OpenAI mà không đọc mật khẩu, mã xác thực hay cookie trình duyệt.
 - Đóng rồi mở lại ChatGPT/Codex Desktop sau khi bạn xác nhận chuyển tài khoản.
 - Theo dõi token Codex cục bộ, trạng thái công khai OpenAI và tín hiệu reset từ [Tibo / @thsottiaux trên X](https://x.com/thsottiaux); dùng radar độc lập [Codex Reset](https://codex-reset.com/) để chuẩn hóa khi X cắt ngắn bài đăng dài.
@@ -148,21 +148,21 @@ swift build --package-path macos/NextAccount
 
 Codex trả về hai cửa sổ sử dụng độc lập: `primary_window` là quota cuốn chiếu **5 giờ**, còn `secondary_window` là quota **tuần**. Roster hiển thị và gắn nhãn riêng cho cả hai thay vì gộp thành một phần trăm. Tài khoản chỉ dùng được ngay khi mọi cửa sổ được trả về đều còn quota; quota 5 giờ còn không thể bù cho quota tuần đã hết và ngược lại.
 
-Chế độ **Tự động chuyển khi hết quota** là tùy chọn. App theo dõi phiên Codex tại `~/.codex` (không đọc cookie đăng nhập riêng trong ChatGPT). Khi hết `0%`, app chờ nếu phiên ChatGPT đang ghi hoạt động Codex; sau khi phiên yên, macOS sẽ đóng ChatGPT/Codex nếu cần, chuyển phiên, rồi mở lại Desktop để khớp Roster. Nếu mọi tài khoản đều hết quota, phiên hiện tại không bị thay đổi.
+Chế độ **Tự động chuyển khi hết quota** là tùy chọn. App theo dõi phiên Codex tại `~/.codex` (không đọc cookie đăng nhập riêng trong ChatGPT). Khi hết `0%`, app chờ nếu phiên ChatGPT đang ghi hoạt động Codex; sau khi phiên yên, macOS sẽ lưu phiên đang mở, đóng ChatGPT/Codex (ưu tiên thoát mềm), xóa cache web Desktop, chuyển phiên, rồi mở lại Desktop để khớp Roster. Nếu mọi tài khoản đều hết quota, phiên hiện tại không bị thay đổi.
 
 Banked rate-limit reset được tách khỏi quota có thể dùng ngay. Roster sẽ nêu rõ account và số reset thay vì tự tiêu một reset không thể hoàn tác hoặc chuyển sang account vẫn `0%`; sau khi bạn redeem reset trong Codex, lần kiểm tra nền kế tiếp có thể dùng quota vừa được khôi phục.
 
-Màn hình Tổng quan chia mọi tài khoản vào một trong năm trạng thái và nêu sẵn việc nên làm tiếp theo (chuyển tài khoản, redeem banked reset, đăng nhập lại, thử lại quota, hoặc không cần làm gì):
+Danh bạ notch chia mọi tài khoản vào một trong năm trạng thái và nêu sẵn việc nên làm tiếp theo (chuyển tài khoản, redeem banked reset, đăng nhập lại, thử lại quota, hoặc không cần làm gì):
 
 | Trạng thái | Ý nghĩa |
 | --- | --- |
 | **Cần xử lý** | Phiên hết hạn, cần phục hồi cục bộ, hoặc không đọc được quota. |
 | **Đang dùng** | Phiên `~/.codex` hiện tại. |
-| **Sẵn sàng** | Phiên khỏe và còn quota — chuyển sang được ngay. |
-| **Đang nghỉ** | Hết quota, đang chờ đặt lại. Vẫn chuyển được nếu còn banked reset để redeem trong Codex. |
+| **Sẵn sàng** | Phiên khỏe và còn quota — chuyển sang được ngay (tự chuyển / phím 1–9). |
+| **Đang nghỉ** | Hết quota, đang chờ đặt lại. Vẫn Đổi thủ công được; banked reset vẫn hiện. |
 | **Đã lưu trữ** | Đã cất đi, không tham gia tự động chuyển. |
 
-Tín hiệu ở sidebar, thanh gợi ý và bảng trạng thái đều đọc từ cùng một nguồn nên không thể lệch nhau. Tài khoản có thể sắp xếp theo gói ChatGPT (Pro → Plus → Free), quota còn lại, tên hiển thị hoặc email. Bảng notch hiển thị các ứng viên chuyển nhanh theo cùng thứ tự sắp xếp.
+Bộ lọc notch, caption next-action và thẻ tài khoản đều đọc từ cùng một nguồn triage. Tài khoản có thể sắp xếp theo gói ChatGPT (Pro → Plus → Free), quota còn lại, tên hiển thị hoặc email.
 
 ### Sao lưu và khôi phục
 

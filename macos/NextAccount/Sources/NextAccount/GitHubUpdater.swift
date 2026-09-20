@@ -75,6 +75,12 @@ final class GitHubUpdater: ObservableObject {
         do {
             let update = try await Self.fetchLatestUpdate()
             state = Self.isVersion(update.version, newerThan: currentVersion) ? .available(update) : .upToDate
+            if case .upToDate = state {
+                try? await Task.sleep(for: .seconds(4))
+                if case .upToDate = state {
+                    state = .idle
+                }
+            }
         } catch {
             state = .failed(error.localizedDescription)
         }

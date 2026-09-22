@@ -858,15 +858,16 @@ struct NextActionBanner: View {
     var body: some View {
         HStack(alignment: .center, spacing: 14) {
             Image(systemName: icon(for: action))
-                .font(.title2)
+                .font(RosterSecondaryChrome.iconLarge)
                 .foregroundStyle(tint(for: action))
                 .frame(width: 34)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(action.headline(language: language))
-                    .font(.headline)
+                    .font(RosterSecondaryChrome.section)
+                    .lineLimit(2)
                 Text(action.detail(language: language))
-                    .font(.caption)
+                    .font(RosterSecondaryChrome.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1676,9 +1677,9 @@ struct TokenUsageOverview: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Label(language.text("Mức dùng Codex trên máy này", "Local Codex usage"), systemImage: "chart.bar.xaxis")
-                .font(.headline)
+                .font(RosterSecondaryChrome.section)
             Text(language.text("Thống kê token theo các phiên sử dụng gần đây.", "Token activity from recent sessions."))
-                .font(.subheadline)
+                .font(RosterSecondaryChrome.callout)
                 .foregroundStyle(.secondary)
             if let summary = store.tokenUsage {
                 VStack(alignment: .leading, spacing: 14) {
@@ -1687,12 +1688,12 @@ struct TokenUsageOverview: View {
                             TokenMetric(title: "VibeCafe 7d", tokens: vibe.totalTokens)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(language.text("Chi phí ước tính", "Estimated cost"))
-                                    .font(.caption)
+                                    .font(RosterSecondaryChrome.caption)
                                     .foregroundStyle(.secondary)
                                 Text(String(format: "$%.2f", vibe.estimatedCostUsd))
-                                    .font(.title3.weight(.semibold))
+                                    .font(RosterSecondaryChrome.metric)
                                 Text("\(vibe.sessions) sessions · \(String(format: "%.1f", Double(vibe.activeSeconds) / 3600))h")
-                                    .font(.caption2)
+                                    .font(RosterSecondaryChrome.micro)
                                     .foregroundStyle(.secondary)
                             }
                             Spacer()
@@ -1721,7 +1722,7 @@ struct TokenUsageOverview: View {
                             "Bao gồm token context và cache; không dùng để tính chi phí.",
                             "Includes context and cached tokens; it is not a billing total."
                         ))
-                        .font(.caption)
+                        .font(RosterSecondaryChrome.caption)
                         .foregroundStyle(.secondary)
                         Spacer()
                         Button(language.text("Cập nhật token", "Refresh tokens")) {
@@ -1746,7 +1747,7 @@ struct TokenUsageOverview: View {
                         }
                     }
                 }
-                .font(.subheadline)
+                .font(RosterSecondaryChrome.callout)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -1760,7 +1761,7 @@ private struct TokenUsageDetails: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(language.text("Phân bổ token", "Token breakdown"))
-                .font(.subheadline.weight(.semibold))
+                .font(RosterSecondaryChrome.section)
 
             HStack(spacing: 10) {
                 TokenBreakdownMetric(title: language.text("Input", "Input"), tokens: summary.inputTokens)
@@ -1779,7 +1780,7 @@ private struct TokenUsageDetails: View {
                 Text(compactTokenCount(summary.cacheWriteInputTokens, in: language.language))
                     .fontWeight(.semibold)
             }
-            .font(.caption)
+            .font(RosterSecondaryChrome.caption)
             .foregroundStyle(.secondary)
 
             if let cost = summary.estimatedCostUsd, cost > 0 {
@@ -1791,13 +1792,13 @@ private struct TokenUsageDetails: View {
                         ),
                         systemImage: "dollarsign.circle.fill"
                     )
-                    .font(.caption.weight(.semibold))
+                    .font(RosterSecondaryChrome.caption.weight(.semibold))
                     .foregroundStyle(PrismTheme.emerald)
 
                     if let todayCost = summary.todayCostUsd, todayCost > 0 {
                         Text("·").foregroundStyle(.tertiary)
                         Text(String(format: language.text("Hôm nay: $%.2f", "Today: $%.2f"), todayCost))
-                            .font(.caption)
+                            .font(RosterSecondaryChrome.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -1812,7 +1813,7 @@ private struct TokenUsageDetails: View {
                         "Sessions: \(main) main, \(sub) subagents"
                     ))
                 }
-                .font(.caption)
+                .font(RosterSecondaryChrome.caption)
                 .foregroundStyle(.secondary)
             }
 
@@ -1836,10 +1837,10 @@ private struct TokenBreakdownMetric: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
-                .font(.caption)
+                .font(RosterSecondaryChrome.caption)
                 .foregroundStyle(.secondary)
             Text(compactTokenCount(tokens, in: language.language))
-                .font(.subheadline.monospacedDigit().weight(.semibold))
+                .font(RosterSecondaryChrome.section.monospacedDigit())
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1863,22 +1864,22 @@ private struct TokenUsageRanking: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
-                .font(.caption.weight(.medium))
+                .font(RosterSecondaryChrome.caption.weight(.medium))
                 .foregroundStyle(.secondary)
             ForEach(ranked) { entry in
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 8) {
                         Text(entry.label)
                             .lineLimit(1)
-                            .font(.subheadline)
+                            .font(RosterSecondaryChrome.callout)
                         Spacer(minLength: 4)
                         if let cost = entry.estimatedCostUsd, cost > 0 {
                             Text(String(format: "$%.2f", cost))
-                                .font(.caption.monospacedDigit().weight(.medium))
+                                .font(RosterSecondaryChrome.caption.monospacedDigit().weight(.medium))
                                 .foregroundStyle(PrismTheme.emerald)
                         }
                         Text(compactTokenCount(entry.tokens, in: language.language))
-                            .font(.caption.monospacedDigit())
+                            .font(RosterSecondaryChrome.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
                     if showBars {
@@ -1911,14 +1912,16 @@ private struct TokenMetric: View {
                     .font(PrismTheme.fontMicro)
                     .foregroundStyle(.tint)
                 Text(title)
-                    .font(.subheadline.weight(.medium))
+                    .font(RosterSecondaryChrome.callout.weight(.medium))
                     .foregroundStyle(.secondary)
             }
             Text(compactTokenCount(tokens, in: language.language))
-                .font(.system(.title2, design: .rounded).weight(.bold))
+                .font(RosterSecondaryChrome.metricLarge)
                 .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
             Text(language.text("token", "tokens"))
-                .font(.caption)
+                .font(RosterSecondaryChrome.caption)
                 .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1945,18 +1948,18 @@ private struct TokenUsageChart: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(language.text("Hoạt động 7 ngày", "Seven-day activity"))
-                        .font(.subheadline.weight(.semibold))
+                        .font(RosterSecondaryChrome.section)
                     Text(language.text("Trung bình \(compactTokenCount(average, in: language.language)) token/ngày", "Average \(compactTokenCount(average, in: language.language)) tokens/day"))
-                        .font(.caption)
+                        .font(RosterSecondaryChrome.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 3) {
                     Text(language.text("Cao nhất", "Peak"))
-                        .font(.caption)
+                        .font(RosterSecondaryChrome.caption)
                         .foregroundStyle(.secondary)
                     Text(compactTokenCount(maximum, in: language.language))
-                        .font(.subheadline.monospacedDigit().weight(.semibold))
+                        .font(RosterSecondaryChrome.section.monospacedDigit())
                 }
             }
 
@@ -2000,7 +2003,7 @@ private struct TokenDayColumn: View {
     var body: some View {
         VStack(spacing: 6) {
             Text(isLatest || isPeak ? compactTokenCount(day.tokens, in: language) : " ")
-                .font(.caption.monospacedDigit())
+                .font(RosterSecondaryChrome.caption.monospacedDigit())
                 .foregroundStyle(isLatest ? Color.accentColor : Color.secondary)
                 .lineLimit(1)
             ZStack(alignment: .bottom) {
@@ -2012,7 +2015,7 @@ private struct TokenDayColumn: View {
             }
             .frame(width: 24, height: 78)
             Text(dayLabel)
-                .font(.caption.weight(isLatest ? .semibold : .regular))
+                .font(RosterSecondaryChrome.caption.weight(isLatest ? .semibold : .regular))
                 .foregroundStyle(isLatest ? Color.accentColor : Color.secondary)
         }
         .frame(maxWidth: .infinity)
@@ -2185,7 +2188,7 @@ struct OpenAIStatusCard: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Label(language.text("Trạng thái dịch vụ OpenAI", "OpenAI service status"), systemImage: "dot.radiowaves.left.and.right")
-                    .font(.headline)
+                    .font(RosterSecondaryChrome.section)
                 Spacer()
                 Button { openURL(sourceURL) } label: {
                     Label("status.openai.com", systemImage: "arrow.up.right.square")
@@ -2199,7 +2202,8 @@ struct OpenAIStatusCard: View {
                     Image(systemName: status.isOperational ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                         .foregroundStyle(status.isOperational ? .green : .orange)
                     Text(localizedOpenAIStatus(status.description, language: language.language))
-                        .font(.body.weight(.semibold))
+                        .font(RosterSecondaryChrome.body.weight(.semibold))
+                        .lineLimit(2)
                     Spacer()
                     Button(language.text("Cập nhật", "Refresh")) { store.refreshOpenAIStatus() }
                         .controlSize(.small)
@@ -2210,7 +2214,7 @@ struct OpenAIStatusCard: View {
                     HStack(spacing: 8) {
                         ForEach(status.codexComponents) { component in
                             Label(component.name, systemImage: component.isOperational ? "circle.fill" : "exclamationmark.circle.fill")
-                                .font(.caption)
+                                .font(RosterSecondaryChrome.caption)
                                 .foregroundStyle(component.isOperational ? Color.secondary : PrismTheme.warning)
                                 .lineLimit(2)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -2228,7 +2232,7 @@ struct OpenAIStatusCard: View {
                         Button(language.text("Tải lại", "Retry")) { store.refreshOpenAIStatus() }
                     }
                 }
-                .font(.subheadline)
+                .font(RosterSecondaryChrome.callout)
                 .foregroundStyle(.secondary)
             }
         }
@@ -2258,7 +2262,7 @@ struct GlobalResetOutlookCard: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Label(language.text("Tibo reset radar", "Tibo reset radar"), systemImage: "antenna.radiowaves.left.and.right")
-                    .font(.headline)
+                    .font(RosterSecondaryChrome.section)
                 Spacer()
                 Button {
                     openURL(outlookSourceURL ?? sourceURL)
@@ -2339,11 +2343,11 @@ struct GlobalResetOutlookCard: View {
                         .controlSize(.small)
                         .disabled(store.isLoadingResetOutlook)
                 }
-                .font(.caption)
+                .font(RosterSecondaryChrome.caption)
                 .foregroundStyle(.secondary)
 
                 Text(language.text("Quota tài khoản là xác nhận cuối cùng.", "Account quota is the final confirmation."))
-                    .font(.caption)
+                    .font(RosterSecondaryChrome.caption)
                     .foregroundStyle(.tertiary)
             } else {
                 HStack {
@@ -2356,7 +2360,7 @@ struct GlobalResetOutlookCard: View {
                         Button(language.text("Tải lại", "Retry")) { store.refreshResetOutlook() }
                     }
                 }
-                .font(.subheadline)
+                .font(RosterSecondaryChrome.callout)
                 .foregroundStyle(.secondary)
             }
         }
@@ -2372,18 +2376,18 @@ struct GlobalResetOutlookCard: View {
                 Text(isConfirmedReset
                     ? language.text("Lần reset gần nhất", "Last reset")
                     : language.text("Tín hiệu gần nhất", "Latest signal"))
-                    .font(.caption)
+                    .font(RosterSecondaryChrome.caption)
                     .foregroundStyle(.secondary)
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(formattedResetDate(outlook.lastResetAt, language: language.language))
-                        .font(.subheadline.weight(.semibold))
+                        .font(RosterSecondaryChrome.section)
                     TimelineView(.periodic(from: .now, by: 60)) { context in
                         Text(formattedRelativeResetDate(
                             outlook.lastResetAt,
                             relativeTo: context.date,
                             language: language.language
                         ))
-                        .font(.caption)
+                        .font(RosterSecondaryChrome.caption)
                         .foregroundStyle(.tertiary)
                     }
                 }
@@ -2392,10 +2396,10 @@ struct GlobalResetOutlookCard: View {
             if let summary = outlook.signalSummary, !summary.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(language.text("Tóm tắt tín hiệu", "Signal summary"))
-                        .font(.caption)
+                        .font(RosterSecondaryChrome.caption)
                         .foregroundStyle(.secondary)
                     Text(localizedSignalSummary(summary))
-                        .font(.caption)
+                        .font(RosterSecondaryChrome.caption)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                 }
@@ -2404,15 +2408,15 @@ struct GlobalResetOutlookCard: View {
             if let timeline = store.resetTimeline, !timeline.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(language.text("Lịch sử reset", "Reset history"))
-                        .font(.caption)
+                        .font(RosterSecondaryChrome.caption)
                         .foregroundStyle(.secondary)
                     ForEach(timeline.prefix(3)) { event in
                         HStack(alignment: .top, spacing: 6) {
                             Text(event.date)
-                                .font(.caption2.monospacedDigit())
+                                .font(RosterSecondaryChrome.micro.monospacedDigit())
                                 .foregroundStyle(.tertiary)
                             Text(event.summary)
-                                .font(.caption2)
+                                .font(RosterSecondaryChrome.micro)
                                 .lineLimit(3)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -2423,16 +2427,16 @@ struct GlobalResetOutlookCard: View {
             if let juice = store.resetJuice, !juice.efforts.isEmpty {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(language.text("Mức effort còn lại", "Remaining effort levels"))
-                        .font(.caption)
+                        .font(RosterSecondaryChrome.caption)
                         .foregroundStyle(.secondary)
                     HStack(spacing: 12) {
                         ForEach(juice.efforts.prefix(4)) { effort in
                             HStack(spacing: 4) {
                                 Text(effort.effort.capitalized)
-                                    .font(.caption2)
+                                    .font(RosterSecondaryChrome.micro)
                                     .foregroundStyle(.secondary)
                                 Text("\(effort.current)")
-                                    .font(.caption2.monospacedDigit().weight(.medium))
+                                    .font(RosterSecondaryChrome.micro.monospacedDigit().weight(.medium))
                                     .foregroundStyle(effort.delta > 0 ? .green : effort.delta < 0 ? .red : .secondary)
                             }
                         }
@@ -2489,12 +2493,15 @@ private struct ResetOutlookMetric: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
-                .font(.caption)
+                .font(RosterSecondaryChrome.caption)
                 .foregroundStyle(.secondary)
+                .lineLimit(2)
             Text(value)
-                .font(.title3.weight(.bold))
+                .font(RosterSecondaryChrome.metric)
                 .foregroundStyle(tint)
                 .monospacedDigit()
+                .lineLimit(2)
+                .minimumScaleFactor(0.75)
         }
         .frame(minWidth: 112, maxWidth: .infinity, alignment: .leading)
         .padding(11)
@@ -2693,10 +2700,11 @@ struct AddAccountSheet: View {
         GroupBox {
             VStack(alignment: .leading, spacing: 8) {
                 Text(modeDetailTitle)
-                    .font(.headline)
+                    .font(RosterSecondaryChrome.section)
                 Text(modeDetailBody)
-                    .font(.subheadline)
+                    .font(RosterSecondaryChrome.callout)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
@@ -2707,7 +2715,7 @@ struct AddAccountSheet: View {
                 "Cổng 1455/1457 đang bận — Chỉ thêm sẽ báo lỗi trừ khi bạn thoát Desktop trước (hoặc chọn Thêm & chuyển).",
                 "Ports 1455/1457 are busy — Add only will fail unless you quit Desktop first (or choose Add & switch)."
             ), systemImage: "exclamationmark.triangle.fill")
-            .font(.footnote)
+            .font(RosterSecondaryChrome.footnote)
             .foregroundStyle(.orange)
         }
 
@@ -2735,17 +2743,18 @@ struct AddAccountSheet: View {
             HStack(spacing: 12) {
                 if isFinished {
                     Image(systemName: "checkmark.circle.fill")
-                        .font(.title2)
+                        .font(RosterSecondaryChrome.iconLarge)
                         .foregroundStyle(.green)
                 } else {
                     ProgressView()
                         .controlSize(.small)
                 }
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(progressTitle).font(.headline)
+                    Text(progressTitle).font(RosterSecondaryChrome.section)
                     Text(saveStatusText)
-                        .font(.subheadline)
+                        .font(RosterSecondaryChrome.callout)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2764,12 +2773,12 @@ struct AddAccountSheet: View {
             .foregroundStyle(.green)
         } else if case let .failed(message) = store.newAccountLoginState {
             Text(message)
-                .font(.footnote)
+                .font(RosterSecondaryChrome.footnote)
                 .foregroundStyle(.red)
         }
 
         Label(progressSafetyNote, systemImage: "lock.shield")
-            .font(.footnote)
+            .font(RosterSecondaryChrome.footnote)
             .foregroundStyle(.secondary)
 
         HStack {
@@ -3344,12 +3353,13 @@ struct ReloginAccountSheet: View {
                         Text(isCompleting
                             ? language.text("Đang tự động cập nhật", "Updating automatically")
                             : language.text("Đang chờ đúng tài khoản", "Waiting for the correct account"))
-                            .font(.headline)
+                            .font(RosterSecondaryChrome.section)
                         Text(isCompleting
                             ? language.text("Đang lưu phiên và kiểm tra lại quota…", "Saving the session and checking quota…")
                             : language.text("Không cần tải lại hay bấm Lưu — Roster tự hoàn tất khi nhận diện \(account.email).", "No reload or Save click needed — Roster finishes when it detects \(account.email)."))
-                            .font(.subheadline)
+                            .font(RosterSecondaryChrome.callout)
                             .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -3361,13 +3371,13 @@ struct ReloginAccountSheet: View {
                     "Sau tài khoản này, Roster tự mở lần lượt \(queuedCount) tài khoản còn lại.",
                     "After this account, Roster will automatically open the remaining \(queuedCount) accounts in sequence."
                 ), systemImage: "list.number")
-                .font(.footnote.weight(.medium))
+                .font(RosterSecondaryChrome.footnote.weight(.medium))
                 .foregroundStyle(.tint)
             }
 
             if let localError {
                 Label(localError, systemImage: "exclamationmark.triangle.fill")
-                    .font(.footnote)
+                    .font(RosterSecondaryChrome.footnote)
                     .foregroundStyle(.orange)
             }
 
@@ -3375,7 +3385,7 @@ struct ReloginAccountSheet: View {
                 "Phiên Codex đang dùng được sao lưu trước khi mở đăng nhập mới. Hủy sẽ khôi phục phiên trước. Phải đăng nhập đúng \(account.email).",
                 "The current Codex session is backed up before the new sign-in. Cancel restores it. You must sign in as \(account.email)."
             ), systemImage: "lock.shield")
-            .font(.footnote)
+            .font(RosterSecondaryChrome.footnote)
             .foregroundStyle(.secondary)
 
             HStack {
@@ -3471,7 +3481,7 @@ struct AccountEditorSheet: View {
                 "Đặt tên để dễ nhận biết tài khoản.",
                 "Choose a name that makes the account easy to recognize."
             ))
-            .font(.caption)
+            .font(RosterSecondaryChrome.caption)
             .foregroundStyle(.secondary)
 
             HStack {
@@ -4394,19 +4404,55 @@ private struct AboutDisclosurePanel<Content: View>: View {
     let title: String
     let icon: String
     @ViewBuilder let content: Content
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isExpanded = false
 
     var body: some View {
-        DisclosureGroup {
-            VStack(alignment: .leading, spacing: 10) {
-                content
-                    .font(RosterSecondaryChrome.body)
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                if reduceMotion {
+                    isExpanded.toggle()
+                } else {
+                    withAnimation(RosterSecondaryChrome.disclosureSpring) {
+                        isExpanded.toggle()
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.right")
+                        .font(RosterSecondaryChrome.micro.weight(.bold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    Label(title, systemImage: icon)
+                        .font(RosterSecondaryChrome.section)
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, 10)
-        } label: {
-            Label(title, systemImage: icon)
-                .font(RosterSecondaryChrome.section)
-                .foregroundStyle(.primary)
+            .buttonStyle(.plain)
+            .pointingHandCursor()
+            .accessibilityLabel(title)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityValue(isExpanded
+                ? AppLanguage.text("Đang mở", "Expanded")
+                : AppLanguage.text("Đang đóng", "Collapsed"))
+            .accessibilityHint(AppLanguage.text(
+                "Nhấn để mở hoặc đóng phần này",
+                "Press to expand or collapse this section"
+            ))
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 10) {
+                    content
+                        .font(RosterSecondaryChrome.body)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 10)
+            }
         }
         .padding(14)
         .background(

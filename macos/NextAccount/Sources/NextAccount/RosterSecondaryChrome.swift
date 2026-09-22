@@ -23,9 +23,20 @@ enum RosterSecondaryChrome {
     static let callout = Font.system(size: 12.5, weight: .regular)
     static let caption = Font.system(size: 11.5, weight: .regular)
     static let footnote = Font.system(size: 11, weight: .regular)
+    /// Dense secondary metrics (status chips, micro labels) — ~10pt
+    static let micro = Font.system(size: 10, weight: .regular)
+    /// Banner / status SF Symbol (~22pt)
+    static let iconLarge = Font.system(size: 22, weight: .regular)
+    /// Compact metric figure (~20pt)
+    static let metric = Font.system(size: 20, weight: .semibold)
+    /// Emphasized metric figure (~22pt rounded)
+    static let metricLarge = Font.system(size: 22, weight: .bold, design: .rounded)
 
     static let cardFill = AnyShapeStyle(.ultraThinMaterial)
     static let cardRadius: CGFloat = 12
+
+    /// Critically damped spring for secondary chrome expand/collapse.
+    static let disclosureSpring = Animation.spring(response: 0.28, dampingFraction: 1.0)
 }
 
 extension View {

@@ -8,6 +8,7 @@ struct PrismQuickSwitchDeck: View {
     @EnvironmentObject private var updater: GitHubUpdater
     @Environment(\.openURL) private var openURL
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @AppStorage("codex_roster_notch_pinned_live") private var isPinnedLive = false
     @AppStorage(NotchRosterLayout.rosterExpandedKey) private var isRosterExpanded = false
@@ -663,8 +664,12 @@ struct PrismQuickSwitchDeck: View {
                         "See every account without scrolling"
                     )
                 ) {
-                    withAnimation(PrismTheme.snapSpring) {
+                    if reduceMotion {
                         isRosterExpanded.toggle()
+                    } else {
+                        withAnimation(PrismTheme.snapSpring) {
+                            isRosterExpanded.toggle()
+                        }
                     }
                 }
 
@@ -676,8 +681,12 @@ struct PrismQuickSwitchDeck: View {
                         "Pin open continuously (⌘P)"
                     )
                 ) {
-                    withAnimation(PrismTheme.snapSpring) {
+                    if reduceMotion {
                         isPinnedLive.toggle()
+                    } else {
+                        withAnimation(PrismTheme.snapSpring) {
+                            isPinnedLive.toggle()
+                        }
                     }
                 }
                 .keyboardShortcut("p", modifiers: [.command])
@@ -847,8 +856,12 @@ struct PrismQuickSwitchDeck: View {
         let isSelected = rosterFilter == filter
         return Button {
             PrismTheme.triggerHaptic()
-            withAnimation(PrismTheme.snapSpring) {
+            if reduceMotion {
                 rosterFilter = filter
+            } else {
+                withAnimation(PrismTheme.snapSpring) {
+                    rosterFilter = filter
+                }
             }
         } label: {
             Text(label)
@@ -868,6 +881,7 @@ struct PrismQuickSwitchDeck: View {
 private struct PrismCompactAccountCard: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let account: SavedAccount
     let shortcutIndex: Int?
@@ -1120,8 +1134,12 @@ private struct PrismCompactAccountCard: View {
     private func switchButton(targetID: UUID) -> some View {
         Button {
             PrismTheme.triggerHaptic()
-            withAnimation(PrismTheme.pressFeedback) {
+            if reduceMotion {
                 justSwitchedID = targetID
+            } else {
+                withAnimation(PrismTheme.pressFeedback) {
+                    justSwitchedID = targetID
+                }
             }
             guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
             store.activate(target, force: true)

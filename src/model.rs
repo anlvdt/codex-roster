@@ -321,6 +321,9 @@ pub struct SessionResumeHint {
     pub rollout_path: Option<String>,
     /// disabled | missing | ready | ready_cli | cwd_gone | rollout_gone
     pub status: String,
+    /// Other interrupted threads captured in the same account switch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_sessions: Vec<SessionResumeHint>,
 }
 
 #[derive(Clone, Debug, Serialize)]

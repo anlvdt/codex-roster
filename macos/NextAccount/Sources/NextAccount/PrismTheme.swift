@@ -274,3 +274,34 @@ extension View {
         modifier(PrismInteractiveModifier(cornerRadius: cornerRadius, action: action))
     }
 }
+
+/// Compact iPhone-style switch — macOS `.switch` + `.tint` stays grey on mini controls.
+struct PrismGreenSwitchToggleStyle: ToggleStyle {
+    var onColor: Color = PrismTheme.emerald
+    var offColor: Color = Color.white.opacity(0.18)
+
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            HStack(spacing: 0) {
+                configuration.label
+                ZStack(alignment: configuration.isOn ? .trailing : .leading) {
+                    Capsule()
+                        .fill(configuration.isOn ? onColor : offColor)
+                        .frame(width: 30, height: 17)
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 13, height: 13)
+                        .shadow(color: .black.opacity(0.25), radius: 1, y: 0.5)
+                        .padding(2)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .animation(.easeInOut(duration: 0.16), value: configuration.isOn)
+        .accessibilityAddTraits(.isButton)
+    }
+}

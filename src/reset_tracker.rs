@@ -9,11 +9,6 @@ use time::OffsetDateTime;
 /// Public Codex reset outlook / commitment API (codex-resets.com).
 const RESETS_STATUS_ENDPOINT: &str = "https://codex-resets.com/api/v1/status";
 const RESETS_LIST_ENDPOINT: &str = "https://codex-resets.com/api/v1/resets?limit=40";
-/// Forecast probabilities + Watch lead % (hosted on codex-reset.com; not on plural host).
-const FORECAST_ENDPOINT: &str = "https://codex-reset.com/api/forecast";
-const TIMELINE_ENDPOINT: &str = "https://codex-reset.com/api/timeline";
-const STATUS_HISTORY_ENDPOINT: &str = "https://codex-reset.com/api/status-history";
-const JUICE_ENDPOINT: &str = "https://codex-reset.com/api/juice";
 
 const SITE_HOME: &str = "https://codex-resets.com/";
 const USER_AGENT: &str =
@@ -31,12 +26,6 @@ pub struct ResetOutlook {
     pub last_reset_at: String,
     pub next_reset_at: Option<String>,
     pub last_reset_is_confirmed: bool,
-    pub chance_24_hours: u8,
-    pub chance_48_hours: u8,
-    /// Site Watch / commitment lead % (`probabilities.signal_percent` on forecast).
-    /// Distinct from `confidence`, which is experimental model-fit (often "low").
-    pub signal_percent: Option<u8>,
-    pub confidence: String,
     pub window_label: String,
     pub window_timezone: Option<String>,
     pub window_start_hour: Option<u32>,
@@ -71,78 +60,48 @@ struct NotificationState {
 }
 
 // ---------------------------------------------------------------------------
-// Outlook: codex-resets.com status + codex-reset.com forecast
+// Outlook: Codex Resets public status only
 // ---------------------------------------------------------------------------
 
 pub fn fetch_reset_outlook() -> Result<ResetOutlook> {
-    let forecast = fetch_forecast()?;
-    let status = fetch_resets_status().ok();
-    let outlook_signal = resolve_outlook_signal(&forecast, status.as_ref());
-    let signal_percent = resolve_signal_percent(&forecast);
-    let last_reset_at = status
-        .as_ref()
-        .and_then(|s| s.data.stats.as_ref())
-        .and_then(|stats| stats.last_reset_at.clone())
-        .or_else(|| {
-            status
-                .as_ref()
-                .and_then(|s| s.data.latest_reset.as_ref())
-                .and_then(|reset| reset.announced_at.clone())
-        })
-        .unwrap_or(forecast.last_reset_at.clone());
-    let cadence_days = status
-        .as_ref()
-        .and_then(|s| s.data.stats.as_ref())
-        .and_then(|stats| stats.avg_interval_days)
-        .or_else(|| forecast.cadence.as_ref().and_then(|c| c.recent_median_days));
-    let updated_at = status
-        .as_ref()
-        .and_then(|s| s.meta.as_ref())
-        .and_then(|meta| meta.generated_at.clone())
-        .unwrap_or(forecast.updated_at);
-
-    Ok(ResetOutlook {
-        updated_at,
-        last_reset_at,
-        next_reset_at: outlook_signal.next_reset_at,
-        last_reset_is_confirmed: outlook_signal.last_reset_is_confirmed,
-        chance_24_hours: forecast.probabilities.rounded_24h,
-        chance_48_hours: forecast.probabilities.rounded_48h,
-        signal_percent,
-        confidence: forecast.confidence,
-        window_label: outlook_signal
-            .window_label
-            .unwrap_or(forecast.time_window.label),
-        window_timezone: outlook_signal
-            .window_timezone
-            .or(forecast.time_window.timezone),
-        window_start_hour: forecast.time_window.start_hour,
-        window_end_hour: forecast.time_window.end_hour,
-        signal_kind: outlook_signal.signal_kind,
-        signal_summary: outlook_signal.signal_summary,
-        source_url: outlook_signal.source_url,
-        source_freshness: "codex_resets_api".to_owned(),
-        cadence_days,
-        cadence_accelerating: forecast.cadence.as_ref().and_then(|c| c.accelerating),
-    })
+    let status = fetch_resets_status()?;
+    Ok(outlook_from_status(&status))
 }
 
-/// Site lead metric (Watch / commitment strength), not the 24h/48h model odds
-/// and not `confidence` (walk-forward model-fit label, often stuck on "low").
-fn resolve_signal_percent(forecast: &ForecastResponse) -> Option<u8> {
-    forecast
-        .probabilities
-        .signal_percent
-        .or(forecast.probabilities.commitment_floor_percent)
-        .or_else(|| forecast.signal_score.as_ref().and_then(|score| score.value))
-        .or_else(|| {
-            forecast
-                .official_signal
-                .as_ref()
-                .and_then(|official| official.score.as_ref())
-                .and_then(|score| score.value)
-        })
-        .filter(|&percent| percent > 0)
+fn outlook_from_status(status: &ResetsStatusResponse) -> ResetOutlook {
+    let signal = resolve_outlook_signal(Some(status));
+    ResetOutlook {
+        updated_at: status
+            .meta
+            .as_ref()
+            .and_then(|m| m.generated_at.clone())
+            .unwrap_or_default(),
+        last_reset_at: status
+            .data
+            .stats
+            .as_ref()
+            .and_then(|s| s.last_reset_at.clone())
+            .or_else(|| {
+                status
+                    .data
+                    .latest_reset
+                    .as_ref()
+                    .and_then(|r| r.announced_at.clone())
+            })
+            .unwrap_or_default(),
+        next_reset_at: signal.next_reset_at,
+        last_reset_is_confirmed: signal.last_reset_is_confirmed,
+        window_label: signal.window_label.unwrap_or_default(),
+        window_timezone: signal.window_timezone,
+        window_start_hour: None,
+        window_end_hour: None,
+        signal_kind: signal.signal_kind,
+        signal_summary: signal.signal_summary,
+        source_url: signal.source_url,
+        source_freshness: "codex_resets_api".to_owned(),
+        cadence_days: status.data.stats.as_ref().and_then(|s| s.avg_interval_days),
+        cadence_accelerating: None,
+    }
 }
 
 struct ResolvedOutlookSignal {
@@ -155,15 +114,9 @@ struct ResolvedOutlookSignal {
     window_timezone: Option<String>,
 }
 
-fn resolve_outlook_signal(
-    forecast: &ForecastResponse,
-    status: Option<&ResetsStatusResponse>,
-) -> ResolvedOutlookSignal {
+fn resolve_outlook_signal(status: Option<&ResetsStatusResponse>) -> ResolvedOutlookSignal {
     if let Some(scheduled) = status.and_then(|s| s.data.scheduled_reset.as_ref()) {
         return resolve_scheduled_status_signal(scheduled);
-    }
-    if let Some(official) = forecast.official_signal.as_ref() {
-        return resolve_official_outlook_signal(official);
     }
     if let Some(watch) = status.and_then(|s| s.data.active_watch.as_ref()) {
         return resolve_active_watch_signal(watch);
@@ -221,55 +174,6 @@ fn resolve_active_watch_signal(watch: &ResetsWatch) -> ResolvedOutlookSignal {
     }
 }
 
-fn resolve_official_outlook_signal(official: &ForecastOfficialSignal) -> ResolvedOutlookSignal {
-    let next_reset_at = official
-        .window
-        .as_ref()
-        .and_then(|window| window.target_at.clone().or_else(|| window.end_at.clone()));
-    ResolvedOutlookSignal {
-        signal_kind: map_official_signal_kind(official).to_owned(),
-        signal_summary: official.summary.clone().unwrap_or_default(),
-        source_url: official
-            .url
-            .clone()
-            .or_else(|| {
-                official
-                    .tweet_id
-                    .as_deref()
-                    .and_then(trusted_status_post_url)
-            })
-            .unwrap_or_else(|| SITE_HOME.to_owned()),
-        last_reset_is_confirmed: matches!(
-            official.signal_type.as_deref(),
-            Some("confirmed") | Some("landed") | Some("propagated")
-        ),
-        next_reset_at,
-        window_label: official
-            .window
-            .as_ref()
-            .and_then(|window| window.label.clone()),
-        window_timezone: official
-            .window
-            .as_ref()
-            .and_then(|window| window.time_zone.clone()),
-    }
-}
-
-fn map_official_signal_kind(official: &ForecastOfficialSignal) -> &'static str {
-    match official.signal_type.as_deref() {
-        Some("dated_commitment") | Some("commitment") | Some("scheduled") => {
-            "scheduled_global_reset"
-        }
-        Some("confirmed") | Some("landed") | Some("propagated") => "confirmed_global_reset",
-        Some("tease") | Some("hint") => "reset_hint",
-        _ => match official.signal_tier.as_deref() {
-            Some("likely") | Some("scheduled") | Some("announced") => "scheduled_global_reset",
-            Some("confirmed") => "confirmed_global_reset",
-            _ => "reset_hint",
-        },
-    }
-}
-
 fn map_scheduled_reset_kind(reset_type: Option<&str>) -> &'static str {
     match reset_type {
         Some("banked") => "scheduled_banked_reset",
@@ -302,20 +206,13 @@ fn trusted_status_post_url(id: &str) -> Option<String> {
 
 fn trusted_https_url(value: &str) -> Option<&str> {
     let lower = value.to_ascii_lowercase();
-    if !(lower.starts_with("https://x.com/")
-        || lower.starts_with("https://codex-reset.com/")
-        || lower.starts_with("https://codex-resets.com/"))
-    {
+    if !(lower.starts_with("https://x.com/") || lower.starts_with("https://codex-resets.com/")) {
         return None;
     }
     if value.contains([' ', '\n', '\r', '\t']) {
         return None;
     }
     Some(value)
-}
-
-fn fetch_forecast() -> Result<ForecastResponse> {
-    get_json(FORECAST_ENDPOINT, "Codex Reset forecast API")
 }
 
 fn fetch_resets_status() -> Result<ResetsStatusResponse> {
@@ -342,79 +239,6 @@ fn get_json<T: for<'de> Deserialize<'de>>(url: &str, label: &str) -> Result<T> {
         .body_mut()
         .read_json::<T>()
         .with_context(|| format!("failed to decode the {label} response"))
-}
-
-#[derive(Deserialize)]
-struct ForecastResponse {
-    updated_at: String,
-    probabilities: ForecastProbabilities,
-    confidence: String,
-    last_reset_at: String,
-    time_window: ForecastTimeWindow,
-    #[serde(default)]
-    cadence: Option<ForecastCadence>,
-    #[serde(default)]
-    official_signal: Option<ForecastOfficialSignal>,
-    #[serde(default)]
-    signal_score: Option<ForecastSignalScore>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct ForecastOfficialSignal {
-    tweet_id: Option<String>,
-    summary: Option<String>,
-    at: Option<String>,
-    url: Option<String>,
-    #[allow(dead_code)]
-    kind: Option<String>,
-    signal_type: Option<String>,
-    signal_tier: Option<String>,
-    #[serde(default)]
-    score: Option<ForecastSignalScore>,
-    #[serde(default)]
-    window: Option<ForecastOfficialWindow>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct ForecastSignalScore {
-    #[serde(default)]
-    value: Option<u8>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct ForecastOfficialWindow {
-    label: Option<String>,
-    #[allow(dead_code)]
-    start_at: Option<String>,
-    end_at: Option<String>,
-    time_zone: Option<String>,
-    #[allow(dead_code)]
-    target_kind: Option<String>,
-    target_at: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ForecastProbabilities {
-    rounded_24h: u8,
-    rounded_48h: u8,
-    #[serde(default)]
-    signal_percent: Option<u8>,
-    #[serde(default)]
-    commitment_floor_percent: Option<u8>,
-}
-
-#[derive(Deserialize)]
-struct ForecastTimeWindow {
-    label: String,
-    timezone: Option<String>,
-    start_hour: Option<u32>,
-    end_hour: Option<u32>,
-}
-
-#[derive(Deserialize)]
-struct ForecastCadence {
-    recent_median_days: Option<f64>,
-    accelerating: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -517,7 +341,7 @@ pub fn fetch_new_reset_events(app_data_dir: &Path) -> Result<Vec<ResetEvent>> {
             }
         }
         Err(error) => {
-            // Soft-fail path: still try forecast official_signal so UX is not blank.
+            // The list endpoint can still supply confirmed events when status is unavailable.
             let _ = error;
         }
     }
@@ -528,13 +352,6 @@ pub fn fetch_new_reset_events(app_data_dir: &Path) -> Result<Vec<ResetEvent>> {
                 push_unique_event(&mut events, event);
             }
         }
-    }
-
-    // Forecast official_signal covers dated commitments if the plural-host API lags.
-    if let Ok(forecast) = fetch_forecast()
-        && let Some(event) = official_signal_event(forecast.official_signal.as_ref())
-    {
-        push_unique_event(&mut events, event);
     }
 
     process_reset_events(app_data_dir, events, now)
@@ -607,31 +424,6 @@ fn watch_event(watch: Option<&ResetsWatch>) -> Option<ResetEvent> {
     })
 }
 
-fn official_signal_event(official: Option<&ForecastOfficialSignal>) -> Option<ResetEvent> {
-    let official = official?;
-    let id = official.tweet_id.clone()?;
-    let announced_at = official.at.clone()?;
-    let summary = official.summary.clone().unwrap_or_default();
-    if summary.trim().is_empty() {
-        return None;
-    }
-    let kind = map_official_signal_kind(official);
-    if kind == "none" {
-        return None;
-    }
-    let url = official
-        .url
-        .clone()
-        .or_else(|| trusted_status_post_url(&id))?;
-    Some(ResetEvent {
-        id,
-        announced_at,
-        summary,
-        url,
-        kind: kind.to_owned(),
-    })
-}
-
 // ---------------------------------------------------------------------------
 // Reset Timeline
 // ---------------------------------------------------------------------------
@@ -657,7 +449,29 @@ pub struct ResetTimelineEvent {
 }
 
 pub fn fetch_reset_timeline() -> Result<ResetTimeline> {
-    get_json(TIMELINE_ENDPOINT, "Codex Reset timeline API")
+    let list = fetch_resets_list()?;
+    Ok(ResetTimeline {
+        updated_at: format_time(OffsetDateTime::now_utc()),
+        events: list
+            .data
+            .iter()
+            .filter_map(|item| {
+                let event = announcement_event(Some(item), map_completed_reset_kind)?;
+                Some(ResetTimelineEvent {
+                    id: event.id,
+                    date: event.announced_at.chars().take(10).collect(),
+                    event_type: event.kind,
+                    summary: event.summary,
+                    url: event.url,
+                    announced_at: event.announced_at,
+                    scope: None,
+                    confidence: None,
+                    reset_kind: item.reset_type.clone(),
+                    audience: None,
+                })
+            })
+            .collect(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -698,7 +512,7 @@ pub struct ResetStatusIncident {
 }
 
 pub fn fetch_reset_status_history() -> Result<ResetStatusHistory> {
-    get_json(STATUS_HISTORY_ENDPOINT, "Codex Reset status-history API")
+    bail!("Codex Resets does not publish service status history; use the OpenAI status command.")
 }
 
 // ---------------------------------------------------------------------------
@@ -725,7 +539,7 @@ pub struct ResetJuiceEffort {
 }
 
 pub fn fetch_reset_juice() -> Result<ResetJuice> {
-    get_json(JUICE_ENDPOINT, "Codex Reset juice API")
+    bail!("Codex Resets does not publish effort tiers.")
 }
 
 fn parse_event_time(value: &str) -> Option<OffsetDateTime> {
@@ -861,153 +675,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn maps_official_dated_commitment_to_scheduled_outlook() {
-        let official = ForecastOfficialSignal {
-            tweet_id: Some("2102254445082116335".into()),
-            summary: Some("I promised a reset for Tuesday.".into()),
-            at: Some("2026-09-22T04:31:32.000Z".into()),
-            url: Some("https://x.com/thsottiaux/status/2102254445082116335".into()),
-            kind: Some("signal".into()),
-            signal_type: Some("dated_commitment".into()),
-            signal_tier: Some("likely".into()),
-            score: Some(ForecastSignalScore { value: Some(93) }),
-            window: Some(ForecastOfficialWindow {
-                label: Some("end of Tuesday".into()),
-                start_at: Some("2026-09-22T04:31:32.000Z".into()),
-                end_at: Some("2026-09-23T06:59:59.999Z".into()),
-                time_zone: Some("America/Los_Angeles".into()),
-                target_kind: Some("deadline".into()),
-                target_at: Some("2026-09-23T06:59:59.999Z".into()),
-            }),
-        };
-        let resolved = resolve_official_outlook_signal(&official);
-        assert_eq!(resolved.signal_kind, "scheduled_global_reset");
+    fn status_only_outlook_preserves_schedule_without_probabilities() {
+        let status: ResetsStatusResponse = serde_json::from_value(serde_json::json!({
+            "data": {
+                "scheduled_reset": {"id":"123", "reset_type":"banked", "scheduled_for":"2026-09-23T07:00:00Z", "text":"Banked reset scheduled"},
+                "stats": {"last_reset_at":"2026-09-12T08:00:00Z", "avg_interval_days":6.9}
+            },
+            "meta": {"generated_at":"2026-09-22T12:00:00Z"}
+        })).unwrap();
+        let result = outlook_from_status(&status);
+        assert_eq!(result.signal_kind, "scheduled_banked_reset");
         assert_eq!(
-            resolved.next_reset_at.as_deref(),
-            Some("2026-09-23T06:59:59.999Z")
+            result.next_reset_at.as_deref(),
+            Some("2026-09-23T07:00:00Z")
         );
-        assert!(!resolved.last_reset_is_confirmed);
-        assert_eq!(resolved.window_label.as_deref(), Some("end of Tuesday"));
-
-        let event = official_signal_event(Some(&official)).expect("event");
-        assert_eq!(event.id, "2102254445082116335");
-        assert_eq!(event.kind, "scheduled_global_reset");
+        let json = serde_json::to_value(result).unwrap();
+        for key in [
+            "chance_24_hours",
+            "chance_48_hours",
+            "signal_percent",
+            "confidence",
+        ] {
+            assert!(json.get(key).is_none());
+        }
     }
 
     #[test]
-    fn prefers_scheduled_status_over_forecast_official_signal() {
-        let forecast = ForecastResponse {
-            updated_at: "2026-09-22T05:00:00.000Z".into(),
-            probabilities: ForecastProbabilities {
-                rounded_24h: 20,
-                rounded_48h: 35,
-                signal_percent: Some(93),
-                commitment_floor_percent: Some(93),
-            },
-            confidence: "low".into(),
-            last_reset_at: "2026-09-12T08:09:17.000Z".into(),
-            time_window: ForecastTimeWindow {
-                label: "11 PM - 2 AM".into(),
-                timezone: Some("UTC".into()),
-                start_hour: Some(23),
-                end_hour: Some(2),
-            },
-            cadence: None,
-            official_signal: Some(ForecastOfficialSignal {
-                tweet_id: Some("old".into()),
-                summary: Some("stale official".into()),
-                at: Some("2026-09-01T00:00:00.000Z".into()),
-                url: None,
-                kind: None,
-                signal_type: Some("dated_commitment".into()),
-                signal_tier: Some("likely".into()),
-                score: Some(ForecastSignalScore { value: Some(50) }),
-                window: None,
-            }),
-            signal_score: None,
-        };
-        let status = ResetsStatusResponse {
-            data: ResetsStatusData {
-                latest_reset: None,
-                scheduled_reset: Some(ResetsScheduledReset {
-                    id: Some("2102254445082116335".into()),
-                    reset_type: Some("regular".into()),
-                    announced_at: Some("2026-09-22T04:31:32.000Z".into()),
-                    scheduled_for: Some("2026-09-23T07:00:00.000Z".into()),
-                    text: Some("promised a reset for Tuesday".into()),
-                    source: Some(ResetsSource {
-                        url: Some("https://x.com/thsottiaux/status/2102254445082116335".into()),
-                    }),
-                }),
-                active_watch: None,
-                stats: None,
-            },
-            meta: None,
-        };
-        let resolved = resolve_outlook_signal(&forecast, Some(&status));
-        assert_eq!(resolved.signal_kind, "scheduled_global_reset");
-        assert_eq!(
-            resolved.next_reset_at.as_deref(),
-            Some("2026-09-23T07:00:00.000Z")
-        );
-        assert!(resolved.signal_summary.contains("Tuesday"));
-    }
-
-    #[test]
-    fn prefers_site_commitment_percent_over_model_confidence_label() {
-        let from_probabilities = ForecastResponse {
-            updated_at: "2026-09-22T05:00:00.000Z".into(),
-            probabilities: ForecastProbabilities {
-                rounded_24h: 20,
-                rounded_48h: 35,
-                signal_percent: Some(93),
-                commitment_floor_percent: Some(93),
-            },
-            confidence: "low".into(),
-            last_reset_at: "2026-09-12T08:09:17.000Z".into(),
-            time_window: ForecastTimeWindow {
-                label: "11 PM - 2 AM".into(),
-                timezone: Some("UTC".into()),
-                start_hour: Some(23),
-                end_hour: Some(2),
-            },
-            cadence: None,
-            official_signal: None,
-            signal_score: Some(ForecastSignalScore { value: Some(93) }),
-        };
-        assert_eq!(resolve_signal_percent(&from_probabilities), Some(93));
-
-        let from_official_score = ForecastResponse {
-            updated_at: "2026-09-22T05:00:00.000Z".into(),
-            probabilities: ForecastProbabilities {
-                rounded_24h: 10,
-                rounded_48h: 20,
-                signal_percent: None,
-                commitment_floor_percent: None,
-            },
-            confidence: "low".into(),
-            last_reset_at: "2026-09-12T08:09:17.000Z".into(),
-            time_window: ForecastTimeWindow {
-                label: "11 PM - 2 AM".into(),
-                timezone: Some("UTC".into()),
-                start_hour: Some(23),
-                end_hour: Some(2),
-            },
-            cadence: None,
-            signal_score: None,
-            official_signal: Some(ForecastOfficialSignal {
-                tweet_id: Some("1".into()),
-                summary: Some("promised a reset".into()),
-                at: Some("2026-09-22T04:31:32.000Z".into()),
-                url: None,
-                kind: None,
-                signal_type: Some("dated_commitment".into()),
-                signal_tier: Some("likely".into()),
-                score: Some(ForecastSignalScore { value: Some(100) }),
-                window: None,
-            }),
-        };
-        assert_eq!(resolve_signal_percent(&from_official_score), Some(100));
+    fn absent_status_never_invents_a_schedule() {
+        let signal = resolve_outlook_signal(None);
+        assert_eq!(signal.signal_kind, "none");
+        assert!(signal.next_reset_at.is_none());
     }
 
     #[test]

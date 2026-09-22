@@ -77,6 +77,7 @@ struct NotchWindowView: View {
     @State private var expansionState: NotchExpansionState = .collapsed
     @State private var hoverTask: Task<Void, Never>?
     @State private var collapseTask: Task<Void, Never>?
+    @State private var windowShrinkTask: Task<Void, Never>?
     @State private var keyMonitors: [Any] = []
     @State private var isWindowExpanded = false
     @State private var geometry: NotchGeometry = .detect()
@@ -379,14 +380,14 @@ struct NotchWindowView: View {
         if hovering {
             guard !isExpanded else { return }
             hoverTask = Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(900))
+                try? await Task.sleep(for: .milliseconds(180))
                 guard !Task.isCancelled else { return }
                 expand()
             }
         } else if isExpanded {
             guard !isPinnedLive else { return }
             collapseTask = Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(850))
+                try? await Task.sleep(for: .milliseconds(250))
                 guard !Task.isCancelled else { return }
                 collapse()
             }
@@ -397,6 +398,7 @@ struct NotchWindowView: View {
     private func expand() {
         hoverTask?.cancel()
         collapseTask?.cancel()
+        windowShrinkTask?.cancel()
         installKeyMonitors()
         isWindowExpanded = true
 
@@ -405,24 +407,16 @@ struct NotchWindowView: View {
             return
         }
 
-        // Phase 1: Rapid drop down from the notch ceiling
-        withAnimation(.spring(response: 0.26, dampingFraction: 0.88)) {
-            expansionState = .droppingDown
-        }
-
-        // Phase 2: Smoothly bloom outward horizontally to both left and right sides!
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(75))
-            guard expansionState != .collapsed else { return }
-            withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) {
-                expansionState = .fullyExpanded
-            }
+        // One interruptible, critically damped transition; no delayed bloom.
+        withAnimation(.spring(response: 0.22, dampingFraction: 1)) {
+            expansionState = .fullyExpanded
         }
     }
 
     private func collapse() {
         hoverTask?.cancel()
         collapseTask?.cancel()
+        windowShrinkTask?.cancel()
         removeKeyMonitors()
 
         guard !reduceMotion else {
@@ -431,13 +425,13 @@ struct NotchWindowView: View {
             return
         }
 
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
+        withAnimation(.easeOut(duration: 0.16)) {
             expansionState = .collapsed
         }
 
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(300))
-            guard expansionState == .collapsed else { return }
+        windowShrinkTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(170))
+            guard !Task.isCancelled, expansionState == .collapsed else { return }
             isWindowExpanded = false
         }
     }

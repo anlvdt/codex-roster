@@ -374,11 +374,11 @@ struct NextActionBanner: View {
     let reloginAll: ([SavedAccount]) -> Void
 
     var body: some View {
-        HStack(alignment: .center, spacing: 14) {
+        HStack(alignment: .center, spacing: 12) {
             Image(systemName: icon(for: action))
                 .font(RosterSecondaryChrome.iconLarge)
                 .foregroundStyle(tint(for: action))
-                .frame(width: 34)
+                .frame(width: 22)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(action.headline(language: language))
@@ -393,11 +393,12 @@ struct NextActionBanner: View {
             Spacer(minLength: 8)
 
             button(for: action)
+                .controlSize(.small)
         }
-        .padding(16)
-        .background(tint(for: action).opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
+        .padding(14)
+        .background(tint(for: action).opacity(0.10), in: RoundedRectangle(cornerRadius: RosterSecondaryChrome.cardRadius))
         .overlay(
-            RoundedRectangle(cornerRadius: 14)
+            RoundedRectangle(cornerRadius: RosterSecondaryChrome.cardRadius)
                 .strokeBorder(tint(for: action).opacity(0.28), lineWidth: 1)
         )
         .accessibilityElement(children: .contain)
@@ -496,7 +497,10 @@ struct TokenUsageOverview: View {
                                     .foregroundStyle(.secondary)
                                 Text(String(format: "$%.2f", vibe.estimatedCostUsd))
                                     .font(RosterSecondaryChrome.metric)
-                                Text("\(vibe.sessions) sessions · \(String(format: "%.1f", Double(vibe.activeSeconds) / 3600))h")
+                                Text(language.text(
+                                    "\(vibe.sessions) phiên · \(String(format: "%.1f", Double(vibe.activeSeconds) / 3600)) giờ",
+                                    "\(vibe.sessions) sessions · \(String(format: "%.1f", Double(vibe.activeSeconds) / 3600))h"
+                                ))
                                     .font(RosterSecondaryChrome.micro)
                                     .foregroundStyle(.secondary)
                             }
@@ -729,8 +733,8 @@ private struct TokenMetric: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: 12))
+        .padding(10)
+        .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: RosterSecondaryChrome.cardRadius))
     }
 }
 
@@ -925,8 +929,8 @@ struct OpenAIStatusCard: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: 15))
+        .padding(14)
+        .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: RosterSecondaryChrome.cardRadius))
     }
 
 }
@@ -1184,8 +1188,8 @@ private struct ResetOutlookMetric: View {
                 .minimumScaleFactor(0.75)
         }
         .frame(minWidth: 112, maxWidth: .infinity, alignment: .leading)
-        .padding(11)
-        .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: 11))
+        .padding(10)
+        .background(dashboardCardFill, in: RoundedRectangle(cornerRadius: RosterSecondaryChrome.cardRadius))
     }
 }
 
@@ -1860,7 +1864,6 @@ struct AboutView: View {
     private let tokentabURL = URL(string: "https://github.com/damejan80/tokentab")!
     private let codeburnURL = URL(string: "https://github.com/getagentseal/codeburn")!
     private let agentMonitorURL = URL(string: "https://github.com/donvito/agent-monitor")!
-    private let codexResetURL = URL(string: "https://codex-reset.com/")!
     private let codexResetsURL = URL(string: "https://codex-resets.com/")!
     private let openAIBrandURL = URL(string: "https://openai.com/brand/")!
     private let codexPricingURL = URL(string: "https://learn.chatgpt.com/docs/pricing")!
@@ -2064,12 +2067,6 @@ struct AboutView: View {
                             detail: language.text("API công khai cho trạng thái / lịch sử reset Codex (source of truth cho cam kết & sự kiện); Data from Codex Resets. Không gửi credential hay quota tài khoản.", "Public API for Codex reset status/history (source of truth for commitment & events); Data from Codex Resets. Never sends credentials or account quota."),
                             badge: "Public API · attribution required",
                             url: codexResetsURL
-                        )
-                        ReferenceLink(
-                            title: "codex-reset.com",
-                            detail: language.text("API phụ: timeline / juice / forecast (không hiện % 24h/48h trên notch hay Operations; UI chính lấy lịch từ codex-resets.com).", "Secondary API: timeline / juice / forecast (% 24h/48h not shown on notch or Operations; primary schedule comes from codex-resets.com)."),
-                            badge: "Public API · optional detail",
-                            url: codexResetURL
                         )
                         Text(language.text("Ngoại trừ nền tảng MIT được ghi rõ, Codex Roster không đưa mã nguồn, tài sản, credential hay state của các dự án tham khảo vào ứng dụng. Chi tiết đầy đủ: CREDITS.md.", "Except for the credited MIT foundation, Codex Roster does not incorporate source code, assets, credentials, or state from the reference projects. Full detail: CREDITS.md."))
                             .font(RosterSecondaryChrome.caption)

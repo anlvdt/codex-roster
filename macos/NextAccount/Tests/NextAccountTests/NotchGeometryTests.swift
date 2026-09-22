@@ -86,25 +86,14 @@ import Testing
 }
 
 @Test func expandedRosterCountsPlanSectionHeadersInHeight() {
-    // Contiguous columns include only their own section headers.
-    // The tallest of three columns has seven accounts and two headers.
     let sections = [5, 5, 5, 5]
-    #expect(NotchRosterLayout.contentRowCount(sectionCounts: sections, columns: 2) == 12)
-    #expect(NotchRosterLayout.columnCount(sectionCounts: sections, expanded: true) == 3)
-    #expect(NotchRosterLayout.contentRowCount(sectionCounts: sections, columns: 3) == 9)
-    #expect(!NotchRosterLayout.needsRosterScroll(sectionCounts: sections, expanded: true))
-
-    let height = NotchRosterLayout.rosterGridHeight(sectionCounts: sections, expanded: true)
-    // Headers use sectionHeaderHeight (not full rowHeight) to avoid bottom void.
-    let headerCount = 2
-    let accountRows = 7
-    let logicalRows = headerCount + accountRows
-    let expected = CGFloat(headerCount) * NotchRosterLayout.sectionHeaderHeight
-        + CGFloat(headerCount - 1) * NotchRosterLayout.sectionHeaderTopGap
-        + CGFloat(accountRows) * NotchRosterLayout.rowHeight
-        + CGFloat(logicalRows - 1) * NotchRosterLayout.rowSpacing
-        + NotchRosterLayout.gridVerticalPadding
-    #expect(height == expected)
+    #expect(NotchRosterLayout.columnCount(sectionCounts: sections, expanded: true) == 2)
+    #expect(NotchRosterLayout.needsRosterScroll(sectionCounts: sections, expanded: true, maximumHeight: 530))
+    let height = NotchRosterLayout.rosterGridHeight(sectionCounts: sections, expanded: true, maximumHeight: 530)
+    #expect(height <= 530)
+    let smallHeight = NotchRosterLayout.rosterGridHeight(sectionCounts: [2, 2], expanded: true)
+    #expect(smallHeight == 2 * NotchRosterLayout.rowHeight + NotchRosterLayout.sectionHeaderHeight
+        + 2 * NotchRosterLayout.rowSpacing + NotchRosterLayout.gridVerticalPadding)
 }
 
 @Test func collapsedRosterKeepsFixedScrollViewport() {
@@ -120,9 +109,9 @@ import Testing
 @Test func singlePlanBandSkipsHeadersAndFitsPreferredColumns() {
     let sections = [10]
     #expect(NotchRosterLayout.contentRowCount(sectionCounts: sections, columns: 2) == 5)
-    // ≥8 accounts prefer width-aware columns (3 on the panoramic deck).
-    #expect(NotchRosterLayout.preferredColumnCount(sectionCounts: sections) == 3)
-    #expect(NotchRosterLayout.columnCount(sectionCounts: sections, expanded: true) == 3)
+    // Larger rosters retain two readable columns.
+    #expect(NotchRosterLayout.preferredColumnCount(sectionCounts: sections) == 2)
+    #expect(NotchRosterLayout.columnCount(sectionCounts: sections, expanded: true) == 2)
     #expect(NotchRosterLayout.contentRowCount(sectionCounts: sections, columns: 3) == 4)
     #expect(!NotchRosterLayout.needsRosterScroll(sectionCounts: sections, expanded: true))
 }
@@ -135,8 +124,8 @@ import Testing
 }
 
 @Test func comfortableWidthCapsColumnsBeforeCrush() {
-    // Panoramic deck (~996pt usable) keeps cards ≥ minComfortableCardWidth → 3 cols.
-    #expect(NotchRosterLayout.maxColumnsForComfortableWidth() == 3)
+    // Two wide columns preserve room for identity, quota, and actions.
+    #expect(NotchRosterLayout.maxColumnsForComfortableWidth() == 2)
 }
 
 @Test func rosterColumnsPreserveEveryAccountInReadingOrder() {
@@ -150,4 +139,21 @@ import Testing
     #expect(NotchRosterLayout.columnRanges(accountCount: 15, columns: 3) == [0..<5, 5..<10, 10..<15])
     #expect(NotchRosterLayout.columnSectionCounts(sectionCounts: [5, 3, 7], columns: 3) == [[5], [3, 2], [5]])
     #expect(NotchRosterLayout.contentRowCount(sectionCounts: [5, 3, 7], columns: 3) == 7)
+}
+
+@Test func expandedRosterFitsAllRowsUntilScreenLimit() {
+    let sections = [3, 5, 7]
+    let full = NotchRosterLayout.rosterGridHeight(sectionCounts: sections, expanded: true, maximumHeight: 1000)
+    #expect(full > 530)
+    #expect(full < 1000)
+    #expect(!NotchRosterLayout.needsRosterScroll(sectionCounts: sections, expanded: true, maximumHeight: full))
+    #expect(NotchRosterLayout.needsRosterScroll(sectionCounts: sections, expanded: true, maximumHeight: full - 1))
+    #expect(NotchRosterLayout.rosterGridHeight(sectionCounts: sections, expanded: true, maximumHeight: 600) == 600)
+    #expect(NotchRosterLayout.rosterGridHeight(sectionCounts: [100], expanded: true, maximumHeight: 900) == 900)
+}
+
+@Test func captionReservesItsHeightAndAdditionalGap() {
+    let plain = NotchRosterLayout.deckHeight(sectionCounts: [3, 2], expanded: true)
+    let caption = NotchRosterLayout.deckHeight(sectionCounts: [3, 2], expanded: true, hasNextActionCaption: true)
+    #expect(caption - plain == NotchRosterLayout.nextActionCaptionHeight + NotchRosterLayout.deckSectionSpacing)
 }

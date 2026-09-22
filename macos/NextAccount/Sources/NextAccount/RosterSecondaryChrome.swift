@@ -1,6 +1,7 @@
 import SwiftUI
 
 /// Shared sizing and type scale for the secondary console (Settings / Operations / About / Backup).
+/// Keep every tab on the same ladder so Operations metrics do not out-shout Settings copy.
 enum RosterSecondaryChrome {
     static let consoleWidth: CGFloat = 720
     static let consoleHeight: CGFloat = 780
@@ -17,20 +18,26 @@ enum RosterSecondaryChrome {
     static let sectionSpacing: CGFloat = 16
     static let blockSpacing: CGFloat = 8
 
-    static let title = Font.system(size: 17, weight: .semibold)
-    static let section = Font.system(size: 13, weight: .semibold)
-    static let body = Font.system(size: 13, weight: .regular)
-    static let callout = Font.system(size: 12.5, weight: .regular)
+    /// Page title (tab headers).
+    static let title = Font.system(size: 15, weight: .semibold)
+    /// Card / section heading.
+    static let section = Font.system(size: 12.5, weight: .semibold)
+    /// Primary readable copy and control labels.
+    static let body = Font.system(size: 12.5, weight: .regular)
+    /// Supporting paragraph under a section.
+    static let callout = Font.system(size: 12, weight: .regular)
+    /// Secondary helper text.
     static let caption = Font.system(size: 11.5, weight: .regular)
+    /// Dense footnotes / chips.
     static let footnote = Font.system(size: 11, weight: .regular)
-    /// Dense secondary metrics (status chips, micro labels) — ~10pt
+    /// Micro labels (~10pt).
     static let micro = Font.system(size: 10, weight: .regular)
-    /// Banner / status SF Symbol (~22pt)
-    static let iconLarge = Font.system(size: 22, weight: .regular)
-    /// Compact metric figure (~20pt)
-    static let metric = Font.system(size: 20, weight: .semibold)
-    /// Emphasized metric figure (~22pt rounded)
-    static let metricLarge = Font.system(size: 22, weight: .bold, design: .rounded)
+    /// Banner / status SF Symbol — stay near body, not display size.
+    static let iconLarge = Font.system(size: 15, weight: .semibold)
+    /// Compact metric figure (cost, reset countdown).
+    static let metric = Font.system(size: 14, weight: .semibold, design: .rounded)
+    /// Emphasized metric figure (token totals) — still close to section size.
+    static let metricLarge = Font.system(size: 15, weight: .bold, design: .rounded)
 
     static let cardFill = AnyShapeStyle(.ultraThinMaterial)
     static let cardRadius: CGFloat = 12
@@ -47,6 +54,12 @@ extension View {
 
     func rosterSecondaryPadding() -> some View {
         padding(RosterSecondaryChrome.contentPadding)
+    }
+
+    /// Default body font + small controls for every console tab.
+    func rosterConsoleTypography() -> some View {
+        font(RosterSecondaryChrome.body)
+            .controlSize(.small)
     }
 }
 

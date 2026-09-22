@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.4.8 - 2026-09-22
+
+### Added
+
+- **Auto-resume session**: after Auto-switch (or manual activate), reopen interrupted / quota-blocked threads and queue a continue turn on the next account’s quota; Settings + notch toggles; batch resume for multiple threads.
+- **Add only · don’t switch** account enroll: import a new login without quitting Desktop or activating the new row.
+- **Tabbed Roster Console**: Settings, Operations, About, and Backup share one named window instead of separate popups.
+- **Codex Resets outlook**: live schedule/status from the public [Codex Resets](https://codex-resets.com/) API (replaces the homemade Tibo radar signal for commitment/schedule UI).
+- Explicit UI language preference (System / Tiếng Việt / English).
+
+### Fixed
+
+- ChatGPT Desktop showing **Sign in** after account switch: clear Electron `Partitions` (and related) web-session cache on every activate / force-switch / auto-switch relaunch.
+- Console window title stuck on Vietnamese **Bảng điều khiển** after switching the UI to English — sync `NSWindow.title` with `LanguageStore`.
+- Session longevity hardening: bind Login / Delete / Activate by account UUID; stop burning inactive refresh tokens on polls; settle and retry Desktop acceptance using live identity.
+- Notch geometry, densify, column-major roster layout, and dead companion UI cleanup.
+
+### Changed
+
+- Faster Auto-switch timing and clearer Auto-switch / Auto-resume chrome in the notch.
+- Route live UI typography and semantic colors through PrismTheme design tokens.
+
 ## v0.4.7 - 2026-09-16
 
 ### Added

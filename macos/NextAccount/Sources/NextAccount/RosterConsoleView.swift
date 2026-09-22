@@ -11,6 +11,7 @@ struct RosterConsoleView: View {
             consoleTabBar
             Divider()
             tabContent
+                .rosterConsoleTypography()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(
@@ -20,6 +21,18 @@ struct RosterConsoleView: View {
             idealHeight: RosterSecondaryChrome.consoleHeight
         )
         .background(.background)
+        // SwiftUI `Window(title:)` does not refresh when LanguageStore changes.
+        .background {
+            SyncNamedWindowTitle(
+                title: language.text("Bảng điều khiển", "Roster Console"),
+                windowID: RosterConsoleTab.windowID
+            )
+        }
+        .onChange(of: language.language) { _, _ in
+            RosterWindowSurface.syncConsoleWindowTitle(
+                language.text("Bảng điều khiển", "Roster Console")
+            )
+        }
     }
 
     private var consoleTabBar: some View {

@@ -28,10 +28,25 @@ enum RosterWindowSurface {
     static func elevateNamedWindow(id: String) {
         for window in NSApplication.shared.windows where window.identifier?.rawValue == id {
             guard window.identifier?.rawValue != "notch" else { continue }
+            if id == RosterConsoleTab.windowID {
+                window.title = consoleWindowTitle()
+            }
             window.level = aboveNotch
             window.collectionBehavior.insert([.moveToActiveSpace, .fullScreenAuxiliary])
             window.makeKeyAndOrderFront(nil)
             window.orderFrontRegardless()
+        }
+    }
+
+    /// SwiftUI `Window(title:)` freezes the first-evaluated string; keep AppKit in sync.
+    static func consoleWindowTitle() -> String {
+        AppLanguage.text("Bảng điều khiển", "Roster Console")
+    }
+
+    static func syncConsoleWindowTitle(_ title: String? = nil) {
+        let resolved = title ?? consoleWindowTitle()
+        for window in NSApplication.shared.windows where window.identifier?.rawValue == RosterConsoleTab.windowID {
+            window.title = resolved
         }
     }
 
@@ -59,6 +74,31 @@ struct ElevatePresentedWindow: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         DispatchQueue.main.async {
             RosterWindowSurface.elevatePresentedWindow(nsView.window)
+        }
+    }
+}
+
+/// Keeps a named SwiftUI `Window` chrome title in sync when UI language changes.
+struct SyncNamedWindowTitle: NSViewRepresentable {
+    let title: String
+    let windowID: String
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async { apply(from: view) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { apply(from: nsView) }
+    }
+
+    private func apply(from view: NSView) {
+        if let window = view.window {
+            window.title = title
+        }
+        for window in NSApplication.shared.windows where window.identifier?.rawValue == windowID {
+            window.title = title
         }
     }
 }

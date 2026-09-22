@@ -73,6 +73,7 @@ struct OperationsView: View {
             } else {
                 HStack(spacing: 10) {
                     Image(systemName: "checkmark.seal.fill")
+                        .font(RosterSecondaryChrome.iconLarge)
                         .foregroundStyle(PrismTheme.emerald)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(language.text("Không có việc khẩn", "Nothing urgent"))
@@ -104,10 +105,10 @@ struct OperationsView: View {
                 .font(RosterSecondaryChrome.section)
             HStack(spacing: 8) {
                 opsChip(language.text("Sẵn sàng \(ready)", "Ready \(ready)"), tint: PrismTheme.emerald)
-                opsChip(language.text("Login \(needsLogin)", "Login \(needsLogin)"), tint: needsLogin > 0 ? PrismTheme.amber : PrismTheme.titanium)
+                opsChip(language.text("Đăng nhập \(needsLogin)", "Login \(needsLogin)"), tint: needsLogin > 0 ? PrismTheme.amber : PrismTheme.titanium)
                 opsChip(language.text("Nghỉ \(resting)", "Resting \(resting)"), tint: PrismTheme.titanium)
                 if banked > 0 {
-                    opsChip(language.text("Banked \(banked)", "Banked \(banked)"), tint: PrismTheme.warning)
+                    opsChip(language.text("Dự phòng \(banked)", "Banked \(banked)"), tint: PrismTheme.warning)
                 }
                 if deferred > 0 {
                     opsChip(language.text("Chưa xác minh \(deferred)", "Unverified \(deferred)"), tint: PrismTheme.textSecondary)
@@ -133,7 +134,7 @@ struct OperationsView: View {
             if let resume = store.sessionResumeCaption {
                 opsStatusRow(
                     icon: "arrow.uturn.backward.circle",
-                    title: language.text("Auto-resume", "Auto-resume"),
+                    title: language.text("Tự tiếp tục", "Auto-resume"),
                     detail: resume
                 )
             }

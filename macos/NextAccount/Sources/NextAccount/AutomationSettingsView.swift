@@ -89,8 +89,8 @@ struct AutomationSettingsView: View {
                     )
                     .disabled(store.isBusyForActions)
                     Text(language.text(
-                        "Sau auto-switch: mở lại thread bị chặn và gửi tin tiếp tục qua `codex queue`.",
-                        "After auto-switch: reopen the blocked thread and queue a continue message via `codex queue`."
+                        "Sau khi tự chuyển tài khoản: tiếp tục các cuộc hội thoại đang dang dở hoặc bị chặn vì quota, có hoạt động trong 24 giờ qua.",
+                        "After auto-switch: continue interrupted or quota-blocked conversations active within the last 24 hours."
                     ))
                     .font(RosterSecondaryChrome.caption)
                     .foregroundStyle(.secondary)

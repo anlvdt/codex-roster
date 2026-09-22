@@ -188,7 +188,7 @@ enum Command {
         #[command(subcommand)]
         command: Option<VibeUsageCommand>,
     },
-    /// Global Codex Reset outlook (codex-resets.com status + codex-reset.com forecast).
+    /// Global Codex Reset outlook (codex-resets.com status).
     ResetOutlook {
         #[arg(long)]
         json: bool,
@@ -199,17 +199,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Return the full reset timeline from codex-reset.com.
+    /// Return recent reset announcements from codex-resets.com.
     ResetTimeline {
         #[arg(long)]
         json: bool,
     },
-    /// Return OpenAI status history from codex-reset.com (Codex-specific incidents).
+    /// Deprecated: Codex Resets does not publish service status history.
     ResetStatusHistory {
         #[arg(long)]
         json: bool,
     },
-    /// Return quota effort tiers ("juice") from codex-reset.com.
+    /// Deprecated: Codex Resets does not publish effort tiers.
     ResetJuice {
         #[arg(long)]
         json: bool,
@@ -782,17 +782,12 @@ pub fn run() -> Result<()> {
             if json {
                 print_json(&outlook)?;
             } else {
-                if let Some(signal_percent) = outlook.signal_percent {
-                    println!(
-                        "Global reset outlook: commitment {signal_percent}%, {}% in 24h, {}% in 48h",
-                        outlook.chance_24_hours, outlook.chance_48_hours
-                    );
-                } else {
-                    println!(
-                        "Global reset outlook: {}% in 24h, {}% in 48h",
-                        outlook.chance_24_hours, outlook.chance_48_hours
-                    );
+                println!("Global reset status: {}", outlook.signal_kind);
+                if let Some(next) = &outlook.next_reset_at {
+                    println!("Scheduled: {next}");
                 }
+                println!("{}", outlook.signal_summary);
+                println!("Data from Codex Resets — https://codex-resets.com/");
                 println!("Last reset: {}", outlook.last_reset_at);
             }
             Ok(())

@@ -1096,6 +1096,14 @@ final class AccountStore: ObservableObject {
             return
         }
         guard hint.enabled else { return }
+        if continueExhausted {
+            let extras = hint.additionalSessions
+            logSessionResume(
+                "continueExhausted primary=\(hint.sessionId ?? "-") additional=\(extras.count) status=\(hint.status)"
+            )
+            await resumeInterruptedThreads([hint] + extras)
+            return
+        }
 
         switch hint.status {
         case "missing":
@@ -1207,6 +1215,51 @@ final class AccountStore: ObservableObject {
                 )
             }
         }
+        scheduleSessionResumeCaptionClear()
+    }
+
+    /// Open + queue each exact thread independently; a failure must not skip later threads.
+    /// Deep-link open is required — `codex queue` alone often lands unread until Desktop
+    /// has the thread selected (proven single-thread path before the batch refactor).
+    private func resumeInterruptedThreads(_ hints: [SessionResumeHint]) async {
+        var seen = Set<String>()
+        let targets = hints.filter {
+            guard $0.enabled, let id = $0.sessionId, !id.isEmpty else { return false }
+            return seen.insert(id).inserted
+        }
+        guard !targets.isEmpty else {
+            sessionResumeCaption = AppLanguage.text(
+                "Không có cuộc hội thoại dang dở cần tiếp tục",
+                "No interrupted conversations to resume"
+            )
+            scheduleSessionResumeCaptionClear()
+            return
+        }
+        logSessionResume(
+            "batch begin count=\(targets.count) ids=\(targets.compactMap(\.sessionId).joined(separator: ","))"
+        )
+        await waitForDesktopResumeReady(minimumSettle: .seconds(5), maximumWait: .seconds(14))
+        let result = await SessionResumeBatch.run(
+            threadIDs: targets.compactMap(\.sessionId),
+            shouldContinue: { self.autoResumeSession },
+            progress: { index, total in
+                self.sessionResumeCaption = AppLanguage.text(
+                    "Đang tiếp tục cuộc hội thoại \(index)/\(total)",
+                    "Resuming conversation \(index)/\(total)"
+                )
+            },
+            enqueue: { id in
+                let open = await self.openRememberedWorkspace(cwd: nil, sessionID: id)
+                self.logSessionResume("batch open thread=\(id) result=\(String(describing: open))")
+                let queued = await self.queueContinueMessage(threadID: id)
+                self.logSessionResume("batch continue thread=\(id) queued=\(queued)")
+                return queued
+            }
+        )
+        sessionResumeCaption = AppLanguage.text(
+            "Đã gửi tiếp tục \(result.succeeded)/\(result.total) cuộc hội thoại",
+            "Queued continue for \(result.succeeded)/\(result.total) conversations"
+        )
         scheduleSessionResumeCaptionClear()
     }
 
@@ -1627,7 +1680,10 @@ final class AccountStore: ObservableObject {
                 try? await Task.sleep(for: .milliseconds(150))
             }
         }
-        throw CLIError("Account switch safety check did not complete.")
+        throw CLIError(AppLanguage.text(
+            "Kiểm tra an toàn khi chuyển tài khoản chưa hoàn tất.",
+            "Account switch safety check did not complete."
+        ))
     }
 
     /// Quit ChatGPT Desktop if needed, then reopen it so the UI loads the current `~/.codex` session.
@@ -2040,13 +2096,8 @@ final class AccountStore: ObservableObject {
     }
 
     func refreshResetJuice(silently: Bool = false) {
-        Task {
-            do {
-                resetJuice = try await cli.decode(ResetJuice.self, arguments: ["reset-juice"])
-            } catch {
-                if !silently { errorMessage = error.localizedDescription }
-            }
-        }
+        // Codex Resets does not publish effort tiers. Never substitute another source.
+        resetJuice = nil
     }
 
     private func load() async throws {
@@ -2567,7 +2618,10 @@ private struct AccountHubCLI {
             return try decoder.decode(T.self, from: data)
         } catch {
             let command = arguments.first ?? "requested"
-            throw CLIError("Không thể đọc dữ liệu cho \(command). Hãy làm mới Codex Roster rồi thử lại.")
+            throw CLIError(AppLanguage.text(
+                "Không thể đọc dữ liệu cho \(command). Hãy làm mới Codex Roster rồi thử lại.",
+                "Could not decode data for \(command). Refresh Codex Roster and try again."
+            ))
         }
     }
 
@@ -2638,14 +2692,20 @@ private struct AccountHubCLI {
             output.fileHandleForReading.closeFile()
             error.fileHandleForReading.closeFile()
             _ = captures.wait(timeout: .now() + 2)
-            throw CLIError("Codex Roster did not finish within two minutes.")
+            throw CLIError(AppLanguage.text(
+                "Codex Roster không kịp hoàn tất trong hai phút.",
+                "Codex Roster did not finish within two minutes."
+            ))
         }
         captures.wait()
         let outputData = outputCapture.data
         guard process.terminationStatus == 0 else {
             let errorData = errorCapture.data
             let detail = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw CLIError(detail?.isEmpty == false ? detail! : "The Codex Roster command failed.")
+            throw CLIError(detail?.isEmpty == false ? detail! : AppLanguage.text(
+                "Lệnh Codex Roster thất bại.",
+                "The Codex Roster command failed."
+            ))
         }
         return outputData
     }
@@ -3201,6 +3261,23 @@ struct SessionResumeHint: Decodable {
     let cwd: String?
     let rolloutPath: String?
     let status: String
+    /// Other interrupted threads from the same auto-switch capture (may be omitted).
+    let additionalSessions: [SessionResumeHint]
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled, accountId, sessionId, cwd, rolloutPath, status, additionalSessions
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decode(Bool.self, forKey: .enabled)
+        accountId = try container.decodeIfPresent(UUID.self, forKey: .accountId)
+        sessionId = try container.decodeIfPresent(String.self, forKey: .sessionId)
+        cwd = try container.decodeIfPresent(String.self, forKey: .cwd)
+        rolloutPath = try container.decodeIfPresent(String.self, forKey: .rolloutPath)
+        status = try container.decode(String.self, forKey: .status)
+        additionalSessions = try container.decodeIfPresent([SessionResumeHint].self, forKey: .additionalSessions) ?? []
+    }
 }
 
 struct TokenUsageSummary: Decodable {
@@ -3247,12 +3324,6 @@ struct ResetOutlook: Decodable {
     let lastResetAt: String
     let nextResetAt: String?
     let lastResetIsConfirmed: Bool?
-    /// Retained for API decode / legacy callers; UI no longer surfaces forecast %.
-    let chance24Hours: Int
-    let chance48Hours: Int
-    /// Retained for API decode; UI follows codex-resets.com schedule/status instead.
-    let signalPercent: Int?
-    let confidence: String
     let windowLabel: String
     let windowTimezone: String?
     let windowStartHour: Int?
@@ -3473,11 +3544,11 @@ private enum ResetNotifier {
         guard previous != status.indicator else { return }
         enqueue(
             identifier: "codex-roster-openai-\(status.indicator)-\(status.updatedAt)",
-            title: AppLanguage.text("OpenAI đang sự cố", "OpenAI service issue"),
-            subtitle: status.description,
+            title: AppLanguage.text("Sự cố dịch vụ OpenAI", "OpenAI service issue"),
+            subtitle: localizedOpenAIIncidentSubtitle(status.description),
             body: AppLanguage.text(
-                "Trạng thái dịch vụ không còn ổn định. Kiểm tra notch hoặc Operations.",
-                "Service status is no longer healthy. Check the notch or Operations."
+                "Trạng thái dịch vụ không còn ổn định. Kiểm tra notch hoặc tab Vận hành.",
+                "Service status is no longer healthy. Check the notch or the Operations tab."
             )
         )
     }
@@ -3485,15 +3556,30 @@ private enum ResetNotifier {
     static func showPublicSignal(_ signal: GlobalResetEvent) {
         let title = switch signal.kind {
         case "confirmed_banked_reset":
-            AppLanguage.text("Codex Reset: banked reset đã được cấp", "Codex Reset: banked reset confirmed")
+            AppLanguage.text(
+                "Codex Reset: đã cấp banked reset",
+                "Codex Reset: banked reset confirmed"
+            )
         case "scheduled_banked_reset":
-            AppLanguage.text("Codex Reset: banked reset sắp tới", "Codex Reset: banked reset scheduled")
+            AppLanguage.text(
+                "Codex Reset: banked reset sắp tới",
+                "Codex Reset: banked reset scheduled"
+            )
         case "confirmed_global_reset":
-            AppLanguage.text("Codex Reset: mass reset đã xác nhận", "Codex Reset: global reset confirmed")
+            AppLanguage.text(
+                "Codex Reset: đã xác nhận mass reset",
+                "Codex Reset: global reset confirmed"
+            )
         case "scheduled_global_reset":
-            AppLanguage.text("Codex Reset: mass reset sắp tới", "Codex Reset: global reset scheduled")
+            AppLanguage.text(
+                "Codex Reset: mass reset sắp tới",
+                "Codex Reset: global reset scheduled"
+            )
         default:
-            AppLanguage.text("Codex Reset: tín hiệu reset mới", "Codex Reset: new reset signal")
+            AppLanguage.text(
+                "Codex Reset: tín hiệu reset mới",
+                "Codex Reset: new reset signal"
+            )
         }
         enqueue(
             identifier: "codex-roster-reset-\(signal.id)",
@@ -3507,11 +3593,14 @@ private enum ResetNotifier {
     static func showQuotaRecovered() {
         enqueue(
             identifier: "codex-roster-quota-recovered-\(Int(Date().timeIntervalSince1970))",
-            title: AppLanguage.text("\u{2705} Quota đã phục hồi", "\u{2705} Quota recovered"),
-            subtitle: AppLanguage.text("Tài khoản có thể sử dụng lại", "Account is usable again"),
+            title: AppLanguage.text("Quota đã phục hồi", "Quota recovered"),
+            subtitle: AppLanguage.text(
+                "Tài khoản có thể sử dụng lại",
+                "Account is usable again"
+            ),
             body: AppLanguage.text(
-                "Quota Codex đã được đặt lại. Bạn có thể tiếp tục sử dụng.",
-                "Codex quota has been reset. You can continue using it."
+                "Quota Codex đã được đặt lại. Bạn có thể tiếp tục làm việc.",
+                "Codex quota has been reset. You can continue working."
             )
         )
     }
@@ -3574,10 +3663,12 @@ private enum ResetNotifier {
             .compactMap { $0.expiresAt?.value }
             .min()
         var body = AppLanguage.text(
-            "\(account.displayName) có thêm \(newlyGranted) lượt đặt lại quota Codex.",
             newlyGranted == 1
-                ? "\(account.displayName) received 1 Codex quota reset."
-                : "\(account.displayName) received \(newlyGranted) Codex quota resets."
+                ? "\(account.displayName) vừa nhận thêm 1 lượt reset dự phòng Codex."
+                : "\(account.displayName) vừa nhận thêm \(newlyGranted) lượt reset dự phòng Codex.",
+            newlyGranted == 1
+                ? "\(account.displayName) received 1 Codex banked reset."
+                : "\(account.displayName) received \(newlyGranted) Codex banked resets."
         )
         if let title = unseenCredits.first?.title, !title.isEmpty {
             body += " \(title)"
@@ -3589,12 +3680,12 @@ private enum ResetNotifier {
             )
         }
         body += AppLanguage.text(
-            "\(availableCount) lượt khả dụng.",
-            " \(availableCount) available."
+            " Hiện có \(availableCount) lượt khả dụng.",
+            " \(availableCount) currently available."
         )
         enqueue(
             identifier: "codex-roster-banked-\(accountKey)-\(unseenCredits.first?.id ?? String(availableCount))",
-            title: AppLanguage.text("\u{1F389} Banked reset đã đến!", "\u{1F389} Banked reset received!"),
+            title: AppLanguage.text("Reset dự phòng mới", "New banked reset"),
             subtitle: account.displayName,
             body: body
         )
@@ -3623,12 +3714,21 @@ private enum ResetNotifier {
         )
         guard !changes.isEmpty else { return }
         let detail = changes.map { change in
-            "\(change.label) \(change.previousRemaining)% → \(change.currentRemaining)%"
+            AppLanguage.text(
+                "\(change.label): \(change.previousRemaining)% → \(change.currentRemaining)%",
+                "\(change.label): \(change.previousRemaining)% → \(change.currentRemaining)%"
+            )
         }.joined(separator: " · ")
         enqueue(
             identifier: "codex-roster-quota-reset-\(accountKey)-\(Int(current.fetchedAt.timeIntervalSince1970))",
-            title: AppLanguage.text("\u{2705} \(account.displayName) reset quota", "\u{2705} \(account.displayName) quota reset"),
-            subtitle: AppLanguage.text("Quota Codex đã được đặt lại", "Codex quota has been reset"),
+            title: AppLanguage.text(
+                "\(account.displayName) đã đặt lại quota",
+                "\(account.displayName) quota reset"
+            ),
+            subtitle: AppLanguage.text(
+                "Quota Codex đã được đặt lại",
+                "Codex quota has been reset"
+            ),
             body: detail
         )
     }
@@ -3688,6 +3788,31 @@ private enum ResetNotifier {
             ("\(accountKey):five-hour", AppLanguage.text("5 giờ", "5-hour"), observation.fiveHour),
             ("\(accountKey):weekly", AppLanguage.text("Tuần", "Weekly"), observation.weekly),
         ]
+    }
+
+    /// Map common OpenAI status page phrases into the active UI language.
+    private static func localizedOpenAIIncidentSubtitle(_ description: String) -> String {
+        let trimmed = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return AppLanguage.text("Trạng thái dịch vụ thay đổi", "Service status changed")
+        }
+        guard AppLanguage.current == .vietnamese else { return trimmed }
+        switch trimmed {
+        case "All Systems Operational":
+            return "Mọi hệ thống đang hoạt động"
+        case "Degraded Performance":
+            return "Hiệu năng bị giảm"
+        case "Partial System Outage":
+            return "Gián đoạn một phần"
+        case "Major Service Outage":
+            return "Gián đoạn nghiêm trọng"
+        case "Minor Service Outage":
+            return "Gián đoạn nhỏ"
+        case "Under Maintenance":
+            return "Đang bảo trì"
+        default:
+            return trimmed
+        }
     }
 
     private static func usageObservation(for account: SavedAccount) -> UsageObservation? {
@@ -4159,9 +4284,7 @@ func accountSortIsOrderedByWeeklyQuota(_ left: SavedAccount, _ right: SavedAccou
 /// expanded shows the full roster without scrolling for typical sizes.
 ///
 /// Expand grows height to fit every account row **and** plan-section header.
-/// When that would exceed `maxFittedRows`, columns densify (2→4) before any
-/// scroll is allowed. Pathological rosters (dozens of accounts across many
-/// plan bands after max columns) may still scroll — that edge case is intentional.
+/// Two readable columns remain fixed; long rosters scroll in a bounded viewport.
 ///
 /// Pass `hasNextActionCaption: true` only when the caption row is visible so
 /// all-clear layouts do not reserve a tall empty footer under Danh bạ.
@@ -4169,10 +4292,10 @@ enum NotchRosterLayout {
     /// Expanded panoramic width (keep in sync with `NotchWindowView.maxExpandedWidth`
     /// and `PrismQuickSwitchDeck` frame).
     static let deckWidth: CGFloat = 1020
-    static let collapsedDeckHeight: CGFloat = 490
+    static let collapsedDeckHeight: CGFloat = 498
     static let collapsedRosterHeight: CGFloat = 280
     /// Compact next-action caption between upper wings and roster.
-    static let nextActionCaptionHeight: CGFloat = 22
+    static let nextActionCaptionHeight: CGFloat = 30
     /// Outer chrome around the panoramic deck (keep in sync with PrismQuickSwitchDeck).
     static let deckHorizontalInset: CGFloat = 12
     static let deckTopInset: CGFloat = deckHorizontalInset
@@ -4180,23 +4303,29 @@ enum NotchRosterLayout {
     /// Inner padding of the lower switchboard chrome (keep in sync with deck).
     static let switchboardHorizontalInset: CGFloat = 10
     /// Spacing between upper wings / caption / roster.
-    static let deckSectionSpacing: CGFloat = 4
-    /// Dense roster cell: name + email/status + trailing meters/button.
-    static let rowHeight: CGFloat = 48
+    static let deckSectionSpacing: CGFloat = deckHorizontalInset
+    /// Comfortable roster cell: identity, text quotas, details, and action.
+    static let rowHeight: CGFloat = 68
     /// Plan-band header row — shorter than account cards (avoid empty void).
     static let sectionHeaderHeight: CGFloat = 18
     /// Extra top padding on non-first plan headers in the grid.
     static let sectionHeaderTopGap: CGFloat = 4
-    static let rowSpacing: CGFloat = 4
+    static let rowSpacing: CGFloat = 8
     /// Total vertical padding inside the roster scroll content (top + bottom).
     static let gridVerticalPadding: CGFloat = 4
-    static let columnSpacing: CGFloat = 6
+    static let columnSpacing: CGFloat = 12
     /// Floor so expanded cards do not crush name/email/meters.
     static let minComfortableCardWidth: CGFloat = 290
     static let minColumns = 2
-    static let maxColumns = 4
-    /// Soft cap so pathological rosters stay screen-safe (~14" MacBook).
-    static let maxFittedRows = 12
+    static let maxColumns = 2
+    /// The panel starts at the screen top; preserve the Dock and bottom margin.
+    static var availableRosterHeight: CGFloat {
+        let geometry = NotchGeometry.detect()
+        let screen = NSScreen.screens.first { $0.frame == geometry.screenFrame }
+        let available = geometry.screenFrame.maxY - (screen?.visibleFrame.minY ?? geometry.screenFrame.minY) - 12
+        let chrome = collapsedDeckHeight - collapsedRosterHeight + nextActionCaptionHeight + deckSectionSpacing
+        return max(rowHeight + gridVerticalPadding, available - chrome)
+    }
     static let rosterExpandedKey = "codex_roster_notch_roster_expanded"
 
     /// Usable width inside the LazyVGrid (deck minus outer + switchboard insets).
@@ -4257,35 +4386,25 @@ enum NotchRosterLayout {
         return max(minColumns, min(maxColumns, fitted))
     }
 
-    /// Prefer filling deck width for larger rosters; stay 2-col when small.
-    static func preferredColumnCount(sectionCounts: [Int]) -> Int {
-        let total = sectionCounts.reduce(0, +)
-        let widthCap = maxColumnsForComfortableWidth()
-        if total <= 7 { return minColumns }
-        return widthCap
-    }
+    /// Preserve readable card width at every roster size.
+    static func preferredColumnCount(sectionCounts: [Int]) -> Int { minColumns }
 
-    /// Prefer width-aware columns; densify further only to avoid expand scroll.
-    static func columnCount(sectionCounts: [Int], expanded: Bool) -> Int {
-        guard expanded else { return minColumns }
-        let preferred = preferredColumnCount(sectionCounts: sectionCounts)
-        for columns in preferred...maxColumns {
-            if contentRowCount(sectionCounts: sectionCounts, columns: columns) <= maxFittedRows {
-                return columns
-            }
-        }
-        return maxColumns
-    }
+    /// Keep readable widths; long lists scroll instead of squeezing more columns.
+    static func columnCount(sectionCounts: [Int], expanded: Bool) -> Int { minColumns }
 
-    /// Collapsed always scrolls inside a fixed viewport; expand scrolls only when
-    /// content still overflows after column densify.
-    static func needsRosterScroll(sectionCounts: [Int], expanded: Bool) -> Bool {
+    /// Expanded lists scroll only when their actual height exceeds the screen.
+    static func needsRosterScroll(
+        sectionCounts: [Int], expanded: Bool,
+        maximumHeight: CGFloat = availableRosterHeight
+    ) -> Bool {
         guard expanded else { return true }
-        let columns = columnCount(sectionCounts: sectionCounts, expanded: true)
-        return contentRowCount(sectionCounts: sectionCounts, columns: columns) > maxFittedRows
+        return rosterGridHeight(sectionCounts: sectionCounts, expanded: true, maximumHeight: .greatestFiniteMagnitude) > maximumHeight
     }
 
-    static func rosterGridHeight(sectionCounts: [Int], expanded: Bool) -> CGFloat {
+    static func rosterGridHeight(
+        sectionCounts: [Int], expanded: Bool,
+        maximumHeight: CGFloat = availableRosterHeight
+    ) -> CGFloat {
         guard expanded else { return collapsedRosterHeight }
         let columns = columnCount(sectionCounts: sectionCounts, expanded: true)
         let showHeaders = sectionCounts.filter { $0 > 0 }.count > 1
@@ -4299,9 +4418,7 @@ enum NotchRosterLayout {
                 + gridVerticalPadding
         }
         let contentHeight = max(rowHeight + gridVerticalPadding, heights.max() ?? 0)
-        let viewportLimit = CGFloat(maxFittedRows) * rowHeight
-            + CGFloat(maxFittedRows - 1) * rowSpacing + gridVerticalPadding
-        return min(contentHeight, viewportLimit)
+        return min(contentHeight, max(0, maximumHeight))
     }
 
     static func rosterGridHeight(accountCount: Int, expanded: Bool) -> CGFloat {
@@ -4316,7 +4433,7 @@ enum NotchRosterLayout {
     ) -> CGFloat {
         collapsedDeckHeight - collapsedRosterHeight
             + rosterGridHeight(sectionCounts: sectionCounts, expanded: expanded)
-            + (hasNextActionCaption ? nextActionCaptionHeight : 0)
+            + (hasNextActionCaption ? nextActionCaptionHeight + deckSectionSpacing : 0)
     }
 
     static func deckHeight(

@@ -440,7 +440,7 @@ where
             &self.env.codex_root,
             active.id,
         );
-        let activated = if force {
+        let _activated = if force {
             self.activate_with_expected_active(candidate.id, true, Some(active.id))?
         } else {
             self.activate_if_active_matches(candidate.id, active.id)?
@@ -465,8 +465,7 @@ where
             auto_resume_enabled,
         )
         .ok()
-        .flatten()
-        .or(activated.session_resume);
+        .flatten();
         Ok(output)
     }
 

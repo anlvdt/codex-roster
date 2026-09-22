@@ -416,7 +416,7 @@ struct PrismBankedResetCountBadge: View {
                 HStack(spacing: 2.5) {
                     Image(systemName: "arrow.counterclockwise.circle.fill")
                         .font(PrismTheme.fontChipIcon)
-                    Text("+\(count) banked")
+                    Text(AppLanguage.text("+\(count) dự phòng", "+\(count) banked"))
                         .font(PrismTheme.fontChip)
                 }
                 .padding(.horizontal, 5)

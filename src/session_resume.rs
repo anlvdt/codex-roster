@@ -12,9 +12,9 @@
 //!
 //! Restore never exchanges refresh tokens.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -73,6 +73,9 @@ struct SessionResumeIndex {
     /// One-shot continue target for auto-switch after usage-limit exhaustion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_continue: Option<PendingContinueThread>,
+    /// Batch snapshot; Some(empty) deliberately means no interrupted work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_continues: Option<Vec<PendingContinueThread>>,
 }
 
 #[derive(Clone, Debug)]
@@ -127,48 +130,63 @@ pub fn capture_pending_continue(
     codex_root: &Path,
     from_account_id: Uuid,
 ) -> Result<()> {
-    let Some(discovered) = discover_active_user_session(codex_root)? else {
-        return Ok(());
-    };
     let mut index = load_index(app_data_dir)?;
-    index.pending_continue = Some(PendingContinueThread {
-        session_id: discovered.session_id,
-        cwd: discovered.cwd,
-        rollout_path: {
-            let path = discovered.rollout_path.display().to_string();
-            if path.is_empty() || discovered.rollout_path.as_os_str().is_empty() {
-                None
-            } else {
-                Some(path)
-            }
-        },
-        from_account_id: Some(from_account_id),
-        reason: "auto_switch_exhausted".to_owned(),
-        captured_at: OffsetDateTime::now_utc(),
-    });
+    let sessions = discover_interrupted_sessions(codex_root)?;
+    index.pending_continue = None;
+    index.pending_continues = Some(
+        sessions
+            .into_iter()
+            .map(|session| PendingContinueThread {
+                session_id: session.session_id,
+                cwd: session.cwd,
+                rollout_path: Some(session.rollout_path.display().to_string()),
+                from_account_id: Some(from_account_id),
+                reason: "auto_switch_exhausted".to_owned(),
+                captured_at: OffsetDateTime::now_utc(),
+            })
+            .collect(),
+    );
     save_index(app_data_dir, &index)
 }
 
-/// Consume the one-shot continue hint (clears pending). Used after auto-switch.
+/// Consume the entire snapshot once, including an explicitly empty snapshot.
 pub fn take_pending_continue_hint(
     app_data_dir: &Path,
     enabled: bool,
 ) -> Result<Option<SessionResumeHint>> {
+    let mut index = load_index(app_data_dir)?;
+    let pending = index
+        .pending_continues
+        .take()
+        .or_else(|| index.pending_continue.take().map(|thread| vec![thread]));
+    index.pending_continue = None;
+    save_index(app_data_dir, &index)?;
     if !enabled {
         return Ok(None);
     }
-    let mut index = load_index(app_data_dir)?;
-    let Some(pending) = index.pending_continue.take() else {
+    let Some(pending) = pending else {
         return Ok(None);
     };
-    save_index(app_data_dir, &index)?;
-    Ok(Some(hint_from_parts(
-        enabled,
-        pending.from_account_id,
-        Some(pending.session_id),
-        pending.cwd,
-        pending.rollout_path,
-    )))
+    let mut seen = HashSet::new();
+    let mut hints = pending
+        .into_iter()
+        .filter(|thread| {
+            !thread.session_id.trim().is_empty() && seen.insert(thread.session_id.clone())
+        })
+        .map(|thread| {
+            hint_from_parts(
+                true,
+                thread.from_account_id,
+                Some(thread.session_id),
+                thread.cwd,
+                thread.rollout_path,
+            )
+        });
+    let mut first = hints
+        .next()
+        .unwrap_or_else(|| hint_from_parts(true, None, None, None, None));
+    first.additional_sessions = hints.collect();
+    Ok(Some(first))
 }
 
 pub fn hint_for_account(
@@ -178,6 +196,7 @@ pub fn hint_for_account(
 ) -> Result<SessionResumeHint> {
     if !enabled {
         return Ok(SessionResumeHint {
+            additional_sessions: Vec::new(),
             enabled: false,
             account_id: Some(account_id),
             session_id: None,
@@ -189,6 +208,7 @@ pub fn hint_for_account(
     let index = load_index(app_data_dir)?;
     let Some(pointer) = index.accounts.get(&account_id) else {
         return Ok(SessionResumeHint {
+            additional_sessions: Vec::new(),
             enabled: true,
             account_id: Some(account_id),
             session_id: None,
@@ -199,6 +219,7 @@ pub fn hint_for_account(
     };
     if pointer.session_id.trim().is_empty() {
         return Ok(SessionResumeHint {
+            additional_sessions: Vec::new(),
             enabled: true,
             account_id: Some(account_id),
             session_id: None,
@@ -225,6 +246,7 @@ fn hint_from_parts(
 ) -> SessionResumeHint {
     let Some(session_id) = session_id.filter(|id| !id.trim().is_empty()) else {
         return SessionResumeHint {
+            additional_sessions: Vec::new(),
             enabled,
             account_id,
             session_id: None,
@@ -256,6 +278,7 @@ fn hint_from_parts(
         "ready_cli"
     };
     SessionResumeHint {
+        additional_sessions: Vec::new(),
         enabled,
         account_id,
         session_id: Some(session_id),
@@ -302,6 +325,151 @@ fn offset_to_system(ts: OffsetDateTime) -> SystemTime {
     } else {
         SystemTime::UNIX_EPOCH
     }
+}
+
+/// Discover all recently interrupted user threads, never just the most recent row.
+/// Reading only the tail bounds memory for long conversations. Unknown states
+/// are excluded instead of accidentally restarting completed work.
+fn discover_interrupted_sessions(codex_root: &Path) -> Result<Vec<DiscoveredSession>> {
+    let mut candidates = Vec::new();
+    let mut db_available = false;
+    let db_path = codex_root.join("state_5.sqlite");
+    if db_path.is_file() {
+        if let Ok(conn) = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT rollout_path FROM threads WHERE COALESCE(archived, 0) = 0
+                 AND COALESCE(thread_source, 'user') = 'user'
+                 ORDER BY COALESCE(recency_at_ms, updated_at_ms, 0) DESC",
+            ) {
+                if let Ok(rows) = stmt.query_map([], |row| row.get::<_, Option<String>>(0)) {
+                    db_available = true;
+                    candidates.extend(rows.flatten().flatten().map(PathBuf::from));
+                }
+            }
+        }
+    }
+    if !db_available {
+        let today = OffsetDateTime::now_utc().date();
+        for offset in 0..=1 {
+            let date = today - time::Duration::days(offset);
+            let dir = codex_root
+                .join("sessions")
+                .join(format!("{:04}", date.year()))
+                .join(format!("{:02}", date.month() as u8))
+                .join(format!("{:02}", date.day()));
+            if let Ok(entries) = fs::read_dir(dir) {
+                candidates.extend(
+                    entries
+                        .flatten()
+                        .map(|entry| entry.path())
+                        .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl")),
+                );
+            }
+        }
+    }
+    let floor = SystemTime::now() - Duration::from_secs(24 * 60 * 60);
+    let mut sessions = Vec::new();
+    for path in candidates {
+        let Ok(modified) = fs::metadata(&path).and_then(|meta| meta.modified()) else {
+            continue;
+        };
+        if modified < floor || !rollout_needs_continue(&path).unwrap_or(false) {
+            continue;
+        }
+        if let Ok(Some(session)) = parse_user_session_meta(&path, modified) {
+            sessions.push(session);
+        }
+    }
+    sessions.sort_by(|a, b| {
+        b.modified
+            .cmp(&a.modified)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+    let mut seen = HashSet::new();
+    sessions.retain(|session| seen.insert(session.session_id.clone()));
+    Ok(sessions)
+}
+
+fn rollout_needs_continue(path: &Path) -> Result<bool> {
+    let mut file = File::open(path)?;
+    let size = file.metadata()?.len();
+    let start = size.saturating_sub(512 * 1024);
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<_> = text
+        .lines()
+        .enumerate()
+        .filter(|(i, _)| start == 0 || *i > 0)
+        .map(|(_, line)| line)
+        .collect();
+    if let Some(state) = lines.into_iter().rev().find_map(continuation_state) {
+        return Ok(state);
+    }
+    if start > 0 {
+        // A long turn may start before the tail. Stream older records without
+        // retaining conversation content; the latest lifecycle event wins.
+        let reader = BufReader::new(File::open(path)?);
+        let mut state = false;
+        for line in reader.lines() {
+            if let Some(next) = continuation_state(&line?) {
+                state = next;
+            }
+        }
+        return Ok(state);
+    }
+    Ok(false)
+}
+
+fn continuation_state(line: &str) -> Option<bool> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    if value["type"] != "event_msg" {
+        return None;
+    }
+    let payload = &value["payload"];
+    match payload["type"].as_str()? {
+        "task_started" => Some(true),
+        // Desktop reports quota failures as completed turns with a nested
+        // error, including failures during remote compaction.
+        "task_complete" => Some(payload.get("error").is_some_and(is_usage_limit_error)),
+        "turn_aborted" | "error" => {
+            let reason = payload
+                .get("reason")
+                .or_else(|| payload.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let code = payload.get("code").and_then(Value::as_str).unwrap_or("");
+            Some(
+                code == "usage_limit_reached"
+                    || reason.contains("usage limit")
+                    || reason.contains("usage_limit")
+                    || reason.contains("usagelimit")
+                    || reason.contains("quota"),
+            )
+        }
+        _ => None,
+    }
+}
+
+fn is_usage_limit_error(error: &Value) -> bool {
+    let code = error
+        .get("codex_error_info")
+        .or_else(|| error.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if matches!(code, "usage_limit_exceeded" | "usage_limit_reached") {
+        return true;
+    }
+    // Older clients may omit structured error information.
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    code.is_empty()
+        && (message.contains("hit your usage limit") || message.contains("usage limit exceeded"))
 }
 
 /// Prefer Desktop's `state_5.sqlite` recency (the thread that just hit limits),
@@ -622,6 +790,10 @@ mod tests {
             cwd.to_str().unwrap(),
             "user",
         );
+        append_event(
+            &day_dir.join("rollout-hit-limit.jsonl"),
+            serde_json::json!({"type":"task_started"}),
+        );
         let from = Uuid::new_v4();
         capture_pending_continue(&app_data, &codex_root, from).expect("pending");
         let hint = take_pending_continue_hint(&app_data, true)
@@ -637,6 +809,185 @@ mod tests {
                 .expect("second take")
                 .is_none()
         );
+    }
+
+    fn append_event(path: &Path, payload: Value) {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({"type":"event_msg","payload":payload})
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn batch_filters_completed_cancelled_stale_and_subagent_threads() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("codex");
+        let app = temp.path().join("app");
+        let dir = day_dir(&root);
+        for id in ["active-a", "blocked-b", "done", "cancelled", "sub", "stale"] {
+            let path = dir.join(format!("rollout-{id}.jsonl"));
+            write_rollout(
+                &path,
+                id,
+                temp.path().to_str().unwrap(),
+                if id == "sub" { "subagent" } else { "user" },
+            );
+            append_event(&path, serde_json::json!({"type":"task_started"}));
+            match id {
+                "blocked-b" => append_event(
+                    &path,
+                    serde_json::json!({"type":"error", "code":"usage_limit_reached"}),
+                ),
+                "done" => append_event(&path, serde_json::json!({"type":"task_complete"})),
+                "cancelled" => append_event(
+                    &path,
+                    serde_json::json!({"type":"turn_aborted", "reason":"user_cancelled"}),
+                ),
+                "stale" => filetime_set(&path, SystemTime::now() - Duration::from_secs(25 * 3600)),
+                _ => {}
+            }
+        }
+        // Duplicate rollout id must only be resumed once.
+        let duplicate = dir.join("rollout-duplicate.jsonl");
+        write_rollout(
+            &duplicate,
+            "active-a",
+            temp.path().to_str().unwrap(),
+            "user",
+        );
+        append_event(&duplicate, serde_json::json!({"type":"task_started"}));
+        capture_pending_continue(&app, &root, Uuid::new_v4()).unwrap();
+        let hint = take_pending_continue_hint(&app, true).unwrap().unwrap();
+        let mut ids = vec![hint.session_id.unwrap()];
+        ids.extend(
+            hint.additional_sessions
+                .into_iter()
+                .map(|hint| hint.session_id.unwrap()),
+        );
+        ids.sort();
+        assert_eq!(ids, vec!["active-a", "blocked-b"]);
+        assert!(take_pending_continue_hint(&app, true).unwrap().is_none());
+    }
+
+    #[test]
+    fn empty_capture_replaces_stale_pending_and_disabled_consumes_batch() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("codex");
+        let app = temp.path().join("app");
+        let path = day_dir(&root).join("rollout-active.jsonl");
+        write_rollout(&path, "active", temp.path().to_str().unwrap(), "user");
+        append_event(&path, serde_json::json!({"type":"task_started"}));
+        let account = Uuid::new_v4();
+        capture_pending_continue(&app, &root, account).unwrap();
+        assert!(take_pending_continue_hint(&app, false).unwrap().is_none());
+        assert!(take_pending_continue_hint(&app, true).unwrap().is_none());
+        capture_pending_continue(&app, &root, account).unwrap();
+        append_event(&path, serde_json::json!({"type":"task_complete"}));
+        capture_pending_continue(&app, &root, account).unwrap();
+        let hint = take_pending_continue_hint(&app, true).unwrap().unwrap();
+        assert_eq!(hint.status, "missing");
+        assert!(hint.additional_sessions.is_empty());
+    }
+
+    #[test]
+    fn database_excludes_archived_threads_and_has_no_single_thread_limit() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("codex");
+        fs::create_dir_all(&root).unwrap();
+        let conn = Connection::open(root.join("state_5.sqlite")).unwrap();
+        conn.execute_batch("CREATE TABLE threads (rollout_path TEXT, archived INTEGER, thread_source TEXT, recency_at_ms INTEGER, updated_at_ms INTEGER);").unwrap();
+        for (id, archived) in [("one", 0), ("two", 0), ("archived", 1)] {
+            let path = day_dir(&root).join(format!("rollout-{id}.jsonl"));
+            write_rollout(&path, id, temp.path().to_str().unwrap(), "user");
+            append_event(&path, serde_json::json!({"type":"task_started"}));
+            conn.execute(
+                "INSERT INTO threads VALUES (?1, ?2, 'user', 1, 1)",
+                rusqlite::params![path.to_str().unwrap(), archived],
+            )
+            .unwrap();
+        }
+        let sessions = discover_interrupted_sessions(&root).unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().all(|s| s.session_id != "archived"));
+    }
+
+    #[test]
+    fn long_running_turn_is_detected_beyond_tail_and_new_completion_wins() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("rollout.jsonl");
+        write_rollout(&path, "long", temp.path().to_str().unwrap(), "user");
+        append_event(&path, serde_json::json!({"type":"task_started"}));
+        for _ in 0..600 {
+            append_event(
+                &path,
+                serde_json::json!({"type":"token_count", "padding":"x".repeat(1024)}),
+            );
+        }
+        assert!(rollout_needs_continue(&path).unwrap());
+        append_event(&path, serde_json::json!({"type":"task_complete"}));
+        assert!(!rollout_needs_continue(&path).unwrap());
+    }
+
+    #[test]
+    fn desktop_quota_completions_resume_multiple_threads() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("codex");
+        let app = temp.path().join("app");
+        for (id, error) in [
+            (
+                "normal-limit",
+                serde_json::json!({"codex_error_info":"usage_limit_exceeded", "message":"You’ve hit your usage limit."}),
+            ),
+            (
+                "compact-limit",
+                serde_json::json!({"codex_error_info":"usage_limit_exceeded", "message":"Error running remote compact task: You’ve hit your usage limit."}),
+            ),
+            ("success", Value::Null),
+            (
+                "other-error",
+                serde_json::json!({"codex_error_info":"network_error", "message":"Connection lost"}),
+            ),
+        ] {
+            let path = day_dir(&root).join(format!("rollout-{id}.jsonl"));
+            write_rollout(&path, id, temp.path().to_str().unwrap(), "user");
+            append_event(&path, serde_json::json!({"type":"task_started"}));
+            append_event(
+                &path,
+                serde_json::json!({"type":"task_complete", "last_agent_message":null, "error":error}),
+            );
+        }
+        capture_pending_continue(&app, &root, Uuid::new_v4()).unwrap();
+        let hint = take_pending_continue_hint(&app, true).unwrap().unwrap();
+        let mut ids = vec![hint.session_id.unwrap()];
+        ids.extend(
+            hint.additional_sessions
+                .into_iter()
+                .map(|h| h.session_id.unwrap()),
+        );
+        ids.sort();
+        assert_eq!(ids, vec!["compact-limit", "normal-limit"]);
+    }
+
+    #[test]
+    fn successful_completion_after_quota_failure_clears_resume() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("rollout.jsonl");
+        write_rollout(&path, "thread", temp.path().to_str().unwrap(), "user");
+        append_event(
+            &path,
+            serde_json::json!({"type":"task_complete", "error":{"codex_error_info":"usage_limit_exceeded"}}),
+        );
+        assert!(rollout_needs_continue(&path).unwrap());
+        append_event(&path, serde_json::json!({"type":"task_started"}));
+        append_event(
+            &path,
+            serde_json::json!({"type":"task_complete", "error":null}),
+        );
+        assert!(!rollout_needs_continue(&path).unwrap());
     }
 
     fn filetime_set(path: &Path, when: SystemTime) {

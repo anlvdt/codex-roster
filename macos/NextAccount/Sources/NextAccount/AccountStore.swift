@@ -299,6 +299,10 @@ final class AccountStore: ObservableObject {
     private var coreBootstrapStarted = false
     private var menuInteractionUntil: Date?
     private var isRefreshingAccountsInBackground = false
+    /// First wall-clock time Desktop was observed running in the current accept cycle.
+    /// Resume settle credits this so post-accept does not always pay another full 5s.
+    /// Also floors log mtime so a prior launch's sidebar_ready cannot false-ready us.
+    private var desktopBecameRunningAt: Date?
 
     init() {
         let defaults = UserDefaults.standard
@@ -376,9 +380,11 @@ final class AccountStore: ObservableObject {
             .remainingPercent else {
             return .seconds(60)
         }
-        // 0% must not poll every 10s — that made auto-switch close ChatGPT in a loop
-        // when decide briefly looked "ready" against a stale sibling row.
-        if remaining == 0 { return .seconds(60) }
+        // Near-exhaust: prefer ~18s so decide sees Ready sooner. Do NOT go back to
+        // 10s — that quit-looped ChatGPT when decide briefly looked ready on a
+        // stale sibling. Apply stays tightly ready-gated (usable candidate +
+        // generation check + pre-activate), and all-exhausted stays at 300s.
+        if remaining == 0 { return .seconds(18) }
         if remaining <= 5 { return .seconds(10) }
         if remaining <= 20 { return .seconds(30) }
         return .seconds(60)
@@ -1154,11 +1160,13 @@ final class AccountStore: ObservableObject {
                 : "Resuming session · \(label)"
         )
 
-        // Cold Desktop after web-session clear needs several seconds before
-        // deep-link navigation works (sidebar_ready ≈ 7s on this machine).
+        // Cold Desktop after web-session clear needs hydrate before deep-link
+        // (sidebar_ready ≈ 4–7s). Settle clock starts at Desktop-up during
+        // acceptance when possible, so we rarely pay a full extra 5s here.
         await waitForDesktopResumeReady(minimumSettle: .seconds(5), maximumWait: .seconds(14))
 
         let result = await openRememberedWorkspace(cwd: hint.cwd, sessionID: hint.sessionId)
+        desktopBecameRunningAt = nil
         logSessionResume("result=\(String(describing: result)) label=\(label) continueExhausted=\(continueExhausted)")
         switch result {
         case .openedThread:
@@ -1229,36 +1237,66 @@ final class AccountStore: ObservableObject {
         case failed
     }
 
-    /// Wait until Desktop is up long enough for deep-link handlers + app-server.
+    /// Wait until Desktop can accept deep-links: process up + (sidebar_ready /
+    /// app-server log) or Desktop-up ≥ minimumSettle. Credits acceptance uptime.
     private func waitForDesktopResumeReady(
         minimumSettle: Duration,
         maximumWait: Duration
     ) async {
-        let start = ContinuousClock.now
-        while !ChatGPTDesktop.isRunning {
-            if ContinuousClock.now - start > maximumWait { return }
+        let waitStarted = ContinuousClock.now
+        let minimumSettleSeconds = durationSeconds(minimumSettle)
+        while ContinuousClock.now - waitStarted <= maximumWait {
+            if ChatGPTDesktop.isRunning {
+                if desktopBecameRunningAt == nil {
+                    desktopBecameRunningAt = Date()
+                }
+                let upAt = desktopBecameRunningAt ?? Date()
+                let upFor = Date().timeIntervalSince(upAt)
+                // Event-driven: recent hydrate markers beat a fixed post-accept sleep.
+                // Floor log mtime at Desktop-up so a prior session's sidebar_ready
+                // cannot make us deep-link before the new process is ready.
+                if await desktopLogShowsResumeHandlersReady(notBefore: upAt.addingTimeInterval(-1)) {
+                    logSessionResume("resume handlers ready via Desktop log")
+                    return
+                }
+                if upFor >= minimumSettleSeconds {
+                    logSessionResume("resume settle credited from Desktop-up (\(Int(upFor))s)")
+                    return
+                }
+            } else {
+                desktopBecameRunningAt = nil
+            }
             try? await Task.sleep(for: .milliseconds(250))
         }
-        let elapsed = ContinuousClock.now - start
-        if elapsed < minimumSettle {
-            try? await Task.sleep(for: minimumSettle - elapsed)
-        }
+        logSessionResume("resume ready wait hit \(maximumWait) cap")
+    }
+
+    private func durationSeconds(_ duration: Duration) -> TimeInterval {
+        let components = duration.components
+        return TimeInterval(components.seconds)
+            + TimeInterval(components.attoseconds) / 1_000_000_000_000_000_000
     }
 
     /// Opens the remembered thread (preferred) or project for the account just switched *to*.
     private func openRememberedWorkspace(cwd: String?, sessionID: String?) async -> SessionResumeOpenResult {
         if let sessionID, !sessionID.isEmpty {
             // Retry: first deliveries during cold hydrate are often dropped.
+            // Poll logs every ~300ms instead of a blind 1.5s sleep between attempts.
             for attempt in 1...6 {
                 logSessionResume("thread deep-link attempt \(attempt) id=\(sessionID)")
                 let delivered = await openCodexThreadDeepLink(sessionID: sessionID)
                 if delivered {
-                    if await desktopLogConfirmsThreadOpen(sessionID: sessionID, withinSeconds: 3.5) {
-                        return .openedThread
+                    let evidenceDeadline = ContinuousClock.now + .milliseconds(1500)
+                    while ContinuousClock.now < evidenceDeadline {
+                        if await desktopLogConfirmsThreadOpen(sessionID: sessionID, withinSeconds: 3.5) {
+                            return .openedThread
+                        }
+                        try? await Task.sleep(for: .milliseconds(300))
                     }
                     logSessionResume("open delivered but no Desktop resume evidence yet")
+                } else {
+                    try? await Task.sleep(for: .milliseconds(300))
                 }
-                try? await Task.sleep(for: .milliseconds(1500))
             }
             // Final attempt — only claim thread resume when Desktop log confirms.
             if await openCodexThreadDeepLink(sessionID: sessionID),
@@ -1361,12 +1399,14 @@ final class AccountStore: ObservableObject {
     private func openCodexURL(_ url: String) async -> Bool {
         // `com.openai.chat` is stale on current installs — ChatGPT.app is
         // `com.openai.codex`. Prefer resolved IDs that LaunchServices knows.
+        // `/usr/bin/open` returns quickly; keep a short timeout (not 8s).
+        let openTimeout = 2.5
         let bundleIDs = ChatGPTDesktop.resolvableBundleIDs()
         for bundleID in bundleIDs {
             if await runProcessAndWait(
                 executable: "/usr/bin/open",
                 arguments: ["-b", bundleID, url],
-                timeoutSeconds: 8
+                timeoutSeconds: openTimeout
             ) {
                 return true
             }
@@ -1376,7 +1416,7 @@ final class AccountStore: ObservableObject {
             if await runProcessAndWait(
                 executable: "/usr/bin/open",
                 arguments: ["-a", path, url],
-                timeoutSeconds: 8
+                timeoutSeconds: openTimeout
             ) {
                 return true
             }
@@ -1384,7 +1424,7 @@ final class AccountStore: ObservableObject {
         return await runProcessAndWait(
             executable: "/usr/bin/open",
             arguments: [url],
-            timeoutSeconds: 8
+            timeoutSeconds: openTimeout
         )
     }
 
@@ -1398,6 +1438,55 @@ final class AccountStore: ObservableObject {
         }
         return await MainActor.run {
             NSWorkspace.shared.open(URL(fileURLWithPath: cwd))
+        }
+    }
+
+    /// Scan recent Codex Desktop logs for hydrate markers that mean deep-links work.
+    private func desktopLogShowsResumeHandlersReady(notBefore: Date) async -> Bool {
+        let root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/com.openai.codex", isDirectory: true)
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                let fm = FileManager.default
+                guard let enumerator = fm.enumerator(
+                    at: root,
+                    includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+                    options: [.skipsHiddenFiles]
+                ) else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                var candidates: [(Date, URL)] = []
+                while let item = enumerator.nextObject() as? URL {
+                    guard item.pathExtension == "log" else { continue }
+                    let values = try? item.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
+                    guard values?.isRegularFile == true,
+                          let modified = values?.contentModificationDate,
+                          modified >= notBefore else { continue }
+                    candidates.append((modified, item))
+                }
+                candidates.sort { $0.0 > $1.0 }
+                for (_, url) in candidates.prefix(6) {
+                    guard let handle = try? FileHandle(forReadingFrom: url) else { continue }
+                    defer { try? handle.close() }
+                    let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                    if size > 262_144 {
+                        try? handle.seek(toOffset: UInt64(size - 262_144))
+                    }
+                    guard let data = try? handle.readToEnd(),
+                          let text = String(data: data, encoding: .utf8) else { continue }
+                    // Real cold-launch markers from Desktop logs (marksMs.sidebar_ready /
+                    // local app-server sqlite). Either means deep-link handlers are live.
+                    let ready = text.contains("sidebar_ready")
+                        || text.contains("local app-server sqlite initialized")
+                        || text.contains("host_services_ready")
+                    if ready {
+                        continuation.resume(returning: true)
+                        return
+                    }
+                }
+                continuation.resume(returning: false)
+            }
         }
     }
 
@@ -2377,7 +2466,11 @@ final class AccountStore: ObservableObject {
         // "Sign in to ChatGPT").
         // Fast path: Desktop already running → poll immediately after a short
         // beat. Cold launch still gets a longer head start before the loop.
+        // Reset settle origin for this accept cycle; stamp on first process-up
+        // so auto-resume can credit the same Desktop-up clock.
+        desktopBecameRunningAt = nil
         if ChatGPTDesktop.isRunning {
+            desktopBecameRunningAt = Date()
             try? await Task.sleep(for: .milliseconds(400))
         } else {
             try? await Task.sleep(for: .milliseconds(800))
@@ -2386,8 +2479,12 @@ final class AccountStore: ObservableObject {
         var sawMatchingLiveIdentity = false
         while ContinuousClock.now < deadline {
             guard ChatGPTDesktop.isRunning else {
+                desktopBecameRunningAt = nil
                 try? await Task.sleep(for: .milliseconds(250))
                 continue
+            }
+            if desktopBecameRunningAt == nil {
+                desktopBecameRunningAt = Date()
             }
             do {
                 let status = try await cli.decode(StatusOutput.self, arguments: ["status"])

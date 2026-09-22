@@ -14,6 +14,8 @@ use super::App;
 pub const AUTO_SWITCH_POLL_SECONDS: u64 = 60;
 /// While every account is exhausted (or only banked resets remain), back off
 /// so decide does not fan-out AT probes every minute.
+/// Keep 300s — macOS shortens only the near-exhaust (0%) path to ~18s; the
+/// CLI worker has no remaining-% signal, so do not mirror that here.
 pub const AUTO_SWITCH_EXHAUSTED_BACKOFF_SECONDS: u64 = 300;
 
 static AUTO_SWITCH_RUN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();

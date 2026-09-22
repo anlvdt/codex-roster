@@ -1284,6 +1284,8 @@ private struct PrismCompactAccountCard: View {
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
+        .disabled(store.isBusyForActions || store.isWorking)
+        .opacity(store.isBusyForActions ? 0.6 : 1.0)
         .fixedSize()
     }
 

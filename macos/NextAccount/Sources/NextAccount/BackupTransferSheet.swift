@@ -49,7 +49,7 @@ struct BackupTransferPane: View {
 
                 if !isExport {
                     Text(language.text(
-                        "Cảnh báo: snapshot nhập vào có thể giữ refresh token cũ hơn phiên Codex đang sống. Hãy Save current trước; đừng kích hoạt hàng vừa nhập một cách mù quáng — có thể buộc đăng nhập lại.",
+                        "Cảnh báo: bản sao lưu nhập vào có thể chứa refresh token cũ hơn phiên Codex đang hoạt động. Hãy lưu lại tài khoản hiện tại trước; không nên kích hoạt ngay các hàng vừa nhập khi chưa kiểm tra — có thể buộc phải đăng nhập lại.",
                         "Warning: imported snapshots may hold stale refresh tokens vs live Codex. Save the current session first; do not activate imported rows blindly — that can force re-login."
                     ))
                     .font(RosterSecondaryChrome.caption)

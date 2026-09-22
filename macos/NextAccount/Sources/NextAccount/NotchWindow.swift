@@ -106,10 +106,16 @@ struct NotchWindowView: View {
         store.accounts.filter { !$0.archived }.count
     }
 
+    private var hasNextActionCaption: Bool {
+        if store.sessionResumeCaption != nil { return true }
+        return NextAction.resolve(in: store).compactCaption(language: language) != nil
+    }
+
     private var expandedPanelHeight: CGFloat {
         NotchRosterLayout.deckHeight(
             accountCount: rosterAccountCount,
-            expanded: isRosterExpanded
+            expanded: isRosterExpanded,
+            hasNextActionCaption: hasNextActionCaption
         )
     }
 

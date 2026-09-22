@@ -427,6 +427,12 @@ struct PrismQuickSwitchDeck: View {
                         Image(systemName: "antenna.radiowaves.left.and.right")
                             .font(PrismTheme.fontMicro)
                             .foregroundStyle(.secondary)
+                        if let signalPercent = outlook.signalPercent {
+                            Text(language.text("Cam kết \(signalPercent)%", "Tibo \(signalPercent)%"))
+                                .font(PrismTheme.fontChip)
+                                .foregroundStyle(signalPercent >= 50 ? PrismTheme.amber : PrismTheme.emerald)
+                            Text("·").foregroundStyle(.tertiary)
+                        }
                         Text("24h \(outlook.chance24Hours)%")
                             .font(PrismTheme.fontChip)
                             .foregroundStyle(outlook.chance24Hours >= 50 ? PrismTheme.amber : PrismTheme.emerald)
@@ -435,7 +441,9 @@ struct PrismQuickSwitchDeck: View {
                             .font(PrismTheme.fontChip)
                             .foregroundStyle(outlook.chance48Hours >= 50 ? PrismTheme.amber : PrismTheme.emerald)
                     }
-                    .help(outlook.windowLabel)
+                    .help(outlook.signalSummary?.isEmpty == false
+                          ? (outlook.signalSummary ?? outlook.windowLabel)
+                          : outlook.windowLabel)
                 }
                 Button {
                     PrismTheme.triggerHaptic()

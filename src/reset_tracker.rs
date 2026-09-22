@@ -24,6 +24,9 @@ pub struct ResetOutlook {
     pub last_reset_is_confirmed: bool,
     pub chance_24_hours: u8,
     pub chance_48_hours: u8,
+    /// codex-reset.com "Tibo commitment" lead % (`probabilities.signal_percent`).
+    /// Distinct from `confidence`, which is experimental model-fit (often "low").
+    pub signal_percent: Option<u8>,
     pub confidence: String,
     pub window_label: String,
     pub window_timezone: Option<String>,
@@ -102,6 +105,7 @@ pub fn fetch_reset_outlook() -> Result<ResetOutlook> {
     // Prefer forecast.official_signal (current announcement) over /api/feed.signal,
     // which can lag on an older candidate while Tibo already posted a dated commitment.
     let outlook_signal = resolve_outlook_signal(&forecast, now);
+    let signal_percent = resolve_signal_percent(&forecast);
 
     Ok(ResetOutlook {
         updated_at: forecast.updated_at,
@@ -110,6 +114,7 @@ pub fn fetch_reset_outlook() -> Result<ResetOutlook> {
         last_reset_is_confirmed: outlook_signal.last_reset_is_confirmed,
         chance_24_hours: forecast.probabilities.rounded_24h,
         chance_48_hours: forecast.probabilities.rounded_48h,
+        signal_percent,
         confidence: forecast.confidence,
         window_label: outlook_signal
             .window_label
@@ -126,6 +131,24 @@ pub fn fetch_reset_outlook() -> Result<ResetOutlook> {
         cadence_days: forecast.cadence.as_ref().and_then(|c| c.recent_median_days),
         cadence_accelerating: forecast.cadence.as_ref().and_then(|c| c.accelerating),
     })
+}
+
+/// Site lead metric ("Tibo commitment" / Watch strength), not the 24h/48h model odds
+/// and not `confidence` (walk-forward model-fit label, often stuck on "low").
+fn resolve_signal_percent(forecast: &ForecastResponse) -> Option<u8> {
+    forecast
+        .probabilities
+        .signal_percent
+        .or(forecast.probabilities.commitment_floor_percent)
+        .or_else(|| forecast.signal_score.as_ref().and_then(|score| score.value))
+        .or_else(|| {
+            forecast
+                .official_signal
+                .as_ref()
+                .and_then(|official| official.score.as_ref())
+                .and_then(|score| score.value)
+        })
+        .filter(|&percent| percent > 0)
 }
 
 struct ResolvedOutlookSignal {
@@ -374,6 +397,9 @@ struct ForecastResponse {
     /// Prefer this over `/api/feed.signal`, which can lag behind.
     #[serde(default)]
     official_signal: Option<ForecastOfficialSignal>,
+    /// Aggregate Watch / commitment score shown as the site lead percent.
+    #[serde(default)]
+    signal_score: Option<ForecastSignalScore>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -387,7 +413,15 @@ struct ForecastOfficialSignal {
     signal_type: Option<String>,
     signal_tier: Option<String>,
     #[serde(default)]
+    score: Option<ForecastSignalScore>,
+    #[serde(default)]
     window: Option<ForecastOfficialWindow>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ForecastSignalScore {
+    #[serde(default)]
+    value: Option<u8>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -406,6 +440,11 @@ struct ForecastOfficialWindow {
 struct ForecastProbabilities {
     rounded_24h: u8,
     rounded_48h: u8,
+    /// Site "Tibo commitment" / Watch lead percent (e.g. 93).
+    #[serde(default)]
+    signal_percent: Option<u8>,
+    #[serde(default)]
+    commitment_floor_percent: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -1143,6 +1182,7 @@ mod tests {
             kind: Some("signal".into()),
             signal_type: Some("dated_commitment".into()),
             signal_tier: Some("likely".into()),
+            score: Some(ForecastSignalScore { value: Some(93) }),
             window: Some(ForecastOfficialWindow {
                 label: Some("end of Tuesday".into()),
                 start_at: Some("2026-09-22T04:31:32.000Z".into()),
@@ -1164,6 +1204,63 @@ mod tests {
         let event = official_signal_event(Some(&official)).expect("event");
         assert_eq!(event.id, "2102254445082116335");
         assert_eq!(event.kind, "scheduled_global_reset");
+    }
+
+    #[test]
+    fn prefers_site_commitment_percent_over_model_confidence_label() {
+        let from_probabilities = ForecastResponse {
+            updated_at: "2026-09-22T05:00:00.000Z".into(),
+            probabilities: ForecastProbabilities {
+                rounded_24h: 20,
+                rounded_48h: 35,
+                signal_percent: Some(93),
+                commitment_floor_percent: Some(93),
+            },
+            confidence: "low".into(),
+            last_reset_at: "2026-09-12T08:09:17.000Z".into(),
+            time_window: ForecastTimeWindow {
+                label: "11 PM - 2 AM".into(),
+                timezone: Some("UTC".into()),
+                start_hour: Some(23),
+                end_hour: Some(2),
+            },
+            cadence: None,
+            official_signal: None,
+            signal_score: Some(ForecastSignalScore { value: Some(93) }),
+        };
+        assert_eq!(resolve_signal_percent(&from_probabilities), Some(93));
+
+        let from_official_score = ForecastResponse {
+            updated_at: "2026-09-22T05:00:00.000Z".into(),
+            probabilities: ForecastProbabilities {
+                rounded_24h: 10,
+                rounded_48h: 20,
+                signal_percent: None,
+                commitment_floor_percent: None,
+            },
+            confidence: "low".into(),
+            last_reset_at: "2026-09-12T08:09:17.000Z".into(),
+            time_window: ForecastTimeWindow {
+                label: "11 PM - 2 AM".into(),
+                timezone: Some("UTC".into()),
+                start_hour: Some(23),
+                end_hour: Some(2),
+            },
+            cadence: None,
+            signal_score: None,
+            official_signal: Some(ForecastOfficialSignal {
+                tweet_id: Some("1".into()),
+                summary: Some("promised a reset".into()),
+                at: Some("2026-09-22T04:31:32.000Z".into()),
+                url: None,
+                kind: None,
+                signal_type: Some("dated_commitment".into()),
+                signal_tier: Some("likely".into()),
+                score: Some(ForecastSignalScore { value: Some(100) }),
+                window: None,
+            }),
+        };
+        assert_eq!(resolve_signal_percent(&from_official_score), Some(100));
     }
 
     #[test]

@@ -2275,11 +2275,19 @@ struct GlobalResetOutlookCard: View {
 
             if let outlook = store.resetOutlook {
                 let isConfirmedReset = outlook.lastResetIsConfirmed == true
-                let urgencyColor = forecastColor(max(outlook.chance24Hours, outlook.chance48Hours), high: .orange)
+                let leadPercent = outlook.signalPercent ?? max(outlook.chance24Hours, outlook.chance48Hours)
+                let urgencyColor = forecastColor(leadPercent, high: .orange)
 
                 // One full-width row of metrics; the card used to stack these
                 // vertically and leave half of its width blank.
                 HStack(alignment: .top, spacing: 12) {
+                    if let signalPercent = outlook.signalPercent {
+                        ResetOutlookMetric(
+                            title: language.text("Cam kết Tibo", "Tibo commitment"),
+                            value: "\(signalPercent)%",
+                            tint: forecastColor(signalPercent, high: .red)
+                        )
+                    }
                     ResetOutlookMetric(
                         title: language.text("24 giờ", "24 hours"),
                         value: "\(outlook.chance24Hours)%",
@@ -2309,8 +2317,8 @@ struct GlobalResetOutlookCard: View {
                         .fill(urgencyColor)
                         .frame(width: 8, height: 8)
                     Text(language.text(
-                        "Độ tin cậy: \(localizedConfidence(outlook.confidence))",
-                        "Confidence: \(localizedConfidence(outlook.confidence))"
+                        "Độ tin cậy mô hình: \(localizedConfidence(outlook.confidence))",
+                        "Model confidence: \(localizedConfidence(outlook.confidence))"
                     ))
                     if isConfirmedReset {
                         Text("·").foregroundStyle(.tertiary)
@@ -3908,6 +3916,9 @@ private struct MenuBarLiveSignals: View {
     private var resetSignalText: String {
         guard let outlook = store.resetOutlook else {
             return language.text("Đang theo dõi", "Monitoring")
+        }
+        if let signalPercent = outlook.signalPercent {
+            return language.text("Cam kết \(signalPercent)%", "Commitment \(signalPercent)%")
         }
         return "\(outlook.chance24Hours)% / 24H"
     }

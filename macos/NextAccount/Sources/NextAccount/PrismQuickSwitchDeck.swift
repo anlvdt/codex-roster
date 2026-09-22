@@ -455,27 +455,7 @@ struct PrismQuickSwitchDeck: View {
                     .font(PrismTheme.fontBodyCompactBold)
                 Spacer(minLength: 4)
                 if let outlook = store.resetOutlook {
-                    HStack(spacing: 3) {
-                        Image(systemName: "antenna.radiowaves.left.and.right")
-                            .font(PrismTheme.fontMicro)
-                            .foregroundStyle(.secondary)
-                        if let signalPercent = outlook.signalPercent {
-                            Text(language.text("Cam kết \(signalPercent)%", "Commit \(signalPercent)%"))
-                                .font(PrismTheme.fontChip)
-                                .foregroundStyle(signalPercent >= 50 ? PrismTheme.amber : PrismTheme.emerald)
-                            Text("·").foregroundStyle(.tertiary)
-                        }
-                        Text("24h \(outlook.chance24Hours)%")
-                            .font(PrismTheme.fontChip)
-                            .foregroundStyle(outlook.chance24Hours >= 50 ? PrismTheme.amber : PrismTheme.emerald)
-                        Text("·").foregroundStyle(.tertiary)
-                        Text("48h \(outlook.chance48Hours)%")
-                            .font(PrismTheme.fontChip)
-                            .foregroundStyle(outlook.chance48Hours >= 50 ? PrismTheme.amber : PrismTheme.emerald)
-                    }
-                    .help(outlook.signalSummary?.isEmpty == false
-                          ? (outlook.signalSummary ?? outlook.windowLabel)
-                          : outlook.windowLabel)
+                    resetOutlookBadge(outlook)
                 }
                 Button {
                     PrismTheme.triggerHaptic()
@@ -594,6 +574,84 @@ struct PrismQuickSwitchDeck: View {
                 .fill(PrismTheme.surfacePanel)
                 .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(PrismTheme.surfaceFill, lineWidth: 0.8))
         )
+    }
+
+    private func resetOutlookBadge(_ outlook: ResetOutlook) -> some View {
+        Button {
+            PrismTheme.triggerHaptic()
+            if let url = outlook.sourceUrl.flatMap(URL.init) {
+                openURL(url)
+            } else {
+                openURL(URL(string: "https://codex-resets.com")!)
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .font(PrismTheme.fontMicro)
+                    .foregroundStyle(PrismTheme.accent)
+                Text(language.text("Reset:", "Reset:"))
+                    .font(PrismTheme.fontMicro)
+                    .foregroundStyle(PrismTheme.textSecondary)
+                if let signalPercent = outlook.signalPercent {
+                    Text(language.text("Tín hiệu \(signalPercent)%", "Signal \(signalPercent)%"))
+                        .font(PrismTheme.fontChip)
+                        .foregroundStyle(signalPercent >= 50 ? PrismTheme.amber : PrismTheme.emerald)
+                    Text("·").foregroundStyle(.tertiary)
+                }
+                Text("24h \(outlook.chance24Hours)%")
+                    .font(PrismTheme.fontChip)
+                    .foregroundStyle(outlook.chance24Hours >= 50 ? PrismTheme.amber : PrismTheme.emerald)
+                Text("·").foregroundStyle(.tertiary)
+                Text("48h \(outlook.chance48Hours)%")
+                    .font(PrismTheme.fontChip)
+                    .foregroundStyle(outlook.chance48Hours >= 50 ? PrismTheme.amber : PrismTheme.emerald)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2.5)
+            .background(
+                Capsule()
+                    .fill(PrismTheme.surfaceMuted)
+                    .overlay(Capsule().strokeBorder(PrismTheme.surfaceFill, lineWidth: 0.8))
+            )
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .help(resetOutlookTooltip(for: outlook))
+    }
+
+    private func resetOutlookTooltip(for outlook: ResetOutlook) -> String {
+        var lines: [String] = []
+        lines.append(language.text(
+            "Radar dự báo reset quota toàn hệ thống OpenAI (codex-resets.com)",
+            "OpenAI global quota reset radar (codex-resets.com)"
+        ))
+        if let signal = outlook.signalPercent {
+            lines.append(language.text(
+                "• Tín hiệu cam kết: \(signal)% (từ cộng đồng / Tibo)",
+                "• Commitment signal: \(signal)% (from community / Tibo)"
+            ))
+        }
+        lines.append(language.text(
+            "• Xác suất reset trong 24h tới: \(outlook.chance24Hours)%",
+            "• 24h reset chance: \(outlook.chance24Hours)%"
+        ))
+        lines.append(language.text(
+            "• Xác suất reset trong 48h tới: \(outlook.chance48Hours)%",
+            "• 48h reset chance: \(outlook.chance48Hours)%"
+        ))
+        if let summary = outlook.signalSummary, !summary.isEmpty {
+            lines.append("• " + summary)
+        } else if !outlook.windowLabel.isEmpty {
+            lines.append(language.text(
+                "• Khung giờ: \(outlook.windowLabel)",
+                "• Window: \(outlook.windowLabel)"
+            ))
+        }
+        lines.append(language.text(
+            "Nhấp để mở codex-resets.com",
+            "Click to open codex-resets.com"
+        ))
+        return lines.joined(separator: "\n")
     }
 
     private var githubRepoURL: URL {

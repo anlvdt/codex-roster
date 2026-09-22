@@ -13,8 +13,6 @@ struct AutomationSettingsView: View {
                 Label(language.text("Cài đặt", "Settings"), systemImage: "gearshape.2")
                     .font(RosterSecondaryChrome.title)
 
-                RosterSecondaryLinkBar(current: .settings)
-
                 LanguagePreferencePicker()
                     .padding(14)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -170,10 +168,7 @@ struct AutomationSettingsView: View {
             .rosterSecondaryPadding()
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .rosterSecondaryFrame(
-            width: RosterSecondaryChrome.windowWidth,
-            height: RosterSecondaryChrome.settingsHeight
-        )
+        .rosterSecondaryContent()
         .confirmationDialog(
             language.text("Khôi phục phiên sao lưu?", "Restore saved sessions?"),
             isPresented: $confirmingFullBackupRestore,

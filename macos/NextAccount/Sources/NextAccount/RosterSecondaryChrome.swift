@@ -1,13 +1,16 @@
 import SwiftUI
 
-/// Shared sizing and type scale for secondary windows (Settings, Operations, About, sheets).
+/// Shared sizing and type scale for the secondary console (Settings / Operations / About / Backup).
 enum RosterSecondaryChrome {
-    static let windowWidth: CGFloat = 560
-    static let settingsHeight: CGFloat = 640
-    static let operationsWidth: CGFloat = 720
-    static let operationsHeight: CGFloat = 860
-    static let aboutWidth: CGFloat = 680
-    static let aboutHeight: CGFloat = 600
+    static let consoleWidth: CGFloat = 720
+    static let consoleHeight: CGFloat = 780
+    /// Legacy aliases kept so older call sites / previews still compile.
+    static let windowWidth: CGFloat = consoleWidth
+    static let settingsHeight: CGFloat = consoleHeight
+    static let operationsWidth: CGFloat = consoleWidth
+    static let operationsHeight: CGFloat = consoleHeight
+    static let aboutWidth: CGFloat = consoleWidth
+    static let aboutHeight: CGFloat = consoleHeight
     static let sheetWidth: CGFloat = 540
 
     static let contentPadding: CGFloat = 22
@@ -26,9 +29,9 @@ enum RosterSecondaryChrome {
 }
 
 extension View {
-    /// Standard secondary-window frame used by Settings / Operations / About.
-    func rosterSecondaryFrame(width: CGFloat, height: CGFloat) -> some View {
-        frame(width: width, height: height)
+    /// Fill the console content area (no fixed outer frame — the hub owns sizing).
+    func rosterSecondaryContent() -> some View {
+        frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     func rosterSecondaryPadding() -> some View {
@@ -64,8 +67,8 @@ struct LanguagePreferencePicker: View {
     }
 }
 
-/// Related secondary surfaces that should link to each other bidirectionally.
-enum RosterSecondaryNavTarget: String, CaseIterable, Identifiable {
+/// Tabs inside the single secondary console window.
+enum RosterConsoleTab: String, CaseIterable, Identifiable {
     case settings
     case operations
     case about
@@ -74,14 +77,7 @@ enum RosterSecondaryNavTarget: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    var windowID: String? {
-        switch self {
-        case .settings: "settings"
-        case .operations: "operations"
-        case .about: "about"
-        case .exportBackup, .importBackup: nil
-        }
-    }
+    static let windowID = "roster-console"
 
     @MainActor
     func title(in language: LanguageStore) -> String {
@@ -93,9 +89,9 @@ enum RosterSecondaryNavTarget: String, CaseIterable, Identifiable {
         case .about:
             language.text("Giới thiệu", "About")
         case .exportBackup:
-            language.text("Xuất backup", "Export backup")
+            language.text("Xuất backup", "Export")
         case .importBackup:
-            language.text("Nhập backup", "Import backup")
+            language.text("Nhập backup", "Import")
         }
     }
 
@@ -110,92 +106,35 @@ enum RosterSecondaryNavTarget: String, CaseIterable, Identifiable {
     }
 }
 
-/// Compact cross-links so Settings / Operations / About / Backup are not dead ends.
-struct RosterSecondaryLinkBar: View {
-    @EnvironmentObject private var language: LanguageStore
-    @Environment(\.openWindow) private var openWindow
-    @Environment(\.dismiss) private var dismiss
+/// Live tab selection shared across entry points and the console window.
+@MainActor
+final class RosterConsoleSelection: ObservableObject {
+    static let shared = RosterConsoleSelection()
 
-    /// Surface currently showing this bar (rendered as current, not tappable).
-    var current: RosterSecondaryNavTarget?
-    /// When true (sheets), dismiss before jumping to a named window.
-    var dismissBeforeNavigate: Bool = false
+    @Published var tab: RosterConsoleTab = .settings
 
-    private var destinations: [RosterSecondaryNavTarget] {
-        RosterSecondaryNavTarget.allCases
+    func select(_ tab: RosterConsoleTab) {
+        self.tab = tab
+    }
+}
+
+extension Notification.Name {
+    /// Open (or raise) the roster console and select a tab. `object` is `RosterConsoleTab.rawValue`.
+    static let openRosterConsole = Notification.Name("codexRoster.openRosterConsole")
+}
+
+/// Present the single secondary hub above the notch and select a tab.
+@MainActor
+enum RosterConsolePresenter {
+    static func open(_ tab: RosterConsoleTab, using openWindow: OpenWindowAction) {
+        RosterConsoleSelection.shared.select(tab)
+        openWindow(id: RosterConsoleTab.windowID)
+        RosterWindowSurface.presentNamedWindow(id: RosterConsoleTab.windowID)
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(language.text("Cửa sổ liên quan", "Related windows"))
-                .font(RosterSecondaryChrome.footnote.weight(.semibold))
-                .foregroundStyle(.secondary)
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 6) {
-                    ForEach(destinations) { destination in
-                        linkControl(for: destination)
-                    }
-                }
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 6) {
-                        ForEach(Array(destinations.prefix(3))) { destination in
-                            linkControl(for: destination)
-                        }
-                    }
-                    HStack(spacing: 6) {
-                        ForEach(Array(destinations.suffix(2))) { destination in
-                            linkControl(for: destination)
-                        }
-                    }
-                }
-            }
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RosterSecondaryChrome.cardFill,
-            in: RoundedRectangle(cornerRadius: RosterSecondaryChrome.cardRadius)
-        )
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(language.text("Cửa sổ liên quan", "Related windows"))
-    }
-
-    @ViewBuilder
-    private func linkControl(for destination: RosterSecondaryNavTarget) -> some View {
-        let isCurrent = destination == current
-        if isCurrent {
-            Label(destination.title(in: language), systemImage: destination.systemImage)
-                .font(RosterSecondaryChrome.footnote.weight(.semibold))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(Color.accentColor.opacity(0.14), in: Capsule())
-                .foregroundStyle(.primary)
-                .accessibilityAddTraits(.isSelected)
-        } else {
-            Button {
-                navigate(to: destination)
-            } label: {
-                Label(destination.title(in: language), systemImage: destination.systemImage)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.mini)
-            .help(destination.title(in: language))
-        }
-    }
-
-    private func navigate(to destination: RosterSecondaryNavTarget) {
-        if dismissBeforeNavigate {
-            dismiss()
-        }
-        switch destination {
-        case .settings, .operations, .about:
-            guard let windowID = destination.windowID else { return }
-            openWindow(id: windowID)
-            RosterWindowSurface.presentNamedWindow(id: windowID)
-        case .exportBackup:
-            NotificationCenter.default.post(name: .exportBackup, object: nil)
-        case .importBackup:
-            NotificationCenter.default.post(name: .importBackup, object: nil)
-        }
+    /// For Commands / menu actions that lack `OpenWindowAction` — listeners with `openWindow` handle it.
+    static func request(_ tab: RosterConsoleTab) {
+        RosterConsoleSelection.shared.select(tab)
+        NotificationCenter.default.post(name: .openRosterConsole, object: tab.rawValue)
     }
 }

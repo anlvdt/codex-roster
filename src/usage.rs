@@ -681,11 +681,26 @@ impl ResetCreditDetailsResponse {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        // Prefer the higher of the API summary and the detailed available rows —
+        // either side can under-report when the other is truncated or stale.
         Ok(BankedResetSummaryView {
-            available_count: self.available_count,
+            available_count: effective_banked_available_count(self.available_count, &credits),
             credits: Some(credits),
         })
     }
+}
+
+/// Total redeemable banked resets for an account.
+///
+/// OpenAI may return `available_count` without listing every credit, or list
+/// more `available` rows than the summary field. Take the max so roster UI and
+/// auto-switch messaging never under-count.
+fn effective_banked_available_count(reported: i64, credits: &[BankedResetCreditView]) -> i64 {
+    let from_credits = credits
+        .iter()
+        .filter(|credit| credit.status.eq_ignore_ascii_case("available"))
+        .count() as i64;
+    reported.max(0).max(from_credits)
 }
 
 fn snapshot_auth(snapshot: &SnapshotBlob) -> Result<SnapshotAuth> {
@@ -1139,13 +1154,15 @@ fn parse_last_refresh(value: Option<&str>) -> Result<Option<OffsetDateTime>> {
 }
 
 fn format_last_refresh(value: OffsetDateTime) -> String {
-
     value
         .format(&Rfc3339)
         .unwrap_or_else(|_| value.unix_timestamp().to_string())
 }
 fn parse_luna_reserve(value: &Value) -> Option<LunaReserveView> {
-    if let Some(arr) = value.get("additional_rate_limits").and_then(Value::as_array) {
+    if let Some(arr) = value
+        .get("additional_rate_limits")
+        .and_then(Value::as_array)
+    {
         for item in arr {
             let limit_name = item.get("limit_name").and_then(Value::as_str).unwrap_or("");
             let normal_model_slug = item
@@ -1159,7 +1176,8 @@ fn parse_luna_reserve(value: &Value) -> Option<LunaReserveView> {
                     .map(|v| flexible_bool(Some(v)))
                     .unwrap_or(true);
                 let primary_window = rate_limit.and_then(|rl| rl.get("primary_window"));
-                let used_percent = primary_window.and_then(|pw| flexible_u8(pw.get("used_percent")));
+                let used_percent =
+                    primary_window.and_then(|pw| flexible_u8(pw.get("used_percent")));
                 let reset_at = primary_window
                     .and_then(|pw| flexible_i64(pw.get("reset_at")))
                     .and_then(|ts| OffsetDateTime::from_unix_timestamp(ts).ok());
@@ -1179,7 +1197,10 @@ fn parse_luna_reserve(value: &Value) -> Option<LunaReserveView> {
     }
 
     if let Some(upsell) = value.get("rate_limit_upsell") {
-        let banner_type = upsell.get("banner_type").and_then(Value::as_str).unwrap_or("");
+        let banner_type = upsell
+            .get("banner_type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if banner_type == "luna_reserve" {
             let reset_at = flexible_i64(upsell.get("reset_at"))
                 .and_then(|ts| OffsetDateTime::from_unix_timestamp(ts).ok());
@@ -1208,10 +1229,7 @@ pub fn prove_saved_session_refresh(snapshot: &SnapshotBlob) -> Result<SnapshotBl
     prove_saved_session_refresh_with(snapshot, refresh_auth)
 }
 
-fn prove_saved_session_refresh_with<F>(
-    snapshot: &SnapshotBlob,
-    refresh: F,
-) -> Result<SnapshotBlob>
+fn prove_saved_session_refresh_with<F>(snapshot: &SnapshotBlob, refresh: F) -> Result<SnapshotBlob>
 where
     F: FnOnce(&SnapshotAuth) -> Result<SnapshotAuth>,
 {
@@ -1399,6 +1417,40 @@ mod tests {
             credits[0].expires_at.map(|value| value.unix_timestamp()),
             Some(1_789_948_800)
         );
+    }
+
+    #[test]
+    fn detailed_banked_resets_prefer_taller_available_credit_list() {
+        let details: ResetCreditDetailsResponse = serde_json::from_value(json!({
+            "available_count": 1,
+            "credits": [
+                {
+                    "id": "credit-1",
+                    "reset_type": "codex_rate_limits",
+                    "status": "available",
+                    "granted_at": "2026-08-22T00:00:00Z",
+                    "expires_at": "2026-09-21T00:00:00Z"
+                },
+                {
+                    "id": "credit-2",
+                    "reset_type": "codex_rate_limits",
+                    "status": "available",
+                    "granted_at": "2026-08-23T00:00:00Z",
+                    "expires_at": "2026-09-22T00:00:00Z"
+                },
+                {
+                    "id": "credit-3",
+                    "reset_type": "codex_rate_limits",
+                    "status": "redeemed",
+                    "granted_at": "2026-07-01T00:00:00Z",
+                    "expires_at": null
+                }
+            ]
+        }))
+        .expect("details payload");
+
+        let view = details.into_view().expect("details view");
+        assert_eq!(view.available_count, 2);
     }
 
     #[test]
@@ -1611,13 +1663,16 @@ mod tests {
         assert_eq!(usage_error_label(&message), "Login required");
         assert!(message.contains("[server_session_revoked]"));
         assert!(usage_error_blocks_activation(&message));
-        assert!(usage_error_is_definite_login_required(&format!("{error:#}")));
+        assert!(usage_error_is_definite_login_required(&format!(
+            "{error:#}"
+        )));
     }
 
     #[test]
     fn transient_refresh_failure_is_not_definite_login_required() {
-        let transient =
-            anyhow!("token refresh failed: connection reset while contacting refresh token endpoint");
+        let transient = anyhow!(
+            "token refresh failed: connection reset while contacting refresh token endpoint"
+        );
         assert!(
             !usage_error_is_definite_login_required(&format!("{transient:#}")),
             "broad 'refresh token' mention must not sticky-lock accounts"
@@ -1631,9 +1686,8 @@ mod tests {
 
     #[test]
     fn invalid_grant_refresh_failure_is_definite_login_required() {
-        let dead = anyhow!(
-            "token refresh failed with 400: invalid_grant: refresh token was already used"
-        );
+        let dead =
+            anyhow!("token refresh failed with 400: invalid_grant: refresh token was already used");
         assert!(usage_error_is_definite_login_required(&format!("{dead:#}")));
         let message = usage_error_message(&dead);
         assert_eq!(usage_error_label(&message), "Login required");

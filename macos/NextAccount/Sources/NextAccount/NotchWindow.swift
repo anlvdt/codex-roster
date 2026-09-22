@@ -341,7 +341,7 @@ struct NotchWindowView: View {
     private var compactAccessibilityLabel: String {
         let five = activeAccount?.usage?.fiveHour?.displayRemainingPercent
         let week = activeAccount?.usage?.weekly?.displayRemainingPercent
-        let banked = activeAccount?.usage?.bankedResets?.availableCount ?? 0
+        let banked = activeAccount?.bankedResetCount ?? 0
         let fiveText = five.map { "\($0)%" } ?? language.text("chưa có", "no data")
         let weekText = week.map { "\($0)%" } ?? language.text("chưa có", "no data")
         let bankedText = banked > 0

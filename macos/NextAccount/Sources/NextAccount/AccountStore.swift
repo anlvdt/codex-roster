@@ -359,6 +359,13 @@ final class AccountStore: ObservableObject {
         }
     }
 
+    /// Sum of redeemable banked resets across non-archived accounts (display only).
+    var totalBankedResetsAcrossRoster: Int {
+        accounts
+            .filter { !$0.archived }
+            .reduce(0) { $0 + $1.bankedResetCount }
+    }
+
     var hasRunningCodexProcesses: Bool {
         ChatGPTDesktop.isRunning
     }
@@ -3141,7 +3148,7 @@ private enum ResetNotifier {
         state: inout SignalState
     ) {
         guard let resets = account.usage?.bankedResets else { return }
-        let availableCount = max(0, resets.availableCount)
+        let availableCount = resets.totalAvailableCount
         let availableCredits = (resets.credits ?? []).filter { $0.status == "available" }
         let unseenCredits = availableCredits.filter { !state.seenCreditIDs.contains($0.id) }
         let previousCount = state.availableCountByAccount[accountKey] ?? 0
@@ -3583,8 +3590,15 @@ struct SavedAccount: Identifiable, Decodable {
         bankedResetSwitchIsAllowed(
             planLabel: planLabel,
             usageError: usageError,
-            availableCount: usage?.bankedResets?.availableCount ?? 0
+            availableCount: bankedResetCount
         )
+    }
+
+    /// Total redeemable banked resets for this account.
+    /// Uses `max(availableCount, available credit rows)` so a truncated details
+    /// list or a stale summary field never under-counts.
+    var bankedResetCount: Int {
+        usage?.bankedResets?.totalAvailableCount ?? 0
     }
 
     /// Weekly-dominant ranking: `weekly * 1000 + fiveHour` so any weekly gap
@@ -3839,6 +3853,16 @@ struct UsageCreditLimit: Decodable {
 struct BankedResetSummary: Decodable {
     let availableCount: Int
     let credits: [BankedResetCredit]?
+
+    /// Full redeemable total for display and switch eligibility.
+    /// Prefer the taller of the API summary and listed `available` credits.
+    var totalAvailableCount: Int {
+        let fromField = max(0, availableCount)
+        let fromCredits = (credits ?? []).filter {
+            $0.status.compare("available", options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+        }.count
+        return max(fromField, fromCredits)
+    }
 }
 
 struct BankedResetCredit: Identifiable, Decodable {
@@ -3901,6 +3925,10 @@ struct UsageWindow: Decodable {
 
 struct RustDate: Decodable {
     let value: Date
+
+    init(value: Date) {
+        self.value = value
+    }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()

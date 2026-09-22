@@ -971,8 +971,8 @@ enum NextAction {
             )
         case .redeemBankedReset(let account):
             language.text(
-                "Không còn tài khoản nào còn quota. \(account.displayName) giữ \(account.usage?.bankedResets?.availableCount ?? 0) banked reset — chuyển sang rồi redeem trong Codex.",
-                "No account has quota left. \(account.displayName) holds \(account.usage?.bankedResets?.availableCount ?? 0) banked reset — switch there, then redeem it inside Codex."
+                "Không còn tài khoản nào còn quota. \(account.displayName) giữ \(account.bankedResetCount) banked reset — chuyển sang rồi redeem trong Codex.",
+                "No account has quota left. \(account.displayName) holds \(account.bankedResetCount) banked reset — switch there, then redeem it inside Codex."
             )
         case .waitForReset(let account):
             language.text(
@@ -1020,7 +1020,7 @@ enum NextAction {
         case .switchTo(let account):
             return "\(head) · \(Self.quotaSummary(account, language: language))"
         case .redeemBankedReset(let account):
-            let count = account.usage?.bankedResets?.availableCount ?? 0
+            let count = account.bankedResetCount
             return "\(head) · ×\(count)"
         default:
             return head
@@ -1625,8 +1625,8 @@ private struct TriageAccountCard: View {
 
     @ViewBuilder
     private var bankedResetBadge: some View {
-        if let summary = account.usage?.bankedResets, max(0, summary.availableCount) > 0 {
-            let count = max(0, summary.availableCount)
+        if let summary = account.usage?.bankedResets, summary.totalAvailableCount > 0 {
+            let count = summary.totalAvailableCount
             let nearestExpiry = summary.credits?
                 .compactMap { $0.expiresAt?.value }
                 .filter { $0 > Date() }
@@ -3702,7 +3702,7 @@ private struct BankedResetCard: View {
     @EnvironmentObject private var language: LanguageStore
     let summary: BankedResetSummary
 
-    private var availableCount: Int { max(0, summary.availableCount) }
+    private var availableCount: Int { summary.totalAvailableCount }
     private var visibleCredits: [BankedResetCredit] { summary.credits ?? [] }
 
     var body: some View {

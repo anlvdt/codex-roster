@@ -26,7 +26,7 @@ struct PrismFilamentView: View {
     }
 
     private var bankedCount: Int {
-        account?.usage?.bankedResets?.availableCount ?? 0
+        account?.bankedResetCount ?? 0
     }
 
     private var fiveResetDate: Date? {
@@ -108,17 +108,14 @@ struct PrismFilamentView: View {
 
             // Banked Reset / Reset Countdown
             if bankedCount > 0 {
-                HStack(spacing: 2) {
-                    Text("⟲")
-                        .font(PrismTheme.fontBodyCompactBold)
-                        .foregroundStyle(PrismTheme.warning)
-                        .fixedSize()
-                    Text("\(bankedCount)")
-                        .font(PrismTheme.fontMetric)
-                        .monospacedDigit()
-                        .foregroundStyle(PrismTheme.warning)
-                        .fixedSize()
-                }
+                PrismBankedResetCountBadge(
+                    count: bankedCount,
+                    style: .filament,
+                    helpText: language.text(
+                        "\(bankedCount) lượt banked reset có thể dùng trong Codex",
+                        "\(bankedCount) banked resets available in Codex"
+                    )
+                )
             } else if let weeklyResetDate {
                 let resetTint = PrismTheme.resetProximityTint(resetAt: weeklyResetDate, kind: .weekly)
                 HStack(spacing: 2) {
@@ -247,19 +244,14 @@ struct PrismFilamentView: View {
 
             // Banked Reset / Reset Countdown
             if bankedCount > 0 {
-                HStack(spacing: 2) {
-                    Text("⟲")
-                        .font(PrismTheme.fontBodyCompactBold)
-                        .foregroundStyle(PrismTheme.warning)
-                        .fixedSize()
-
-                    Text("\(bankedCount)")
-                        .font(PrismTheme.fontMetric)
-                        .monospacedDigit()
-                        .foregroundStyle(PrismTheme.warning)
-                        .fixedSize()
-                }
-                .help(language.text("\(bankedCount) lượt banked reset có thể dùng", "\(bankedCount) banked resets available"))
+                PrismBankedResetCountBadge(
+                    count: bankedCount,
+                    style: .filament,
+                    helpText: language.text(
+                        "\(bankedCount) lượt banked reset có thể dùng",
+                        "\(bankedCount) banked resets available"
+                    )
+                )
             } else if let weeklyResetDate {
                 let resetTint = PrismTheme.resetProximityTint(resetAt: weeklyResetDate, kind: .weekly)
                 HStack(spacing: 2) {
@@ -361,5 +353,74 @@ struct PrismFilamentView: View {
             let minutes = max(1, (seconds % 3600) / 60)
             return "\(minutes)M"
         }
+    }
+}
+
+/// Amber banked-reset count chip shared by notch ears and roster cards.
+/// Display-only — never implies auto-redeem.
+struct PrismBankedResetCountBadge: View {
+    enum Style {
+        /// Dense notch ear: icon + bold digit + micro "BR" label in a capsule.
+        case filament
+        /// Active identity chip: "+N banked".
+        case identity
+        /// Account card: compact "+N".
+        case card
+    }
+
+    let count: Int
+    var style: Style = .filament
+    var helpText: String = ""
+
+    var body: some View {
+        Group {
+            switch style {
+            case .filament:
+                HStack(spacing: 3) {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(PrismTheme.fontCaptionBold)
+                        .foregroundStyle(PrismTheme.warning.opacity(0.9))
+                    Text("\(count)")
+                        .font(PrismTheme.fontMetricDense)
+                        .monospacedDigit()
+                        .foregroundStyle(PrismTheme.warning)
+                    Text("BR")
+                        .font(PrismTheme.fontMicroChip)
+                        .foregroundStyle(PrismTheme.warning.opacity(0.78))
+                }
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(PrismTheme.chipFill(PrismTheme.warning, opacity: 0.16)))
+                .overlay(Capsule().strokeBorder(PrismTheme.chipStroke(PrismTheme.warning, opacity: 0.28), lineWidth: 0.5))
+
+            case .identity:
+                HStack(spacing: 2.5) {
+                    Image(systemName: "arrow.counterclockwise.circle.fill")
+                        .font(PrismTheme.fontChipIcon)
+                    Text("+\(count) banked")
+                        .font(PrismTheme.fontChip)
+                }
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(PrismTheme.chipFill(PrismTheme.warning)))
+                .foregroundStyle(PrismTheme.warning)
+
+            case .card:
+                HStack(spacing: 2) {
+                    Image(systemName: "arrow.counterclockwise.circle.fill")
+                        .font(PrismTheme.fontMicro)
+                    Text("+\(count)")
+                        .font(PrismTheme.fontChip)
+                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1)
+                .background(Capsule().fill(PrismTheme.chipFill(PrismTheme.warning)))
+                .foregroundStyle(PrismTheme.warning)
+            }
+        }
+        .fixedSize()
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(helpText.isEmpty ? "\(count) banked resets" : helpText)
+        .help(helpText)
     }
 }

@@ -123,7 +123,9 @@ fn load_index(app_data_dir: &Path) -> Result<SessionResumeIndex> {
     let path = index_path(app_data_dir);
     match fs::read(&path) {
         Ok(bytes) => Ok(serde_json::from_slice(&bytes).unwrap_or_default()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(SessionResumeIndex::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(SessionResumeIndex::default())
+        }
         Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
     }
 }
@@ -132,7 +134,8 @@ fn save_index(app_data_dir: &Path, index: &SessionResumeIndex) -> Result<()> {
     fs::create_dir_all(app_data_dir)
         .with_context(|| format!("failed to create {}", app_data_dir.display()))?;
     let path = index_path(app_data_dir);
-    let bytes = serde_json::to_vec_pretty(index).context("failed to encode session resume index")?;
+    let bytes =
+        serde_json::to_vec_pretty(index).context("failed to encode session resume index")?;
     replace_file_with_recovery(&path, Some(&bytes), |temp_path| {
         fs::write(temp_path, &bytes)
             .with_context(|| format!("failed to write {}", temp_path.display()))
@@ -178,7 +181,10 @@ fn discover_latest_user_session(codex_root: &Path) -> Result<Option<DiscoveredSe
                 continue;
             }
             let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            if best.as_ref().is_some_and(|current| modified <= current.modified) {
+            if best
+                .as_ref()
+                .is_some_and(|current| modified <= current.modified)
+            {
                 continue;
             }
             if let Some(discovered) = parse_user_session_meta(&path, modified)? {
@@ -222,10 +228,7 @@ fn parse_user_session_meta(path: &Path, modified: SystemTime) -> Result<Option<D
         {
             return Ok(None);
         }
-        if payload
-            .pointer("/source/subagent")
-            .is_some()
-        {
+        if payload.pointer("/source/subagent").is_some() {
             return Ok(None);
         }
         let session_id = payload

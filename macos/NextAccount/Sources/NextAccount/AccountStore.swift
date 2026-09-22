@@ -4001,27 +4001,29 @@ func accountSortIsOrderedByWeeklyQuota(_ left: SavedAccount, _ right: SavedAccou
     left.switchQuotaScore > right.switchQuotaScore
 }
 
-/// Shared notch roster sizing: collapsed 260pt scroll area inside a 480pt deck;
+/// Shared notch roster sizing: collapsed scroll area inside a panoramic deck;
 /// expanded fits all 2-column rows for typical ≤20 accounts.
 ///
-/// `nextActionCaptionHeight` is reserved in the total so a live caption never
-/// clips the roster; when all-clear (caption hidden) that budget becomes bottom
-/// breathing room under the roster card — not a mid-deck gap.
+/// Pass `hasNextActionCaption: true` only when the caption row is visible so
+/// all-clear layouts do not reserve a tall empty footer under Danh bạ.
 enum NotchRosterLayout {
-    static let collapsedDeckHeight: CGFloat = 480
-    static let collapsedRosterHeight: CGFloat = 260
+    /// Expanded panoramic width (keep in sync with `NotchWindowView.maxExpandedWidth`
+    /// and `PrismQuickSwitchDeck` frame).
+    static let deckWidth: CGFloat = 1020
+    static let collapsedDeckHeight: CGFloat = 476
+    static let collapsedRosterHeight: CGFloat = 280
     /// Compact next-action caption between upper wings and roster.
     static let nextActionCaptionHeight: CGFloat = 22
     /// Outer chrome around the panoramic deck (keep in sync with PrismQuickSwitchDeck).
-    static let deckHorizontalInset: CGFloat = 18
-    static let deckTopInset: CGFloat = 10
-    static let deckBottomInset: CGFloat = 22
-    /// Spacing between upper wings / caption / roster (tight — leftover goes below roster).
-    static let deckSectionSpacing: CGFloat = 6
-    /// Name + email + optional status line under a 2-column roster cell.
-    static let rowHeight: CGFloat = 62
-    static let rowSpacing: CGFloat = 7
-    static let gridVerticalPadding: CGFloat = 6
+    static let deckHorizontalInset: CGFloat = 12
+    static let deckTopInset: CGFloat = 6
+    static let deckBottomInset: CGFloat = 4
+    /// Spacing between upper wings / caption / roster.
+    static let deckSectionSpacing: CGFloat = 4
+    /// Dense roster cell: name + email/status + trailing meters/button.
+    static let rowHeight: CGFloat = 48
+    static let rowSpacing: CGFloat = 4
+    static let gridVerticalPadding: CGFloat = 2
     /// Soft cap (~24 accounts) so pathological rosters stay screen-safe.
     static let maxFittedRows = 12
     static let rosterExpandedKey = "codex_roster_notch_roster_expanded"
@@ -4035,10 +4037,14 @@ enum NotchRosterLayout {
             + gridVerticalPadding
     }
 
-    static func deckHeight(accountCount: Int, expanded: Bool) -> CGFloat {
+    static func deckHeight(
+        accountCount: Int,
+        expanded: Bool,
+        hasNextActionCaption: Bool = false
+    ) -> CGFloat {
         collapsedDeckHeight - collapsedRosterHeight
             + rosterGridHeight(accountCount: accountCount, expanded: expanded)
-            + nextActionCaptionHeight
+            + (hasNextActionCaption ? nextActionCaptionHeight : 0)
     }
 }
 

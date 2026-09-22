@@ -1,8 +1,7 @@
 import SwiftUI
 
-/// Restored Approved Panoramic Notch Console for Codex Roster (920pt × 425pt).
-/// Symmetrically frames the MacBook camera notch at the top and expands into the
-/// 2-column account switchboard with generous typography and buttons.
+/// Panoramic Notch Console for Codex Roster (`NotchRosterLayout.deckWidth` × dynamic height).
+/// Frames the MacBook camera notch; dense upper strip + 2-column roster switchboard.
 struct PrismQuickSwitchDeck: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
@@ -50,13 +49,6 @@ struct PrismQuickSwitchDeck: View {
         )
     }
 
-    private var deckHeight: CGFloat {
-        NotchRosterLayout.deckHeight(
-            accountCount: filteredAccounts.count,
-            expanded: isRosterExpanded
-        )
-    }
-
     private var switchableShortcutMap: [UUID: Int] {
         var map: [UUID: Int] = [:]
         var nextShortcut = 1
@@ -86,6 +78,16 @@ struct PrismQuickSwitchDeck: View {
         return NextAction.resolve(in: store).compactCaption(language: language)
     }
 
+    private var hasNextActionCaption: Bool { nextActionCaption != nil }
+
+    private var deckHeight: CGFloat {
+        NotchRosterLayout.deckHeight(
+            accountCount: filteredAccounts.count,
+            expanded: isRosterExpanded,
+            hasNextActionCaption: hasNextActionCaption
+        )
+    }
+
     var body: some View {
         VStack(spacing: NotchRosterLayout.deckSectionSpacing) {
             // Upper Deck: Left Wing | Notch Clearance & Live Pin | Right Wing
@@ -95,21 +97,18 @@ struct PrismQuickSwitchDeck: View {
 
             // Lower Deck: Full-width 2-column account switchboard
             lowerSwitchboardDeck
-
-            // Leftover deck budget (incl. hidden next-action) stays under the roster
-            // so upper panels sit tight above "Danh bạ" and the card has bottom air.
-            Spacer(minLength: 0)
         }
         .padding(.horizontal, NotchRosterLayout.deckHorizontalInset)
         .padding(.top, NotchRosterLayout.deckTopInset)
         .padding(.bottom, NotchRosterLayout.deckBottomInset)
-        .frame(width: 920, height: deckHeight, alignment: .top)
+        .frame(width: NotchRosterLayout.deckWidth, height: deckHeight, alignment: .top)
         .animation(PrismTheme.snapSpring, value: isRosterExpanded)
         .animation(PrismTheme.snapSpring, value: filteredAccounts.count)
+        .animation(PrismTheme.snapSpring, value: hasNextActionCaption)
     }
 
-    /// Compact “what to do next” line — omitted when all-clear so it does not
-    /// open a dead mid-deck gap (height budget remains in `deckHeight` for fit).
+    /// Compact “what to do next” line — omitted when all-clear (no mid-deck gap;
+    /// deck height only grows when this row is present).
     @ViewBuilder
     private var nextActionCaptionRow: some View {
         if let caption = nextActionCaption {
@@ -120,7 +119,7 @@ struct PrismQuickSwitchDeck: View {
                 Text(caption)
                     .font(PrismTheme.fontCaption)
                     .foregroundStyle(PrismTheme.textBright)
-                    .lineLimit(2)
+                    .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
             }
@@ -131,343 +130,206 @@ struct PrismQuickSwitchDeck: View {
         }
     }
 
-    // MARK: - Upper Deck (Left Wing 340pt | Center 188pt | Right Wing 340pt)
+    // MARK: - Upper Deck (Live | Camera gap | Usage) — balanced heights, minimal void
     private var upperDeckFramingNotch: some View {
-        HStack(alignment: .top, spacing: 12) {
-            // Left Ear Wing: Active Session Identity & Quotas
+        HStack(alignment: .center, spacing: 8) {
             upperLeftWing
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
 
-            // Center Notch Gap: Sits comfortably below the physical camera housing (170pt)
+            // Fixed camera clearance — keep content out from under the notch.
             upperCenterNotchGap
-                .frame(width: 170)
+                .frame(width: 156, alignment: .center)
 
-            // Right Ear Wing: Radar, Telemetry & Automation
             upperRightWing
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
         }
     }
 
-    // MARK: - Upper Left Wing (Active Identity & Quota Gauges)
+    // MARK: - Upper Left Wing (Active identity + compact dual quota)
     private var upperLeftWing: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // Identity Row
-            HStack(spacing: 9) {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .center, spacing: 7) {
                 ZStack {
                     Circle()
                         .fill(PrismTheme.quotaTint(percent: activeAccount?.usage?.fiveHour?.displayRemainingPercent).opacity(0.18))
-                        .frame(width: 36, height: 36)
-
+                        .frame(width: 26, height: 26)
                     Image(systemName: (activeAccount?.aiProvider ?? .openAI).icon)
-                        .font(PrismTheme.fontTitle)
+                        .font(PrismTheme.fontCaptionBold)
                         .foregroundStyle(PrismTheme.quotaTint(percent: activeAccount?.usage?.fiveHour?.displayRemainingPercent))
                 }
 
                 VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 4) {
                         Text(activeAccount?.displayName ?? language.text("Chưa chọn phiên", "No session"))
                             .font(PrismTheme.fontHeadline)
                             .lineLimit(1)
-
-                        if let plan = activeAccount?.planLabel, !plan.isEmpty {
-                            Text(plan.uppercased())
-                                .font(PrismTheme.fontChip)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 2)
-                                .background(Capsule().fill(PrismTheme.chipFill(PrismTheme.accent, opacity: 0.15)))
-                                .foregroundStyle(PrismTheme.accent)
+                            .layoutPriority(1)
+                        if hasIdentityChips {
+                            identityChipsRow
                         }
-
-                        if let banked = activeAccount?.bankedResetCount, banked > 0 {
-                            PrismBankedResetCountBadge(
-                                count: banked,
-                                style: .identity,
-                                helpText: language.text(
-                                    "\(banked) lượt reset dự phòng (banked reset) có sẵn trong Codex",
-                                    "\(banked) banked rate-limit resets available in Codex"
-                                )
-                            )
-                        }
-
-                        if let active = activeAccount, active.hasLunaReserve {
-                            let isLunaActive = store.isLunaReserveActive(for: active)
-                            HStack(spacing: 2.5) {
-                                Image(systemName: isLunaActive ? "moon.stars.fill" : "moon.fill")
-                                    .font(PrismTheme.fontChipIcon)
-                                Text(isLunaActive ? "Luna Active" : "Luna Reserve")
-                                    .font(PrismTheme.fontChip)
-                            }
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill(PrismTheme.chipFill(PrismTheme.autoSwitch)))
-                            .foregroundStyle(PrismTheme.autoSwitch)
-                            .help(language.text(
-                                isLunaActive ? "Codex đang chạy bằng Luna Reserve (gpt-5.6-luna)" : "Tài khoản có Luna Reserve sẵn sàng sử dụng",
-                                isLunaActive ? "Codex is running on Luna Reserve (gpt-5.6-luna)" : "Luna Reserve is available for this account"
-                            ))
-                        }
+                        Spacer(minLength: 4)
+                        identityActionsRow
                     }
 
-                    HStack(spacing: 5) {
+                    HStack(spacing: 4) {
                         Text(activeAccount?.email ?? "—")
-                            .font(PrismTheme.fontBody)
+                            .font(PrismTheme.fontCaption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
-                            .truncationMode(.middle)
-
+                            .minimumScaleFactor(0.85)
                         if let email = activeAccount?.email, !email.isEmpty {
-                            CopyEmailButton(email: email, iconSize: 12)
+                            CopyEmailButton(email: email, iconSize: 11)
                         }
                     }
                 }
+            }
 
-                Spacer()
+            PrismDualChamberGauge(
+                fiveHour: activeAccount?.usage?.fiveHour,
+                weekly: activeAccount?.usage?.weekly,
+                showLabels: true,
+                compact: true
+            )
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(PrismTheme.surfacePanel)
+                .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(PrismTheme.surfaceFill, lineWidth: 0.8))
+        )
+    }
 
-                if let active = activeAccount, active.hasLunaReserve && !store.isLunaReserveActive(for: active) {
-                    Button {
-                        PrismTheme.triggerHaptic()
-                        store.enableLunaReserve(active)
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "moon.stars.fill")
-                                .font(PrismTheme.fontCaptionBold)
-                            Text(language.text("Bật Luna", "Enable Luna"))
-                                .font(PrismTheme.fontBodyBold)
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5.5)
-                        .background(
-                            Capsule()
-                                .fill(PrismTheme.chipFill(PrismTheme.autoSwitch))
-                                .overlay(Capsule().strokeBorder(PrismTheme.chipStroke(PrismTheme.autoSwitch), lineWidth: 0.8))
-                        )
-                        .foregroundStyle(PrismTheme.autoSwitch)
-                    }
-                    .buttonStyle(.plain)
-                    .pointingHandCursor()
-                    .help(language.text(
-                        "Kích hoạt Luna Reserve (gpt-5.6-luna) cho Codex",
-                        "Activate Luna Reserve (gpt-5.6-luna) for Codex"
-                    ))
+    private var hasIdentityChips: Bool {
+        let hasPlan = !(activeAccount?.planLabel ?? "").isEmpty
+        let hasBanked = (activeAccount?.bankedResetCount ?? 0) > 0
+        let hasLuna = activeAccount?.hasLunaReserve == true
+        return hasPlan || hasBanked || hasLuna
+    }
+
+    private var identityChipsRow: some View {
+        HStack(spacing: 6) {
+            if let plan = activeAccount?.planLabel, !plan.isEmpty {
+                Text(plan.uppercased())
+                    .font(PrismTheme.fontChip)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(PrismTheme.chipFill(PrismTheme.accent, opacity: 0.15)))
+                    .foregroundStyle(PrismTheme.accent)
+                    .fixedSize()
+            }
+
+            if let banked = activeAccount?.bankedResetCount, banked > 0 {
+                PrismBankedResetCountBadge(
+                    count: banked,
+                    style: .identity,
+                    helpText: language.text(
+                        "\(banked) lượt reset dự phòng (banked reset) có sẵn trong Codex",
+                        "\(banked) banked rate-limit resets available in Codex"
+                    )
+                )
+            }
+
+            if let active = activeAccount, active.hasLunaReserve {
+                let isLunaActive = store.isLunaReserveActive(for: active)
+                HStack(spacing: 2.5) {
+                    Image(systemName: isLunaActive ? "moon.stars.fill" : "moon.fill")
+                        .font(PrismTheme.fontChipIcon)
+                    Text(isLunaActive
+                        ? language.text("Luna bật", "Luna on")
+                        : language.text("Luna", "Luna"))
+                        .font(PrismTheme.fontChip)
                 }
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(PrismTheme.chipFill(PrismTheme.autoSwitch)))
+                .foregroundStyle(PrismTheme.autoSwitch)
+                .fixedSize()
+                .help(language.text(
+                    isLunaActive ? "Codex đang chạy bằng Luna Reserve (gpt-5.6-luna)" : "Tài khoản có Luna Reserve sẵn sàng sử dụng",
+                    isLunaActive ? "Codex is running on Luna Reserve (gpt-5.6-luna)" : "Luna Reserve is available for this account"
+                ))
+            }
 
-                // Sync button
+            Spacer(minLength: 0)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var identityActionsRow: some View {
+        HStack(spacing: 4) {
+            if let active = activeAccount, active.hasLunaReserve && !store.isLunaReserveActive(for: active) {
                 Button {
                     PrismTheme.triggerHaptic()
-                    store.resyncChatGPTDesktop()
+                    store.enableLunaReserve(active)
                 } label: {
-                    HStack(spacing: 4) {
-                        if store.isWorking || store.isBusyForActions {
-                            ProgressView().controlSize(.mini)
-                        } else {
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(PrismTheme.fontCaptionBold)
-                        }
-                        Text(language.text("Mở lại ChatGPT", "Relaunch ChatGPT"))
-                            .font(PrismTheme.fontBodySemibold)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5.5)
-                    .background(
-                        Capsule()
-                            .fill(PrismTheme.surfaceFill)
-                            .overlay(Capsule().strokeBorder(PrismTheme.borderSoft, lineWidth: 0.8))
-                    )
+                    Image(systemName: "moon.stars.fill")
+                        .font(PrismTheme.fontCaptionBold)
+                        .foregroundStyle(PrismTheme.autoSwitch)
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(PrismTheme.chipFill(PrismTheme.autoSwitch)))
                 }
                 .buttonStyle(.plain)
                 .pointingHandCursor()
                 .help(language.text(
-                    "Đóng và mở lại ChatGPT Desktop để đồng bộ phiên đang chạy",
-                    "Quit and relaunch ChatGPT Desktop to resync the live session"
+                    "Bật Luna Reserve (gpt-5.6-luna)",
+                    "Enable Luna Reserve (gpt-5.6-luna)"
                 ))
             }
 
-            // Quotas: 5h & Weekly (+ monthly when credit_limit exists)
-            HStack(spacing: 10) {
-                // 5-Hour Window
-                VStack(alignment: .leading, spacing: 4) {
-                    let five = activeAccount?.usage?.fiveHour
-                    let fivePercent = five?.displayRemainingPercent
-
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(language.text("Cửa sổ 5h", "5h window"))
-                            .font(PrismTheme.fontBody)
+            Button {
+                PrismTheme.triggerHaptic()
+                store.resyncChatGPTDesktop()
+            } label: {
+                Group {
+                    if store.isWorking || store.isBusyForActions {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(PrismTheme.fontCaptionBold)
                             .foregroundStyle(.secondary)
-                        Spacer()
-                        if let fivePercent {
-                            Text("\(fivePercent)%")
-                                .font(PrismTheme.fontMetricLarge)
-                                .monospacedDigit()
-                                .foregroundStyle(PrismTheme.quotaTint(percent: fivePercent))
-                        }
-                    }
-
-                    PrismSegmentedBar(percent: fivePercent ?? 0, segments: 5, height: 6)
-
-                    if let five {
-                        Text(five.resetDescription(in: language.language))
-                            .font(PrismTheme.fontCaptionRegular)
-                            .foregroundStyle(
-                                PrismTheme.resetProximityTint(window: five, kind: .fiveHour)
-                            )
-                            .lineLimit(1)
                     }
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .background(RoundedRectangle(cornerRadius: 10).fill(PrismTheme.surfaceQuiet))
-                // Weekly Allowance
-                VStack(alignment: .leading, spacing: 4) {
-                    let week = activeAccount?.usage?.weekly
-                    let weekPercent = week?.displayRemainingPercent
-
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(language.text("Hạn mức tuần", "Weekly"))
-                            .font(PrismTheme.fontBody)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        if let weekPercent {
-                            Text("\(weekPercent)%")
-                                .font(PrismTheme.fontMetricLarge)
-                                .monospacedDigit()
-                                .foregroundStyle(PrismTheme.quotaTint(percent: weekPercent))
-                        }
-                    }
-
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(PrismTheme.trackFill)
-                            Capsule()
-                                .fill(PrismTheme.quotaGradient(percent: weekPercent))
-                                .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(weekPercent ?? 0) / 100.0)))
-                        }
-                    }
-                    .frame(height: 6)
-
-                    if let week {
-                        Text(week.resetDescription(in: language.language))
-                            .font(PrismTheme.fontCaptionRegular)
-                            .foregroundStyle(
-                                PrismTheme.resetProximityTint(window: week, kind: .weekly)
-                            )
-                            .lineLimit(1)
-                    }
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .background(RoundedRectangle(cornerRadius: 10).fill(PrismTheme.surfaceQuiet))
-
-                if let monthPercent = activeAccount?.monthlyQuotaRemainingPercent {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(alignment: .firstTextBaseline) {
-                            Text(language.text("Hạn mức tháng", "Monthly"))
-                                .font(PrismTheme.fontBody)
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Text("\(monthPercent)%")
-                                .font(PrismTheme.fontMetricLarge)
-                                .monospacedDigit()
-                                .foregroundStyle(PrismTheme.quotaTint(percent: monthPercent))
-                        }
-
-                        GeometryReader { geo in
-                            ZStack(alignment: .leading) {
-                                Capsule().fill(PrismTheme.trackFill)
-                                Capsule()
-                                    .fill(PrismTheme.quotaGradient(percent: monthPercent))
-                                    .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(monthPercent) / 100.0)))
-                            }
-                        }
-                        .frame(height: 6)
-
-                        if let limit = activeAccount?.usage?.credits?.creditLimit {
-                            if let reset = limit.resetDescription(in: language.language) {
-                                Text(reset)
-                                    .font(PrismTheme.fontCaptionRegular)
-                                    .foregroundStyle(
-                                        PrismTheme.resetProximityTint(
-                                            resetAt: limit.resetsAt?.value,
-                                            kind: .monthly
-                                        )
-                                    )
-                                    .lineLimit(1)
-                            }
-                            Text(limit.displayText)
-                                .font(PrismTheme.fontCaptionRegular)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        } else {
-                            Text(language.text("Hạn mức tháng từ API", "Monthly cap from API"))
-                                .font(PrismTheme.fontCaptionRegular)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(PrismTheme.surfaceQuiet))
-                } else if let active = activeAccount, active.showsFreePlanChip {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(language.text("Gói Free", "Free plan"))
-                            .font(PrismTheme.fontBody)
-                            .foregroundStyle(.secondary)
-                        Text(language.text(
-                            "Không có % tháng từ API",
-                            "No monthly % from API"
-                        ))
-                            .font(PrismTheme.fontCaptionRegular)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                        if let balance = active.creditsBalanceDisplay {
-                            Text(language.text("Tín dụng: \(balance)", "Credits: \(balance)"))
-                                .font(PrismTheme.fontCaption)
-                                .foregroundStyle(PrismTheme.accent)
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(PrismTheme.surfaceQuiet))
-                }
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(PrismTheme.surfaceFill))
             }
+            .buttonStyle(.plain)
+            .pointingHandCursor()
+            .help(language.text(
+                "Mở lại ChatGPT Desktop để đồng bộ phiên",
+                "Relaunch ChatGPT Desktop to resync session"
+            ))
         }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(PrismTheme.surfacePanel)
-                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(PrismTheme.surfaceFill, lineWidth: 0.8))
-        )
+        .fixedSize()
     }
 
-    // MARK: - Upper Center Notch Gap (Padded safely below Camera Notch)
+    // MARK: - Upper Center Notch Gap (tight under camera)
     private var upperCenterNotchGap: some View {
-        VStack(spacing: 10) {
-            // Service health — one capsule under the camera
-            HStack(spacing: 6) {
+        VStack(spacing: 6) {
+            HStack(spacing: 5) {
                 let statusIndicator = store.openAIStatus?.indicator ?? "none"
                 let isOperational = statusIndicator == "none"
                 Circle()
                     .fill(isOperational ? PrismTheme.emerald : PrismTheme.ruby)
-                    .frame(width: 7, height: 7)
+                    .frame(width: 6, height: 6)
                 Text(isOperational
                       ? language.text("OpenAI ổn", "OpenAI OK")
                       : language.text("Sự cố OpenAI", "OpenAI issue"))
-                    .font(PrismTheme.fontBodyCompact)
+                    .font(PrismTheme.fontCaptionBold)
                     .foregroundStyle(isOperational ? PrismTheme.emerald : PrismTheme.ruby)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.85)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
             .background(Capsule().fill(PrismTheme.surfaceMuted))
 
-            // Auto-switch control (Settings is secondary; notch is primary)
-            VStack(spacing: 5) {
-                HStack(spacing: 6) {
+            VStack(spacing: 3) {
+                HStack(spacing: 5) {
                     Image(systemName: "bolt.shield.fill")
-                        .font(PrismTheme.fontBodyCompactBold)
+                        .font(PrismTheme.fontCaptionBold)
                         .foregroundStyle(store.autoSwitchWhenExhausted ? PrismTheme.autoSwitch : .secondary)
                     Text(language.text("Tự chuyển", "Auto-switch"))
-                        .font(PrismTheme.fontBodyCompact)
+                        .font(PrismTheme.fontCaptionBold)
                         .foregroundStyle(store.autoSwitchWhenExhausted ? PrismTheme.autoSwitch : .secondary)
                     Spacer(minLength: 0)
                     Toggle("", isOn: Binding(
@@ -480,19 +342,20 @@ struct PrismQuickSwitchDeck: View {
                 }
 
                 Text(autoSwitchStatusCaption)
-                    .font(PrismTheme.fontCaption)
+                    .font(PrismTheme.fontChip)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
+                    .minimumScaleFactor(0.9)
                     .frame(maxWidth: .infinity)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
             .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(PrismTheme.surfaceDim)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .strokeBorder(
                                 store.autoSwitchWhenExhausted
                                     ? PrismTheme.violet.opacity(0.35)
@@ -503,8 +366,6 @@ struct PrismQuickSwitchDeck: View {
             )
         }
         .padding(.top, topNotchClearance)
-        // Intrinsic height only — do not absorb leftover deck space here
-        // (that opened the oversized gap above "Danh bạ").
         .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -542,20 +403,21 @@ struct PrismQuickSwitchDeck: View {
 
     private var topNotchClearance: CGFloat {
         let maxInset = NSScreen.screens.map(\.safeAreaInsets.top).max() ?? 0
-        return max(maxInset + 16, 50)
+        // Keep controls clear of the camera housing without a tall dead band.
+        return max(maxInset + 4, 28)
     }
 
-    // MARK: - Upper Right Wing (Telemetry — Tibo lives once in the center strip)
+    // MARK: - Upper Right Wing (Telemetry — denser strip)
     private var upperRightWing: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
                 Label(language.text("Tiêu thụ", "Usage"), systemImage: "chart.line.uptrend.xyaxis")
-                    .font(PrismTheme.fontSubheadline)
-                Spacer()
+                    .font(PrismTheme.fontBodyCompactBold)
+                Spacer(minLength: 4)
                 if let outlook = store.resetOutlook {
-                    HStack(spacing: 4) {
+                    HStack(spacing: 3) {
                         Image(systemName: "antenna.radiowaves.left.and.right")
-                            .font(PrismTheme.fontCaptionRegular)
+                            .font(PrismTheme.fontMicro)
                             .foregroundStyle(.secondary)
                         Text("24h \(outlook.chance24Hours)%")
                             .font(PrismTheme.fontChip)
@@ -582,11 +444,11 @@ struct PrismQuickSwitchDeck: View {
                                 .controlSize(.mini)
                         } else {
                             Image(systemName: "arrow.clockwise")
-                                .font(PrismTheme.fontBodyCompact)
+                                .font(PrismTheme.fontCaption)
                                 .foregroundStyle(.secondary)
                         }
                     }
-                    .frame(width: 24, height: 24)
+                    .frame(width: 22, height: 22)
                     .background(Circle().fill(PrismTheme.surfaceSoft))
                 }
                 .buttonStyle(.plain)
@@ -599,7 +461,7 @@ struct PrismQuickSwitchDeck: View {
             }
 
             if let summary = store.tokenUsage {
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     telemetryPill(
                         title: language.text("Hôm nay", "Today"),
                         value: formatTokenMetric(summary.today, in: language.language),
@@ -627,20 +489,18 @@ struct PrismQuickSwitchDeck: View {
                 }
             } else {
                 Text(language.text("Chưa có dữ liệu token", "No token data yet"))
-                    .font(PrismTheme.fontBodyCompactMedium)
+                    .font(PrismTheme.fontCaption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 6)
             }
 
-            // Fills the short-wing gap under Usage: repo + live app version.
             usageWingFooter
         }
-        .padding(12)
+        .padding(10)
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(PrismTheme.surfacePanel)
-                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(PrismTheme.surfaceFill, lineWidth: 0.8))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(PrismTheme.surfaceFill, lineWidth: 0.8))
         )
     }
 
@@ -660,6 +520,7 @@ struct PrismQuickSwitchDeck: View {
                     Text("anlvdt/codex-roster")
                         .font(PrismTheme.fontCaption)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                 }
                 .foregroundStyle(PrismTheme.accent)
             }
@@ -682,28 +543,30 @@ struct PrismQuickSwitchDeck: View {
     }
 
     private func telemetryPill(title: String, value: String, accent: String?) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 1) {
             Text(title)
-                .font(PrismTheme.fontChipIcon)
+                .font(PrismTheme.fontMicro)
                 .foregroundStyle(.secondary)
             Text(value)
-                .font(PrismTheme.fontMetric)
+                .font(PrismTheme.fontMetricSub)
                 .lineLimit(1)
+                .minimumScaleFactor(0.8)
             if let accent {
                 Text(accent)
                     .font(PrismTheme.fontChip)
                     .foregroundStyle(PrismTheme.emerald)
+                    .lineLimit(1)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 7)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(PrismTheme.surfacePanel))
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(PrismTheme.surfaceQuiet))
     }
 
     // MARK: - Lower Deck: 2-Column Full-Width Account Switchboard
     private var lowerSwitchboardDeck: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
                 Text(language.text("Danh bạ", "Roster"))
                     .font(PrismTheme.fontSection)
@@ -842,11 +705,11 @@ struct PrismQuickSwitchDeck: View {
 
             ScrollView {
                 let columns = [
-                    GridItem(.flexible(), spacing: 10),
-                    GridItem(.flexible(), spacing: 10)
+                    GridItem(.flexible(), spacing: 6),
+                    GridItem(.flexible(), spacing: 6)
                 ]
 
-                LazyVGrid(columns: columns, spacing: 7) {
+                LazyVGrid(columns: columns, spacing: NotchRosterLayout.rowSpacing) {
                     ForEach(filteredAccounts) { account in
                         PrismCompactAccountCard(
                             account: account,
@@ -857,16 +720,17 @@ struct PrismQuickSwitchDeck: View {
                         )
                     }
                 }
-                .padding(.vertical, 3)
+                .padding(.vertical, 2)
             }
             .frame(height: rosterGridHeight)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 10)
+        .padding(.top, 6)
+        .padding(.bottom, 4)
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(PrismTheme.surfaceQuiet)
-                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(PrismTheme.borderSubtle, lineWidth: 0.8))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(PrismTheme.borderSubtle, lineWidth: 0.8))
         )
     }
 
@@ -945,36 +809,38 @@ private struct PrismCompactAccountCard: View {
         let week = account.usage?.weekly?.displayRemainingPercent
         let isJustSwitched = justSwitchedID == account.id
 
-        return HStack(spacing: 8) {
+        return HStack(alignment: .center, spacing: 6) {
             if let shortcutIndex {
                 Text("\(shortcutIndex)")
                     .font(PrismTheme.fontMonoBold)
                     .foregroundStyle(PrismTheme.textPrimary)
-                    .frame(width: 22, height: 22)
+                    .frame(width: 18, height: 18)
                     .background(
-                        RoundedRectangle(cornerRadius: 4.5, style: .continuous)
+                        RoundedRectangle(cornerRadius: 3.5, style: .continuous)
                             .fill(PrismTheme.surfaceStrong)
-                            .overlay(RoundedRectangle(cornerRadius: 4.5, style: .continuous).strokeBorder(PrismTheme.borderStrong, lineWidth: 0.8))
+                            .overlay(RoundedRectangle(cornerRadius: 3.5, style: .continuous).strokeBorder(PrismTheme.borderStrong, lineWidth: 0.8))
                     )
             } else {
                 Text(String(account.displayName.prefix(1)).uppercased())
-                    .font(PrismTheme.fontBodyCompactBold)
+                    .font(PrismTheme.fontChip)
                     .foregroundStyle(PrismTheme.quotaTint(percent: quota))
-                    .frame(width: 22, height: 22)
+                    .frame(width: 18, height: 18)
                     .background(Circle().fill(PrismTheme.quotaTint(percent: quota).opacity(0.15)))
             }
 
-            VStack(alignment: .leading, spacing: 1.5) {
-                HStack(spacing: 4) {
+            // Text fills remaining width; meters + action stay pinned trailing (no mid-card void).
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 3) {
                     Text(account.displayName)
-                        .font(PrismTheme.fontMetric)
+                        .font(PrismTheme.fontMetricSub)
                         .lineLimit(1)
+                        .layoutPriority(1)
 
                     if account.showsFreePlanChip {
                         Text(language.text("FREE", "FREE"))
                             .font(PrismTheme.fontMicroChip)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
+                            .padding(.horizontal, 3)
+                            .padding(.vertical, 0.5)
                             .background(Capsule().fill(PrismTheme.surfaceStrong))
                             .foregroundStyle(PrismTheme.textSecondary)
                             .help(language.text(
@@ -1003,8 +869,8 @@ private struct PrismCompactAccountCard: View {
                             Text(isLunaActive ? "Luna" : "Reserve")
                                 .font(PrismTheme.fontMicroChip)
                         }
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
+                        .padding(.horizontal, 3)
+                        .padding(.vertical, 0.5)
                         .background(Capsule().fill(PrismTheme.chipFill(PrismTheme.autoSwitch)))
                         .foregroundStyle(PrismTheme.autoSwitch)
                         .help(language.text(
@@ -1016,8 +882,8 @@ private struct PrismCompactAccountCard: View {
                     if let balance = account.creditsBalanceDisplay, account.monthlyQuotaRemainingPercent == nil {
                         Text(language.text("Cr \(balance)", "Cr \(balance)"))
                             .font(PrismTheme.fontMicroChip)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
+                            .padding(.horizontal, 3)
+                            .padding(.vertical, 0.5)
                             .background(Capsule().fill(PrismTheme.chipFill(PrismTheme.accent, opacity: 0.14)))
                             .foregroundStyle(PrismTheme.accent)
                             .help(language.text(
@@ -1027,112 +893,83 @@ private struct PrismCompactAccountCard: View {
                     }
                 }
 
-                HStack(spacing: 4) {
+                HStack(spacing: 3) {
                     Text(account.email)
                         .font(PrismTheme.fontCaption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                        .truncationMode(.middle)
+                        .minimumScaleFactor(0.85)
 
-                    CopyEmailButton(email: account.email, iconSize: 11.5)
-                }
+                    CopyEmailButton(email: account.email, iconSize: 11)
 
-                if let status = rowStatus {
-                    Text(status.text)
-                        .font(PrismTheme.fontChip)
-                        .foregroundStyle(status.tint)
-                        .lineLimit(1)
-                        .help(account.usageStatus(in: language.language))
+                    if let status = rowStatus {
+                        Text("·")
+                            .font(PrismTheme.fontCaption)
+                            .foregroundStyle(.tertiary)
+                        Text(status.text)
+                            .font(PrismTheme.fontCaption)
+                            .foregroundStyle(status.tint)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                            .help(account.usageStatus(in: language.language))
+                    }
                 }
             }
-
-            Spacer(minLength: 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             PrismFilamentBar(
                 fivePercent: quota,
                 weekPercent: week,
                 monthPercent: account.monthlyQuotaRemainingPercent,
-                width: 34,
-                height: 3.5,
-                showLabels: true
+                width: 48,
+                height: 3,
+                showAxisLabels: false,
+                showPercents: true
             )
+            .fixedSize()
 
-            if account.isActive {
-                HStack(spacing: 3) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(PrismTheme.fontCaptionBold)
-                    Text(language.text("Dùng", "Active"))
-                        .font(PrismTheme.fontMetricSub)
-                }
-                .foregroundStyle(PrismTheme.emerald)
-                .padding(.horizontal, 11)
-                .padding(.vertical, 5.5)
-                .background(Capsule().fill(PrismTheme.emerald.opacity(0.16)))
-            } else if account.requiresLogin {
-                Button {
-                    guard accountForContextMenuAction(in: store.accounts, capturedID: targetID) != nil else { return }
-                    openReloginFlow(targetID)
-                } label: {
-                    Text(language.text("Login", "Login"))
-                        .font(PrismTheme.fontMetric)
-                        .foregroundStyle(PrismTheme.amber)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 5.5)
-                        .background(Capsule().fill(PrismTheme.amber.opacity(0.18)))
-                }
-                .buttonStyle(.plain)
-                .pointingHandCursor()
-            } else if canOfferSwitch {
-                if let shortcutIndex {
+            Group {
+                if account.isActive {
+                    HStack(spacing: 2) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(PrismTheme.fontChipIcon)
+                        Text(language.text("Dùng", "Active"))
+                            .font(PrismTheme.fontCaptionBold)
+                    }
+                    .foregroundStyle(PrismTheme.emerald)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3.5)
+                    .background(Capsule().fill(PrismTheme.emerald.opacity(0.16)))
+                } else if account.requiresLogin {
                     Button {
-                        PrismTheme.triggerHaptic()
-                        withAnimation(PrismTheme.pressFeedback) {
-                            justSwitchedID = targetID
-                        }
-                        guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
-                        store.activate(target, force: true)
+                        guard accountForContextMenuAction(in: store.accounts, capturedID: targetID) != nil else { return }
+                        openReloginFlow(targetID)
                     } label: {
-                        Text(language.text("Đổi", "Switch"))
-                            .font(PrismTheme.fontMetric)
-                            .foregroundStyle(PrismTheme.textOnAccent)
-                            .padding(.horizontal, 13)
-                            .padding(.vertical, 5.5)
-                            .background(
-                                Capsule()
-                                    .fill(PrismTheme.accent.opacity(0.85))
-                            )
+                        Text(language.text("Login", "Login"))
+                            .font(PrismTheme.fontCaptionBold)
+                            .foregroundStyle(PrismTheme.amber)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3.5)
+                            .background(Capsule().fill(PrismTheme.amber.opacity(0.18)))
                     }
                     .buttonStyle(.plain)
                     .pointingHandCursor()
-                    .keyboardShortcut(KeyEquivalent(Character("\(shortcutIndex)")), modifiers: [])
-                } else {
-                    Button {
-                        PrismTheme.triggerHaptic()
-                        withAnimation(PrismTheme.pressFeedback) {
-                            justSwitchedID = targetID
-                        }
-                        guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
-                        store.activate(target, force: true)
-                    } label: {
-                        Text(language.text("Đổi", "Switch"))
-                            .font(PrismTheme.fontMetric)
-                            .foregroundStyle(PrismTheme.textOnAccent)
-                            .padding(.horizontal, 13)
-                            .padding(.vertical, 5.5)
-                            .background(
-                                Capsule()
-                                    .fill(PrismTheme.accent.opacity(0.85))
-                            )
+                } else if canOfferSwitch {
+                    if let shortcutIndex {
+                        switchButton(targetID: targetID)
+                            .keyboardShortcut(KeyEquivalent(Character("\(shortcutIndex)")), modifiers: [])
+                    } else {
+                        switchButton(targetID: targetID)
                     }
-                    .buttonStyle(.plain)
-                    .pointingHandCursor()
                 }
             }
+            .fixedSize()
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .frame(height: NotchRosterLayout.rowHeight - 2, alignment: .center)
         .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .fill(isJustSwitched ? PrismTheme.chipFill(PrismTheme.accent) : (account.isActive ? PrismTheme.surfaceSoft : PrismTheme.surfaceFaint))
         )
         .contextMenu {
@@ -1189,6 +1026,30 @@ private struct PrismCompactAccountCard: View {
         !account.usageErrorBlocksActivation
     }
 
+    private func switchButton(targetID: UUID) -> some View {
+        Button {
+            PrismTheme.triggerHaptic()
+            withAnimation(PrismTheme.pressFeedback) {
+                justSwitchedID = targetID
+            }
+            guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
+            store.activate(target, force: true)
+        } label: {
+            Text(language.text("Đổi", "Switch"))
+                .font(PrismTheme.fontCaptionBold)
+                .foregroundStyle(PrismTheme.textOnAccent)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 3.5)
+                .background(
+                    Capsule()
+                        .fill(PrismTheme.accent.opacity(0.85))
+                )
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .fixedSize()
+    }
+
     /// Explicit row state so users don't infer from 0% bars alone.
     private var rowStatus: (text: String, tint: Color)? {
         if account.isActive { return nil }
@@ -1218,8 +1079,8 @@ private struct PrismCompactAccountCard: View {
         if let weekly = account.usage?.weekly, weekly.isDepleted {
             return (
                 language.text(
-                    "Hết tuần · \(weekly.resetDescription(in: language.language))",
-                    "Weekly exhausted · \(weekly.resetDescription(in: language.language))"
+                    "Hết tuần · \(weekly.relativeReset(in: language.language))",
+                    "Wk out · \(weekly.relativeReset(in: language.language))"
                 ),
                 PrismTheme.resetProximityTint(window: weekly, kind: .weekly)
             )
@@ -1236,8 +1097,8 @@ private struct PrismCompactAccountCard: View {
         }()
         return (
             language.text(
-                "Hết · \(window.resetDescription(in: language.language))",
-                "Exhausted · \(window.resetDescription(in: language.language))"
+                "Hết · \(window.relativeReset(in: language.language))",
+                "Out · \(window.relativeReset(in: language.language))"
             ),
             PrismTheme.resetProximityTint(window: window, kind: kind)
         )

@@ -204,7 +204,7 @@ struct CodexRosterApp: App {
                 .environmentObject(language)
                 .environment(\.locale, language.language.locale)
         }
-        .defaultSize(width: RosterSecondaryChrome.windowWidth, height: RosterSecondaryChrome.operationsHeight)
+        .defaultSize(width: RosterSecondaryChrome.operationsWidth, height: RosterSecondaryChrome.operationsHeight)
     }
 
 }
@@ -2207,7 +2207,8 @@ struct OpenAIStatusCard: View {
                             Label(component.name, systemImage: component.isOperational ? "circle.fill" : "exclamationmark.circle.fill")
                                 .font(.caption)
                                 .foregroundStyle(component.isOperational ? Color.secondary : PrismTheme.warning)
-                                .lineLimit(1)
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
@@ -2401,13 +2402,14 @@ struct GlobalResetOutlookCard: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     ForEach(timeline.prefix(3)) { event in
-                        HStack(spacing: 6) {
+                        HStack(alignment: .top, spacing: 6) {
                             Text(event.date)
                                 .font(.caption2.monospacedDigit())
                                 .foregroundStyle(.tertiary)
-                            Text(event.summary.prefix(50).description)
+                            Text(event.summary)
                                 .font(.caption2)
-                                .lineLimit(1)
+                                .lineLimit(3)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }

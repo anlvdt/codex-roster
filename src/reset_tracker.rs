@@ -161,7 +161,10 @@ struct ResolvedOutlookSignal {
     window_timezone: Option<String>,
 }
 
-fn resolve_outlook_signal(forecast: &ForecastResponse, now: OffsetDateTime) -> ResolvedOutlookSignal {
+fn resolve_outlook_signal(
+    forecast: &ForecastResponse,
+    now: OffsetDateTime,
+) -> ResolvedOutlookSignal {
     if let Some(official) = forecast.official_signal.as_ref() {
         return resolve_official_outlook_signal(official);
     }

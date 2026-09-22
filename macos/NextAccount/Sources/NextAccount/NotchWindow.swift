@@ -88,7 +88,7 @@ struct NotchWindowView: View {
     @State private var backupOperation: BackupOperation? = nil
     @State private var accountForEditing: SavedAccount? = nil
 
-    private let maxExpandedWidth: CGFloat = 920
+    private let maxExpandedWidth: CGFloat = NotchRosterLayout.deckWidth
     private let earWidth: CGFloat = 126
     private var physicalNotchClearance: CGFloat {
         notchWidth > 0 ? max(notchWidth - 14, 170) : 0

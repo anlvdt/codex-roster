@@ -2,15 +2,16 @@ import SwiftUI
 
 /// Shared sizing and type scale for secondary windows (Settings, Operations, About, sheets).
 enum RosterSecondaryChrome {
-    static let windowWidth: CGFloat = 540
-    static let settingsHeight: CGFloat = 620
-    static let operationsHeight: CGFloat = 700
-    static let aboutWidth: CGFloat = 640
-    static let aboutHeight: CGFloat = 560
-    static let sheetWidth: CGFloat = 520
+    static let windowWidth: CGFloat = 560
+    static let settingsHeight: CGFloat = 640
+    static let operationsWidth: CGFloat = 720
+    static let operationsHeight: CGFloat = 860
+    static let aboutWidth: CGFloat = 680
+    static let aboutHeight: CGFloat = 600
+    static let sheetWidth: CGFloat = 540
 
-    static let contentPadding: CGFloat = 20
-    static let sectionSpacing: CGFloat = 14
+    static let contentPadding: CGFloat = 22
+    static let sectionSpacing: CGFloat = 16
     static let blockSpacing: CGFloat = 8
 
     static let title = Font.system(size: 17, weight: .semibold)

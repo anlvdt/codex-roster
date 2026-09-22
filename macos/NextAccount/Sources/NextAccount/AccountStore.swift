@@ -4001,27 +4001,30 @@ func accountSortIsOrderedByWeeklyQuota(_ left: SavedAccount, _ right: SavedAccou
     left.switchQuotaScore > right.switchQuotaScore
 }
 
-/// Shared notch roster sizing: collapsed 260pt scroll area inside a 480pt deck;
+/// Shared notch roster sizing: collapsed scroll area inside a panoramic deck;
 /// expanded fits all 2-column rows for typical ≤20 accounts.
 ///
 /// `nextActionCaptionHeight` is reserved in the total so a live caption never
 /// clips the roster; when all-clear (caption hidden) that budget becomes bottom
 /// breathing room under the roster card — not a mid-deck gap.
 enum NotchRosterLayout {
-    static let collapsedDeckHeight: CGFloat = 480
-    static let collapsedRosterHeight: CGFloat = 260
-    /// Compact next-action caption between upper wings and roster.
-    static let nextActionCaptionHeight: CGFloat = 22
+    /// Expanded panoramic width (keep in sync with `NotchWindowView.maxExpandedWidth`
+    /// and `PrismQuickSwitchDeck` frame).
+    static let deckWidth: CGFloat = 1120
+    static let collapsedDeckHeight: CGFloat = 592
+    static let collapsedRosterHeight: CGFloat = 320
+    /// Compact next-action caption between upper wings and roster (2–3 lines).
+    static let nextActionCaptionHeight: CGFloat = 40
     /// Outer chrome around the panoramic deck (keep in sync with PrismQuickSwitchDeck).
-    static let deckHorizontalInset: CGFloat = 18
-    static let deckTopInset: CGFloat = 10
-    static let deckBottomInset: CGFloat = 22
+    static let deckHorizontalInset: CGFloat = 20
+    static let deckTopInset: CGFloat = 12
+    static let deckBottomInset: CGFloat = 24
     /// Spacing between upper wings / caption / roster (tight — leftover goes below roster).
-    static let deckSectionSpacing: CGFloat = 6
-    /// Name + email + optional status line under a 2-column roster cell.
-    static let rowHeight: CGFloat = 62
-    static let rowSpacing: CGFloat = 7
-    static let gridVerticalPadding: CGFloat = 6
+    static let deckSectionSpacing: CGFloat = 8
+    /// Name + email + optional multi-line status under a 2-column roster cell.
+    static let rowHeight: CGFloat = 74
+    static let rowSpacing: CGFloat = 8
+    static let gridVerticalPadding: CGFloat = 8
     /// Soft cap (~24 accounts) so pathological rosters stay screen-safe.
     static let maxFittedRows = 12
     static let rosterExpandedKey = "codex_roster_notch_roster_expanded"

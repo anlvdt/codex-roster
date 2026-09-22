@@ -30,7 +30,7 @@ struct OperationsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .rosterSecondaryFrame(
-            width: RosterSecondaryChrome.windowWidth,
+            width: RosterSecondaryChrome.operationsWidth,
             height: RosterSecondaryChrome.operationsHeight
         )
         .onAppear {

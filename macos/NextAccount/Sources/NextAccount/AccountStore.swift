@@ -3247,9 +3247,10 @@ struct ResetOutlook: Decodable {
     let lastResetAt: String
     let nextResetAt: String?
     let lastResetIsConfirmed: Bool?
+    /// Retained for API decode / legacy callers; UI no longer surfaces forecast %.
     let chance24Hours: Int
     let chance48Hours: Int
-    /// codex-reset.com Watch / commitment lead % — not the model-fit `confidence` label.
+    /// Retained for API decode; UI follows codex-resets.com schedule/status instead.
     let signalPercent: Int?
     let confidence: String
     let windowLabel: String
@@ -3262,6 +3263,47 @@ struct ResetOutlook: Decodable {
     let sourceFreshness: String?
     let cadenceDays: Double?
     let cadenceAccelerating: Bool?
+}
+
+/// Schedule/status copy aligned with codex-resets.com (no 24h/48h/signal %).
+enum ResetOutlookPresentation {
+    static func parseDate(_ value: String?) -> Date? {
+        guard let value else { return nil }
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return withFraction.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+    }
+
+    static func headline(_ outlook: ResetOutlook, language: AppLanguage) -> String {
+        let kind = outlook.signalKind ?? ""
+        let banked = kind.contains("banked")
+        let name = banked ? "Banked reset" : "Reset"
+        if kind.hasPrefix("scheduled") {
+            if let date = parseDate(outlook.nextResetAt) {
+                if date <= Date() {
+                    return language == .vietnamese
+                        ? "\(name): chờ xác nhận"
+                        : "\(name): awaiting confirmation"
+                }
+                let formatter = DateFormatter()
+                formatter.locale = language.locale
+                formatter.dateFormat = "HH:mm dd/MM"
+                let prefix = language == .vietnamese ? "\(name) dự kiến" : "\(name) scheduled"
+                return "\(prefix) · \(formatter.string(from: date))"
+            }
+            return language == .vietnamese
+                ? "\(name): đã có thông báo"
+                : "\(name): announced"
+        }
+        if kind.hasPrefix("confirmed") {
+            return language == .vietnamese
+                ? "\(name): đã xác nhận"
+                : "\(name): confirmed"
+        }
+        return language == .vietnamese
+            ? "Reset: đang theo dõi"
+            : "Reset: watching"
+    }
 }
 
 private struct GlobalResetEvent: Decodable {
@@ -4127,14 +4169,14 @@ enum NotchRosterLayout {
     /// Expanded panoramic width (keep in sync with `NotchWindowView.maxExpandedWidth`
     /// and `PrismQuickSwitchDeck` frame).
     static let deckWidth: CGFloat = 1020
-    static let collapsedDeckHeight: CGFloat = 476
+    static let collapsedDeckHeight: CGFloat = 490
     static let collapsedRosterHeight: CGFloat = 280
     /// Compact next-action caption between upper wings and roster.
     static let nextActionCaptionHeight: CGFloat = 22
     /// Outer chrome around the panoramic deck (keep in sync with PrismQuickSwitchDeck).
     static let deckHorizontalInset: CGFloat = 12
-    static let deckTopInset: CGFloat = 6
-    static let deckBottomInset: CGFloat = 4
+    static let deckTopInset: CGFloat = deckHorizontalInset
+    static let deckBottomInset: CGFloat = deckHorizontalInset
     /// Inner padding of the lower switchboard chrome (keep in sync with deck).
     static let switchboardHorizontalInset: CGFloat = 10
     /// Spacing between upper wings / caption / roster.
@@ -4172,28 +4214,40 @@ enum NotchRosterLayout {
         }
     }
 
-    /// Grid rows needed for sectioned accounts at a given column count.
-    /// Each non-empty plan band starts on a fresh row after its header when
-    /// multiple bands are visible — leftover cells are not shared across bands.
-    static func contentRowCount(sectionCounts: [Int], columns: Int) -> Int {
+    /// Contiguous slices: read down a column, then continue in the next one.
+    static func columnRanges(accountCount: Int, columns: Int) -> [Range<Int>] {
+        let count = max(0, accountCount)
         let cols = max(1, columns)
-        guard !sectionCounts.isEmpty else { return 1 }
-        let showHeaders = sectionCounts.count > 1
-        var rows = 0
-        for count in sectionCounts {
-            if showHeaders { rows += 1 }
-            rows += max(1, Int(ceil(Double(max(count, 0)) / Double(cols))))
+        let rows = max(1, (count + cols - 1) / cols)
+        return (0..<cols).map { column in
+            let start = min(count, column * rows)
+            return start..<min(count, start + rows)
         }
-        return max(1, rows)
     }
 
-    /// Account-only row count (excludes plan headers) at a column count.
-    static func accountRowCount(sectionCounts: [Int], columns: Int) -> Int {
-        let cols = max(1, columns)
-        guard !sectionCounts.isEmpty else { return 1 }
-        return sectionCounts.reduce(0) { partial, count in
-            partial + max(1, Int(ceil(Double(max(count, 0)) / Double(cols))))
+    /// Section fragments in each column, including continued groups.
+    static func columnSectionCounts(sectionCounts: [Int], columns: Int) -> [[Int]] {
+        let counts = sectionCounts.filter { $0 > 0 }
+        return columnRanges(accountCount: counts.reduce(0, +), columns: columns).map { range in
+            var offset = 0
+            return counts.compactMap { count in
+                defer { offset += count }
+                let overlap = min(range.upperBound, offset + count) - max(range.lowerBound, offset)
+                return overlap > 0 ? overlap : nil
+            }
         }
+    }
+
+    static func contentRowCount(sectionCounts: [Int], columns: Int) -> Int {
+        let showHeaders = sectionCounts.filter { $0 > 0 }.count > 1
+        return max(1, columnSectionCounts(sectionCounts: sectionCounts, columns: columns).map {
+            $0.reduce(0, +) + (showHeaders ? $0.count : 0)
+        }.max() ?? 0)
+    }
+
+    static func accountRowCount(sectionCounts: [Int], columns: Int) -> Int {
+        max(1, columnRanges(accountCount: sectionCounts.reduce(0) { $0 + max(0, $1) }, columns: columns)
+            .map(\.count).max() ?? 0)
     }
 
     /// Columns that still keep cards at/above `minComfortableCardWidth`.
@@ -4234,22 +4288,20 @@ enum NotchRosterLayout {
     static func rosterGridHeight(sectionCounts: [Int], expanded: Bool) -> CGFloat {
         guard expanded else { return collapsedRosterHeight }
         let columns = columnCount(sectionCounts: sectionCounts, expanded: true)
-        let showHeaders = sectionCounts.count > 1
-        let headerCount = showHeaders ? sectionCounts.count : 0
-        let accountRows = accountRowCount(sectionCounts: sectionCounts, columns: columns)
-        let logicalRows = headerCount + accountRows
-        // Scroll viewport: keep a dense rowHeight budget (conservative).
-        if logicalRows > maxFittedRows {
-            return CGFloat(maxFittedRows) * rowHeight
-                + CGFloat(max(0, maxFittedRows - 1)) * rowSpacing
+        let showHeaders = sectionCounts.filter { $0 > 0 }.count > 1
+        let heights = columnSectionCounts(sectionCounts: sectionCounts, columns: columns).map { counts in
+            let headers = showHeaders ? counts.count : 0
+            let rows = counts.reduce(0, +)
+            return CGFloat(headers) * sectionHeaderHeight
+                + CGFloat(max(0, headers - 1)) * sectionHeaderTopGap
+                + CGFloat(rows) * rowHeight
+                + CGFloat(max(0, headers + rows - 1)) * rowSpacing
                 + gridVerticalPadding
         }
-        // Exact fit: headers are shorter than cards — prevents bottom void.
-        let headerBlock = CGFloat(headerCount) * sectionHeaderHeight
-            + CGFloat(max(0, headerCount - 1)) * sectionHeaderTopGap
-        let accountBlock = CGFloat(accountRows) * rowHeight
-        let spacingBlock = CGFloat(max(0, logicalRows - 1)) * rowSpacing
-        return headerBlock + accountBlock + spacingBlock + gridVerticalPadding
+        let contentHeight = max(rowHeight + gridVerticalPadding, heights.max() ?? 0)
+        let viewportLimit = CGFloat(maxFittedRows) * rowHeight
+            + CGFloat(maxFittedRows - 1) * rowSpacing + gridVerticalPadding
+        return min(contentHeight, viewportLimit)
     }
 
     static func rosterGridHeight(accountCount: Int, expanded: Bool) -> CGFloat {

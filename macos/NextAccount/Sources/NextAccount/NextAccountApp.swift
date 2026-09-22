@@ -2290,33 +2290,20 @@ struct GlobalResetOutlookCard: View {
 
             if let outlook = store.resetOutlook {
                 let isConfirmedReset = outlook.lastResetIsConfirmed == true
-                let leadPercent = outlook.signalPercent ?? max(outlook.chance24Hours, outlook.chance48Hours)
-                let urgencyColor = forecastColor(leadPercent, high: .orange)
+                let status = ResetOutlookPresentation.headline(outlook, language: language.language)
+                let statusTint: Color = {
+                    let kind = outlook.signalKind ?? ""
+                    if kind.hasPrefix("confirmed") || isConfirmedReset { return .green }
+                    if kind.hasPrefix("scheduled") { return .orange }
+                    return .secondary
+                }()
 
-                // One full-width row of metrics; the card used to stack these
-                // vertically and leave half of its width blank.
+                // Match codex-resets.com: status + schedule, not forecast %.
                 HStack(alignment: .top, spacing: 12) {
-                    if let signalPercent = outlook.signalPercent {
-                        ResetOutlookMetric(
-                            title: language.text("Tín hiệu cam kết", "Signal commitment"),
-                            value: "\(signalPercent)%",
-                            tint: forecastColor(signalPercent, high: .red)
-                        )
-                    }
                     ResetOutlookMetric(
-                        title: language.text("24 giờ", "24 hours"),
-                        value: "\(outlook.chance24Hours)%",
-                        tint: forecastColor(outlook.chance24Hours)
-                    )
-                    ResetOutlookMetric(
-                        title: language.text("48 giờ", "48 hours"),
-                        value: "\(outlook.chance48Hours)%",
-                        tint: forecastColor(outlook.chance48Hours)
-                    )
-                    ResetOutlookMetric(
-                        title: language.text("Giờ thường reset", "Reset window"),
-                        value: formatResetWindow(outlook, language: language.language),
-                        tint: .secondary
+                        title: language.text("Trạng thái", "Status"),
+                        value: status,
+                        tint: statusTint
                     )
                     if let scheduledResetAt = outlook.nextResetAt {
                         ResetOutlookMetric(
@@ -2325,15 +2312,27 @@ struct GlobalResetOutlookCard: View {
                             tint: .orange
                         )
                     }
+                    ResetOutlookMetric(
+                        title: language.text("Reset gần nhất", "Latest reset"),
+                        value: formattedResetDate(outlook.lastResetAt, language: language.language),
+                        tint: .secondary
+                    )
+                    if !outlook.windowLabel.isEmpty {
+                        ResetOutlookMetric(
+                            title: language.text("Giờ thường reset", "Reset window"),
+                            value: formatResetWindow(outlook, language: language.language),
+                            tint: .secondary
+                        )
+                    }
                 }
 
                 HStack(spacing: 7) {
                     Circle()
-                        .fill(urgencyColor)
+                        .fill(statusTint == .secondary ? Color.accentColor : statusTint)
                         .frame(width: 8, height: 8)
                     Text(language.text(
-                        "Độ tin cậy mô hình: \(localizedConfidence(outlook.confidence))",
-                        "Model confidence: \(localizedConfidence(outlook.confidence))"
+                        "Dữ liệu từ Codex Resets (codex-resets.com)",
+                        "Data from Codex Resets (codex-resets.com)"
                     ))
                     if isConfirmedReset {
                         Text("·").foregroundStyle(.tertiary)
@@ -2341,21 +2340,10 @@ struct GlobalResetOutlookCard: View {
                             .fontWeight(.medium)
                             .foregroundStyle(.green)
                     }
-                    if let cadenceDays = outlook.cadenceDays {
-                        Text("·").foregroundStyle(.tertiary)
-                        Text(language.text(
-                            "Nhịp ~\(String(format: "%.1f", cadenceDays)) ngày",
-                            "Cadence ~\(String(format: "%.1f", cadenceDays)) days"
-                        ))
-                        if outlook.cadenceAccelerating == true {
-                            Text(language.text("(tăng nhanh)", "(accelerating)"))
-                                .foregroundStyle(.orange)
-                        }
-                    }
 
                     Spacer(minLength: 8)
 
-                    Button(language.text("Chi tiết tín hiệu", "Signal details")) {
+                    Button(language.text("Chi tiết", "Details")) {
                         showingSignalDetails.toggle()
                     }
                     .controlSize(.small)
@@ -2481,25 +2469,6 @@ struct GlobalResetOutlookCard: View {
             return language.text("Nguồn báo chưa có reset.", "The source reports no reset yet.")
         default:
             return summary
-        }
-    }
-
-    private func forecastColor(_ percent: Int, high: Color = .orange) -> Color {
-        switch percent {
-        case 0..<20: return .green
-        case 20..<50: return high
-        case 50..<75: return .orange
-        default: return .red
-        }
-    }
-
-    private func localizedConfidence(_ value: String) -> String {
-        guard language.language == .vietnamese else { return value.capitalized }
-        return switch value.lowercased() {
-        case "high": "Cao"
-        case "medium": "Trung bình"
-        case "low": "Thấp"
-        default: value
         }
     }
 
@@ -3932,10 +3901,7 @@ private struct MenuBarLiveSignals: View {
         guard let outlook = store.resetOutlook else {
             return language.text("Đang theo dõi", "Monitoring")
         }
-        if let signalPercent = outlook.signalPercent {
-            return language.text("Tín hiệu \(signalPercent)%", "Signal \(signalPercent)%")
-        }
-        return "\(outlook.chance24Hours)% / 24H"
+        return ResetOutlookPresentation.headline(outlook, language: language.language)
     }
 }
 
@@ -4332,8 +4298,8 @@ struct AboutView: View {
                         )
                         ReferenceLink(
                             title: "codex-reset.com",
-                            detail: language.text("API forecast 24h/48h, timeline, juice và status-history cho Codex Reset outlook.", "Forecast 24h/48h, timeline, juice, and status-history APIs for Codex Reset outlook."),
-                            badge: "Public API · forecast",
+                            detail: language.text("API phụ: timeline / juice / forecast (không hiện % 24h/48h trên notch hay Operations; UI chính lấy lịch từ codex-resets.com).", "Secondary API: timeline / juice / forecast (% 24h/48h not shown on notch or Operations; primary schedule comes from codex-resets.com)."),
+                            badge: "Public API · optional detail",
                             url: codexResetURL
                         )
                         Text(language.text("Ngoại trừ nền tảng MIT được ghi rõ, Codex Roster không đưa mã nguồn, tài sản, credential hay state của các dự án tham khảo vào ứng dụng. Chi tiết đầy đủ: CREDITS.md.", "Except for the credited MIT foundation, Codex Roster does not incorporate source code, assets, credentials, or state from the reference projects. Full detail: CREDITS.md."))

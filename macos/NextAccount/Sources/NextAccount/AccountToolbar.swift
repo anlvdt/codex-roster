@@ -14,7 +14,10 @@ struct AccountToolbar: ToolbarContent {
             }
             .labelStyle(.titleAndIcon)
             .disabled(store.isWorking)
-            .help(language.text("Đăng nhập tài khoản Codex mới hoặc lưu phiên hiện tại.", "Sign in to a new Codex account or save the current session."))
+            .help(language.text(
+                "Thêm tài khoản: Chỉ thêm (giữ phiên) hoặc Thêm & chuyển.",
+                "Add an account: Add only (keep session) or Add & switch."
+            ))
             .accessibilityLabel(language.text("Thêm tài khoản", "Add account"))
 
             Menu {

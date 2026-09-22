@@ -19,6 +19,7 @@ Only replace a session when impossible to keep (proven-dead RT, explicit re-logi
 - Activation: restore snapshot unchanged; Desktop/Codex owns refresh after launch.
 - Live `allow_refresh = false`.
 - Login required only for definite dead-session signals — not plain AT 401.
+- On Desktop switch/activate: full web-session clear per `.cursor/rules/chatgpt-desktop-switch-session.mdc` (immutable).
 
 ### Never
 - `prove_saved_session_refresh` / `refresh_snapshot_if_access_token_stale` on activate, poll, auto-switch, or background health checks.
@@ -27,6 +28,7 @@ Only replace a session when impossible to keep (proven-dead RT, explicit re-logi
 - Mass-verify sessions by rotating RTs.
 - Clear deferred AT 401 by proving RT in the background.
 - Activate backup snapshot without saving current live session first.
+- Skip/narrow Desktop web-session clear on switch — see `.cursor/rules/chatgpt-desktop-switch-session.mdc`.
 
 ## 2. Quota sorting
 

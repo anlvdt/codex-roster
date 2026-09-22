@@ -17,99 +17,113 @@ struct PrismDualChamberGauge: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: compact ? 6 : 10) {
+        VStack(alignment: .leading, spacing: compact ? 4 : 10) {
             // Chamber 1: 5-Hour Rolling Allowance (Segmented)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack {
-                    Label {
-                        Text(language.text("Cửa sổ 5 giờ", "5-hour window"))
-                            .font(.system(size: compact ? 10 : 11, weight: .medium))
+            VStack(alignment: .leading, spacing: compact ? 2 : 3) {
+                HStack(spacing: 4) {
+                    if compact {
+                        Text("5H")
+                            .font(PrismTheme.fontChip)
                             .foregroundStyle(.secondary)
-                    } icon: {
-                        Image(systemName: "clock.arrow.circlepath")
-                            .font(.system(size: compact ? 9 : 10))
-                            .foregroundStyle(PrismTheme.quotaTint(percent: fivePercent))
+                            .fixedSize(horizontal: true, vertical: false)
+                            .frame(minWidth: 30, alignment: .leading)
+                    } else {
+                        Label {
+                            Text(language.text("Cửa sổ 5 giờ", "5-hour window"))
+                                .font(PrismTheme.fontBodyCompactMedium)
+                                .foregroundStyle(.secondary)
+                        } icon: {
+                            Image(systemName: "clock.arrow.circlepath")
+                                .font(PrismTheme.fontCaptionRegular)
+                                .foregroundStyle(PrismTheme.quotaTint(percent: fivePercent))
+                        }
                     }
 
-                    Spacer()
+                    Spacer(minLength: 4)
 
                     if let fivePercent {
                         Text("\(fivePercent)%")
-                            .font(.system(size: compact ? 11 : 12, weight: .bold, design: .rounded))
+                            .font(compact ? PrismTheme.fontCaptionBold : PrismTheme.fontMetricSub)
                             .monospacedDigit()
                             .foregroundStyle(PrismTheme.quotaTint(percent: fivePercent))
                     } else {
-                        Text(language.text("Chưa có", "No data"))
-                            .font(.system(size: compact ? 9 : 10))
+                        Text(language.text("—", "—"))
+                            .font(PrismTheme.fontChip)
                             .foregroundStyle(.secondary)
                     }
                 }
 
-                // 5-Segmented tactile bar
-                PrismSegmentedBar(percent: fivePercent ?? 0, segments: 5, height: compact ? 5 : 7)
+                PrismSegmentedBar(percent: fivePercent ?? 0, segments: 5, height: compact ? 4 : 7)
 
                 if showLabels, let fiveHour {
-                    HStack {
-                        Text(fiveHour.resetDescription(in: language.language))
-                            .font(.system(size: 9, weight: .regular))
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                    }
-                    .padding(.top, 1)
+                    Text(fiveHour.resetDescription(in: language.language))
+                        .font(PrismTheme.fontMicro)
+                        .foregroundStyle(
+                            PrismTheme.resetProximityTint(window: fiveHour, kind: .fiveHour)
+                        )
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                 }
             }
 
             // Chamber 2: Weekly Quota Horizon
-            VStack(alignment: .leading, spacing: 3) {
-                HStack {
-                    Label {
-                        Text(language.text("Hạn mức tuần", "Weekly quota"))
-                            .font(.system(size: compact ? 10 : 11, weight: .medium))
+            VStack(alignment: .leading, spacing: compact ? 2 : 3) {
+                HStack(spacing: 4) {
+                    if compact {
+                        Text(language.text("Tuần", "Wk"))
+                            .font(PrismTheme.fontChip)
                             .foregroundStyle(.secondary)
-                    } icon: {
-                        Image(systemName: "calendar")
-                            .font(.system(size: compact ? 9 : 10))
-                            .foregroundStyle(PrismTheme.quotaTint(percent: weekPercent))
+                            .fixedSize(horizontal: true, vertical: false)
+                            .frame(minWidth: 30, alignment: .leading)
+                    } else {
+                        Label {
+                            Text(language.text("Hạn mức tuần", "Weekly quota"))
+                                .font(PrismTheme.fontBodyCompactMedium)
+                                .foregroundStyle(.secondary)
+                        } icon: {
+                            Image(systemName: "calendar")
+                                .font(PrismTheme.fontCaptionRegular)
+                                .foregroundStyle(PrismTheme.quotaTint(percent: weekPercent))
+                        }
                     }
 
-                    Spacer()
+                    Spacer(minLength: 4)
 
                     if let weekPercent {
                         Text("\(weekPercent)%")
-                            .font(.system(size: compact ? 11 : 12, weight: .bold, design: .rounded))
+                            .font(compact ? PrismTheme.fontCaptionBold : PrismTheme.fontMetricSub)
                             .monospacedDigit()
                             .foregroundStyle(PrismTheme.quotaTint(percent: weekPercent))
                     } else {
-                        Text(language.text("Chưa có", "No data"))
-                            .font(.system(size: compact ? 9 : 10))
+                        Text(language.text("—", "—"))
+                            .font(PrismTheme.fontChip)
                             .foregroundStyle(.secondary)
                     }
                 }
 
-                // Continuous Horizon Bar
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
                         Capsule()
-                            .fill(Color.primary.opacity(0.08))
+                            .fill(PrismTheme.trackFill)
                             .frame(height: compact ? 3 : 4)
 
                         let width = max(0, min(geo.size.width, geo.size.width * CGFloat(weekPercent ?? 0) / 100.0))
                         Capsule()
                             .fill(PrismTheme.quotaGradient(percent: weekPercent))
                             .frame(width: width, height: compact ? 3 : 4)
-                            .shadow(color: PrismTheme.quotaTint(percent: weekPercent).opacity(0.3), radius: 2)
+                            .shadow(color: PrismTheme.quotaTint(percent: weekPercent).opacity(0.3), radius: compact ? 1 : 2)
                     }
                 }
                 .frame(height: compact ? 3 : 4)
 
                 if showLabels, let weekly {
-                    HStack {
-                        Text(weekly.resetDescription(in: language.language))
-                            .font(.system(size: 9, weight: .regular))
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                    }
-                    .padding(.top, 1)
+                    Text(weekly.resetDescription(in: language.language))
+                        .font(PrismTheme.fontMicro)
+                        .foregroundStyle(
+                            PrismTheme.resetProximityTint(window: weekly, kind: .weekly)
+                        )
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                 }
             }
         }
@@ -132,7 +146,7 @@ struct PrismSegmentedBar: View {
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
                         RoundedRectangle(cornerRadius: height / 2, style: .continuous)
-                            .fill(Color.primary.opacity(0.07))
+                            .fill(PrismTheme.trackSoft)
 
                         if fillRatio > 0 {
                             RoundedRectangle(cornerRadius: height / 2, style: .continuous)
@@ -165,7 +179,7 @@ struct PrismArcGauge: View {
             Circle()
                 .trim(from: 0.15, to: 0.85)
                 .stroke(
-                    Color.primary.opacity(0.10),
+                    PrismTheme.surfaceHover,
                     style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
                 )
                 .rotationEffect(.degrees(90))
@@ -186,107 +200,106 @@ struct PrismArcGauge: View {
     }
 }
 
-/// Micro filament dual-line gauge for ultra-compact tiles with explicit labels and percentages
+/// Micro filament dual-line gauge for ultra-compact tiles.
 struct PrismFilamentBar: View {
     @EnvironmentObject private var language: LanguageStore
     let fivePercent: Int?
     let weekPercent: Int?
+    /// Optional monthly spend-control remaining % (`credit_limit`). Shown only when
+    /// the usage payload publishes it — never derived from weekly/5H.
+    var monthPercent: Int? = nil
     var width: CGFloat = 36
     var height: CGFloat = 3.5
-    var showLabels: Bool = true
+    /// Axis labels (5H / Wk). Hide on dense roster rows; tooltip still has them.
+    var showAxisLabels: Bool = true
+    var showPercents: Bool = true
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2.5) {
-            // 5H quota line
-            HStack(spacing: 3) {
-                if showLabels {
-                    Text("5H")
-                        .font(.system(size: 8, weight: .bold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.55))
-                        .frame(width: 14, alignment: .leading)
-                        .fixedSize()
-                }
-
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Color.white.opacity(0.12))
-                        Capsule()
-                            .fill(PrismTheme.quotaTint(percent: fivePercent))
-                            .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(fivePercent ?? 0) / 100.0)))
-                    }
-                }
-                .frame(width: width, height: height)
-
-                if showLabels, let fivePercent {
-                    Text("\(fivePercent)%")
-                        .font(.system(size: 9.5, weight: .bold, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(PrismTheme.quotaTint(percent: fivePercent))
-                        .frame(width: 32, alignment: .trailing)
-                        .fixedSize()
-                }
-            }
-
-            // Weekly quota line
-            HStack(spacing: 3) {
-                if showLabels {
-                    Text(language.text("Wk", "Wk"))
-                        .font(.system(size: 8, weight: .bold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.55))
-                        .frame(width: 14, alignment: .leading)
-                        .fixedSize()
-                }
-
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Color.white.opacity(0.12))
-                        Capsule()
-                            .fill(PrismTheme.quotaTint(percent: weekPercent))
-                            .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(weekPercent ?? 0) / 100.0)))
-                    }
-                }
-                .frame(width: width, height: height)
-
-                if showLabels, let weekPercent {
-                    Text("\(weekPercent)%")
-                        .font(.system(size: 9.5, weight: .bold, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(PrismTheme.quotaTint(percent: weekPercent))
-                        .frame(width: 32, alignment: .trailing)
-                        .fixedSize()
-                }
+        VStack(alignment: .trailing, spacing: 2) {
+            filamentRow(label: "5H", percent: fivePercent)
+            filamentRow(label: language.text("Wk", "Wk"), percent: weekPercent)
+            if let monthPercent {
+                filamentRow(label: language.text("Th", "Mo"), percent: monthPercent)
             }
         }
-        .help(
+        .help(helpText)
+    }
+
+    private var helpText: String {
+        var parts = [
             language.text(
-                "5H: \(fivePercent.map { "\($0)%" } ?? "—"), Tuần: \(weekPercent.map { "\($0)%" } ?? "—")",
-                "5H: \(fivePercent.map { "\($0)%" } ?? "—"), Weekly: \(weekPercent.map { "\($0)%" } ?? "—")"
-            )
-        )
+                "5H: \(fivePercent.map { "\($0)%" } ?? "—")",
+                "5H: \(fivePercent.map { "\($0)%" } ?? "—")"
+            ),
+            language.text(
+                "Tuần: \(weekPercent.map { "\($0)%" } ?? "—")",
+                "Weekly: \(weekPercent.map { "\($0)%" } ?? "—")"
+            ),
+        ]
+        if let monthPercent {
+            parts.append(language.text("Tháng: \(monthPercent)%", "Monthly: \(monthPercent)%"))
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    private func filamentRow(label: String, percent: Int?) -> some View {
+        HStack(spacing: 3) {
+            if showAxisLabels {
+                Text(label)
+                    .font(PrismTheme.fontMicro)
+                    .foregroundStyle(PrismTheme.textSecondary)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(minWidth: 14, alignment: .leading)
+            }
+
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(PrismTheme.surfaceStrong)
+                    Capsule()
+                        .fill(PrismTheme.quotaTint(percent: percent))
+                        .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(percent ?? 0) / 100.0)))
+                }
+            }
+            .frame(width: width, height: height)
+
+            if showPercents {
+                // fixedSize before frame so "100%" never wraps; minWidth keeps columns aligned.
+                Text(percent.map { "\($0)%" } ?? "—")
+                    .font(PrismTheme.fontChip)
+                    .monospacedDigit()
+                    .foregroundStyle(PrismTheme.quotaTint(percent: percent))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(minWidth: 34, alignment: .trailing)
+            }
+        }
+        .fixedSize(horizontal: true, vertical: true)
     }
 }
 
 /// Reset countdown badge with clock icon and monospaced digits
 struct PrismResetClockChip: View {
     let window: UsageWindow?
+    var kind: QuotaResetWindowKind = .fiveHour
     @EnvironmentObject private var language: LanguageStore
 
     var body: some View {
         if let window {
+            let tint = PrismTheme.resetProximityTint(window: window, kind: kind)
             HStack(spacing: 4) {
                 Image(systemName: "hourglass")
-                    .font(.system(size: 9))
-                    .foregroundStyle(PrismTheme.amber)
+                    .font(PrismTheme.fontChipIcon)
+                    .foregroundStyle(tint)
                 Text(window.relativeReset(in: language.language))
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .font(PrismTheme.fontCaption)
+                    .foregroundStyle(tint)
             }
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(
                 Capsule()
-                    .fill(Color.primary.opacity(0.04))
-                    .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+                    .fill(PrismTheme.surfacePanel)
+                    .overlay(Capsule().strokeBorder(PrismTheme.trackFill, lineWidth: 0.5))
             )
         }
     }

@@ -148,6 +148,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Remember Codex rollout cwd/session on switch; reopen thread after activate.
+    AutoResumeSession {
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
+        #[arg(long)]
+        disable: bool,
+        #[arg(long)]
+        json: bool,
+    },
     AutoSwitch {
         #[arg(long, conflicts_with_all = ["disable", "apply", "status"])]
         enable: bool,
@@ -179,26 +188,28 @@ enum Command {
         #[command(subcommand)]
         command: Option<VibeUsageCommand>,
     },
+    /// Global Codex Reset outlook (codex-resets.com status).
     ResetOutlook {
         #[arg(long)]
         json: bool,
     },
-    /// Return newly verified global reset events once, for desktop notifications.
+    /// Return newly published Codex reset events once, for desktop notifications
+    /// (codex-resets.com status/list + forecast official_signal).
     ResetEvents {
         #[arg(long)]
         json: bool,
     },
-    /// Return the full reset timeline from codex-reset.com.
+    /// Return recent reset announcements from codex-resets.com.
     ResetTimeline {
         #[arg(long)]
         json: bool,
     },
-    /// Return OpenAI status history from codex-reset.com (Codex-specific incidents).
+    /// Deprecated: Codex Resets does not publish service status history.
     ResetStatusHistory {
         #[arg(long)]
         json: bool,
     },
-    /// Return quota effort tiers ("juice") from codex-reset.com.
+    /// Deprecated: Codex Resets does not publish effort tiers.
     ResetJuice {
         #[arg(long)]
         json: bool,
@@ -670,6 +681,32 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::AutoResumeSession {
+            enable,
+            disable,
+            json,
+        }) => {
+            let status = if enable {
+                app.set_auto_resume_session(true)?
+            } else if disable {
+                app.set_auto_resume_session(false)?
+            } else {
+                app.auto_resume_session_status()?
+            };
+            if json {
+                print_json(&status)?;
+            } else {
+                println!(
+                    "Auto-resume session: {}",
+                    if status.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                );
+            }
+            Ok(())
+        }
         Some(Command::AutoSwitch {
             enable,
             disable,
@@ -693,6 +730,7 @@ pub fn run() -> Result<()> {
                     candidate_display_name: None,
                     detail: None,
                     banked_reset_count: 0,
+                    session_resume: None,
                 }
             } else {
                 app.auto_switch_with_candidate(apply, account_id, force)?
@@ -744,10 +782,12 @@ pub fn run() -> Result<()> {
             if json {
                 print_json(&outlook)?;
             } else {
-                println!(
-                    "Global reset outlook: {}% in 24h, {}% in 48h",
-                    outlook.chance_24_hours, outlook.chance_48_hours
-                );
+                println!("Global reset status: {}", outlook.signal_kind);
+                if let Some(next) = &outlook.next_reset_at {
+                    println!("Scheduled: {next}");
+                }
+                println!("{}", outlook.signal_summary);
+                println!("Data from Codex Resets — https://codex-resets.com/");
                 println!("Last reset: {}", outlook.last_reset_at);
             }
             Ok(())

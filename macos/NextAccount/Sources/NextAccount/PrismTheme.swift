@@ -1,6 +1,13 @@
 import SwiftUI
 import AppKit
 
+/// Quota window cadence used to scale reset-proximity color bands.
+enum QuotaResetWindowKind {
+    case fiveHour
+    case weekly
+    case monthly
+}
+
 /// Design tokens, bioluminescent tints, haptics, and physics for the Neo-Prism UI system.
 enum PrismTheme {
     // MARK: - Bioluminescent State Tints
@@ -18,6 +25,82 @@ enum PrismTheme {
     static let accent = Color(red: 0.24, green: 0.58, blue: 0.96)
     /// Neutral titanium sheen
     static let titanium = Color(red: 0.62, green: 0.66, blue: 0.74)
+
+    /// Semantic aliases — prefer these over ad-hoc `Color.green` / `.orange` / `.red` / `.purple`.
+    static let success = emerald
+    static let warning = amber
+    static let danger = ruby
+    static let autoSwitch = violet
+
+    // MARK: - Semantic Text (dark notch / glass surfaces)
+    static let textPrimary = Color.white.opacity(0.92)
+    static let textBright = Color.white.opacity(0.68)
+    static let textSecondary = Color.white.opacity(0.55)
+    static let textTertiary = Color.white.opacity(0.40)
+    static let textOnAccent = Color.white
+    static let highlight = Color.white.opacity(0.18)
+    static let highlightSoft = Color.white.opacity(0.16)
+
+    // MARK: - Surfaces & Borders (dark glass)
+    static let surfaceQuiet = Color.white.opacity(0.03)
+    static let surfaceFaint = Color.white.opacity(0.018)
+    static let surfaceDim = Color.white.opacity(0.05)
+    static let surfaceSoft = Color.white.opacity(0.06)
+    static let surfaceMuted = Color.white.opacity(0.07)
+    static let surfaceFill = Color.white.opacity(0.08)
+    static let surfaceStrong = Color.white.opacity(0.12)
+    static let surfacePanel = Color.white.opacity(0.04)
+    static let surfaceHover = Color.white.opacity(0.10)
+    static let borderSubtle = Color.white.opacity(0.08)
+    static let borderSoft = Color.white.opacity(0.15)
+    static let borderStrong = Color.white.opacity(0.20)
+    static let trackFill = Color.primary.opacity(0.08)
+    static let trackSoft = Color.primary.opacity(0.07)
+
+    /// Soft tinted chip fill / stroke for status pills.
+    static func chipFill(_ tint: Color, opacity: Double = 0.18) -> Color { tint.opacity(opacity) }
+    static func chipStroke(_ tint: Color, opacity: Double = 0.35) -> Color { tint.opacity(opacity) }
+
+    // MARK: - Type Scale (notch / compact glass UI)
+    /// Large identity glyph (~24pt)
+    static let fontDisplay = Font.system(size: 24, weight: .bold)
+    /// Active identity glyph (~16pt)
+    static let fontTitle = Font.system(size: 16, weight: .bold)
+    /// Account display name (~15pt)
+    static let fontHeadline = Font.system(size: 15, weight: .bold)
+    /// Section / card title (~13pt)
+    static let fontSubheadline = Font.system(size: 13, weight: .bold)
+    /// Default body copy (~11.5pt)
+    static let fontBody = Font.system(size: 11.5, weight: .medium)
+    static let fontBodySemibold = Font.system(size: 11.5, weight: .semibold)
+    static let fontBodyBold = Font.system(size: 11.5, weight: .bold)
+    /// Compact controls / status (~11pt)
+    static let fontBodyCompact = Font.system(size: 11, weight: .semibold)
+    static let fontBodyCompactBold = Font.system(size: 11, weight: .bold)
+    static let fontBodyCompactMedium = Font.system(size: 11, weight: .medium)
+    /// Captions / reset lines (~10.5pt)
+    static let fontCaption = Font.system(size: 10.5, weight: .medium)
+    static let fontCaptionRegular = Font.system(size: 10.5, weight: .regular)
+    static let fontCaptionBold = Font.system(size: 10.5, weight: .bold)
+    /// Status chips / plan pills / roster email (~10.5pt rounded)
+    static let fontChip = Font.system(size: 10.5, weight: .bold, design: .rounded)
+    static let fontChipIcon = Font.system(size: 10.5, weight: .regular)
+    /// Micro labels on dense cards (~9–9.5pt)
+    static let fontMicro = Font.system(size: 9, weight: .bold)
+    static let fontMicroChip = Font.system(size: 9.5, weight: .bold, design: .rounded)
+    /// Quota / metric figures
+    static let fontMetric = Font.system(size: 12.5, weight: .bold, design: .rounded)
+    static let fontMetricLarge = Font.system(size: 18, weight: .bold, design: .rounded)
+    static let fontMetricSub = Font.system(size: 12, weight: .bold)
+    /// Monospaced digits / codes
+    static let fontMono = Font.system(size: 11, weight: .medium, design: .monospaced)
+    static let fontMonoBold = Font.system(size: 11, weight: .bold, design: .monospaced)
+    /// Section title / card avatar letter (~14pt)
+    static let fontSection = Font.system(size: 14, weight: .bold)
+    static let fontAvatar = fontSection
+    /// Filament / dense metric (~13.5pt rounded)
+    static let fontMetricDense = Font.system(size: 13.5, weight: .bold, design: .rounded)
+
     // MARK: - Dynamic State Resolvers
     static func quotaTint(percent: Int?) -> Color {
         guard let p = percent else { return titanium }
@@ -35,17 +118,66 @@ enum PrismTheme {
         )
     }
 
+    /// Soft lime between emerald and amber — “approaching reset” mid band.
+    private static let resetNearMid = Color(red: 0.42, green: 0.82, blue: 0.45)
+    /// Cooler green for monthly proximity (distinguishes from 5h/weekly).
+    private static let resetMonthlyNear = Color(red: 0.32, green: 0.78, blue: 0.62)
+    /// Muted amber when still far from reset.
+    private static let resetFarMuted = Color(red: 0.72, green: 0.58, blue: 0.36)
+
+    /// Maps time-until-reset → tint. Closer to reset = greener; farther = amber/muted.
+    /// `kind` retunes band thresholds to each window’s natural cadence.
+    static func resetProximityTint(
+        resetAt: Date?,
+        kind: QuotaResetWindowKind = .fiveHour,
+        now: Date = Date()
+    ) -> Color {
+        guard let resetAt else { return textSecondary }
+        let remaining = resetAt.timeIntervalSince(now)
+        if remaining <= 0 { return emerald }
+
+        let hours = remaining / 3600.0
+        switch kind {
+        case .fiveHour:
+            // Horizon ~5h — tight bands so “soon” reads green quickly.
+            if hours <= 0.5 { return emerald }
+            if hours <= 1.5 { return resetNearMid }
+            if hours <= 3.0 { return amber }
+            return resetFarMuted
+        case .weekly:
+            if hours <= 6 { return emerald }
+            if hours <= 24 { return resetNearMid }
+            if hours <= 72 { return amber }
+            return textSecondary
+        case .monthly:
+            if hours <= 24 { return emerald }
+            if hours <= 72 { return resetMonthlyNear }
+            if hours <= 168 { return amber }
+            return textSecondary
+        }
+    }
+
+    static func resetProximityTint(
+        window: UsageWindow,
+        kind: QuotaResetWindowKind,
+        now: Date = Date()
+    ) -> Color {
+        resetProximityTint(resetAt: window.resetAt.value, kind: kind, now: now)
+    }
+
     // MARK: - Glass Materials & Specular Rim Light
     static let darkBackground = Color(red: 0.06, green: 0.07, blue: 0.10)
     static let lightBackground = Color(red: 0.95, green: 0.96, blue: 0.98)
+    /// Notch shell fill (matches physical-camera backdrop)
+    static let notchShell = Color(red: 0.08, green: 0.09, blue: 0.12)
 
     static var rimStroke: LinearGradient {
         LinearGradient(
             colors: [
                 Color.white.opacity(0.24),
-                Color.white.opacity(0.08),
-                Color.white.opacity(0.03),
-                Color.white.opacity(0.12)
+                borderSubtle,
+                surfaceQuiet,
+                surfaceStrong
             ],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
@@ -140,5 +272,36 @@ extension View {
 
     func prismInteractive(cornerRadius: CGFloat = 12, action: (() -> Void)? = nil) -> some View {
         modifier(PrismInteractiveModifier(cornerRadius: cornerRadius, action: action))
+    }
+}
+
+/// Compact iPhone-style switch — macOS `.switch` + `.tint` stays grey on mini controls.
+struct PrismGreenSwitchToggleStyle: ToggleStyle {
+    var onColor: Color = PrismTheme.emerald
+    var offColor: Color = Color.white.opacity(0.18)
+
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            HStack(spacing: 0) {
+                configuration.label
+                ZStack(alignment: configuration.isOn ? .trailing : .leading) {
+                    Capsule()
+                        .fill(configuration.isOn ? onColor : offColor)
+                        .frame(width: 30, height: 17)
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 13, height: 13)
+                        .shadow(color: .black.opacity(0.25), radius: 1, y: 0.5)
+                        .padding(2)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .animation(.easeInOut(duration: 0.16), value: configuration.isOn)
+        .accessibilityAddTraits(.isButton)
     }
 }

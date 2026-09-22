@@ -43,10 +43,18 @@ import Testing
     ))
 }
 
-@Test func trustedTiboSourceURLAcceptsOnlyCanonicalStatusLinks() {
+@Test func trustedResetSourceURLAcceptsCanonicalStatusAndSiteLinks() {
     #expect(
-        trustedTiboSourceURL("https://x.com/thsottiaux/status/2090964822422949999")?.absoluteString
+        trustedResetSourceURL("https://x.com/thsottiaux/status/2090964822422949999")?.absoluteString
             == "https://x.com/thsottiaux/status/2090964822422949999"
+    )
+    #expect(
+        trustedResetSourceURL("https://codex-resets.com/")?.absoluteString
+            == "https://codex-resets.com/"
+    )
+    #expect(
+        trustedResetSourceURL("https://codex-reset.com/api/forecast")?.absoluteString
+            == "https://codex-reset.com/api/forecast"
     )
     for value in [
         "https://evil.example/phish",
@@ -57,7 +65,7 @@ import Testing
         "https://x.com/thsottiaux/status/not-a-tweet",
         "https://x.com/thsottiaux/status/2090964822422949999?redirect=1",
     ] {
-        #expect(trustedTiboSourceURL(value) == nil)
+        #expect(trustedResetSourceURL(value) == nil)
     }
 }
 
@@ -102,6 +110,62 @@ import Testing
         usageError: nil,
         availableCount: 0
     ))
+}
+
+@Test func bankedResetTotalPrefersTallerAvailableCreditList() {
+    let now = RustDate(value: Date(timeIntervalSince1970: 1_700_000_000))
+    let underReported = BankedResetSummary(
+        availableCount: 1,
+        credits: [
+            BankedResetCredit(
+                id: "a",
+                resetType: "codex_rate_limits",
+                status: "available",
+                grantedAt: now,
+                expiresAt: nil,
+                title: nil,
+                description: nil
+            ),
+            BankedResetCredit(
+                id: "b",
+                resetType: "codex_rate_limits",
+                status: "available",
+                grantedAt: now,
+                expiresAt: nil,
+                title: nil,
+                description: nil
+            ),
+            BankedResetCredit(
+                id: "c",
+                resetType: "codex_rate_limits",
+                status: "redeemed",
+                grantedAt: now,
+                expiresAt: nil,
+                title: nil,
+                description: nil
+            ),
+        ]
+    )
+    #expect(underReported.totalAvailableCount == 2)
+
+    let summaryOnly = BankedResetSummary(availableCount: 4, credits: nil)
+    #expect(summaryOnly.totalAvailableCount == 4)
+
+    let cappedList = BankedResetSummary(
+        availableCount: 3,
+        credits: [
+            BankedResetCredit(
+                id: "only",
+                resetType: "codex_rate_limits",
+                status: "available",
+                grantedAt: now,
+                expiresAt: nil,
+                title: nil,
+                description: nil
+            )
+        ]
+    )
+    #expect(cappedList.totalAvailableCount == 3)
 }
 
 @Test func contextMenuDeleteResolvesByCapturedAccountIDNotListIndex() {

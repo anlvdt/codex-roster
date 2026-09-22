@@ -6,13 +6,17 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-const X_PROFILE_ENDPOINT: &str = "https://x.com/thsottiaux?lang=en";
-const RESET_FEED_ENDPOINT: &str = "https://codex-reset.com/api/feed";
-const FORECAST_ENDPOINT: &str = "https://codex-reset.com/api/forecast";
+/// Public Codex reset outlook / commitment API (codex-resets.com).
+const RESETS_STATUS_ENDPOINT: &str = "https://codex-resets.com/api/v1/status";
+const RESETS_LIST_ENDPOINT: &str = "https://codex-resets.com/api/v1/resets?limit=40";
+
+const SITE_HOME: &str = "https://codex-resets.com/";
+const USER_AGENT: &str =
+    "Mozilla/5.0 (compatible; CodexRoster/0.2; +https://github.com/anlvdt/codex-roster)";
+
 const NOTIFICATION_STATE_FILE: &str = "reset-notifications.json";
-const PROFILE_POST_MARKER: &str = "itemType=\"https://schema.org/SocialMediaPosting\"";
 const INITIAL_REPLAY_WINDOW: time::Duration = time::Duration::hours(6);
-const NOTIFICATION_SOURCE: &str = "x:thsottiaux";
+const NOTIFICATION_SOURCE: &str = "codex-resets:v1";
 const MAX_SEEN_EVENT_IDS: usize = 512;
 const MAX_NOTIFICATIONS_PER_HOUR: usize = 8;
 
@@ -22,9 +26,6 @@ pub struct ResetOutlook {
     pub last_reset_at: String,
     pub next_reset_at: Option<String>,
     pub last_reset_is_confirmed: bool,
-    pub chance_24_hours: u8,
-    pub chance_48_hours: u8,
-    pub confidence: String,
     pub window_label: String,
     pub window_timezone: Option<String>,
     pub window_start_hour: Option<u32>,
@@ -46,40 +47,6 @@ pub struct ResetEvent {
     pub kind: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct TiboPost {
-    id: String,
-    created_at: String,
-    text: String,
-    url: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SignalKind {
-    ConfirmedBanked,
-    ScheduledBanked,
-    ConfirmedReset,
-    ScheduledReset,
-    Hint,
-}
-
-impl SignalKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::ConfirmedBanked => "confirmed_banked_reset",
-            Self::ScheduledBanked => "scheduled_banked_reset",
-            Self::ConfirmedReset => "confirmed_global_reset",
-            Self::ScheduledReset => "scheduled_global_reset",
-            Self::Hint => "reset_hint",
-        }
-    }
-
-    #[allow(dead_code)]
-    fn is_confirmed(self) -> bool {
-        matches!(self, Self::ConfirmedBanked | Self::ConfirmedReset)
-    }
-}
-
 #[derive(Default, Serialize, Deserialize)]
 struct NotificationState {
     initialized_at: String,
@@ -93,201 +60,373 @@ struct NotificationState {
 }
 
 // ---------------------------------------------------------------------------
-// Outlook: delegate to the Codex Reset forecast API
+// Outlook: Codex Resets public status only
 // ---------------------------------------------------------------------------
 
 pub fn fetch_reset_outlook() -> Result<ResetOutlook> {
-    let now = OffsetDateTime::now_utc();
-    let forecast = fetch_forecast()?;
-    let feed_signal = fetch_feed_signal_metadata(now);
+    let status = fetch_resets_status()?;
+    Ok(outlook_from_status(&status))
+}
 
-    let (signal_kind, signal_summary, source_url, last_reset_is_confirmed) = match feed_signal {
-        Some(signal) => {
-            let kind = signal
-                .kind
-                .as_deref()
-                .map(map_feed_signal_kind)
-                .unwrap_or("none");
-            let confirmed = signal
-                .reset_verification_status
-                .as_deref()
-                .is_some_and(|status| status == "confirmed")
-                || signal.active == Some(true);
-            (
-                kind.to_owned(),
-                signal.summary.clone().unwrap_or_default(),
-                signal
-                    .url
-                    .clone()
-                    .unwrap_or_else(|| X_PROFILE_ENDPOINT.to_owned()),
-                confirmed,
-            )
-        }
-        None => (
-            "none".to_owned(),
-            "No actionable reset signal in Tibo's latest public posts.".to_owned(),
-            X_PROFILE_ENDPOINT.to_owned(),
-            false,
-        ),
-    };
+fn outlook_from_status(status: &ResetsStatusResponse) -> ResetOutlook {
+    let signal = resolve_outlook_signal(Some(status));
+    ResetOutlook {
+        updated_at: status
+            .meta
+            .as_ref()
+            .and_then(|m| m.generated_at.clone())
+            .unwrap_or_default(),
+        last_reset_at: status
+            .data
+            .stats
+            .as_ref()
+            .and_then(|s| s.last_reset_at.clone())
+            .or_else(|| {
+                status
+                    .data
+                    .latest_reset
+                    .as_ref()
+                    .and_then(|r| r.announced_at.clone())
+            })
+            .unwrap_or_default(),
+        next_reset_at: signal.next_reset_at,
+        last_reset_is_confirmed: signal.last_reset_is_confirmed,
+        window_label: signal.window_label.unwrap_or_default(),
+        window_timezone: signal.window_timezone,
+        window_start_hour: None,
+        window_end_hour: None,
+        signal_kind: signal.signal_kind,
+        signal_summary: signal.signal_summary,
+        source_url: signal.source_url,
+        source_freshness: "codex_resets_api".to_owned(),
+        cadence_days: status.data.stats.as_ref().and_then(|s| s.avg_interval_days),
+        cadence_accelerating: None,
+    }
+}
 
-    Ok(ResetOutlook {
-        updated_at: forecast.updated_at,
-        last_reset_at: forecast.last_reset_at,
+struct ResolvedOutlookSignal {
+    signal_kind: String,
+    signal_summary: String,
+    source_url: String,
+    last_reset_is_confirmed: bool,
+    next_reset_at: Option<String>,
+    window_label: Option<String>,
+    window_timezone: Option<String>,
+}
+
+fn resolve_outlook_signal(status: Option<&ResetsStatusResponse>) -> ResolvedOutlookSignal {
+    if let Some(scheduled) = status.and_then(|s| s.data.scheduled_reset.as_ref()) {
+        return resolve_scheduled_status_signal(scheduled);
+    }
+    if let Some(watch) = status.and_then(|s| s.data.active_watch.as_ref()) {
+        return resolve_active_watch_signal(watch);
+    }
+    if let Some(latest) = status.and_then(|s| s.data.latest_reset.as_ref()) {
+        return ResolvedOutlookSignal {
+            signal_kind: map_completed_reset_kind(latest.reset_type.as_deref()).to_owned(),
+            signal_summary: latest.text.clone().unwrap_or_default(),
+            source_url: source_url_from(latest.source.as_ref(), latest.id.as_deref()),
+            last_reset_is_confirmed: true,
+            next_reset_at: None,
+            window_label: None,
+            window_timezone: None,
+        };
+    }
+    ResolvedOutlookSignal {
+        signal_kind: "none".to_owned(),
+        signal_summary: "No actionable Codex reset signal from the public API.".to_owned(),
+        source_url: SITE_HOME.to_owned(),
+        last_reset_is_confirmed: false,
         next_reset_at: None,
-        last_reset_is_confirmed,
-        chance_24_hours: forecast.probabilities.rounded_24h,
-        chance_48_hours: forecast.probabilities.rounded_48h,
-        confidence: forecast.confidence,
-        window_label: forecast.time_window.label,
-        window_timezone: forecast.time_window.timezone,
-        window_start_hour: forecast.time_window.start_hour,
-        window_end_hour: forecast.time_window.end_hour,
-        signal_kind,
-        signal_summary,
-        source_url,
-        source_freshness: "codex_reset_forecast_api".to_owned(),
-        cadence_days: forecast.cadence.as_ref().and_then(|c| c.recent_median_days),
-        cadence_accelerating: forecast.cadence.as_ref().and_then(|c| c.accelerating),
-    })
-}
-
-fn map_feed_signal_kind(kind: &str) -> &'static str {
-    match kind {
-        "confirmed" => "confirmed_global_reset",
-        "scheduled" => "scheduled_global_reset",
-        "candidate" => "reset_hint",
-        _ => "none",
+        window_label: None,
+        window_timezone: None,
     }
 }
 
-fn fetch_forecast() -> Result<ForecastResponse> {
-    let mut response = ureq::get(FORECAST_ENDPOINT)
-        .header(
-            "User-Agent",
-            "Mozilla/5.0 (compatible; CodexRoster/0.2; +https://github.com/anlvdt/codex-roster)",
-        )
+fn resolve_scheduled_status_signal(scheduled: &ResetsScheduledReset) -> ResolvedOutlookSignal {
+    ResolvedOutlookSignal {
+        signal_kind: map_scheduled_reset_kind(scheduled.reset_type.as_deref()).to_owned(),
+        signal_summary: scheduled.text.clone().unwrap_or_default(),
+        source_url: source_url_from(scheduled.source.as_ref(), scheduled.id.as_deref()),
+        last_reset_is_confirmed: false,
+        next_reset_at: scheduled.scheduled_for.clone(),
+        window_label: None,
+        window_timezone: None,
+    }
+}
+
+fn resolve_active_watch_signal(watch: &ResetsWatch) -> ResolvedOutlookSignal {
+    ResolvedOutlookSignal {
+        signal_kind: "reset_hint".to_owned(),
+        signal_summary: watch
+            .text
+            .clone()
+            .or_else(|| watch.summary.clone())
+            .unwrap_or_default(),
+        source_url: source_url_from(watch.source.as_ref(), watch.id.as_deref()),
+        last_reset_is_confirmed: false,
+        next_reset_at: watch
+            .scheduled_for
+            .clone()
+            .or_else(|| watch.target_at.clone()),
+        window_label: watch.label.clone(),
+        window_timezone: None,
+    }
+}
+
+fn map_scheduled_reset_kind(reset_type: Option<&str>) -> &'static str {
+    match reset_type {
+        Some("banked") => "scheduled_banked_reset",
+        _ => "scheduled_global_reset",
+    }
+}
+
+fn map_completed_reset_kind(reset_type: Option<&str>) -> &'static str {
+    match reset_type {
+        Some("banked") => "confirmed_banked_reset",
+        _ => "confirmed_global_reset",
+    }
+}
+
+fn source_url_from(source: Option<&ResetsSource>, id: Option<&str>) -> String {
+    if let Some(url) = source.and_then(|s| s.url.clone())
+        && trusted_https_url(&url).is_some()
+    {
+        return url;
+    }
+    id.and_then(trusted_status_post_url)
+        .unwrap_or_else(|| SITE_HOME.to_owned())
+}
+
+fn trusted_status_post_url(id: &str) -> Option<String> {
+    let digits = id.strip_prefix("observed-").unwrap_or(id);
+    (!digits.is_empty() && digits.chars().all(|character| character.is_ascii_digit()))
+        .then(|| format!("https://x.com/thsottiaux/status/{digits}"))
+}
+
+fn trusted_https_url(value: &str) -> Option<&str> {
+    let lower = value.to_ascii_lowercase();
+    if !(lower.starts_with("https://x.com/") || lower.starts_with("https://codex-resets.com/")) {
+        return None;
+    }
+    if value.contains([' ', '\n', '\r', '\t']) {
+        return None;
+    }
+    Some(value)
+}
+
+fn fetch_resets_status() -> Result<ResetsStatusResponse> {
+    get_json(RESETS_STATUS_ENDPOINT, "Codex Resets status API")
+}
+
+fn fetch_resets_list() -> Result<ResetsListResponse> {
+    get_json(RESETS_LIST_ENDPOINT, "Codex Resets list API")
+}
+
+fn get_json<T: for<'de> Deserialize<'de>>(url: &str, label: &str) -> Result<T> {
+    let mut response = ureq::get(url)
+        .header("User-Agent", USER_AGENT)
+        .header("Accept", "application/json")
         .config()
-        .timeout_global(Some(std::time::Duration::from_secs(6)))
+        .timeout_global(Some(std::time::Duration::from_secs(8)))
         .build()
         .call()
-        .context("failed to contact the Codex Reset forecast API")?;
+        .with_context(|| format!("failed to contact the {label}"))?;
     if response.status().as_u16() >= 400 {
-        bail!(
-            "Codex Reset forecast API returned HTTP {}",
-            response.status()
-        );
+        bail!("{label} returned HTTP {}", response.status());
     }
-    let forecast = response
+    response
         .body_mut()
-        .read_json::<ForecastResponse>()
-        .context("failed to decode the Codex Reset forecast response")?;
-    Ok(forecast)
+        .read_json::<T>()
+        .with_context(|| format!("failed to decode the {label} response"))
 }
 
-fn fetch_feed_signal_metadata(now: OffsetDateTime) -> Option<ResetFeedSignal> {
-    let mut response = ureq::get(RESET_FEED_ENDPOINT)
-        .header(
-            "User-Agent",
-            "Mozilla/5.0 (compatible; CodexRoster/0.2; +https://github.com/anlvdt/codex-roster)",
-        )
-        .config()
-        .timeout_global(Some(std::time::Duration::from_secs(6)))
-        .build()
-        .call()
-        .ok()?;
-    if response.status().as_u16() >= 400 {
-        return None;
-    }
-    let feed = response.body_mut().read_json::<ResetFeed>().ok()?;
-    if feed.stale {
-        return None;
-    }
-    let fetched_at = parse_event_time(&feed.fetched_at)?;
-    if (now - fetched_at).abs() > time::Duration::minutes(15) {
-        return None;
-    }
-    feed.signal
+#[derive(Deserialize)]
+struct ResetsStatusResponse {
+    data: ResetsStatusData,
+    #[serde(default)]
+    meta: Option<ResetsMeta>,
+}
+
+#[derive(Deserialize)]
+struct ResetsStatusData {
+    #[serde(default)]
+    latest_reset: Option<ResetsAnnouncement>,
+    #[serde(default)]
+    scheduled_reset: Option<ResetsScheduledReset>,
+    #[serde(default)]
+    active_watch: Option<ResetsWatch>,
+    #[serde(default)]
+    stats: Option<ResetsStats>,
+}
+
+#[derive(Deserialize)]
+struct ResetsListResponse {
+    #[serde(default)]
+    data: Vec<ResetsAnnouncement>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ResetsAnnouncement {
+    id: Option<String>,
+    reset_type: Option<String>,
+    announced_at: Option<String>,
+    text: Option<String>,
+    #[serde(default)]
+    source: Option<ResetsSource>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ResetsScheduledReset {
+    id: Option<String>,
+    reset_type: Option<String>,
+    announced_at: Option<String>,
+    scheduled_for: Option<String>,
+    text: Option<String>,
+    #[serde(default)]
+    source: Option<ResetsSource>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ResetsWatch {
+    id: Option<String>,
+    text: Option<String>,
+    summary: Option<String>,
+    label: Option<String>,
+    scheduled_for: Option<String>,
+    target_at: Option<String>,
+    #[serde(default)]
+    source: Option<ResetsSource>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ResetsSource {
+    url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ResetsStats {
+    last_reset_at: Option<String>,
+    avg_interval_days: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct ResetsMeta {
+    generated_at: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
-// Reset events: feed / X profile scraping for desktop notifications
+// Reset events: public API only (no local classifier / X scrape)
 // ---------------------------------------------------------------------------
 
-/// Return new reset or banked-reset signals published directly by Tibo on X.
+/// Return new Codex reset signals from the public Codex Resets API.
 /// A first poll replays only very recent actionable signals so an app started
 /// after an announcement still tells the user, without replaying old history.
 pub fn fetch_new_reset_events(app_data_dir: &Path) -> Result<Vec<ResetEvent>> {
     let now = OffsetDateTime::now_utc();
-    let posts = fetch_reset_posts(now)?;
-    process_reset_events(app_data_dir, reset_events(&posts), now)
+    let mut events = Vec::new();
+
+    match fetch_resets_status() {
+        Ok(status) => {
+            if let Some(event) = scheduled_status_event(status.data.scheduled_reset.as_ref()) {
+                push_unique_event(&mut events, event);
+            }
+            if let Some(event) =
+                announcement_event(status.data.latest_reset.as_ref(), map_completed_reset_kind)
+            {
+                push_unique_event(&mut events, event);
+            }
+            if let Some(event) = watch_event(status.data.active_watch.as_ref()) {
+                push_unique_event(&mut events, event);
+            }
+        }
+        Err(error) => {
+            // The list endpoint can still supply confirmed events when status is unavailable.
+            let _ = error;
+        }
+    }
+
+    if let Ok(list) = fetch_resets_list() {
+        for announcement in list.data {
+            if let Some(event) = announcement_event(Some(&announcement), map_completed_reset_kind) {
+                push_unique_event(&mut events, event);
+            }
+        }
+    }
+
+    process_reset_events(app_data_dir, events, now)
 }
 
-#[derive(Deserialize)]
-struct ResetFeed {
-    tweets: Vec<ResetFeedTweet>,
-    #[serde(default)]
-    stale: bool,
-    fetched_at: String,
-    #[serde(default)]
-    signal: Option<ResetFeedSignal>,
+fn push_unique_event(events: &mut Vec<ResetEvent>, event: ResetEvent) {
+    if !events.iter().any(|existing| existing.id == event.id) {
+        events.push(event);
+    }
 }
 
-#[derive(Deserialize)]
-struct ResetFeedSignal {
-    #[allow(dead_code)]
-    tweet_id: Option<String>,
-    summary: Option<String>,
-    url: Option<String>,
-    kind: Option<String>,
-    active: Option<bool>,
-    #[serde(default)]
-    reset_verification_status: Option<String>,
+fn scheduled_status_event(scheduled: Option<&ResetsScheduledReset>) -> Option<ResetEvent> {
+    let scheduled = scheduled?;
+    let id = scheduled.id.clone()?;
+    let announced_at = scheduled.announced_at.clone()?;
+    let summary = scheduled.text.clone().unwrap_or_default();
+    if summary.trim().is_empty() {
+        return None;
+    }
+    Some(ResetEvent {
+        id: id.clone(),
+        announced_at,
+        summary,
+        url: source_url_from(scheduled.source.as_ref(), Some(&id)),
+        kind: map_scheduled_reset_kind(scheduled.reset_type.as_deref()).to_owned(),
+    })
 }
 
-#[derive(Deserialize)]
-struct ResetFeedTweet {
-    id: Option<String>,
-    text: Option<String>,
-    at: Option<String>,
+fn announcement_event(
+    announcement: Option<&ResetsAnnouncement>,
+    kind_for: fn(Option<&str>) -> &'static str,
+) -> Option<ResetEvent> {
+    let announcement = announcement?;
+    let id = announcement.id.clone()?;
+    let announced_at = announcement.announced_at.clone()?;
+    let summary = announcement.text.clone().unwrap_or_default();
+    if summary.trim().is_empty() {
+        return None;
+    }
+    Some(ResetEvent {
+        id: id.clone(),
+        announced_at,
+        summary,
+        url: source_url_from(announcement.source.as_ref(), Some(&id)),
+        kind: kind_for(announcement.reset_type.as_deref()).to_owned(),
+    })
 }
 
-#[derive(Deserialize)]
-struct ForecastResponse {
-    updated_at: String,
-    probabilities: ForecastProbabilities,
-    confidence: String,
-    last_reset_at: String,
-    time_window: ForecastTimeWindow,
-    #[serde(default)]
-    cadence: Option<ForecastCadence>,
-}
-
-#[derive(Deserialize)]
-struct ForecastProbabilities {
-    rounded_24h: u8,
-    rounded_48h: u8,
-}
-
-#[derive(Deserialize)]
-struct ForecastTimeWindow {
-    label: String,
-    timezone: Option<String>,
-    start_hour: Option<u32>,
-    end_hour: Option<u32>,
-}
-
-#[derive(Deserialize)]
-struct ForecastCadence {
-    recent_median_days: Option<f64>,
-    accelerating: Option<bool>,
+fn watch_event(watch: Option<&ResetsWatch>) -> Option<ResetEvent> {
+    let watch = watch?;
+    let id = watch.id.clone()?;
+    let announced_at = watch
+        .scheduled_for
+        .clone()
+        .or_else(|| watch.target_at.clone())?;
+    let summary = watch
+        .text
+        .clone()
+        .or_else(|| watch.summary.clone())
+        .unwrap_or_default();
+    if summary.trim().is_empty() {
+        return None;
+    }
+    Some(ResetEvent {
+        id: id.clone(),
+        announced_at,
+        summary,
+        url: source_url_from(watch.source.as_ref(), Some(&id)),
+        kind: "reset_hint".to_owned(),
+    })
 }
 
 // ---------------------------------------------------------------------------
 // Reset Timeline
 // ---------------------------------------------------------------------------
-
-const TIMELINE_ENDPOINT: &str = "https://codex-reset.com/api/timeline";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResetTimeline {
@@ -310,34 +449,34 @@ pub struct ResetTimelineEvent {
 }
 
 pub fn fetch_reset_timeline() -> Result<ResetTimeline> {
-    let mut response = ureq::get(TIMELINE_ENDPOINT)
-        .header(
-            "User-Agent",
-            "Mozilla/5.0 (compatible; CodexRoster/0.2; +https://github.com/anlvdt/codex-roster)",
-        )
-        .config()
-        .timeout_global(Some(std::time::Duration::from_secs(6)))
-        .build()
-        .call()
-        .context("failed to contact the Codex Reset timeline API")?;
-    if response.status().as_u16() >= 400 {
-        bail!(
-            "Codex Reset timeline API returned HTTP {}",
-            response.status()
-        );
-    }
-    let timeline = response
-        .body_mut()
-        .read_json::<ResetTimeline>()
-        .context("failed to decode the Codex Reset timeline response")?;
-    Ok(timeline)
+    let list = fetch_resets_list()?;
+    Ok(ResetTimeline {
+        updated_at: format_time(OffsetDateTime::now_utc()),
+        events: list
+            .data
+            .iter()
+            .filter_map(|item| {
+                let event = announcement_event(Some(item), map_completed_reset_kind)?;
+                Some(ResetTimelineEvent {
+                    id: event.id,
+                    date: event.announced_at.chars().take(10).collect(),
+                    event_type: event.kind,
+                    summary: event.summary,
+                    url: event.url,
+                    announced_at: event.announced_at,
+                    scope: None,
+                    confidence: None,
+                    reset_kind: item.reset_type.clone(),
+                    audience: None,
+                })
+            })
+            .collect(),
+    })
 }
 
 // ---------------------------------------------------------------------------
 // Reset Status History
 // ---------------------------------------------------------------------------
-
-const STATUS_HISTORY_ENDPOINT: &str = "https://codex-reset.com/api/status-history";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResetStatusHistory {
@@ -373,34 +512,12 @@ pub struct ResetStatusIncident {
 }
 
 pub fn fetch_reset_status_history() -> Result<ResetStatusHistory> {
-    let mut response = ureq::get(STATUS_HISTORY_ENDPOINT)
-        .header(
-            "User-Agent",
-            "Mozilla/5.0 (compatible; CodexRoster/0.2; +https://github.com/anlvdt/codex-roster)",
-        )
-        .config()
-        .timeout_global(Some(std::time::Duration::from_secs(6)))
-        .build()
-        .call()
-        .context("failed to contact the Codex Reset status-history API")?;
-    if response.status().as_u16() >= 400 {
-        bail!(
-            "Codex Reset status-history API returned HTTP {}",
-            response.status()
-        );
-    }
-    let status = response
-        .body_mut()
-        .read_json::<ResetStatusHistory>()
-        .context("failed to decode the Codex Reset status-history response")?;
-    Ok(status)
+    bail!("Codex Resets does not publish service status history; use the OpenAI status command.")
 }
 
 // ---------------------------------------------------------------------------
 // Reset Juice (quota effort tiers)
 // ---------------------------------------------------------------------------
-
-const JUICE_ENDPOINT: &str = "https://codex-reset.com/api/juice";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResetJuice {
@@ -422,360 +539,7 @@ pub struct ResetJuiceEffort {
 }
 
 pub fn fetch_reset_juice() -> Result<ResetJuice> {
-    let mut response = ureq::get(JUICE_ENDPOINT)
-        .header(
-            "User-Agent",
-            "Mozilla/5.0 (compatible; CodexRoster/0.2; +https://github.com/anlvdt/codex-roster)",
-        )
-        .config()
-        .timeout_global(Some(std::time::Duration::from_secs(6)))
-        .build()
-        .call()
-        .context("failed to contact the Codex Reset juice API")?;
-    if response.status().as_u16() >= 400 {
-        bail!("Codex Reset juice API returned HTTP {}", response.status());
-    }
-    let juice = response
-        .body_mut()
-        .read_json::<ResetJuice>()
-        .context("failed to decode the Codex Reset juice response")?;
-    Ok(juice)
-}
-
-fn fetch_reset_posts(now: OffsetDateTime) -> Result<Vec<TiboPost>> {
-    match fetch_feed_posts(now) {
-        Ok(posts) if !posts.is_empty() => Ok(posts),
-        Ok(_) => fetch_tibo_posts(now),
-        Err(feed_error) => {
-            let posts = fetch_tibo_posts(now).with_context(|| {
-                format!(
-                    "failed to load both public reset sources; Codex Reset radar error: {feed_error:#}"
-                )
-            })?;
-            Ok(posts)
-        }
-    }
-}
-
-fn fetch_feed_posts(now: OffsetDateTime) -> Result<Vec<TiboPost>> {
-    let mut response = ureq::get(RESET_FEED_ENDPOINT)
-        .header(
-            "User-Agent",
-            "Mozilla/5.0 (compatible; CodexRoster/0.2; +https://github.com/anlvdt/codex-roster)",
-        )
-        .config()
-        .timeout_global(Some(std::time::Duration::from_secs(6)))
-        .build()
-        .call()
-        .context("failed to contact the independent Codex Reset radar")?;
-    if response.status().as_u16() >= 400 {
-        bail!("Codex Reset radar returned HTTP {}", response.status());
-    }
-    let feed = response
-        .body_mut()
-        .read_json::<ResetFeed>()
-        .context("failed to decode the Codex Reset radar feed")?;
-    if feed.stale {
-        bail!("Codex Reset radar returned stale data");
-    }
-    let fetched_at = parse_event_time(&feed.fetched_at)
-        .context("Codex Reset radar returned an invalid freshness timestamp")?;
-    if (now - fetched_at).abs() > time::Duration::minutes(15) {
-        bail!("Codex Reset radar returned data older than 15 minutes");
-    }
-
-    let mut posts = feed
-        .tweets
-        .into_iter()
-        .filter_map(|mut tweet| {
-            let id = tweet.id.take()?;
-            let created_at = tweet.at.take()?;
-            let text = tweet.text.take()?;
-            let url = trusted_tibo_post_url(&id)?;
-            Some(TiboPost {
-                id,
-                created_at,
-                text,
-                url,
-            })
-        })
-        .collect::<Vec<_>>();
-    posts.sort_by(|left, right| right.created_at.cmp(&left.created_at));
-    Ok(posts)
-}
-
-fn fetch_tibo_posts(now: OffsetDateTime) -> Result<Vec<TiboPost>> {
-    let mut response = ureq::get(X_PROFILE_ENDPOINT)
-        .header(
-            "User-Agent",
-            "Mozilla/5.0 (compatible; CodexRoster/0.2; +https://github.com/anlvdt/codex-roster)",
-        )
-        .header("Accept-Language", "en-US,en;q=0.9")
-        .header("Cache-Control", "no-cache")
-        .config()
-        .timeout_global(Some(std::time::Duration::from_secs(8)))
-        .build()
-        .call()
-        .context("failed to contact Tibo's public X profile")?;
-    if response.status().as_u16() >= 400 {
-        bail!("Tibo's X profile returned HTTP {}", response.status());
-    }
-    let html = response
-        .body_mut()
-        .read_to_string()
-        .context("failed to read Tibo's public X profile")?;
-    validate_profile_freshness(&html, now)?;
-    let posts = parse_profile_posts(&html);
-    if posts.is_empty() {
-        bail!("Tibo's X profile did not expose any public posts");
-    }
-    Ok(posts)
-}
-
-fn validate_profile_freshness(html: &str, now: OffsetDateTime) -> Result<()> {
-    const MARKER: &str = "last_top_fetch_timestamp_ms:";
-    let Some(start) = html.rfind(MARKER).map(|index| index + MARKER.len()) else {
-        bail!("Tibo's X profile did not include a freshness timestamp");
-    };
-    let digits = html[start..]
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect::<String>();
-    let milliseconds = digits
-        .parse::<i128>()
-        .context("invalid X profile freshness timestamp")?;
-    let fetched_at = OffsetDateTime::from_unix_timestamp_nanos(milliseconds * 1_000_000)
-        .context("X profile freshness timestamp is out of range")?;
-    if (now - fetched_at).abs() > time::Duration::minutes(15) {
-        bail!("Tibo's X profile returned stale timeline data");
-    }
-    Ok(())
-}
-
-fn parse_profile_posts(html: &str) -> Vec<TiboPost> {
-    let mut posts = Vec::new();
-    let mut seen = HashSet::new();
-    let mut cursor = 0;
-
-    while let Some(relative_marker) = html[cursor..].find(PROFILE_POST_MARKER) {
-        let marker = cursor + relative_marker;
-        let block_start = html[..marker].rfind("<article").unwrap_or(marker);
-        let block_end = html[marker..]
-            .find("</article>")
-            .map(|offset| marker + offset)
-            .unwrap_or(html.len());
-        let block = &html[block_start..block_end];
-
-        if let (Some(id), Some(created_at), Some(text)) = (
-            meta_content(block, "identifier"),
-            meta_content(block, "datePublished"),
-            meta_content(block, "text"),
-        ) && seen.insert(id.clone())
-            && let Some(url) = trusted_tibo_post_url(&id)
-        {
-            posts.push(TiboPost {
-                id,
-                created_at,
-                text,
-                url,
-            });
-        }
-        cursor = marker + PROFILE_POST_MARKER.len();
-    }
-
-    posts.sort_by(|left, right| right.created_at.cmp(&left.created_at));
-    posts
-}
-
-fn trusted_tibo_post_url(id: &str) -> Option<String> {
-    (!id.is_empty() && id.chars().all(|character| character.is_ascii_digit()))
-        .then(|| format!("https://x.com/thsottiaux/status/{id}"))
-}
-
-fn meta_content(block: &str, property: &str) -> Option<String> {
-    let needle = format!("itemProp=\"{property}\"");
-    let mut cursor = 0;
-    while let Some(relative_start) = block[cursor..].find("<meta ") {
-        let start = cursor + relative_start;
-        let end = block[start..].find('>')? + start + 1;
-        let tag = &block[start..end];
-        if tag.contains(&needle) {
-            return attribute(tag, "content").map(|value| decode_html_entities(&value));
-        }
-        cursor = end;
-    }
-    None
-}
-
-fn attribute(tag: &str, name: &str) -> Option<String> {
-    let needle = format!("{name}=\"");
-    let start = tag.find(&needle)? + needle.len();
-    let end = tag[start..].find('"')? + start;
-    Some(tag[start..end].to_owned())
-}
-
-fn decode_html_entities(value: &str) -> String {
-    let mut decoded = String::with_capacity(value.len());
-    let mut rest = value;
-    while let Some(entity_start) = rest.find('&') {
-        decoded.push_str(&rest[..entity_start]);
-        rest = &rest[entity_start..];
-        let Some(entity_end) = rest.find(';') else {
-            decoded.push_str(rest);
-            return decoded;
-        };
-        let entity = &rest[1..entity_end];
-        let replacement = match entity {
-            "amp" => Some('&'),
-            "quot" => Some('"'),
-            "apos" | "#x27" | "#39" => Some('\''),
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            _ if entity.starts_with("#x") => u32::from_str_radix(&entity[2..], 16)
-                .ok()
-                .and_then(char::from_u32),
-            _ if entity.starts_with('#') => {
-                entity[1..].parse::<u32>().ok().and_then(char::from_u32)
-            }
-            _ => None,
-        };
-        if let Some(character) = replacement {
-            decoded.push(character);
-        } else {
-            decoded.push_str(&rest[..=entity_end]);
-        }
-        rest = &rest[entity_end + 1..];
-    }
-    decoded.push_str(rest);
-    decoded
-}
-
-fn classify_post(text: &str) -> Option<SignalKind> {
-    let text = text.to_ascii_lowercase();
-    let mentions_reset = text.contains("reset");
-    let starts_with_reset_signal = [
-        "reset will ",
-        "reset should ",
-        "reset lands ",
-        "reset has ",
-        "reset is ",
-    ]
-    .iter()
-    .any(|prefix| text.trim_start().starts_with(prefix));
-    let relevant_scope = text.contains("codex")
-        || text.contains("chatgpt work")
-        || text.contains("usage limit")
-        || text.contains("rate limit")
-        || text.contains("paid user")
-        || text.contains("banked reset")
-        || starts_with_reset_signal;
-    if !mentions_reset || !relevant_scope {
-        return None;
-    }
-    if [
-        "no reset",
-        "no codex reset",
-        "don't say reset",
-        "do not say reset",
-        "not a reset",
-    ]
-    .iter()
-    .any(|phrase| text.contains(phrase))
-    {
-        return None;
-    }
-
-    let banked = text.contains("banked reset");
-    let confirmed = [
-        "has landed",
-        "have landed",
-        "it's landed",
-        "it is landed",
-        "it is done",
-        "it's done",
-        "has been credited",
-        "have been credited",
-        "have reset",
-        "has reset",
-        "i've reset",
-        "we've reset",
-        "i have reset",
-        "we have reset",
-        "limits have been reset",
-        "limit has been reset",
-        "usage limits have been reset",
-        "usage limits are reset",
-        "usage limits reset",
-        "usage limit reset",
-        "rate limits reset",
-        "rate limit reset",
-        "reset the rate limits",
-        "reset usage limits",
-        "reset rate limits",
-        "reset everyone's usage limits",
-    ]
-    .iter()
-    .any(|phrase| text.contains(phrase));
-    if confirmed {
-        return Some(if banked {
-            SignalKind::ConfirmedBanked
-        } else {
-            SignalKind::ConfirmedReset
-        });
-    }
-
-    let scheduled = [
-        "will credit",
-        "will reset",
-        "will do a full reset",
-        "do a full reset",
-        "will be there",
-        "will land",
-        "should land",
-        "lands in",
-        "land in",
-        "propagating in the next hour",
-        "in the next hour",
-        "next 30 minutes",
-        "later in the day",
-        "later today",
-        "tomorrow",
-    ]
-    .iter()
-    .any(|phrase| text.contains(phrase));
-    if scheduled {
-        return Some(if banked {
-            SignalKind::ScheduledBanked
-        } else {
-            SignalKind::ScheduledReset
-        });
-    }
-
-    let contextual_scope = text.contains("codex")
-        || text.contains("chatgpt work")
-        || text.contains("usage limit")
-        || text.contains("rate limit");
-    let is_hint = ["reset button", "there is still time", "little surprise"]
-        .iter()
-        .any(|phrase| text.contains(phrase))
-        && (contextual_scope || text.contains("little surprise"));
-    is_hint.then_some(SignalKind::Hint)
-}
-
-fn reset_events(posts: &[TiboPost]) -> Vec<ResetEvent> {
-    posts
-        .iter()
-        .filter_map(|post| {
-            let kind = classify_post(&post.text)?;
-            Some(ResetEvent {
-                id: post.id.clone(),
-                announced_at: post.created_at.clone(),
-                summary: post.text.clone(),
-                url: post.url.clone(),
-                kind: kind.as_str().to_owned(),
-            })
-        })
-        .collect()
+    bail!("Codex Resets does not publish effort tiers.")
 }
 
 fn parse_event_time(value: &str) -> Option<OffsetDateTime> {
@@ -911,52 +675,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_current_x_profile_microdata_and_decodes_entities() {
-        let html = r#"<main><article data-tweet-id="2090964822422949999" itemType="https://schema.org/SocialMediaPosting"><meta content="2090964822422949999" itemProp="identifier"/><meta content="2026-08-22T00:50:36.000Z" itemProp="datePublished"/><meta content="https://x.com/thsottiaux/status/2090964822422949999" itemProp="url"/><meta content="It&#x27;s landed &amp; ready: BANKED reset." itemProp="text"/></article></main>"#;
-        let posts = parse_profile_posts(html);
-        assert_eq!(posts.len(), 1);
-        assert_eq!(posts[0].id, "2090964822422949999");
-        assert_eq!(posts[0].text, "It's landed & ready: BANKED reset.");
+    fn status_only_outlook_preserves_schedule_without_probabilities() {
+        let status: ResetsStatusResponse = serde_json::from_value(serde_json::json!({
+            "data": {
+                "scheduled_reset": {"id":"123", "reset_type":"banked", "scheduled_for":"2026-09-23T07:00:00Z", "text":"Banked reset scheduled"},
+                "stats": {"last_reset_at":"2026-09-12T08:00:00Z", "avg_interval_days":6.9}
+            },
+            "meta": {"generated_at":"2026-09-22T12:00:00Z"}
+        })).unwrap();
+        let result = outlook_from_status(&status);
+        assert_eq!(result.signal_kind, "scheduled_banked_reset");
         assert_eq!(
-            posts[0].url,
-            "https://x.com/thsottiaux/status/2090964822422949999"
+            result.next_reset_at.as_deref(),
+            Some("2026-09-23T07:00:00Z")
         );
+        let json = serde_json::to_value(result).unwrap();
+        for key in [
+            "chance_24_hours",
+            "chance_48_hours",
+            "signal_percent",
+            "confidence",
+        ] {
+            assert!(json.get(key).is_none());
+        }
     }
 
     #[test]
-    fn canonicalizes_profile_links_and_rejects_invalid_post_ids() {
-        let html = r#"<main><article itemType="https://schema.org/SocialMediaPosting"><meta content="2090964822422949999" itemProp="identifier"/><meta content="2026-08-22T00:50:36.000Z" itemProp="datePublished"/><meta content="file:///etc/passwd" itemProp="url"/><meta content="Codex usage limits have reset." itemProp="text"/></article><article itemType="https://schema.org/SocialMediaPosting"><meta content="../escape" itemProp="identifier"/><meta content="2026-08-22T00:51:36.000Z" itemProp="datePublished"/><meta content="https://evil.example/phish" itemProp="url"/><meta content="Codex usage limits have reset." itemProp="text"/></article></main>"#;
-        let posts = parse_profile_posts(html);
-        assert_eq!(posts.len(), 1);
-        assert_eq!(
-            posts[0].url,
-            "https://x.com/thsottiaux/status/2090964822422949999"
-        );
-        assert!(trusted_tibo_post_url("../escape").is_none());
+    fn absent_status_never_invents_a_schedule() {
+        let signal = resolve_outlook_signal(None);
+        assert_eq!(signal.signal_kind, "none");
+        assert!(signal.next_reset_at.is_none());
     }
 
     #[test]
-    fn classifies_banked_and_global_reset_signals_without_false_positives() {
+    fn maps_api_reset_types_without_local_classifier() {
         assert_eq!(
-            classify_post("The banked reset has landed for ChatGPT Work and Codex."),
-            Some(SignalKind::ConfirmedBanked)
+            map_scheduled_reset_kind(Some("banked")),
+            "scheduled_banked_reset"
         );
         assert_eq!(
-            classify_post("The banked reset will be there by 8pm PST for all paid users of Codex."),
-            Some(SignalKind::ScheduledBanked)
+            map_completed_reset_kind(Some("banked")),
+            "confirmed_banked_reset"
         );
         assert_eq!(
-            classify_post("We have reset usage limits across Codex and ChatGPT Work."),
-            Some(SignalKind::ConfirmedReset)
+            map_completed_reset_kind(Some("regular")),
+            "confirmed_global_reset"
         );
+        assert!(trusted_status_post_url("../escape").is_none());
         assert_eq!(
-            classify_post("Why did you switch to Codex? Don't say reset."),
-            None
+            trusted_status_post_url("2090964822422949999").as_deref(),
+            Some("https://x.com/thsottiaux/status/2090964822422949999")
         );
-        assert_eq!(classify_post("You would break the reset button?"), None);
-        assert_eq!(classify_post("I've reset my password."), None);
-        assert_eq!(classify_post("We have reset the staging database."), None);
-        assert_eq!(classify_post("Reset my password tomorrow."), None);
     }
 
     #[test]

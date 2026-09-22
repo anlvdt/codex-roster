@@ -219,6 +219,18 @@ enum NewAccountLoginState: Equatable {
     case failed(String)
 }
 
+/// How "Add account" should treat the live Codex / ChatGPT Desktop session.
+enum AddAccountMode: String, CaseIterable, Identifiable {
+    /// Capture login into a roster snapshot only. Does not touch live `~/.codex`,
+    /// does not quit Desktop, and does not activate or auto-resume the new row.
+    case enrollOnly
+    /// Existing flow: `codex login` against live `~/.codex` (may free login ports
+    /// by quitting Desktop), then leave the new credentials as the live session.
+    case addAndSwitch
+
+    var id: String { rawValue }
+}
+
 @MainActor
 final class AccountStore: ObservableObject {
     @Published private(set) var status: StatusOutput?
@@ -231,6 +243,7 @@ final class AccountStore: ObservableObject {
     @Published private(set) var openAIStatus: OpenAIServiceStatus?
     @Published private(set) var providerStates: [ProviderState] = []
     @Published private(set) var autoSwitchWhenExhausted: Bool
+    @Published private(set) var autoResumeSession: Bool
     @Published private(set) var autoSwitchState: AutoSwitchState?
     @Published private(set) var isCheckingAutoSwitch = false
     @Published private(set) var launchAtLoginEnabled: Bool
@@ -247,6 +260,12 @@ final class AccountStore: ObservableObject {
     @Published private(set) var accountSortMode: AccountSortMode
     @Published private(set) var newAccountLoginState: NewAccountLoginState = .idle
     @Published private(set) var isPendingLogin = false
+    /// Which add path is in flight (nil when idle). Used by the add sheet to resume UI.
+    @Published private(set) var pendingAddAccountMode: AddAccountMode?
+    /// Short bilingual progress line during Desktop accept / clear+relaunch retry.
+    @Published private(set) var switchPhaseMessage: String?
+    /// Brief notch/menu caption after Auto-resume opens a remembered workspace.
+    @Published private(set) var sessionResumeCaption: String?
     @Published var errorMessage: String?
 
     private let cli = AccountHubCLI()
@@ -267,10 +286,14 @@ final class AccountStore: ObservableObject {
     private var autoSwitchCooldownUntil: Date?
     private var isInteractiveLoginInProgress = false
     private var isAddAccountSession = false
+    /// Isolated-home enroll path; mutually exclusive with `isAddAccountSession`.
+    private var isEnrollOnlyLogin = false
+    private var enrollOnlyCodexHome: URL?
     private var expectedReloginEmail: String?
     private var newAccountLoginWatchTask: Task<Void, Never>?
     /// Desktop apps to reopen after an interactive `codex login` finishes.
     /// Set when we close ChatGPT Desktop to free the fixed login port.
+    /// Never set for enroll-only adds.
     private var pendingLoginDesktopRelaunch: ChatGPTDesktop.RelaunchPlan?
     private var resetNotificationTask: Task<Void, Never>?
     private var coreBootstrapStarted = false
@@ -285,6 +308,7 @@ final class AccountStore: ObservableObject {
                 .compactMap(UUID.init(uuidString:))
         )
         autoSwitchWhenExhausted = false
+        autoResumeSession = true
         launchAtLoginEnabled = LaunchAtLogin.isEnabled
         notchPanelEnabled = defaults.object(forKey: notchPanelEnabledKey) == nil
             ? true
@@ -333,6 +357,13 @@ final class AccountStore: ObservableObject {
                 return left.email.localizedCaseInsensitiveCompare(right.email) == .orderedAscending
             }
         }
+    }
+
+    /// Sum of redeemable banked resets across non-archived accounts (display only).
+    var totalBankedResetsAcrossRoster: Int {
+        accounts
+            .filter { !$0.archived }
+            .reduce(0) { $0 + $1.bankedResetCount }
     }
 
     var hasRunningCodexProcesses: Bool {
@@ -429,13 +460,19 @@ final class AccountStore: ObservableObject {
         }
     }
 
-    func startNewAccountLogin() {
+    func startNewAccountLogin(mode: AddAccountMode = .addAndSwitch) {
         guard !isBusyForActions, newAccountLoginState != .waiting else { return }
         isInteractiveLoginInProgress = true
         isPendingLogin = true
+        pendingAddAccountMode = mode
         newAccountLoginState = .waiting
         run {
-            try await self.beginOrResumeAddAccountLogin(expectedEmail: nil)
+            switch mode {
+            case .enrollOnly:
+                try await self.beginEnrollOnlyLogin()
+            case .addAndSwitch:
+                try await self.beginOrResumeAddAccountLogin(expectedEmail: nil)
+            }
         }
     }
 
@@ -443,6 +480,10 @@ final class AccountStore: ObservableObject {
         guard case let .ready(expectedIdentity) = newAccountLoginState, !isBusyForActions else { return }
         newAccountLoginState = .saving
         run {
+            if self.isEnrollOnlyLogin {
+                try await self.saveEnrollOnlyAccount(expectedIdentity: expectedIdentity)
+                return
+            }
             let liveStatus: StatusOutput = try await self.cli.decode(StatusOutput.self, arguments: ["status"])
             guard let liveIdentity = liveStatus.currentAccount,
                   liveIdentity.matches(expectedIdentity) else {
@@ -450,6 +491,16 @@ final class AccountStore: ObservableObject {
                     "Phiên Codex đã thay đổi. Hãy chờ app nhận diện lại tài khoản mới rồi lưu.",
                     "The Codex session changed. Wait for the app to detect the new account again before saving."
                 ))
+            }
+            try await self.load()
+            do {
+                try self.ensureNotDuplicateNewAccount(liveIdentity)
+            } catch {
+                if self.isAddAccountSession {
+                    _ = try? await self.cli.data(arguments: ["cancel-add-account", "--json"])
+                }
+                self.clearPendingLoginFlags()
+                throw error
             }
             let saveCommand = self.isAddAccountSession ? "save-added-account" : "save"
             let saved: SaveOutput = try await self.cli.decode(SaveOutput.self, arguments: [saveCommand])
@@ -485,17 +536,24 @@ final class AccountStore: ObservableObject {
     func resetNewAccountLogin() {
         newAccountLoginWatchTask?.cancel()
         newAccountLoginWatchTask = nil
+        CodexLoginLauncher.stop()
         clearPendingLoginFlags()
         newAccountLoginState = .idle
     }
 
-    /// Cancel an unfinished add/re-login and restore the previous live Codex session.
+    /// Cancel an unfinished add/re-login.
+    /// Enroll-only discards the isolated login home and leaves live `~/.codex` alone.
+    /// Add-and-switch restores the previous live Codex session via cancel-add-account.
     func cancelPendingLogin() {
         run {
             self.newAccountLoginWatchTask?.cancel()
             self.newAccountLoginWatchTask = nil
             CodexLoginLauncher.stop()
-            _ = try await self.cli.data(arguments: ["cancel-add-account", "--json"])
+            if self.isEnrollOnlyLogin {
+                self.removeEnrollOnlyHome()
+            } else {
+                _ = try await self.cli.data(arguments: ["cancel-add-account", "--json"])
+            }
             self.clearPendingLoginFlags()
             self.newAccountLoginState = .idle
             try await self.load()
@@ -506,6 +564,7 @@ final class AccountStore: ObservableObject {
     func startRelogin(for account: SavedAccount) {
         isInteractiveLoginInProgress = true
         isPendingLogin = true
+        pendingAddAccountMode = .addAndSwitch
         newAccountLoginState = .waiting
         run {
             try await self.beginOrResumeAddAccountLogin(expectedEmail: account.email)
@@ -533,9 +592,10 @@ final class AccountStore: ObservableObject {
             try await beginAddAccountAfterProcessesDrain()
             began = true
             isAddAccountSession = true
+            isEnrollOnlyLogin = false
             expectedReloginEmail = expectedEmail
             isPendingLogin = true
-            try CodexLoginLauncher.start()
+            try CodexLoginLauncher.start(codexHome: nil)
             watchForNewAccount(after: liveStatus.currentAccount)
         } catch {
             if began {
@@ -551,8 +611,40 @@ final class AccountStore: ObservableObject {
         }
     }
 
+    /// Enroll a new account into the roster without replacing live `~/.codex`
+    /// or restarting ChatGPT Desktop. Login writes into an isolated CODEX_HOME;
+    /// the resulting auth.json is imported as a snapshot only.
+    private func beginEnrollOnlyLogin() async throws {
+        // Fixed OAuth callback ports — cannot free them without quitting Desktop,
+        // which this mode forbids. Fail clearly so the user can pick Add & switch.
+        if CodexLoginPort.isBusy {
+            throw CLIError(AppLanguage.text(
+                "Cổng đăng nhập Codex (1455/1457) đang bị ChatGPT Desktop hoặc tiến trình khác giữ. Chế độ Chỉ thêm không được đóng Desktop — hãy chọn Thêm & chuyển (có thể đóng Desktop để giải phóng cổng), hoặc tạm thoát Desktop rồi thử lại.",
+                "Codex login ports (1455/1457) are held by ChatGPT Desktop or another process. Add-only mode will not quit Desktop — choose Add & switch (may quit Desktop to free the ports), or quit Desktop yourself and retry."
+            ))
+        }
+        removeEnrollOnlyHome()
+        let home = try Self.makeEnrollOnlyCodexHome()
+        enrollOnlyCodexHome = home
+        isEnrollOnlyLogin = true
+        isAddAccountSession = false
+        expectedReloginEmail = nil
+        isPendingLogin = true
+        do {
+            try CodexLoginLauncher.start(codexHome: home)
+            watchForEnrollOnlyAccount(at: home)
+        } catch {
+            CodexLoginLauncher.stop()
+            removeEnrollOnlyHome()
+            clearPendingLoginFlags()
+            newAccountLoginState = .idle
+            throw error
+        }
+    }
+
     private func resumePendingLogin(expectedEmail: String?) async throws {
         isAddAccountSession = true
+        isEnrollOnlyLogin = false
         expectedReloginEmail = expectedEmail
         isInteractiveLoginInProgress = true
         isPendingLogin = true
@@ -562,6 +654,10 @@ final class AccountStore: ObservableObject {
         if let current = status?.currentAccount,
            addStatus.authChanged,
            expectedEmail.map({ current.email.caseInsensitiveCompare($0) == .orderedSame }) ?? true {
+            if shouldRefuseDuplicateEnrollment(current) {
+                await abortDuplicateEnrollment(current)
+                return
+            }
             newAccountLoginState = .ready(current)
             return
         }
@@ -571,7 +667,7 @@ final class AccountStore: ObservableObject {
             try? await preserveLiveSessionBeforeDesktopQuit()
             await closeDesktopForLogin()
         }
-        try CodexLoginLauncher.start()
+        try CodexLoginLauncher.start(codexHome: nil)
         watchForNewAccount(after: nil)
     }
 
@@ -594,11 +690,204 @@ final class AccountStore: ObservableObject {
                    current.email.caseInsensitiveCompare(expected) != .orderedSame {
                     continue
                 }
+                if self.shouldRefuseDuplicateEnrollment(current) {
+                    await self.abortDuplicateEnrollment(current)
+                    return
+                }
                 self.status = status
                 self.newAccountLoginState = .ready(current)
                 return
             }
         }
+    }
+
+    private func watchForEnrollOnlyAccount(at home: URL) {
+        newAccountLoginWatchTask?.cancel()
+        let authURL = home.appendingPathComponent("auth.json")
+        newAccountLoginWatchTask = Task { [weak self] in
+            guard let self else { return }
+            var lastSize: Int = -1
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled else { return }
+                guard case .waiting = self.newAccountLoginState else { return }
+                guard let data = try? Data(contentsOf: authURL), !data.isEmpty else {
+                    continue
+                }
+                // Wait until the write settles (login can rewrite auth.json).
+                if data.count != lastSize {
+                    lastSize = data.count
+                    continue
+                }
+                guard let identity = Self.identityFromAuthJSON(data) else { continue }
+                if self.shouldRefuseDuplicateEnrollment(identity) {
+                    await self.abortDuplicateEnrollment(identity)
+                    return
+                }
+                self.newAccountLoginState = .ready(identity)
+                return
+            }
+        }
+    }
+
+    /// Relogin of the same email is a credential refresh, not a duplicate enrollment.
+    private func shouldRefuseDuplicateEnrollment(_ identity: AccountIdentity) -> Bool {
+        if let expected = expectedReloginEmail,
+           identity.email.caseInsensitiveCompare(expected) == .orderedSame {
+            return false
+        }
+        return existingRosterAccount(matching: identity) != nil
+    }
+
+    private func existingRosterAccount(matching identity: AccountIdentity) -> SavedAccount? {
+        accounts.first { account in
+            identity.matches(AccountIdentity(email: account.email, subject: account.subject))
+        }
+    }
+
+    private func ensureNotDuplicateNewAccount(_ identity: AccountIdentity) throws {
+        guard shouldRefuseDuplicateEnrollment(identity) else { return }
+        throw CLIError(Self.duplicateAccountAlreadyInRosterMessage)
+    }
+
+    private static var duplicateAccountAlreadyInRosterMessage: String {
+        AppLanguage.text(
+            "Tài khoản đã có trong danh bạ",
+            "Account already in roster"
+        )
+    }
+
+    /// Refuse enrollment of an identity already in the roster: no second row, no switch.
+    /// Add-only cleans the temp enroll home; add-and-switch cancels the add session.
+    private func abortDuplicateEnrollment(_ identity: AccountIdentity) async {
+        CodexLoginLauncher.stop()
+        newAccountLoginWatchTask?.cancel()
+        newAccountLoginWatchTask = nil
+        if isEnrollOnlyLogin {
+            removeEnrollOnlyHome()
+        } else if isAddAccountSession {
+            _ = try? await cli.data(arguments: ["cancel-add-account", "--json"])
+        }
+        clearPendingLoginFlags()
+        let email = identity.email
+        newAccountLoginState = .failed(AppLanguage.text(
+            "Tài khoản đã có trong danh bạ (\(email)). Không tạo dòng mới và không chuyển tài khoản.",
+            "Account already in roster (\(email)). No new row was created and no switch was performed."
+        ))
+    }
+
+    private func saveEnrollOnlyAccount(expectedIdentity: AccountIdentity) async throws {
+        guard let home = enrollOnlyCodexHome else {
+            throw CLIError(AppLanguage.text(
+                "Không tìm thấy thư mục đăng nhập tạm cho chế độ Chỉ thêm.",
+                "The temporary enroll-only login home is missing."
+            ))
+        }
+        do {
+            try await load()
+            try ensureNotDuplicateNewAccount(expectedIdentity)
+        } catch {
+            removeEnrollOnlyHome()
+            clearPendingLoginFlags()
+            throw error
+        }
+        let authPath = home.appendingPathComponent("auth.json").path
+        guard FileManager.default.fileExists(atPath: authPath) else {
+            throw CLIError(AppLanguage.text(
+                "Chưa có credential trong thư mục đăng nhập tạm. Hãy hoàn tất đăng nhập OpenAI rồi thử lại.",
+                "No credential in the temporary login home yet. Finish the OpenAI browser sign-in, then try again."
+            ))
+        }
+        // `decode` always appends `--json`; do not pass it here or clap rejects duplicates.
+        let imported: ImportJsonOutput = try await cli.decode(
+            ImportJsonOutput.self,
+            arguments: ["import-json", authPath]
+        )
+        guard let account = imported.accounts.first else {
+            throw CLIError(AppLanguage.text(
+                "Import thành công nhưng không trả về tài khoản.",
+                "Import succeeded but returned no account."
+            ))
+        }
+        let identity = AccountIdentity(email: account.email, subject: account.subject)
+        guard identity.matches(expectedIdentity) else {
+            throw CLIError(AppLanguage.text(
+                "Credential vừa lưu là \(account.email), không khớp \(expectedIdentity.email).",
+                "Saved credential is \(account.email), which does not match \(expectedIdentity.email)."
+            ))
+        }
+        do {
+            _ = try await cli.data(arguments: ["usage", account.id.uuidString, "--json"])
+        } catch {
+            if Self.isDeferredAccessTokenUsageError(error.localizedDescription) {
+                removeEnrollOnlyHome()
+                clearPendingLoginFlags()
+                newAccountLoginState = .saved(identity)
+                try await load()
+                lastQuotaRefreshAt = .now
+                return
+            }
+            removeEnrollOnlyHome()
+            clearPendingLoginFlags()
+            try? await load()
+            throw CLIError(AppLanguage.text(
+                "OpenAI chưa chấp nhận credential mới. Tài khoản đã được giữ lại nhưng chưa được đánh dấu đăng nhập thành công.",
+                "OpenAI did not accept the new credential. The account was preserved but sign-in was not marked successful."
+            ))
+        }
+        removeEnrollOnlyHome()
+        clearPendingLoginFlags()
+        newAccountLoginState = .saved(identity)
+        try await load()
+        lastQuotaRefreshAt = .now
+    }
+
+    private static func makeEnrollOnlyCodexHome() throws -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let root = base
+            .appendingPathComponent("Codex Roster", isDirectory: true)
+            .appendingPathComponent("enroll-only-login", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    private func removeEnrollOnlyHome() {
+        guard let home = enrollOnlyCodexHome else { return }
+        enrollOnlyCodexHome = nil
+        try? FileManager.default.removeItem(at: home)
+    }
+
+    /// Parse email/subject from a Codex auth.json without touching live `~/.codex`.
+    private static func identityFromAuthJSON(_ data: Data) -> AccountIdentity? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tokens = root["tokens"] as? [String: Any],
+              let access = tokens["access_token"] as? String, !access.isEmpty,
+              let refresh = tokens["refresh_token"] as? String, !refresh.isEmpty,
+              let idToken = tokens["id_token"] as? String,
+              let claims = decodeJWTPayload(idToken),
+              let email = claims["email"] as? String,
+              !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        let subject = claims["sub"] as? String
+        return AccountIdentity(email: email, subject: subject)
+    }
+
+    private static func decodeJWTPayload(_ token: String) -> [String: Any]? {
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count >= 2 else { return nil }
+        var payload = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let pad = (4 - payload.count % 4) % 4
+        if pad > 0 { payload += String(repeating: "=", count: pad) }
+        guard let data = Data(base64Encoded: payload),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return json
     }
 
     /// Save the live Codex session after re-login and confirm the target account recovered.
@@ -649,8 +938,14 @@ final class AccountStore: ObservableObject {
         CodexLoginLauncher.stop()
         isInteractiveLoginInProgress = false
         isAddAccountSession = false
+        isEnrollOnlyLogin = false
         expectedReloginEmail = nil
         isPendingLogin = false
+        pendingAddAccountMode = nil
+        // Enroll-only never quits Desktop; add-and-switch may have closed it for ports.
+        if enrollOnlyCodexHome != nil {
+            removeEnrollOnlyHome()
+        }
         relaunchDesktopAfterLogin()
     }
 
@@ -691,6 +986,9 @@ final class AccountStore: ObservableObject {
             // Force path: save live auth WHILE Desktop may still be running,
             // then quit (graceful first), then activate (saves again), then relaunch.
             let relaunch: ChatGPTDesktop.RelaunchPlan
+            // One full partition clear per switch is required before relaunch;
+            // skip a duplicate wipe when the post-quit clear already ran.
+            var didClearWebSession = false
             if force {
                 try await self.preserveLiveSessionBeforeDesktopQuit()
                 relaunch = try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
@@ -698,7 +996,7 @@ final class AccountStore: ObservableObject {
                 // even after ~/.codex/auth.json was restored. Clear web session
                 // caches only while Desktop is fully quit so launch rehydrates
                 // from the restored auth files.
-                ChatGPTDesktop.clearWebSessionCache()
+                ChatGPTDesktop.clearWebSessionCacheOnce(didClear: &didClearWebSession)
             } else {
                 relaunch = ChatGPTDesktop.RelaunchPlan.preferredDesktop()
             }
@@ -716,20 +1014,24 @@ final class AccountStore: ObservableObject {
                 }
                 throw error
             }
-            // Give the filesystem a beat after restore before Desktop opens and
+            // Brief filesystem beat after restore before Desktop opens and
             // races a partial auth.json read.
-            try? await Task.sleep(for: .milliseconds(250))
+            try? await Task.sleep(for: .milliseconds(100))
+            // Ensure a clear happened before relaunch (no-op if already cleared
+            // and Desktop stayed quit).
+            ChatGPTDesktop.clearWebSessionCacheOnce(didClear: &didClearWebSession)
             let launched = await relaunch.launchAndConfirm()
-            let accepted: Bool
+            let acceptance: DesktopAcceptanceResult
             if launched {
-                accepted = await self.waitForDesktopAcceptance(
+                acceptance = await self.confirmDesktopAcceptanceWithOneRetry(
                     accountID: activated.account.id,
-                    expectedEmail: activated.account.email
+                    expectedEmail: activated.account.email,
+                    relaunch: relaunch
                 )
             } else {
-                accepted = false
+                acceptance = .timedOut
             }
-            guard accepted else {
+            guard acceptance == .accepted else {
                 do {
                     try await self.rollbackRejectedTarget(
                         rejectedAccountID: activated.account.id,
@@ -743,16 +1045,14 @@ final class AccountStore: ObservableObject {
                         "ChatGPT rejected the target account and the previous session could not be restored automatically: \(error.localizedDescription)"
                     ))
                 }
-                throw CLIError(AppLanguage.text(
-                    "ChatGPT không chấp nhận tài khoản đích; phiên trước đã được khôi phục an toàn.",
-                    "ChatGPT rejected the target account; the previous session was restored safely."
-                ))
+                throw CLIError(Self.desktopAcceptanceFailureMessage(acceptance))
             }
             self.applyActivatedAccount(activated.account)
             try await self.reloadAccountsAfterSwitch()
             if self.accounts.contains(where: { $0.id == activated.account.id && $0.isActive }) {
                 self.lastQuotaRefreshAt = .now
             }
+            await self.applySessionResumeIfNeeded(activated.sessionResume, continueExhausted: false)
         }
     }
 
@@ -773,6 +1073,568 @@ final class AccountStore: ObservableObject {
                 "Không thể lưu phiên đang mở trước khi đóng ChatGPT. Chuyển tài khoản đã bị hủy để tránh mất phiên: \(error.localizedDescription)",
                 "Could not preserve the live session before quitting ChatGPT. The account switch was aborted to avoid losing the session: \(error.localizedDescription)"
             ))
+        }
+    }
+
+    /// After a successful activate/auto-switch, reopen a remembered Codex thread.
+    ///
+    /// - `continueExhausted == true` (auto-switch): reopen the thread that hit
+    ///   usage limits so work continues on the new account's quota.
+    /// - otherwise (manual Đổi): reopen that account's last remembered workspace/thread.
+    private func applySessionResumeIfNeeded(
+        _ hint: SessionResumeHint?,
+        continueExhausted: Bool
+    ) async {
+        guard autoResumeSession else { return }
+        guard let hint else {
+            logSessionResume("no hint from activate/auto-switch JSON continueExhausted=\(continueExhausted)")
+            sessionResumeCaption = AppLanguage.text(
+                "Auto-resume: không có gợi ý phiên sau khi đổi tài khoản",
+                "Auto-resume: no session hint after account switch"
+            )
+            scheduleSessionResumeCaptionClear()
+            return
+        }
+        guard hint.enabled else { return }
+        if continueExhausted {
+            let extras = hint.additionalSessions
+            logSessionResume(
+                "continueExhausted primary=\(hint.sessionId ?? "-") additional=\(extras.count) status=\(hint.status)"
+            )
+            await resumeInterruptedThreads([hint] + extras)
+            return
+        }
+
+        switch hint.status {
+        case "missing":
+            logSessionResume("status=missing continueExhausted=\(continueExhausted)")
+            sessionResumeCaption = AppLanguage.text(
+                continueExhausted
+                    ? "Không tìm thấy thread vừa hết quota để tiếp tục"
+                    : "Chưa nhớ thread/workspace cho tài khoản này — mở dự án một lần rồi đổi lại",
+                continueExhausted
+                    ? "Could not find the usage-limit thread to continue"
+                    : "No remembered thread/workspace for this account — open a project once, then switch again"
+            )
+            scheduleSessionResumeCaptionClear()
+            return
+        case "cwd_gone":
+            // Folder gone, but thread id may still open in Desktop / CLI.
+            break
+        case "rollout_gone":
+            logSessionResume("status=rollout_gone path=\(hint.rolloutPath ?? "-")")
+            // Thread id can still resume from state_5 even if rollout path is stale.
+            if hint.sessionId == nil || hint.sessionId?.isEmpty == true {
+                sessionResumeCaption = AppLanguage.text(
+                    "Rollout đã nhớ không còn trên máy",
+                    "Remembered rollout is no longer on this Mac"
+                )
+                scheduleSessionResumeCaptionClear()
+                return
+            }
+        case "ready", "ready_cli":
+            break
+        default:
+            logSessionResume("unexpected status=\(hint.status)")
+            sessionResumeCaption = AppLanguage.text(
+                "Auto-resume: trạng thái \(hint.status)",
+                "Auto-resume: status \(hint.status)"
+            )
+            scheduleSessionResumeCaptionClear()
+            return
+        }
+
+        logSessionResume(
+            "begin continueExhausted=\(continueExhausted) status=\(hint.status) session=\(hint.sessionId ?? "-") cwd=\(hint.cwd ?? "-")"
+        )
+
+        let projectName = hint.cwd.flatMap { path -> String? in
+            guard !path.isEmpty else { return nil }
+            return URL(fileURLWithPath: path).lastPathComponent
+        }
+        let label = projectName ?? hint.sessionId.map(shortSessionID) ?? "session"
+        sessionResumeCaption = AppLanguage.text(
+            continueExhausted
+                ? "Đang tiếp tục thread hết quota · \(label)"
+                : "Đang khôi phục phiên · \(label)",
+            continueExhausted
+                ? "Continuing usage-limit thread · \(label)"
+                : "Resuming session · \(label)"
+        )
+
+        // Cold Desktop after web-session clear needs several seconds before
+        // deep-link navigation works (sidebar_ready ≈ 7s on this machine).
+        await waitForDesktopResumeReady(minimumSettle: .seconds(5), maximumWait: .seconds(14))
+
+        let result = await openRememberedWorkspace(cwd: hint.cwd, sessionID: hint.sessionId)
+        logSessionResume("result=\(String(describing: result)) label=\(label) continueExhausted=\(continueExhausted)")
+        switch result {
+        case .openedThread:
+            var queuedContinue = false
+            if continueExhausted, let sessionID = hint.sessionId, !sessionID.isEmpty {
+                // Deep-link only selects the thread; queue a continue turn so Codex
+                // actually resumes work on the new account's quota.
+                queuedContinue = await queueContinueMessage(threadID: sessionID)
+                logSessionResume("queue continue thread=\(sessionID) ok=\(queuedContinue)")
+            }
+            if continueExhausted {
+                sessionResumeCaption = AppLanguage.text(
+                    queuedContinue
+                        ? "Đã gửi tiếp tục thread hết quota · \(label)"
+                        : "Đã mở thread hết quota · \(label) (chưa gửi được tin tiếp tục)",
+                    queuedContinue
+                        ? "Queued continue on usage-limit thread · \(label)"
+                        : "Opened usage-limit thread · \(label) (continue message not queued)"
+                )
+            } else {
+                sessionResumeCaption = AppLanguage.text(
+                    "Đã khôi phục thread · \(label)",
+                    "Restored thread · \(label)"
+                )
+            }
+        case .openedDesktop:
+            sessionResumeCaption = AppLanguage.text(
+                "Đã mở workspace · \(label)",
+                "Opened workspace · \(label)"
+            )
+        case .openedFinder:
+            sessionResumeCaption = AppLanguage.text(
+                "Đã mở thư mục · \(label) (Desktop deep-link lỗi)",
+                "Opened folder · \(label) (Desktop deep-link failed)"
+            )
+        case .failed:
+            if let sessionID = hint.sessionId, !sessionID.isEmpty {
+                sessionResumeCaption = AppLanguage.text(
+                    "Khôi phục thất bại — `codex resume \(shortSessionID(sessionID))` · \(label)",
+                    "Resume failed — `codex resume \(shortSessionID(sessionID))` · \(label)"
+                )
+            } else {
+                sessionResumeCaption = AppLanguage.text(
+                    "Không mở được workspace đã nhớ · \(label)",
+                    "Could not open the remembered workspace · \(label)"
+                )
+            }
+        }
+        scheduleSessionResumeCaptionClear()
+    }
+
+    /// Open + queue each exact thread independently; a failure must not skip later threads.
+    /// Deep-link open is required — `codex queue` alone often lands unread until Desktop
+    /// has the thread selected (proven single-thread path before the batch refactor).
+    private func resumeInterruptedThreads(_ hints: [SessionResumeHint]) async {
+        var seen = Set<String>()
+        let targets = hints.filter {
+            guard $0.enabled, let id = $0.sessionId, !id.isEmpty else { return false }
+            return seen.insert(id).inserted
+        }
+        guard !targets.isEmpty else {
+            sessionResumeCaption = AppLanguage.text(
+                "Không có cuộc hội thoại dang dở cần tiếp tục",
+                "No interrupted conversations to resume"
+            )
+            scheduleSessionResumeCaptionClear()
+            return
+        }
+        logSessionResume(
+            "batch begin count=\(targets.count) ids=\(targets.compactMap(\.sessionId).joined(separator: ","))"
+        )
+        await waitForDesktopResumeReady(minimumSettle: .seconds(5), maximumWait: .seconds(14))
+        let result = await SessionResumeBatch.run(
+            threadIDs: targets.compactMap(\.sessionId),
+            shouldContinue: { self.autoResumeSession },
+            progress: { index, total in
+                self.sessionResumeCaption = AppLanguage.text(
+                    "Đang tiếp tục cuộc hội thoại \(index)/\(total)",
+                    "Resuming conversation \(index)/\(total)"
+                )
+            },
+            enqueue: { id in
+                let open = await self.openRememberedWorkspace(cwd: nil, sessionID: id)
+                self.logSessionResume("batch open thread=\(id) result=\(String(describing: open))")
+                let queued = await self.queueContinueMessage(threadID: id)
+                self.logSessionResume("batch continue thread=\(id) queued=\(queued)")
+                return queued
+            }
+        )
+        sessionResumeCaption = AppLanguage.text(
+            "Đã gửi tiếp tục \(result.succeeded)/\(result.total) cuộc hội thoại",
+            "Queued continue for \(result.succeeded)/\(result.total) conversations"
+        )
+        scheduleSessionResumeCaptionClear()
+    }
+
+    private func scheduleSessionResumeCaptionClear() {
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(10))
+            sessionResumeCaption = nil
+        }
+    }
+
+    private func shortSessionID(_ id: String) -> String {
+        guard id.count > 8 else { return id }
+        return String(id.prefix(8))
+    }
+
+    private enum SessionResumeOpenResult {
+        case openedThread
+        case openedDesktop
+        case openedFinder
+        case failed
+    }
+
+    /// Wait until Desktop is up long enough for deep-link handlers + app-server.
+    private func waitForDesktopResumeReady(
+        minimumSettle: Duration,
+        maximumWait: Duration
+    ) async {
+        let start = ContinuousClock.now
+        while !ChatGPTDesktop.isRunning {
+            if ContinuousClock.now - start > maximumWait { return }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        let elapsed = ContinuousClock.now - start
+        if elapsed < minimumSettle {
+            try? await Task.sleep(for: minimumSettle - elapsed)
+        }
+    }
+
+    /// Opens the remembered thread (preferred) or project for the account just switched *to*.
+    private func openRememberedWorkspace(cwd: String?, sessionID: String?) async -> SessionResumeOpenResult {
+        if let sessionID, !sessionID.isEmpty {
+            // Retry: first deliveries during cold hydrate are often dropped.
+            for attempt in 1...6 {
+                logSessionResume("thread deep-link attempt \(attempt) id=\(sessionID)")
+                let delivered = await openCodexThreadDeepLink(sessionID: sessionID)
+                if delivered {
+                    if await desktopLogConfirmsThreadOpen(sessionID: sessionID, withinSeconds: 3.5) {
+                        return .openedThread
+                    }
+                    logSessionResume("open delivered but no Desktop resume evidence yet")
+                }
+                try? await Task.sleep(for: .milliseconds(1500))
+            }
+            // Final attempt — only claim thread resume when Desktop log confirms.
+            if await openCodexThreadDeepLink(sessionID: sessionID),
+               await desktopLogConfirmsThreadOpen(sessionID: sessionID, withinSeconds: 5) {
+                return .openedThread
+            }
+            logSessionResume("thread deep-link exhausted without Desktop resume evidence")
+        }
+
+        let cwdPath = cwd?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !cwdPath.isEmpty, FileManager.default.fileExists(atPath: cwdPath) {
+            if await runCodexAppWorkspace(cwdPath) {
+                return .openedDesktop
+            }
+            if await openCodexNewThreadDeepLink(cwd: cwdPath) {
+                return .openedDesktop
+            }
+            if await openFolderInFinder(cwdPath) {
+                return .openedFinder
+            }
+        }
+        return .failed
+    }
+
+    private func runCodexAppWorkspace(_ cwd: String) async -> Bool {
+        for binary in codexCLIBinaries where FileManager.default.isExecutableFile(atPath: binary) {
+            // `codex app` exits in ~2s when Desktop is already up; treat a clean
+            // exit as success. If it is still running past the timeout, kill and
+            // still succeed when Desktop is running (workspace handoff started).
+            let outcome = await runProcessOutcome(
+                executable: binary,
+                arguments: ["app", cwd],
+                timeoutSeconds: 8
+            )
+            switch outcome {
+            case .exited(0):
+                return true
+            case .stillRunning:
+                if ChatGPTDesktop.isRunning { return true }
+            case .exited, .failedToStart:
+                continue
+            }
+        }
+        return false
+    }
+
+    /// Exact-thread resume — OpenAI-confirmed contract (`codex://threads/<threadId>`).
+    private func openCodexThreadDeepLink(sessionID: String) async -> Bool {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/?#")
+        let encoded = sessionID.addingPercentEncoding(withAllowedCharacters: allowed) ?? sessionID
+        return await openCodexURL("codex://threads/\(encoded)")
+    }
+
+    /// After auto-switch, open the blocked thread then queue a user turn so Desktop
+    /// actually continues (deep-link alone only navigates). Uses `codex queue`.
+    private func queueContinueMessage(threadID: String) async -> Bool {
+        let message = "Continue the interrupted task after the account usage-limit switch."
+        for binary in codexCLIBinaries where FileManager.default.isExecutableFile(atPath: binary) {
+            let outcome = await runProcessCapturingOutput(
+                executable: binary,
+                arguments: ["queue", "--thread", threadID, "--message", message],
+                timeoutSeconds: 20
+            )
+            switch outcome {
+            case let .exited(status, stdout, stderr):
+                let combined = stdout + "\n" + stderr
+                if status == 0, combined.localizedCaseInsensitiveContains("Queued message") {
+                    return true
+                }
+                logSessionResume(
+                    "codex queue exit=\(status) via=\(binary) out=\(String(combined.prefix(240)))"
+                )
+            case .stillRunning:
+                logSessionResume("codex queue still running via=\(binary)")
+            case .failedToStart:
+                continue
+            }
+        }
+        return false
+    }
+
+    private var codexCLIBinaries: [String] {
+        [
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".local/bin/codex").path,
+            "/opt/homebrew/bin/codex",
+            "/usr/local/bin/codex",
+        ]
+    }
+
+    /// Workspace fallback when thread id cannot be opened (opens a new thread at cwd).
+    private func openCodexNewThreadDeepLink(cwd: String) async -> Bool {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: ":/?#[]@!$&'()*+,;=")
+        let encodedPath = cwd.addingPercentEncoding(withAllowedCharacters: allowed) ?? cwd
+        return await openCodexURL("codex://threads/new?path=\(encodedPath)")
+    }
+
+    private func openCodexURL(_ url: String) async -> Bool {
+        // `com.openai.chat` is stale on current installs — ChatGPT.app is
+        // `com.openai.codex`. Prefer resolved IDs that LaunchServices knows.
+        let bundleIDs = ChatGPTDesktop.resolvableBundleIDs()
+        for bundleID in bundleIDs {
+            if await runProcessAndWait(
+                executable: "/usr/bin/open",
+                arguments: ["-b", bundleID, url],
+                timeoutSeconds: 8
+            ) {
+                return true
+            }
+        }
+        for path in ChatGPTDesktop.knownDesktopAppPaths
+        where FileManager.default.fileExists(atPath: path) {
+            if await runProcessAndWait(
+                executable: "/usr/bin/open",
+                arguments: ["-a", path, url],
+                timeoutSeconds: 8
+            ) {
+                return true
+            }
+        }
+        return await runProcessAndWait(
+            executable: "/usr/bin/open",
+            arguments: [url],
+            timeoutSeconds: 8
+        )
+    }
+
+    private func openFolderInFinder(_ cwd: String) async -> Bool {
+        if await runProcessAndWait(
+            executable: "/usr/bin/open",
+            arguments: [cwd],
+            timeoutSeconds: 6
+        ) {
+            return true
+        }
+        return await MainActor.run {
+            NSWorkspace.shared.open(URL(fileURLWithPath: cwd))
+        }
+    }
+
+    /// Scan recent Codex Desktop logs for evidence the thread deep-link landed.
+    private func desktopLogConfirmsThreadOpen(sessionID: String, withinSeconds: Double) async -> Bool {
+        let root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/com.openai.codex", isDirectory: true)
+        let cutoff = Date().addingTimeInterval(-max(withinSeconds + 30, 60))
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                let fm = FileManager.default
+                guard let enumerator = fm.enumerator(
+                    at: root,
+                    includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+                    options: [.skipsHiddenFiles]
+                ) else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                var candidates: [(Date, URL)] = []
+                while let item = enumerator.nextObject() as? URL {
+                    guard item.pathExtension == "log" else { continue }
+                    let values = try? item.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
+                    guard values?.isRegularFile == true,
+                          let modified = values?.contentModificationDate,
+                          modified >= cutoff else { continue }
+                    candidates.append((modified, item))
+                }
+                candidates.sort { $0.0 > $1.0 }
+                for (_, url) in candidates.prefix(8) {
+                    guard let handle = try? FileHandle(forReadingFrom: url) else { continue }
+                    defer { try? handle.close() }
+                    // Read trailing 256 KiB — enough for recent navigation events.
+                    let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                    if size > 262_144 {
+                        try? handle.seek(toOffset: UInt64(size - 262_144))
+                    }
+                    guard let data = try? handle.readToEnd(),
+                          let text = String(data: data, encoding: .utf8) else { continue }
+                    let hasId = text.contains("conversationId=\(sessionID)")
+                        || text.contains("threadId=\(sessionID)")
+                    let hasResume = text.contains("maybe_resume_success")
+                        || text.contains("method=thread/resume")
+                        || text.contains("name=thread_navigation outcome=success")
+                        || text.contains("name=thread_navigation")
+                    if hasId && hasResume {
+                        continuation.resume(returning: true)
+                        return
+                    }
+                }
+                continuation.resume(returning: false)
+            }
+        }
+    }
+
+    private func logSessionResume(_ message: String) {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/com.codexroster.codex-roster", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("session-resume.log")
+        let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(message)\n"
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: url.path) {
+                if let handle = try? FileHandle(forWritingTo: url) {
+                    defer { try? handle.close() }
+                    try? handle.seekToEnd()
+                    try? handle.write(contentsOf: data)
+                }
+            } else {
+                try? data.write(to: url)
+            }
+        }
+    }
+
+    private enum ProcessRunOutcome {
+        case exited(Int32)
+        case stillRunning
+        case failedToStart
+    }
+
+    private enum ProcessCaptureOutcome {
+        case exited(status: Int32, stdout: String, stderr: String)
+        case stillRunning
+        case failedToStart
+    }
+
+    private func runProcessOutcome(
+        executable: String,
+        arguments: [String],
+        timeoutSeconds: Double
+    ) async -> ProcessRunOutcome {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: executable)
+                process.arguments = arguments
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                do {
+                    try process.run()
+                } catch {
+                    continuation.resume(returning: .failedToStart)
+                    return
+                }
+                let deadline = Date().addingTimeInterval(timeoutSeconds)
+                while process.isRunning, Date() < deadline {
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
+                if process.isRunning {
+                    process.terminate()
+                    process.waitUntilExit()
+                    continuation.resume(returning: .stillRunning)
+                    return
+                }
+                process.waitUntilExit()
+                continuation.resume(returning: .exited(process.terminationStatus))
+            }
+        }
+    }
+
+    private func runProcessCapturingOutput(
+        executable: String,
+        arguments: [String],
+        timeoutSeconds: Double
+    ) async -> ProcessCaptureOutcome {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: executable)
+                process.arguments = arguments
+                let stdoutPipe = Pipe()
+                let stderrPipe = Pipe()
+                process.standardOutput = stdoutPipe
+                process.standardError = stderrPipe
+                do {
+                    try process.run()
+                } catch {
+                    continuation.resume(returning: .failedToStart)
+                    return
+                }
+                let deadline = Date().addingTimeInterval(timeoutSeconds)
+                while process.isRunning, Date() < deadline {
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
+                if process.isRunning {
+                    process.terminate()
+                    process.waitUntilExit()
+                    continuation.resume(returning: .stillRunning)
+                    return
+                }
+                process.waitUntilExit()
+                let stdout = String(
+                    data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(),
+                    encoding: .utf8
+                ) ?? ""
+                let stderr = String(
+                    data: stderrPipe.fileHandleForReading.readDataToEndOfFile(),
+                    encoding: .utf8
+                ) ?? ""
+                continuation.resume(
+                    returning: .exited(
+                        status: process.terminationStatus,
+                        stdout: stdout,
+                        stderr: stderr
+                    )
+                )
+            }
+        }
+    }
+
+    private func runProcessAndWait(
+        executable: String,
+        arguments: [String],
+        timeoutSeconds: Double
+    ) async -> Bool {
+        switch await runProcessOutcome(
+            executable: executable,
+            arguments: arguments,
+            timeoutSeconds: timeoutSeconds
+        ) {
+        case .exited(0):
+            return true
+        case .exited, .stillRunning, .failedToStart:
+            return false
         }
     }
 
@@ -818,7 +1680,10 @@ final class AccountStore: ObservableObject {
                 try? await Task.sleep(for: .milliseconds(150))
             }
         }
-        throw CLIError("Account switch safety check did not complete.")
+        throw CLIError(AppLanguage.text(
+            "Kiểm tra an toàn khi chuyển tài khoản chưa hoàn tất.",
+            "Account switch safety check did not complete."
+        ))
     }
 
     /// Quit ChatGPT Desktop if needed, then reopen it so the UI loads the current `~/.codex` session.
@@ -827,6 +1692,8 @@ final class AccountStore: ObservableObject {
             let relaunch = ChatGPTDesktop.isRunning
                 ? try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
                 : ChatGPTDesktop.RelaunchPlan.preferredDesktop()
+            // Drop stale Electron cookies so relaunch rehydrates from live auth.json.
+            ChatGPTDesktop.clearWebSessionCache()
             await relaunch.launchAndConfirm()
         }
     }
@@ -885,6 +1752,7 @@ final class AccountStore: ObservableObject {
                     // Account-authenticated usage is the source of truth for
                     // personal banked credits and actual quota resets.
                     ResetNotifier.showAccountSignals(self.accounts)
+                    ResetNotifier.showOpenAIIncidentIfNeeded(self.openAIStatus)
                     if Date.now >= nextPublicSignalCheck {
                         if let signals = try? await self.cli.decode(
                             [GlobalResetEvent].self,
@@ -911,6 +1779,7 @@ final class AccountStore: ObservableObject {
         isAddAccountSession = true
         isInteractiveLoginInProgress = true
         isPendingLogin = true
+        pendingAddAccountMode = .addAndSwitch
         newAccountLoginState = .waiting
         if addStatus.authChanged,
            let current = try? await cli.decode(StatusOutput.self, arguments: ["status"]).currentAccount {
@@ -1031,6 +1900,15 @@ final class AccountStore: ObservableObject {
             if enabled {
                 Task { await self.checkAutoSwitchWhenExhausted() }
             }
+        }
+    }
+
+    func setAutoResumeSession(_ enabled: Bool) {
+        run {
+            _ = try await self.cli.data(
+                arguments: ["auto-resume-session", enabled ? "--enable" : "--disable", "--json"]
+            )
+            self.autoResumeSession = enabled
         }
     }
 
@@ -1209,8 +2087,8 @@ final class AccountStore: ObservableObject {
     func refreshResetTimeline(silently: Bool = false) {
         Task {
             do {
-                let timeline = try await cli.decode([ResetTimelineEvent].self, arguments: ["reset-timeline"])
-                resetTimeline = timeline
+                let payload = try await cli.decode(ResetTimelinePayload.self, arguments: ["reset-timeline"])
+                resetTimeline = payload.events
             } catch {
                 if !silently { errorMessage = error.localizedDescription }
             }
@@ -1218,13 +2096,8 @@ final class AccountStore: ObservableObject {
     }
 
     func refreshResetJuice(silently: Bool = false) {
-        Task {
-            do {
-                resetJuice = try await cli.decode(ResetJuice.self, arguments: ["reset-juice"])
-            } catch {
-                if !silently { errorMessage = error.localizedDescription }
-            }
-        }
+        // Codex Resets does not publish effort tiers. Never substitute another source.
+        resetJuice = nil
     }
 
     private func load() async throws {
@@ -1232,7 +2105,10 @@ final class AccountStore: ObservableObject {
         async let accounts: AccountListOutput = cli.decode(AccountListOutput.self, arguments: ["list"])
         async let settings: AutoStartUsageWindowsStatus = cli.decode(AutoStartUsageWindowsStatus.self, arguments: ["auto-start-usage-windows"])
         async let autoSwitch: AutoSwitchOutput = cli.decode(AutoSwitchOutput.self, arguments: ["auto-switch", "--status"])
-        let (loadedStatus, loadedAccounts, loadedSettings, loadedAutoSwitch) = try await (status, accounts, settings, autoSwitch)
+        async let autoResume: AutoResumeSessionStatus = cli.decode(AutoResumeSessionStatus.self, arguments: ["auto-resume-session"])
+        let (loadedStatus, loadedAccounts, loadedSettings, loadedAutoSwitch, loadedAutoResume) = try await (
+            status, accounts, settings, autoSwitch, autoResume
+        )
         applyRoster(status: loadedStatus, accounts: loadedAccounts.accounts)
         let pendingLegacyArchives = legacyArchivedAccountIDs.intersection(Set(loadedAccounts.accounts.map(\.id)))
         if !pendingLegacyArchives.isEmpty {
@@ -1247,6 +2123,7 @@ final class AccountStore: ObservableObject {
             applyRoster(status: loadedStatus, accounts: refreshedAccounts.accounts)
         }
         self.autoStartUsageWindows = loadedSettings.enabled
+        self.autoResumeSession = loadedAutoResume.enabled
         if !loadedAutoSwitch.enabled,
            UserDefaults.standard.object(forKey: legacyAutoSwitchWhenExhaustedKey) != nil,
            UserDefaults.standard.bool(forKey: legacyAutoSwitchWhenExhaustedKey) {
@@ -1321,11 +2198,12 @@ final class AccountStore: ObservableObject {
                 // A live Codex CLI must defer switching even after Desktop has quit.
                 var relaunch = ChatGPTDesktop.RelaunchPlan.preferredDesktop()
                 var didCloseDesktop = false
+                var didClearWebSession = false
                 if ChatGPTDesktop.isRunning {
                     autoSwitchState = .closingDesktop
                     try await self.preserveLiveSessionBeforeDesktopQuit()
                     relaunch = try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
-                    ChatGPTDesktop.clearWebSessionCache()
+                    ChatGPTDesktop.clearWebSessionCacheOnce(didClear: &didClearWebSession)
                     didCloseDesktop = true
                 }
                 autoSwitchState = .switchingAccount
@@ -1354,31 +2232,34 @@ final class AccountStore: ObservableObject {
                     return
                 }
                 autoSwitchState = .relaunchingDesktop
-                try? await Task.sleep(for: .milliseconds(250))
+                try? await Task.sleep(for: .milliseconds(100))
+                // Required before relaunch — no-op when the post-quit clear already
+                // ran and Desktop stayed quit; still clears when Desktop was already
+                // quit at decide time (post-quit branch skipped).
+                ChatGPTDesktop.clearWebSessionCacheOnce(didClear: &didClearWebSession)
                 var launched = await relaunch.launchAndConfirm()
-                var accepted: Bool
+                var acceptance: DesktopAcceptanceResult = .timedOut
                 let expectedEmail = self.accounts.first(where: { $0.id == applied.candidateAccountId })?.email
                     ?? candidateName
                 if launched, let candidateID = applied.candidateAccountId {
-                    accepted = await waitForDesktopAcceptance(
+                    acceptance = await confirmDesktopAcceptanceWithOneRetry(
                         accountID: candidateID,
-                        expectedEmail: expectedEmail
+                        expectedEmail: expectedEmail,
+                        relaunch: relaunch
                     )
-                } else {
-                    accepted = false
-                }
-                // Retry relaunch up to 2 times if it fails
-                for _ in 1...2 where !accepted {
+                } else if !launched {
+                    // Launch itself failed — try open again once before giving up.
                     try? await Task.sleep(for: .seconds(1))
                     launched = await relaunch.launchAndConfirm()
                     if launched, let candidateID = applied.candidateAccountId {
-                        accepted = await waitForDesktopAcceptance(
+                        acceptance = await confirmDesktopAcceptanceWithOneRetry(
                             accountID: candidateID,
-                            expectedEmail: expectedEmail
+                            expectedEmail: expectedEmail,
+                            relaunch: relaunch
                         )
                     }
                 }
-                guard accepted else {
+                guard acceptance == .accepted else {
                     do {
                         try await rollbackRejectedTarget(
                             rejectedAccountID: applied.candidateAccountId,
@@ -1386,10 +2267,7 @@ final class AccountStore: ObservableObject {
                             fallbackRelaunch: relaunch
                         )
                         try? await reloadAccountsAfterSwitch()
-                        errorMessage = AppLanguage.text(
-                            "ChatGPT không chấp nhận tài khoản tự động chọn; phiên trước đã được khôi phục.",
-                            "ChatGPT rejected the automatically selected account; the previous session was restored."
-                        )
+                        errorMessage = Self.desktopAcceptanceFailureMessage(acceptance)
                     } catch {
                         errorMessage = AppLanguage.text(
                             "Tài khoản đích bị từ chối và rollback thất bại: \(error.localizedDescription)",
@@ -1404,6 +2282,7 @@ final class AccountStore: ObservableObject {
                 autoSwitchState = .switched(applied.candidateDisplayName ?? candidateName)
                 autoSwitchAllExhaustedNotified = false
                 autoSwitchCooldownUntil = Date.now.addingTimeInterval(30)
+                await self.applySessionResumeIfNeeded(applied.sessionResume, continueExhausted: true)
             default:
                 autoSwitchState = .checkFailed
             }
@@ -1476,6 +2355,7 @@ final class AccountStore: ObservableObject {
             defer {
                 isWorking = false
                 isSwitching = false
+                switchPhaseMessage = nil
             }
             do {
                 try await operation()
@@ -1498,46 +2378,137 @@ final class AccountStore: ObservableObject {
         applyRoster(status: loadedStatus, accounts: loadedAccounts.accounts)
     }
 
-    private func waitForDesktopAcceptance(accountID: UUID, expectedEmail: String) async -> Bool {
+    /// After relaunch: wait for a settled live identity match. Never treat the
+    /// first matching `~/.codex` email/ID alone as success — Desktop can still
+    /// flash Sign-in. One clear+relaunch retry is allowed when acceptance is weak.
+    private func confirmDesktopAcceptanceWithOneRetry(
+        accountID: UUID,
+        expectedEmail: String,
+        relaunch: ChatGPTDesktop.RelaunchPlan
+    ) async -> DesktopAcceptanceResult {
+        defer { switchPhaseMessage = nil }
+        switchPhaseMessage = AppLanguage.text(
+            "Đang xác nhận ChatGPT đã nhận phiên…",
+            "Confirming ChatGPT accepted the session…"
+        )
+        let first = await waitForDesktopAcceptance(accountID: accountID, expectedEmail: expectedEmail)
+        if first == .accepted || first == .rejected {
+            return first
+        }
+
+        // Weak / timed-out: one longevity-safe clear+relaunch retry (no RT prove).
+        switchPhaseMessage = AppLanguage.text(
+            "ChatGPT chưa ổn định — lưu phiên, xóa cache web và mở lại…",
+            "ChatGPT unsettled — saving session, clearing web cache, and relaunching…"
+        )
+        do {
+            if ChatGPTDesktop.isRunning {
+                try await preserveLiveSessionBeforeDesktopQuit()
+                _ = try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
+            }
+            ChatGPTDesktop.clearWebSessionCache()
+            guard await relaunch.launchAndConfirm() else {
+                return .timedOut
+            }
+            switchPhaseMessage = AppLanguage.text(
+                "Đang xác nhận lại sau khi mở lại ChatGPT…",
+                "Re-confirming after ChatGPT relaunch…"
+            )
+            return await waitForDesktopAcceptance(accountID: accountID, expectedEmail: expectedEmail)
+        } catch {
+            return first == .uncertain ? .uncertain : .timedOut
+        }
+    }
+
+    private func waitForDesktopAcceptance(accountID: UUID, expectedEmail: String) async -> DesktopAcceptanceResult {
         // Give Desktop time to open and either rehydrate from restored auth.json
         // or reject a proven-dead session. Acceptance is based on the LIVE
         // ~/.codex identity — never on a saved-account usage probe (that only
         // checks the snapshot bytes and can report OK while the UI still shows
         // "Sign in to ChatGPT").
-        try? await Task.sleep(for: .seconds(2))
+        // Fast path: Desktop already running → poll immediately after a short
+        // beat. Cold launch still gets a longer head start before the loop.
+        if ChatGPTDesktop.isRunning {
+            try? await Task.sleep(for: .milliseconds(400))
+        } else {
+            try? await Task.sleep(for: .milliseconds(800))
+        }
         let deadline = ContinuousClock.now + .seconds(12)
         var sawMatchingLiveIdentity = false
         while ContinuousClock.now < deadline {
+            guard ChatGPTDesktop.isRunning else {
+                try? await Task.sleep(for: .milliseconds(250))
+                continue
+            }
             do {
                 let status = try await cli.decode(StatusOutput.self, arguments: ["status"])
                 guard let live = status.currentAccount else {
-                    try? await Task.sleep(for: .milliseconds(400))
+                    try? await Task.sleep(for: .milliseconds(250))
                     continue
                 }
                 let emailMatches = live.email.caseInsensitiveCompare(expectedEmail) == .orderedSame
                 let idMatches = status.currentAccountSavedId == accountID
                 guard emailMatches || idMatches else {
-                    try? await Task.sleep(for: .milliseconds(400))
+                    try? await Task.sleep(for: .milliseconds(250))
                     continue
                 }
                 sawMatchingLiveIdentity = true
+                // Settle: first match alone is weak — Desktop may still be on Sign-in.
+                try? await Task.sleep(for: .milliseconds(500))
+                guard ChatGPTDesktop.isRunning else { continue }
+                let settled = try await cli.decode(StatusOutput.self, arguments: ["status"])
+                let settledEmail = settled.currentAccount?.email
+                let settledEmailMatches = settledEmail.map {
+                    $0.caseInsensitiveCompare(expectedEmail) == .orderedSame
+                } ?? false
+                let settledIDMatches = settled.currentAccountSavedId == accountID
+                guard settledEmailMatches || settledIDMatches else {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    continue
+                }
                 do {
                     // Live usage probe (no account-id) — AT-only, no RT prove.
                     _ = try await cli.data(arguments: ["usage", "--json"])
-                    return true
+                    return .accepted
                 } catch {
                     if Self.usageErrorForcesRollback(error.localizedDescription) {
-                        return false
+                        return .rejected
                     }
                     // Expired AT / deferred is fine: Desktop owns refresh once
-                    // live identity already matches the target.
-                    return true
+                    // live identity has settled on the target.
+                    return .accepted
                 }
             } catch {
-                try? await Task.sleep(for: .milliseconds(400))
+                try? await Task.sleep(for: .milliseconds(250))
             }
         }
-        return sawMatchingLiveIdentity
+        // Never silent false-OK: a fleeting match without settle is uncertain.
+        return sawMatchingLiveIdentity ? .uncertain : .timedOut
+    }
+
+    private static func desktopAcceptanceFailureMessage(_ result: DesktopAcceptanceResult) -> String {
+        switch result {
+        case .accepted:
+            return AppLanguage.text(
+                "ChatGPT không chấp nhận tài khoản đích; phiên trước đã được khôi phục an toàn.",
+                "ChatGPT rejected the target account; the previous session was restored safely."
+            )
+        case .rejected:
+            return AppLanguage.text(
+                "ChatGPT từ chối phiên đích (cần đăng nhập lại); phiên trước đã được khôi phục.",
+                "ChatGPT rejected the target session (sign-in required); the previous session was restored."
+            )
+        case .uncertain:
+            return AppLanguage.text(
+                "Phiên ~/.codex đã khớp nhưng ChatGPT chưa xác nhận ổn định (có thể vẫn Sign-in). Phiên trước đã được khôi phục — hãy thử Đổi lại hoặc Mở lại ChatGPT.",
+                "Live ~/.codex matched but ChatGPT acceptance is uncertain (Sign-in may still show). Previous session restored — try Switch again or Relaunch ChatGPT."
+            )
+        case .timedOut:
+            return AppLanguage.text(
+                "ChatGPT không xác nhận phiên đích kịp thời; phiên trước đã được khôi phục.",
+                "ChatGPT did not confirm the target session in time; the previous session was restored."
+            )
+        }
     }
 
     /// Whether a `usage` probe error means the target account is genuinely
@@ -1568,15 +2539,17 @@ final class AccountStore: ObservableObject {
             ))
         }
         let relaunch: ChatGPTDesktop.RelaunchPlan
+        var didClearWebSession = false
         if ChatGPTDesktop.isRunning {
             try await preserveLiveSessionBeforeDesktopQuit()
             relaunch = try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
-            ChatGPTDesktop.clearWebSessionCache()
+            ChatGPTDesktop.clearWebSessionCacheOnce(didClear: &didClearWebSession)
         } else {
             relaunch = fallbackRelaunch
         }
         _ = try await activateAfterProcessesDrain(accountID: previousAccountID, waitForDrain: true)
-        try? await Task.sleep(for: .milliseconds(250))
+        try? await Task.sleep(for: .milliseconds(100))
+        ChatGPTDesktop.clearWebSessionCacheOnce(didClear: &didClearWebSession)
         guard await relaunch.launchAndConfirm() else {
             throw CLIError(AppLanguage.text(
                 "Đã phục hồi dữ liệu phiên trước nhưng không thể mở lại ChatGPT.",
@@ -1611,6 +2584,14 @@ final class AccountStore: ObservableObject {
 
 }
 
+enum DesktopAcceptanceResult: Equatable {
+    case accepted
+    case rejected
+    /// Live identity matched at least once, but Desktop never settled.
+    case uncertain
+    case timedOut
+}
+
 enum AutoSwitchState: Equatable {
     case waitingForLogin
     case allAccountsExhausted
@@ -1627,14 +2608,20 @@ enum AutoSwitchState: Equatable {
 
 private struct AccountHubCLI {
     func decode<T: Decodable>(_ type: T.Type, arguments: [String]) async throws -> T {
-        let data = try await data(arguments: arguments + ["--json"])
+        // Idempotent: callers must not pass `--json` themselves, but tolerate it
+        // so a stray flag never becomes `cannot be used multiple times`.
+        let jsonArgs = arguments.contains("--json") ? arguments : arguments + ["--json"]
+        let data = try await data(arguments: jsonArgs)
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         do {
             return try decoder.decode(T.self, from: data)
         } catch {
             let command = arguments.first ?? "requested"
-            throw CLIError("Không thể đọc dữ liệu cho \(command). Hãy làm mới Codex Roster rồi thử lại.")
+            throw CLIError(AppLanguage.text(
+                "Không thể đọc dữ liệu cho \(command). Hãy làm mới Codex Roster rồi thử lại.",
+                "Could not decode data for \(command). Refresh Codex Roster and try again."
+            ))
         }
     }
 
@@ -1705,14 +2692,20 @@ private struct AccountHubCLI {
             output.fileHandleForReading.closeFile()
             error.fileHandleForReading.closeFile()
             _ = captures.wait(timeout: .now() + 2)
-            throw CLIError("Codex Roster did not finish within two minutes.")
+            throw CLIError(AppLanguage.text(
+                "Codex Roster không kịp hoàn tất trong hai phút.",
+                "Codex Roster did not finish within two minutes."
+            ))
         }
         captures.wait()
         let outputData = outputCapture.data
         guard process.terminationStatus == 0 else {
             let errorData = errorCapture.data
             let detail = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw CLIError(detail?.isEmpty == false ? detail! : "The Codex Roster command failed.")
+            throw CLIError(detail?.isEmpty == false ? detail! : AppLanguage.text(
+                "Lệnh Codex Roster thất bại.",
+                "The Codex Roster command failed."
+            ))
         }
         return outputData
     }
@@ -1746,7 +2739,9 @@ private struct CLIError: LocalizedError {
 private enum CodexLoginLauncher {
     private static var process: Process?
 
-    static func start() throws {
+    /// Start `codex login`. When `codexHome` is set, login writes credentials
+    /// only into that isolated home (enroll-only); live `~/.codex` is untouched.
+    static func start(codexHome: URL?) throws {
         // `codex login` opens its own browser sign-in (loopback/PKCE) — no device
         // code. Run it quietly: the browser is the only UI the user needs.
         stop()
@@ -1759,6 +2754,11 @@ private enum CodexLoginLauncher {
             login.arguments = ["codex", "-c", "cli_auth_credentials_store=\"file\"", "login"]
         }
         login.currentDirectoryURL = FileManager.default.temporaryDirectory
+        var environment = ProcessInfo.processInfo.environment
+        if let codexHome {
+            environment["CODEX_HOME"] = codexHome.path
+        }
+        login.environment = environment
         login.standardOutput = FileHandle.nullDevice
         login.standardError = FileHandle.nullDevice
         try login.run()
@@ -1831,6 +2831,21 @@ private enum ChatGPTDesktop {
         "/Applications/ChatGPT.app",
         "/Applications/Codex.app",
     ]
+    /// Public read-only view for session-resume deep links.
+    static var knownDesktopAppPaths: [String] { knownAppPaths }
+
+    /// Bundle IDs that LaunchServices can actually resolve on this Mac.
+    /// Filters out stale ids like `com.openai.chat` when only `com.openai.codex` is installed.
+    static func resolvableBundleIDs() -> [String] {
+        let resolved = bundleIdentifiers.filter { id in
+            NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) != nil
+                || knownAppPaths.contains(where: { path in
+                    FileManager.default.fileExists(atPath: path)
+                        && bundleIdentifier(at: URL(fileURLWithPath: path)) == id
+                })
+        }
+        return resolved.isEmpty ? ["com.openai.codex"] : resolved
+    }
     private static let terminatePollInterval: Duration = .milliseconds(50)
     /// Wait long enough for ChatGPT/Codex to flush rotated refresh tokens on
     /// graceful quit before escalating to forceTerminate / SIGKILL.
@@ -1861,9 +2876,9 @@ private enum ChatGPTDesktop {
         @discardableResult
         func launchAndConfirm() async -> Bool {
             // LaunchServices often rejects an immediate reopen after force-quit.
-            try? await Task.sleep(for: .milliseconds(350))
+            try? await Task.sleep(for: .milliseconds(150))
             await openDesktop()
-            if await waitUntilRunning(deadline: .seconds(3)) {
+            if await waitUntilRunning(deadline: .seconds(2)) {
                 return true
             }
             await openDesktop()
@@ -1987,12 +3002,29 @@ private enum ChatGPTDesktop {
     /// Drop Chromium web-session caches so Desktop rehydrates from restored
     /// `~/.codex/auth.json` instead of a stale logged-out cookie jar.
     /// Call only after Desktop processes have fully quit.
+    ///
+    /// ChatGPT Desktop also keeps a full session under
+    /// `Default/Partitions/codex-browser-app` — clearing only the top-level
+    /// `Default` / `codex-browser-app` roots leaves Sign-in cookies behind.
     static func clearWebSessionCache() {
         guard !isRunning else { return }
         let supportRoot = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Codex", isDirectory: true)
-        let profileDirs = ["Default", "codex-browser-app"].map {
+        let fm = FileManager.default
+        var profileDirs = ["Default", "codex-browser-app"].map {
             supportRoot.appendingPathComponent($0, isDirectory: true)
+        }
+        let partitionsRoot = supportRoot
+            .appendingPathComponent("Default", isDirectory: true)
+            .appendingPathComponent("Partitions", isDirectory: true)
+        if let partitions = try? fm.contentsOfDirectory(
+            at: partitionsRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            profileDirs.append(contentsOf: partitions.filter {
+                (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            })
         }
         let fileNames = [
             "Cookies",
@@ -2008,16 +3040,21 @@ private enum ChatGPTDesktop {
             "Cache Storage",
             "Code Cache",
             "GPUCache",
+            "WebStorage",
         ]
-        let fm = FileManager.default
         for profile in profileDirs where fm.fileExists(atPath: profile.path) {
             for name in fileNames {
-                let url = profile.appendingPathComponent(name)
-                try? fm.removeItem(at: url)
+                try? fm.removeItem(at: profile.appendingPathComponent(name))
             }
             for name in directoryNames {
-                let url = profile.appendingPathComponent(name, isDirectory: true)
-                try? fm.removeItem(at: url)
+                try? fm.removeItem(at: profile.appendingPathComponent(name, isDirectory: true))
+            }
+            // Newer Chromium profiles store cookies under Network/.
+            let network = profile.appendingPathComponent("Network", isDirectory: true)
+            if fm.fileExists(atPath: network.path) {
+                for name in fileNames {
+                    try? fm.removeItem(at: network.appendingPathComponent(name))
+                }
             }
         }
         // Stale singleton locks can make the next launch attach to a half-dead
@@ -2025,6 +3062,16 @@ private enum ChatGPTDesktop {
         for name in ["SingletonLock", "SingletonCookie", "SingletonSocket"] {
             try? fm.removeItem(at: supportRoot.appendingPathComponent(name))
         }
+    }
+
+    /// Clear once per switch path. Skips a duplicate wipe when the same switch
+    /// already cleared while Desktop stayed quit — still runs before relaunch
+    /// when the post-quit clear was skipped (Desktop already quit).
+    static func clearWebSessionCacheOnce(didClear: inout Bool) {
+        guard !didClear else { return }
+        guard !isRunning else { return }
+        clearWebSessionCache()
+        didClear = true
     }
 
     private static func resolvedAppURLs(for bundleIDs: [String]) -> [URL] {
@@ -2152,6 +3199,13 @@ private struct SaveOutput: Decodable {
     let account: SavedAccount
 }
 
+private struct ImportJsonOutput: Decodable {
+    let format: String
+    let created: Int
+    let updated: Int
+    let accounts: [SavedAccount]
+}
+
 struct AccountIdentity: Decodable, Equatable {
     let email: String
     let subject: String?
@@ -2197,6 +3251,33 @@ struct ProviderState: Identifiable, Decodable {
 struct ActivateOutput: Decodable {
     let account: SavedAccount
     let previousAccountId: UUID?
+    let sessionResume: SessionResumeHint?
+}
+
+struct SessionResumeHint: Decodable {
+    let enabled: Bool
+    let accountId: UUID?
+    let sessionId: String?
+    let cwd: String?
+    let rolloutPath: String?
+    let status: String
+    /// Other interrupted threads from the same auto-switch capture (may be omitted).
+    let additionalSessions: [SessionResumeHint]
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled, accountId, sessionId, cwd, rolloutPath, status, additionalSessions
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decode(Bool.self, forKey: .enabled)
+        accountId = try container.decodeIfPresent(UUID.self, forKey: .accountId)
+        sessionId = try container.decodeIfPresent(String.self, forKey: .sessionId)
+        cwd = try container.decodeIfPresent(String.self, forKey: .cwd)
+        rolloutPath = try container.decodeIfPresent(String.self, forKey: .rolloutPath)
+        status = try container.decode(String.self, forKey: .status)
+        additionalSessions = try container.decodeIfPresent([SessionResumeHint].self, forKey: .additionalSessions) ?? []
+    }
 }
 
 struct TokenUsageSummary: Decodable {
@@ -2243,9 +3324,6 @@ struct ResetOutlook: Decodable {
     let lastResetAt: String
     let nextResetAt: String?
     let lastResetIsConfirmed: Bool?
-    let chance24Hours: Int
-    let chance48Hours: Int
-    let confidence: String
     let windowLabel: String
     let windowTimezone: String?
     let windowStartHour: Int?
@@ -2256,6 +3334,47 @@ struct ResetOutlook: Decodable {
     let sourceFreshness: String?
     let cadenceDays: Double?
     let cadenceAccelerating: Bool?
+}
+
+/// Schedule/status copy aligned with codex-resets.com (no 24h/48h/signal %).
+enum ResetOutlookPresentation {
+    static func parseDate(_ value: String?) -> Date? {
+        guard let value else { return nil }
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return withFraction.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+    }
+
+    static func headline(_ outlook: ResetOutlook, language: AppLanguage) -> String {
+        let kind = outlook.signalKind ?? ""
+        let banked = kind.contains("banked")
+        let name = banked ? "Banked reset" : "Reset"
+        if kind.hasPrefix("scheduled") {
+            if let date = parseDate(outlook.nextResetAt) {
+                if date <= Date() {
+                    return language == .vietnamese
+                        ? "\(name): chờ xác nhận"
+                        : "\(name): awaiting confirmation"
+                }
+                let formatter = DateFormatter()
+                formatter.locale = language.locale
+                formatter.dateFormat = "HH:mm dd/MM"
+                let prefix = language == .vietnamese ? "\(name) dự kiến" : "\(name) scheduled"
+                return "\(prefix) · \(formatter.string(from: date))"
+            }
+            return language == .vietnamese
+                ? "\(name): đã có thông báo"
+                : "\(name): announced"
+        }
+        if kind.hasPrefix("confirmed") {
+            return language == .vietnamese
+                ? "\(name): đã xác nhận"
+                : "\(name): confirmed"
+        }
+        return language == .vietnamese
+            ? "Reset: đang theo dõi"
+            : "Reset: watching"
+    }
 }
 
 private struct GlobalResetEvent: Decodable {
@@ -2278,6 +3397,12 @@ struct ResetTimelineEvent: Decodable, Identifiable {
     let resetKind: String?
 }
 
+/// Matches Rust `ResetTimeline` JSON from `codex-roster reset-timeline --json`.
+private struct ResetTimelinePayload: Decodable {
+    let updatedAt: String?
+    let events: [ResetTimelineEvent]
+}
+
 struct ResetJuice: Decodable {
     let status: String
     let model: String?
@@ -2295,16 +3420,20 @@ struct ResetJuiceEffort: Decodable, Identifiable {
     var id: String { effort }
 }
 
-func trustedTiboSourceURL(_ value: String?) -> URL? {
+func trustedResetSourceURL(_ value: String?) -> URL? {
     guard let value,
           let components = URLComponents(string: value),
           components.scheme?.lowercased() == "https",
-          components.host?.lowercased() == "x.com",
           components.user == nil,
           components.password == nil,
           components.port == nil,
           components.query == nil,
           components.fragment == nil else { return nil }
+    let host = components.host?.lowercased() ?? ""
+    if host == "codex-resets.com" || host == "codex-reset.com" {
+        return components.url
+    }
+    guard host == "x.com" else { return nil }
     let path = components.path.split(separator: "/")
     guard path.count == 3,
           path[0].lowercased() == "thsottiaux",
@@ -2312,6 +3441,11 @@ func trustedTiboSourceURL(_ value: String?) -> URL? {
           !path[2].isEmpty,
           path[2].allSatisfy(\.isNumber) else { return nil }
     return components.url
+}
+
+/// Legacy alias kept for any remaining call sites / tests mid-rename.
+func trustedTiboSourceURL(_ value: String?) -> URL? {
+    trustedResetSourceURL(value)
 }
 
 private enum ResetNotifier {
@@ -2323,12 +3457,18 @@ private enum ResetNotifier {
         var availableCountByAccount: [String: Int] = [:]
         var usageByAccount: [String: UsageObservation] = [:]
         var pendingResetByWindow: [String: PendingReset] = [:]
+        /// Last weekly/5H remaining we already warned about (cross edge ≤15%).
+        var lowQuotaWarnedPercentByAccount: [String: Int] = [:]
+        /// Last OpenAI status indicator we notified about.
+        var lastOpenAIIndicator: String?
 
         private enum CodingKeys: String, CodingKey {
             case seenCreditIDs
             case availableCountByAccount
             case usageByAccount
             case pendingResetByWindow
+            case lowQuotaWarnedPercentByAccount
+            case lastOpenAIIndicator
         }
 
         init() {}
@@ -2339,6 +3479,8 @@ private enum ResetNotifier {
             availableCountByAccount = try values.decodeIfPresent([String: Int].self, forKey: .availableCountByAccount) ?? [:]
             usageByAccount = try values.decodeIfPresent([String: UsageObservation].self, forKey: .usageByAccount) ?? [:]
             pendingResetByWindow = try values.decodeIfPresent([String: PendingReset].self, forKey: .pendingResetByWindow) ?? [:]
+            lowQuotaWarnedPercentByAccount = try values.decodeIfPresent([String: Int].self, forKey: .lowQuotaWarnedPercentByAccount) ?? [:]
+            lastOpenAIIndicator = try values.decodeIfPresent(String.self, forKey: .lastOpenAIIndicator)
         }
     }
 
@@ -2384,29 +3526,65 @@ private enum ResetNotifier {
             let accountKey = account.id.uuidString
             showNewBankedResets(for: account, accountKey: accountKey, state: &state)
             showDetectedQuotaReset(for: account, accountKey: accountKey, state: &state)
+            showLowQuotaWarning(for: account, accountKey: accountKey, state: &state)
         }
         if state != previousState {
             saveSignalState(state)
         }
     }
 
+    /// Notify once when OpenAI status leaves operational (`indicator != none`).
+    static func showOpenAIIncidentIfNeeded(_ status: OpenAIServiceStatus?) {
+        guard let status else { return }
+        var state = loadSignalState()
+        let previous = state.lastOpenAIIndicator
+        state.lastOpenAIIndicator = status.indicator
+        defer { saveSignalState(state) }
+        guard status.indicator != "none" else { return }
+        guard previous != status.indicator else { return }
+        enqueue(
+            identifier: "codex-roster-openai-\(status.indicator)-\(status.updatedAt)",
+            title: AppLanguage.text("Sự cố dịch vụ OpenAI", "OpenAI service issue"),
+            subtitle: localizedOpenAIIncidentSubtitle(status.description),
+            body: AppLanguage.text(
+                "Trạng thái dịch vụ không còn ổn định. Kiểm tra notch hoặc tab Vận hành.",
+                "Service status is no longer healthy. Check the notch or the Operations tab."
+            )
+        )
+    }
+
     static func showPublicSignal(_ signal: GlobalResetEvent) {
         let title = switch signal.kind {
         case "confirmed_banked_reset":
-            AppLanguage.text("Tibo: banked reset đã được cấp", "Tibo: banked reset confirmed")
+            AppLanguage.text(
+                "Codex Reset: đã cấp banked reset",
+                "Codex Reset: banked reset confirmed"
+            )
         case "scheduled_banked_reset":
-            AppLanguage.text("Tibo báo banked reset sắp tới", "Tibo scheduled a banked reset")
+            AppLanguage.text(
+                "Codex Reset: banked reset sắp tới",
+                "Codex Reset: banked reset scheduled"
+            )
         case "confirmed_global_reset":
-            AppLanguage.text("Tibo xác nhận mass reset", "Tibo confirmed a global reset")
+            AppLanguage.text(
+                "Codex Reset: đã xác nhận mass reset",
+                "Codex Reset: global reset confirmed"
+            )
         case "scheduled_global_reset":
-            AppLanguage.text("Tibo báo mass reset sắp tới", "Tibo scheduled a global reset")
+            AppLanguage.text(
+                "Codex Reset: mass reset sắp tới",
+                "Codex Reset: global reset scheduled"
+            )
         default:
-            AppLanguage.text("Tibo phát tín hiệu reset", "Tibo posted a reset signal")
+            AppLanguage.text(
+                "Codex Reset: tín hiệu reset mới",
+                "Codex Reset: new reset signal"
+            )
         }
         enqueue(
-            identifier: "codex-roster-tibo-\(signal.id)",
+            identifier: "codex-roster-reset-\(signal.id)",
             title: title,
-            subtitle: "@thsottiaux · X",
+            subtitle: "codex-resets.com",
             body: signal.summary,
             url: signal.url
         )
@@ -2415,11 +3593,51 @@ private enum ResetNotifier {
     static func showQuotaRecovered() {
         enqueue(
             identifier: "codex-roster-quota-recovered-\(Int(Date().timeIntervalSince1970))",
-            title: AppLanguage.text("\u{2705} Quota đã phục hồi", "\u{2705} Quota recovered"),
-            subtitle: AppLanguage.text("Tài khoản có thể sử dụng lại", "Account is usable again"),
+            title: AppLanguage.text("Quota đã phục hồi", "Quota recovered"),
+            subtitle: AppLanguage.text(
+                "Tài khoản có thể sử dụng lại",
+                "Account is usable again"
+            ),
             body: AppLanguage.text(
-                "Quota Codex đã được đặt lại. Bạn có thể tiếp tục sử dụng.",
-                "Codex quota has been reset. You can continue using it."
+                "Quota Codex đã được đặt lại. Bạn có thể tiếp tục làm việc.",
+                "Codex quota has been reset. You can continue working."
+            )
+        )
+    }
+
+    private static func showLowQuotaWarning(
+        for account: SavedAccount,
+        accountKey: String,
+        state: inout SignalState
+    ) {
+        // Active account only — avoid fan-out noise across the whole roster.
+        guard account.isActive, !account.archived else { return }
+        let weekly = account.usage?.weekly?.displayRemainingPercent
+        let five = account.usage?.fiveHour?.displayRemainingPercent
+        let bottleneck = [weekly, five].compactMap { $0 }.min()
+        guard let remaining = bottleneck else { return }
+        let previous = state.lowQuotaWarnedPercentByAccount[accountKey]
+        // Cross below 15% once; clear when recovered above 25% so a later dip can warn again.
+        if remaining > 25 {
+            state.lowQuotaWarnedPercentByAccount[accountKey] = remaining
+            return
+        }
+        guard remaining <= 15 else { return }
+        if let previous, previous <= 15 { return }
+        state.lowQuotaWarnedPercentByAccount[accountKey] = remaining
+        let windowLabel: String = {
+            if let weekly, weekly == remaining {
+                return AppLanguage.text("Tuần", "Weekly")
+            }
+            return AppLanguage.text("5 giờ", "5-hour")
+        }()
+        enqueue(
+            identifier: "codex-roster-low-quota-\(accountKey)-\(remaining)",
+            title: AppLanguage.text("Quota sắp hết", "Quota running low"),
+            subtitle: account.displayName,
+            body: AppLanguage.text(
+                "\(windowLabel) còn \(remaining)%. Cân nhắc chuyển tài khoản từ notch.",
+                "\(windowLabel) at \(remaining)%. Consider switching from the notch."
             )
         )
     }
@@ -2430,7 +3648,7 @@ private enum ResetNotifier {
         state: inout SignalState
     ) {
         guard let resets = account.usage?.bankedResets else { return }
-        let availableCount = max(0, resets.availableCount)
+        let availableCount = resets.totalAvailableCount
         let availableCredits = (resets.credits ?? []).filter { $0.status == "available" }
         let unseenCredits = availableCredits.filter { !state.seenCreditIDs.contains($0.id) }
         let previousCount = state.availableCountByAccount[accountKey] ?? 0
@@ -2445,10 +3663,12 @@ private enum ResetNotifier {
             .compactMap { $0.expiresAt?.value }
             .min()
         var body = AppLanguage.text(
-            "\(account.displayName) có thêm \(newlyGranted) lượt đặt lại quota Codex.",
             newlyGranted == 1
-                ? "\(account.displayName) received 1 Codex quota reset."
-                : "\(account.displayName) received \(newlyGranted) Codex quota resets."
+                ? "\(account.displayName) vừa nhận thêm 1 lượt reset dự phòng Codex."
+                : "\(account.displayName) vừa nhận thêm \(newlyGranted) lượt reset dự phòng Codex.",
+            newlyGranted == 1
+                ? "\(account.displayName) received 1 Codex banked reset."
+                : "\(account.displayName) received \(newlyGranted) Codex banked resets."
         )
         if let title = unseenCredits.first?.title, !title.isEmpty {
             body += " \(title)"
@@ -2460,12 +3680,12 @@ private enum ResetNotifier {
             )
         }
         body += AppLanguage.text(
-            "\(availableCount) lượt khả dụng.",
-            " \(availableCount) available."
+            " Hiện có \(availableCount) lượt khả dụng.",
+            " \(availableCount) currently available."
         )
         enqueue(
             identifier: "codex-roster-banked-\(accountKey)-\(unseenCredits.first?.id ?? String(availableCount))",
-            title: AppLanguage.text("\u{1F389} Banked reset đã đến!", "\u{1F389} Banked reset received!"),
+            title: AppLanguage.text("Reset dự phòng mới", "New banked reset"),
             subtitle: account.displayName,
             body: body
         )
@@ -2494,12 +3714,21 @@ private enum ResetNotifier {
         )
         guard !changes.isEmpty else { return }
         let detail = changes.map { change in
-            "\(change.label) \(change.previousRemaining)% → \(change.currentRemaining)%"
+            AppLanguage.text(
+                "\(change.label): \(change.previousRemaining)% → \(change.currentRemaining)%",
+                "\(change.label): \(change.previousRemaining)% → \(change.currentRemaining)%"
+            )
         }.joined(separator: " · ")
         enqueue(
             identifier: "codex-roster-quota-reset-\(accountKey)-\(Int(current.fetchedAt.timeIntervalSince1970))",
-            title: AppLanguage.text("\u{2705} \(account.displayName) reset quota", "\u{2705} \(account.displayName) quota reset"),
-            subtitle: AppLanguage.text("Quota Codex đã được đặt lại", "Codex quota has been reset"),
+            title: AppLanguage.text(
+                "\(account.displayName) đã đặt lại quota",
+                "\(account.displayName) quota reset"
+            ),
+            subtitle: AppLanguage.text(
+                "Quota Codex đã được đặt lại",
+                "Codex quota has been reset"
+            ),
             body: detail
         )
     }
@@ -2559,6 +3788,31 @@ private enum ResetNotifier {
             ("\(accountKey):five-hour", AppLanguage.text("5 giờ", "5-hour"), observation.fiveHour),
             ("\(accountKey):weekly", AppLanguage.text("Tuần", "Weekly"), observation.weekly),
         ]
+    }
+
+    /// Map common OpenAI status page phrases into the active UI language.
+    private static func localizedOpenAIIncidentSubtitle(_ description: String) -> String {
+        let trimmed = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return AppLanguage.text("Trạng thái dịch vụ thay đổi", "Service status changed")
+        }
+        guard AppLanguage.current == .vietnamese else { return trimmed }
+        switch trimmed {
+        case "All Systems Operational":
+            return "Mọi hệ thống đang hoạt động"
+        case "Degraded Performance":
+            return "Hiệu năng bị giảm"
+        case "Partial System Outage":
+            return "Gián đoạn một phần"
+        case "Major Service Outage":
+            return "Gián đoạn nghiêm trọng"
+        case "Minor Service Outage":
+            return "Gián đoạn nhỏ"
+        case "Under Maintenance":
+            return "Đang bảo trì"
+        default:
+            return trimmed
+        }
     }
 
     private static func usageObservation(for account: SavedAccount) -> UsageObservation? {
@@ -2645,7 +3899,7 @@ private final class ResetNotificationDelegate: NSObject, UNUserNotificationCente
     ) {
         defer { completionHandler() }
         guard let value = response.notification.request.content.userInfo["url"] as? String,
-              let url = trustedTiboSourceURL(value) else { return }
+              let url = trustedResetSourceURL(value) else { return }
         NSWorkspace.shared.open(url)
     }
 }
@@ -2681,6 +3935,7 @@ struct SavedAccount: Identifiable, Decodable {
     let id: UUID
     let provider: String
     let email: String
+    let subject: String?
     let name: String?
     let customLabel: String?
     let planLabel: String?
@@ -2698,6 +3953,7 @@ struct SavedAccount: Identifiable, Decodable {
             id: id,
             provider: provider,
             email: email,
+            subject: subject,
             name: name,
             customLabel: customLabel,
             planLabel: planLabel,
@@ -2716,6 +3972,7 @@ struct SavedAccount: Identifiable, Decodable {
         id: UUID,
         provider: String,
         email: String,
+        subject: String? = nil,
         name: String?,
         customLabel: String?,
         planLabel: String?,
@@ -2731,6 +3988,7 @@ struct SavedAccount: Identifiable, Decodable {
         self.id = id
         self.provider = provider
         self.email = email
+        self.subject = subject
         self.name = name
         self.customLabel = customLabel
         self.planLabel = planLabel
@@ -2868,22 +4126,57 @@ struct SavedAccount: Identifiable, Decodable {
         bankedResetSwitchIsAllowed(
             planLabel: planLabel,
             usageError: usageError,
-            availableCount: usage?.bankedResets?.availableCount ?? 0
+            availableCount: bankedResetCount
         )
+    }
+
+    /// Total redeemable banked resets for this account.
+    /// Uses `max(availableCount, available credit rows)` so a truncated details
+    /// list or a stale summary field never under-counts.
+    var bankedResetCount: Int {
+        usage?.bankedResets?.totalAvailableCount ?? 0
     }
 
     /// Weekly-dominant ranking: `weekly * 1000 + fiveHour` so any weekly gap
     /// outranks any 5H-only difference. Depleted weekly → `-1`.
+    /// Usable accounts whose weekly window resets within 24h get a Switchboard-
+    /// style urgency boost so they surface above otherwise-equal peers.
     var switchQuotaScore: Int {
-        if let weekly = usage?.weekly {
-            if weekly.isDepleted { return -1 }
-            let five = usage?.fiveHour?.remainingPercent ?? 0
-            return weekly.remainingPercent * 1000 + five
+        let base: Int = {
+            if let weekly = usage?.weekly {
+                if weekly.isDepleted { return -1 }
+                let five = usage?.fiveHour?.remainingPercent ?? 0
+                return weekly.remainingPercent * 1000 + five
+            }
+            if let fiveHour = usage?.fiveHour {
+                return fiveHour.isDepleted ? -1 : fiveHour.remainingPercent
+            }
+            return -1
+        }()
+        if base >= 0, isUsableForSwitch, hasWeeklyResetWithin24Hours {
+            return base + 1_000_000
         }
-        if let fiveHour = usage?.fiveHour {
-            return fiveHour.isDepleted ? -1 : fiveHour.remainingPercent
+        return base
+    }
+
+    /// True when the weekly window still has a future reset within 24 hours.
+    var hasWeeklyResetWithin24Hours: Bool {
+        guard let weekly = usage?.weekly else { return false }
+        let resetAt = weekly.resetAt.value
+        let now = Date()
+        guard resetAt > now else { return false }
+        return resetAt.timeIntervalSince(now) <= 24 * 60 * 60
+    }
+
+    /// Coarse plan band for roster section headers (Switchboard-style grouping).
+    var planGroupKey: String {
+        switch planSortRank {
+        case 0: return "pro"
+        case 1: return "plus"
+        case 2: return "team"
+        case 3: return "free"
+        default: return "other"
         }
-        return -1
     }
 
     /// Single source of truth for where an account belongs in the triage board.
@@ -2920,6 +4213,27 @@ struct SavedAccount: Identifiable, Decodable {
         return 4
     }
 
+    /// Explicit Free/Go label for UI chips — empty/unknown plans stay unlabeled.
+    var showsFreePlanChip: Bool {
+        planLabelHasFreeOrGoWord(planLabel)
+    }
+
+    /// Monthly spend-control remaining % when the usage API publishes `credit_limit`.
+    /// Free ChatGPT message caps are not a separate window in this model — do not
+    /// invent a monthly % from weekly/5H.
+    var monthlyQuotaRemainingPercent: Int? {
+        guard let limit = usage?.credits?.creditLimit else { return nil }
+        let rounded = Int(limit.remainingPercent.rounded())
+        return max(0, min(100, rounded))
+    }
+
+    /// Closest non-window signal when monthly % is absent (personal credit balance).
+    var creditsBalanceDisplay: String? {
+        guard let credits = usage?.credits, credits.hasDisplayableBalance else { return nil }
+        if credits.unlimited { return "∞" }
+        return credits.balance
+    }
+
     var hasLunaReserve: Bool {
         usage?.lunaReserve != nil
     }
@@ -2934,6 +4248,16 @@ struct SavedAccount: Identifiable, Decodable {
 
 }
 
+func planLabelHasFreeOrGoWord(_ planLabel: String?) -> Bool {
+    let normalizedPlan = (planLabel ?? "").replacingOccurrences(of: "-", with: " ")
+        .replacingOccurrences(of: "_", with: " ")
+    let planWords = normalizedPlan.split(whereSeparator: \.isWhitespace)
+    return planWords.contains {
+        $0.localizedCaseInsensitiveCompare("free") == .orderedSame
+            || $0.localizedCaseInsensitiveCompare("go") == .orderedSame
+    }
+}
+
 func bankedResetSwitchIsAllowed(
     planLabel: String?,
     usageError: String?,
@@ -2945,10 +4269,7 @@ func bankedResetSwitchIsAllowed(
         .replacingOccurrences(of: "_", with: " ")
     let planWords = normalizedPlan.split(whereSeparator: \.isWhitespace)
     guard !planWords.isEmpty else { return false }
-    return !planWords.contains {
-        $0.localizedCaseInsensitiveCompare("free") == .orderedSame
-            || $0.localizedCaseInsensitiveCompare("go") == .orderedSame
-    }
+    return !planLabelHasFreeOrGoWord(planLabel)
 }
 
 /// Display roster ordering by weekly-dominant `switchQuotaScore` (higher first).
@@ -2959,30 +4280,173 @@ func accountSortIsOrderedByWeeklyQuota(_ left: SavedAccount, _ right: SavedAccou
     left.switchQuotaScore > right.switchQuotaScore
 }
 
-/// Shared notch roster sizing: collapsed 260pt scroll area inside a 480pt deck;
-/// expanded fits all 2-column rows for typical ≤20 accounts.
+/// Shared notch roster sizing: collapsed scroll area inside a panoramic deck;
+/// expanded shows the full roster without scrolling for typical sizes.
+///
+/// Expand grows height to fit every account row **and** plan-section header.
+/// Two readable columns remain fixed; long rosters scroll in a bounded viewport.
+///
+/// Pass `hasNextActionCaption: true` only when the caption row is visible so
+/// all-clear layouts do not reserve a tall empty footer under Danh bạ.
 enum NotchRosterLayout {
-    static let collapsedDeckHeight: CGFloat = 480
-    static let collapsedRosterHeight: CGFloat = 260
-    static let rowHeight: CGFloat = 54
-    static let rowSpacing: CGFloat = 7
-    static let gridVerticalPadding: CGFloat = 6
-    /// Soft cap (~24 accounts) so pathological rosters stay screen-safe.
-    static let maxFittedRows = 12
+    /// Expanded panoramic width (keep in sync with `NotchWindowView.maxExpandedWidth`
+    /// and `PrismQuickSwitchDeck` frame).
+    static let deckWidth: CGFloat = 1020
+    static let collapsedDeckHeight: CGFloat = 498
+    static let collapsedRosterHeight: CGFloat = 280
+    /// Compact next-action caption between upper wings and roster.
+    static let nextActionCaptionHeight: CGFloat = 30
+    /// Outer chrome around the panoramic deck (keep in sync with PrismQuickSwitchDeck).
+    static let deckHorizontalInset: CGFloat = 12
+    static let deckTopInset: CGFloat = deckHorizontalInset
+    static let deckBottomInset: CGFloat = deckHorizontalInset
+    /// Inner padding of the lower switchboard chrome (keep in sync with deck).
+    static let switchboardHorizontalInset: CGFloat = 10
+    /// Spacing between upper wings / caption / roster.
+    static let deckSectionSpacing: CGFloat = deckHorizontalInset
+    /// Comfortable roster cell: identity, text quotas, details, and action.
+    static let rowHeight: CGFloat = 68
+    /// Plan-band header row — shorter than account cards (avoid empty void).
+    static let sectionHeaderHeight: CGFloat = 18
+    /// Extra top padding on non-first plan headers in the grid.
+    static let sectionHeaderTopGap: CGFloat = 4
+    static let rowSpacing: CGFloat = 8
+    /// Total vertical padding inside the roster scroll content (top + bottom).
+    static let gridVerticalPadding: CGFloat = 4
+    static let columnSpacing: CGFloat = 12
+    /// Floor so expanded cards do not crush name/email/meters.
+    static let minComfortableCardWidth: CGFloat = 290
+    static let minColumns = 2
+    static let maxColumns = 2
+    /// The panel starts at the screen top; preserve the Dock and bottom margin.
+    static var availableRosterHeight: CGFloat {
+        let geometry = NotchGeometry.detect()
+        let screen = NSScreen.screens.first { $0.frame == geometry.screenFrame }
+        let available = geometry.screenFrame.maxY - (screen?.visibleFrame.minY ?? geometry.screenFrame.minY) - 12
+        let chrome = collapsedDeckHeight - collapsedRosterHeight + nextActionCaptionHeight + deckSectionSpacing
+        return max(rowHeight + gridVerticalPadding, available - chrome)
+    }
     static let rosterExpandedKey = "codex_roster_notch_roster_expanded"
 
-    static func rosterGridHeight(accountCount: Int, expanded: Bool) -> CGFloat {
-        guard expanded else { return collapsedRosterHeight }
-        let rows = max(1, Int(ceil(Double(max(accountCount, 0)) / 2.0)))
-        let fittedRows = min(rows, maxFittedRows)
-        return CGFloat(fittedRows) * rowHeight
-            + CGFloat(max(0, fittedRows - 1)) * rowSpacing
-            + gridVerticalPadding
+    /// Usable width inside the LazyVGrid (deck minus outer + switchboard insets).
+    static var rosterContentWidth: CGFloat {
+        deckWidth - 2 * deckHorizontalInset - 2 * switchboardHorizontalInset
     }
 
-    static func deckHeight(accountCount: Int, expanded: Bool) -> CGFloat {
+    /// Plan-band section sizes in switchboard display order (non-empty only).
+    static func planSectionAccountCounts(from accounts: [SavedAccount]) -> [Int] {
+        let groupOrder = ["pro", "plus", "team", "other", "free"]
+        let grouped = Dictionary(grouping: accounts, by: \.planGroupKey)
+        return groupOrder.compactMap { key in
+            guard let list = grouped[key], !list.isEmpty else { return nil }
+            return list.count
+        }
+    }
+
+    /// Contiguous slices: read down a column, then continue in the next one.
+    static func columnRanges(accountCount: Int, columns: Int) -> [Range<Int>] {
+        let count = max(0, accountCount)
+        let cols = max(1, columns)
+        let rows = max(1, (count + cols - 1) / cols)
+        return (0..<cols).map { column in
+            let start = min(count, column * rows)
+            return start..<min(count, start + rows)
+        }
+    }
+
+    /// Section fragments in each column, including continued groups.
+    static func columnSectionCounts(sectionCounts: [Int], columns: Int) -> [[Int]] {
+        let counts = sectionCounts.filter { $0 > 0 }
+        return columnRanges(accountCount: counts.reduce(0, +), columns: columns).map { range in
+            var offset = 0
+            return counts.compactMap { count in
+                defer { offset += count }
+                let overlap = min(range.upperBound, offset + count) - max(range.lowerBound, offset)
+                return overlap > 0 ? overlap : nil
+            }
+        }
+    }
+
+    static func contentRowCount(sectionCounts: [Int], columns: Int) -> Int {
+        let showHeaders = sectionCounts.filter { $0 > 0 }.count > 1
+        return max(1, columnSectionCounts(sectionCounts: sectionCounts, columns: columns).map {
+            $0.reduce(0, +) + (showHeaders ? $0.count : 0)
+        }.max() ?? 0)
+    }
+
+    static func accountRowCount(sectionCounts: [Int], columns: Int) -> Int {
+        max(1, columnRanges(accountCount: sectionCounts.reduce(0) { $0 + max(0, $1) }, columns: columns)
+            .map(\.count).max() ?? 0)
+    }
+
+    /// Columns that still keep cards at/above `minComfortableCardWidth`.
+    static func maxColumnsForComfortableWidth() -> Int {
+        let usable = rosterContentWidth
+        let fitted = Int(floor((usable + columnSpacing) / (minComfortableCardWidth + columnSpacing)))
+        return max(minColumns, min(maxColumns, fitted))
+    }
+
+    /// Preserve readable card width at every roster size.
+    static func preferredColumnCount(sectionCounts: [Int]) -> Int { minColumns }
+
+    /// Keep readable widths; long lists scroll instead of squeezing more columns.
+    static func columnCount(sectionCounts: [Int], expanded: Bool) -> Int { minColumns }
+
+    /// Expanded lists scroll only when their actual height exceeds the screen.
+    static func needsRosterScroll(
+        sectionCounts: [Int], expanded: Bool,
+        maximumHeight: CGFloat = availableRosterHeight
+    ) -> Bool {
+        guard expanded else { return true }
+        return rosterGridHeight(sectionCounts: sectionCounts, expanded: true, maximumHeight: .greatestFiniteMagnitude) > maximumHeight
+    }
+
+    static func rosterGridHeight(
+        sectionCounts: [Int], expanded: Bool,
+        maximumHeight: CGFloat = availableRosterHeight
+    ) -> CGFloat {
+        guard expanded else { return collapsedRosterHeight }
+        let columns = columnCount(sectionCounts: sectionCounts, expanded: true)
+        let showHeaders = sectionCounts.filter { $0 > 0 }.count > 1
+        let heights = columnSectionCounts(sectionCounts: sectionCounts, columns: columns).map { counts in
+            let headers = showHeaders ? counts.count : 0
+            let rows = counts.reduce(0, +)
+            return CGFloat(headers) * sectionHeaderHeight
+                + CGFloat(max(0, headers - 1)) * sectionHeaderTopGap
+                + CGFloat(rows) * rowHeight
+                + CGFloat(max(0, headers + rows - 1)) * rowSpacing
+                + gridVerticalPadding
+        }
+        let contentHeight = max(rowHeight + gridVerticalPadding, heights.max() ?? 0)
+        return min(contentHeight, max(0, maximumHeight))
+    }
+
+    static func rosterGridHeight(accountCount: Int, expanded: Bool) -> CGFloat {
+        let counts = accountCount > 0 ? [accountCount] : []
+        return rosterGridHeight(sectionCounts: counts, expanded: expanded)
+    }
+
+    static func deckHeight(
+        sectionCounts: [Int],
+        expanded: Bool,
+        hasNextActionCaption: Bool = false
+    ) -> CGFloat {
         collapsedDeckHeight - collapsedRosterHeight
-            + rosterGridHeight(accountCount: accountCount, expanded: expanded)
+            + rosterGridHeight(sectionCounts: sectionCounts, expanded: expanded)
+            + (hasNextActionCaption ? nextActionCaptionHeight + deckSectionSpacing : 0)
+    }
+
+    static func deckHeight(
+        accountCount: Int,
+        expanded: Bool,
+        hasNextActionCaption: Bool = false
+    ) -> CGFloat {
+        let counts = accountCount > 0 ? [accountCount] : []
+        return deckHeight(
+            sectionCounts: counts,
+            expanded: expanded,
+            hasNextActionCaption: hasNextActionCaption
+        )
     }
 }
 
@@ -3063,11 +4527,35 @@ struct UsageCreditLimit: Decodable {
         }
         return "\(format(used ?? 0)) / \(format(limit))"
     }
+
+    func resetDescription(in language: AppLanguage) -> String? {
+        guard let resetsAt else { return nil }
+        guard resetsAt.value > Date() else {
+            return language == .vietnamese ? "Đang chờ đặt lại" : "Reset pending"
+        }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        formatter.locale = language.locale
+        let relative = formatter.localizedString(for: resetsAt.value, relativeTo: Date())
+        return language == .vietnamese
+            ? "Đặt lại \(relative)"
+            : "Resets \(relative)"
+    }
 }
 
 struct BankedResetSummary: Decodable {
     let availableCount: Int
     let credits: [BankedResetCredit]?
+
+    /// Full redeemable total for display and switch eligibility.
+    /// Prefer the taller of the API summary and listed `available` credits.
+    var totalAvailableCount: Int {
+        let fromField = max(0, availableCount)
+        let fromCredits = (credits ?? []).filter {
+            $0.status.compare("available", options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+        }.count
+        return max(fromField, fromCredits)
+    }
 }
 
 struct BankedResetCredit: Identifiable, Decodable {
@@ -3131,6 +4619,10 @@ struct UsageWindow: Decodable {
 struct RustDate: Decodable {
     let value: Date
 
+    init(value: Date) {
+        self.value = value
+    }
+
     init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
         if let encoded = try? container.decode(String.self), let value = Self.parseISO8601(encoded) {
@@ -3180,6 +4672,10 @@ struct AutoStartUsageWindowsStatus: Decodable {
     let enabled: Bool
 }
 
+struct AutoResumeSessionStatus: Decodable {
+    let enabled: Bool
+}
+
 struct AddAccountStatusOutput: Decodable {
     let active: Bool
     let authChanged: Bool
@@ -3193,6 +4689,7 @@ struct AutoSwitchOutput: Decodable {
     let candidateDisplayName: String?
     let detail: String?
     let bankedResetCount: Int?
+    let sessionResume: SessionResumeHint?
 }
 
 enum AIProvider: String, CaseIterable, Identifiable, Decodable {

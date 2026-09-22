@@ -71,10 +71,10 @@ where
         let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
 
-        if let Some(target_id) = account_id {
-            if !self.is_live_saved_account(target_id)? {
-                self.activate(target_id)?;
-            }
+        if let Some(target_id) = account_id
+            && !self.is_live_saved_account(target_id)?
+        {
+            self.activate(target_id)?;
         }
 
         let live = codex::try_read_live_auth_bundle(&self.env)?
@@ -109,7 +109,28 @@ where
             candidate_display_name: None,
             detail: None,
             banked_reset_count: 0,
+            session_resume: None,
         })
+    }
+
+    pub fn auto_resume_session_status(
+        &self,
+    ) -> Result<crate::model::AutoResumeSessionStatusOutput> {
+        let settings = load_settings(&self.env.app_data_dir)?;
+        Ok(crate::model::AutoResumeSessionStatusOutput {
+            enabled: settings.auto_resume_session,
+        })
+    }
+
+    pub fn set_auto_resume_session(
+        &self,
+        enabled: bool,
+    ) -> Result<crate::model::AutoResumeSessionStatusOutput> {
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        let mut settings = load_settings(&self.env.app_data_dir)?;
+        settings.auto_resume_session = enabled;
+        save_settings(&self.env.app_data_dir, &settings)?;
+        Ok(crate::model::AutoResumeSessionStatusOutput { enabled })
     }
 
     pub fn auto_switch(&self, apply: bool) -> Result<AutoSwitchOutput> {
@@ -411,25 +432,41 @@ where
                 Some("Close Codex and ChatGPT before automatic switching.".to_owned()),
             ));
         }
-        if force {
-            self.activate_with_expected_active(candidate.id, true, Some(active.id))?;
+        // Freeze the live thread that hit usage limits BEFORE swapping auth.
+        // Shared ~/.codex keeps that thread; the new account's quota pays for
+        // the next turns. Do not use the target account's old workspace hint.
+        let _ = crate::session_resume::capture_pending_continue(
+            &self.env.app_data_dir,
+            &self.env.codex_root,
+            active.id,
+        );
+        let _activated = if force {
+            self.activate_with_expected_active(candidate.id, true, Some(active.id))?
         } else {
-            self.activate_if_active_matches(candidate.id, active.id)?;
-        }
+            self.activate_if_active_matches(candidate.id, active.id)?
+        };
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         let mut settings = load_settings(&self.env.app_data_dir)?;
         settings.last_auto_switch_at = Some(now);
         settings.last_auto_switch_target = Some(candidate.id);
         settings.last_auto_switch_from = Some(active.id);
         save_settings(&self.env.app_data_dir, &settings)?;
-        Ok(auto_switch_output(
+        let mut output = auto_switch_output(
             enabled,
             "switched",
             Some(active.id),
             Some(candidate.id),
             Some(account_display_name(&candidate)),
             None,
-        ))
+        );
+        let auto_resume_enabled = settings.auto_resume_session;
+        output.session_resume = crate::session_resume::take_pending_continue_hint(
+            &self.env.app_data_dir,
+            auto_resume_enabled,
+        )
+        .ok()
+        .flatten();
+        Ok(output)
     }
 
     fn revalidated_auto_switch_candidate(
@@ -446,6 +483,16 @@ where
         if let Some(account) = self.list().ok()?.accounts.into_iter().find(|account| {
             account.id == candidate_id
                 && deferred_fresh_usable_auto_switch_candidate(account, active, settings, now)
+        }) {
+            return Some(account);
+        }
+
+        // Decide often just AT-probed this id seconds earlier. Reuse a still-fresh
+        // usable paid cache instead of a duplicate network hit on apply — still
+        // refuses Free/Go, exhausted, and stale caches.
+        if let Some(account) = self.list().ok()?.accounts.into_iter().find(|account| {
+            account.id == candidate_id
+                && fresh_usable_paid_cached_auto_switch_candidate(account, active, settings, now)
         }) {
             return Some(account);
         }
@@ -576,6 +623,7 @@ where
         if looks_like_auth_json(&value) {
             let (identity, snapshot) = codex::snapshot_from_auth_json(&bytes)?;
             let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+            Self::refuse_duplicate_import(&self.repository, &self.env.kind, &identity)?;
             let (metadata, created) =
                 self.repository
                     .save_snapshot(&self.env.kind, &identity, &snapshot)?;
@@ -601,6 +649,7 @@ where
             codex::validate_snapshot(&snapshot)?;
             let identity = codex::identity_from_snapshot(&snapshot)?;
             let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+            Self::refuse_duplicate_import(&self.repository, &self.env.kind, &identity)?;
             let (metadata, created) =
                 self.repository
                     .save_snapshot(&self.env.kind, &identity, &snapshot)?;
@@ -660,6 +709,21 @@ where
         )
     }
 
+    /// Single-account auth.json / snapshot import must not silently refresh an
+    /// existing roster row — that path is for enrollment. Backup-bundle import
+    /// still updates matching identities.
+    fn refuse_duplicate_import(
+        repository: &SnapshotRepository<S>,
+        environment: &crate::model::EnvironmentKind,
+        identity: &DisplayIdentity,
+    ) -> Result<()> {
+        let accounts = repository.list_accounts(environment)?;
+        if match_saved_account(&accounts, identity).is_some() {
+            anyhow::bail!("Tài khoản đã có trong danh bạ / Account already in roster");
+        }
+        Ok(())
+    }
+
     fn save_current_for_activation(&self) -> Result<SaveOutput> {
         self.save_current_inner(false)
     }
@@ -690,6 +754,14 @@ where
                 &live.snapshot,
             )?
         };
+        // Remember this account's latest Codex user-thread pointer while the live
+        // ~/.codex session is still the outgoing one (including the pre-quit save
+        // on Desktop switch). Never touches refresh tokens.
+        let _ = crate::session_resume::capture_for_account(
+            &self.env.app_data_dir,
+            &self.env.codex_root,
+            metadata.id,
+        );
         Ok(SaveOutput {
             account: account_view(metadata.clone(), Some(metadata.id), None, None),
             action: if created {
@@ -736,6 +808,15 @@ where
         let initial_warnings = activation_process_warnings(force_running);
         ensure_activation_processes_stopped(&initial_warnings)?;
         let previous_account_id = self.refresh_current_saved_account_before_activation()?;
+        // Remember outgoing Codex rollout metadata (session id + cwd) before we
+        // replace auth. Never touches refresh tokens.
+        if let Some(outgoing_id) = previous_account_id {
+            let _ = crate::session_resume::capture_for_account(
+                &self.env.app_data_dir,
+                &self.env.codex_root,
+                outgoing_id,
+            );
+        }
         let refreshed_current_at = Instant::now();
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         let acquired_lock_at = Instant::now();
@@ -822,10 +903,23 @@ where
                 synced_metadata_at.duration_since(started).as_millis(),
             );
         }
+        // Tenure floor for the next switch-away capture so idle accounts do not
+        // inherit another account's shared ~/.codex/sessions rollout.
+        let _ = crate::session_resume::mark_activated(&self.env.app_data_dir, account_id);
+        let auto_resume_enabled = load_settings(&self.env.app_data_dir)
+            .map(|settings| settings.auto_resume_session)
+            .unwrap_or(true);
+        let session_resume = crate::session_resume::hint_for_account(
+            &self.env.app_data_dir,
+            account_id,
+            auto_resume_enabled,
+        )
+        .ok();
         Ok(ActivateOutput {
             account: account_view(metadata, Some(account_id), None, None),
             previous_account_id,
             warnings,
+            session_resume,
         })
     }
 
@@ -1358,6 +1452,7 @@ fn auto_switch_output(
         candidate_display_name,
         detail,
         banked_reset_count: 0,
+        session_resume: None,
     }
 }
 
@@ -1441,13 +1536,24 @@ fn deferred_fresh_usable_auto_switch_candidate(
         .usage_error
         .as_deref()
         .is_some_and(usage_error_is_deferred_access_token_refresh)
-        && candidate
-            .usage
-            .as_ref()
-            .is_some_and(|usage| {
-                cached_usage_is_fresh(Some(usage), now) && fresh_usage_passes_auto_switch_gate(usage)
-            })
+        && candidate.usage.as_ref().is_some_and(|usage| {
+            cached_usage_is_fresh(Some(usage), now) && fresh_usage_passes_auto_switch_gate(usage)
+        })
         && is_eligible_auto_switch_candidate(candidate, active, settings, now, None)
+}
+
+/// Fresh usable paid cache (within the normal freshness window) may skip a
+/// duplicate AT probe during revalidation — typically decide → apply seconds
+/// later. Never promotes Free/Go, exhausted, or stale caches.
+fn fresh_usable_paid_cached_auto_switch_candidate(
+    candidate: &AccountView,
+    active: &AccountView,
+    settings: &crate::settings::AppSettings,
+    now: time::OffsetDateTime,
+) -> bool {
+    candidate.usage.as_ref().is_some_and(|usage| {
+        cached_usage_is_fresh(Some(usage), now) && fresh_usage_passes_auto_switch_gate(usage)
+    }) && is_eligible_auto_switch_candidate(candidate, active, settings, now, None)
 }
 
 fn has_usable_credits(usage: Option<&AccountUsageView>) -> bool {
@@ -1462,7 +1568,16 @@ fn has_usable_credits(usage: Option<&AccountUsageView>) -> bool {
 fn banked_reset_count(usage: Option<&AccountUsageView>) -> i64 {
     usage
         .and_then(|usage| usage.banked_resets.as_ref())
-        .map(|resets| resets.available_count.max(0))
+        .map(|resets| {
+            let from_credits = resets
+                .credits
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .filter(|credit| credit.status.eq_ignore_ascii_case("available"))
+                .count() as i64;
+            resets.available_count.max(0).max(from_credits)
+        })
         .unwrap_or_default()
 }
 
@@ -1686,8 +1801,7 @@ fn exhausted_cached_usage_skips_probe(
     now: time::OffsetDateTime,
 ) -> bool {
     usage.is_some_and(|usage| {
-        !is_usable_for_switch(Some(usage))
-            && now - usage.fetched_at < EXHAUSTED_USAGE_PROBE_BACKOFF
+        !is_usable_for_switch(Some(usage)) && now - usage.fetched_at < EXHAUSTED_USAGE_PROBE_BACKOFF
     })
 }
 
@@ -2548,11 +2662,9 @@ mod tests {
             &exhausted, &active, &settings, now, None
         ));
         // Preferred exhausted id: apply's revalidation + final belt both refuse.
-        let preferred_exhausted_would_activate = fresh_usage_passes_auto_switch_gate(
-            exhausted.usage.as_ref().expect("usage"),
-        ) && is_eligible_auto_switch_candidate(
-            &exhausted, &active, &settings, now, None
-        );
+        let preferred_exhausted_would_activate =
+            fresh_usage_passes_auto_switch_gate(exhausted.usage.as_ref().expect("usage"))
+                && is_eligible_auto_switch_candidate(&exhausted, &active, &settings, now, None);
         assert!(
             !preferred_exhausted_would_activate,
             "apply must not activate a preferred exhausted id"
@@ -2600,8 +2712,14 @@ mod tests {
             luna_reserve: None,
         };
 
-        assert!(exhausted_cached_usage_skips_probe(Some(&recent_exhausted), now));
-        assert!(!exhausted_cached_usage_skips_probe(Some(&stale_exhausted), now));
+        assert!(exhausted_cached_usage_skips_probe(
+            Some(&recent_exhausted),
+            now
+        ));
+        assert!(!exhausted_cached_usage_skips_probe(
+            Some(&stale_exhausted),
+            now
+        ));
         assert!(!exhausted_cached_usage_skips_probe(Some(&usable), now));
         assert!(!exhausted_cached_usage_skips_probe(None, now));
         // Exhausted caches are never "fresh" — backoff is what stops the fan-out.
@@ -2678,10 +2796,109 @@ mod tests {
 
         // Login-required must never qualify via the deferred soft path.
         let mut login_required = deferred.clone();
-        login_required.usage_error =
-            Some("Login required [refresh_token_rejected]: OpenAI rejected the saved refresh token.".to_owned());
+        login_required.usage_error = Some(
+            "Login required [refresh_token_rejected]: OpenAI rejected the saved refresh token."
+                .to_owned(),
+        );
         assert!(!deferred_fresh_usable_auto_switch_candidate(
-            &login_required, &active, &settings, now
+            &login_required,
+            &active,
+            &settings,
+            now
+        ));
+    }
+
+    #[test]
+    fn fresh_usable_paid_cache_skips_duplicate_revalidate_probe() {
+        let now = OffsetDateTime::now_utc();
+        let settings = crate::settings::AppSettings::default();
+        let window = |remaining: u8| UsageWindowView {
+            used_percent: 100u8.saturating_sub(remaining),
+            remaining_percent: remaining,
+            reset_at: now,
+        };
+        let usable = AccountUsageView {
+            source: UsageSource::SavedAccessToken,
+            fetched_at: now,
+            five_hour: Some(window(40)),
+            weekly: Some(window(80)),
+            credits: None,
+            banked_resets: None,
+            plan_label: Some("Pro".to_owned()),
+            subscription_active_until: None,
+            luna_reserve: None,
+        };
+        let candidate = AccountView {
+            id: Uuid::new_v4(),
+            provider: crate::model::AiProvider::OpenAi,
+            email: "ready@example.com".to_owned(),
+            subject: Some("subject-ready".to_owned()),
+            name: None,
+            custom_label: None,
+            plan_label: Some("Pro".to_owned()),
+            environment: EnvironmentKind::Linux,
+            is_active: false,
+            created_at: now,
+            updated_at: now,
+            last_activated_at: None,
+            archived: false,
+            usage: Some(usable.clone()),
+            usage_error: None,
+        };
+        let mut active = candidate.clone();
+        active.id = Uuid::new_v4();
+        active.email = "active@example.com".to_owned();
+        active.subject = Some("subject-active".to_owned());
+        active.is_active = true;
+        active.usage = Some(AccountUsageView {
+            source: UsageSource::SavedAccessToken,
+            fetched_at: now,
+            five_hour: Some(window(0)),
+            weekly: Some(window(0)),
+            credits: None,
+            banked_resets: None,
+            plan_label: Some("Pro".to_owned()),
+            subscription_active_until: None,
+            luna_reserve: None,
+        });
+
+        assert!(fresh_usable_paid_cached_auto_switch_candidate(
+            &candidate, &active, &settings, now
+        ));
+
+        // Free must never skip via fresh-cache short-circuit.
+        let mut free = candidate.clone();
+        free.plan_label = Some("Free".to_owned());
+        free.usage = Some(AccountUsageView {
+            source: UsageSource::SavedAccessToken,
+            fetched_at: now,
+            five_hour: Some(window(40)),
+            weekly: Some(window(80)),
+            credits: None,
+            banked_resets: None,
+            plan_label: Some("Free".to_owned()),
+            subscription_active_until: None,
+            luna_reserve: None,
+        });
+        assert!(!fresh_usable_paid_cached_auto_switch_candidate(
+            &free, &active, &settings, now
+        ));
+
+        // Stale cache must fall through to a live AT probe.
+        let mut stale = candidate.clone();
+        stale.usage = Some(AccountUsageView {
+            source: UsageSource::SavedAccessToken,
+            fetched_at: now - time::Duration::minutes(20),
+            five_hour: Some(window(40)),
+            weekly: Some(window(80)),
+            credits: None,
+            banked_resets: None,
+            plan_label: Some("Pro".to_owned()),
+            subscription_active_until: None,
+            luna_reserve: None,
+        });
+        assert!(!fresh_usable_paid_cached_auto_switch_candidate(
+            &stale, &active, &settings, now
         ));
     }
 
@@ -2739,13 +2956,7 @@ mod tests {
             &usable, &active, &settings, now, None
         ));
 
-        let ranked = ranked_cached_auto_switch_candidates(
-            &roster,
-            &active,
-            &settings,
-            now,
-            None,
-        );
+        let ranked = ranked_cached_auto_switch_candidates(&roster, &active, &settings, now, None);
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].id, usable.id);
 
@@ -2759,10 +2970,7 @@ mod tests {
             Some(usable.id),
             "mixed roster must only surface the usable account as ready"
         );
-        assert_ne!(
-            ready_candidate.as_ref().map(|c| c.id),
-            Some(exhausted.id)
-        );
+        assert_ne!(ready_candidate.as_ref().map(|c| c.id), Some(exhausted.id));
     }
 
     #[test]
@@ -2777,8 +2985,8 @@ mod tests {
             remaining_percent: remaining,
             reset_at: now,
         };
-        let account = |email: &str, plan: &str, remaining: u8, banked: i64, active: bool| {
-            AccountView {
+        let account =
+            |email: &str, plan: &str, remaining: u8, banked: i64, active: bool| AccountView {
                 id: Uuid::new_v4(),
                 provider: crate::model::AiProvider::OpenAi,
                 email: email.to_owned(),
@@ -2807,8 +3015,7 @@ mod tests {
                     luna_reserve: None,
                 }),
                 usage_error: None,
-            }
-        };
+            };
         let active = account("active@example.com", "Plus", 0, 0, true);
         let exhausted = account("exhausted@example.com", "Pro", 0, 0, false);
         let banked_only = account("banked@example.com", "Pro", 0, 2, false);
@@ -2824,16 +3031,14 @@ mod tests {
             &exhausted, &active, &settings, now, None
         ));
         assert!(!is_eligible_auto_switch_candidate(
-            &banked_only, &active, &settings, now, None
-        ));
-
-        let ranked = ranked_cached_auto_switch_candidates(
-            &roster,
+            &banked_only,
             &active,
             &settings,
             now,
-            None,
-        );
+            None
+        ));
+
+        let ranked = ranked_cached_auto_switch_candidates(&roster, &active, &settings, now, None);
         assert!(
             ranked.is_empty(),
             "all-exhausted roster must not surface a switch candidate"
@@ -2905,11 +3110,13 @@ mod tests {
         assert_eq!(output.accounts[0].email, "json-import@example.com");
         assert_eq!(output.accounts[0].custom_label.as_deref(), Some("Từ JSON"));
 
-        let again = app
-            .import_accounts_from_json(&auth_path, None)
-            .expect("reimport");
-        assert_eq!(again.created, 0);
-        assert_eq!(again.updated, 1);
+        let again = app.import_accounts_from_json(&auth_path, None);
+        let err = again.expect_err("duplicate import must refuse");
+        assert!(
+            err.to_string().contains("Account already in roster")
+                || err.to_string().contains("Tài khoản đã có trong danh bạ"),
+            "unexpected error: {err}"
+        );
         assert_eq!(app.list().expect("list").accounts.len(), 1);
     }
 

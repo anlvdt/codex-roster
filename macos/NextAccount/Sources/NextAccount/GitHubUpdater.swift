@@ -83,11 +83,11 @@ final class GitHubUpdater: ObservableObject {
     private func scheduleInstall(extractedApp: URL) throws {
         let installedApp = Bundle.main.bundleURL
         guard installedApp.pathExtension == "app" else {
-            throw UpdaterError("Codex Roster must be installed as an app bundle before it can update itself.")
+            throw UpdaterError(AppLanguage.text("Cần cài Codex Roster dưới dạng app bundle trước khi tự cập nhật.", "Codex Roster must be installed as an app bundle before it can update itself."))
         }
         let installDirectory = installedApp.deletingLastPathComponent()
         guard FileManager.default.isWritableFile(atPath: installDirectory.path) else {
-            throw UpdaterError("Codex Roster does not have permission to update \(installedApp.path). Move it to a writable Applications folder and try again.")
+            throw UpdaterError(AppLanguage.text("Codex Roster không có quyền cập nhật \(installedApp.path). Hãy chuyển app vào thư mục Applications có quyền ghi rồi thử lại.", "Codex Roster does not have permission to update \(installedApp.path). Move it to a writable Applications folder and try again."))
         }
 
         let updateBundle = installDirectory
@@ -156,7 +156,7 @@ final class GitHubUpdater: ObservableObject {
         request.setValue("codex-roster", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let response = response as? HTTPURLResponse, response.statusCode == 200 else {
-            throw UpdaterError("GitHub did not return a latest release.")
+            throw UpdaterError(AppLanguage.text("GitHub không trả về bản phát hành mới nhất.", "GitHub did not return a latest release."))
         }
         return try decodeLatestUpdate(data)
     }
@@ -164,13 +164,13 @@ final class GitHubUpdater: ObservableObject {
     static func decodeLatestUpdate(_ data: Data) throws -> Update {
         let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
         guard !release.draft, !release.prerelease else {
-            throw UpdaterError("The latest GitHub release is not a stable release.")
+            throw UpdaterError(AppLanguage.text("Bản phát hành GitHub mới nhất không phải bản ổn định.", "The latest GitHub release is not a stable release."))
         }
         guard let asset = release.assets.first(where: { $0.name.hasSuffix("-macos.zip") }) else {
-            throw UpdaterError("The latest GitHub release does not include a macOS ZIP.")
+            throw UpdaterError(AppLanguage.text("Bản phát hành GitHub mới nhất không có file ZIP macOS.", "The latest GitHub release does not include a macOS ZIP."))
         }
         guard let digest = asset.digest, digest.lowercased().hasPrefix("sha256:") else {
-            throw UpdaterError("The latest macOS ZIP does not include a SHA-256 digest.")
+            throw UpdaterError(AppLanguage.text("File ZIP macOS mới nhất thiếu mã SHA-256.", "The latest macOS ZIP does not include a SHA-256 digest."))
         }
         return Update(
             version: release.tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV")),
@@ -184,15 +184,15 @@ final class GitHubUpdater: ObservableObject {
         request.timeoutInterval = 120
         let (temporaryArchive, response) = try await URLSession.shared.download(for: request)
         guard let response = response as? HTTPURLResponse, response.statusCode == 200 else {
-            throw UpdaterError("Could not download the macOS update ZIP.")
+            throw UpdaterError(AppLanguage.text("Không tải được file ZIP cập nhật macOS.", "Could not download the macOS update ZIP."))
         }
         let archiveSize = try FileManager.default.attributesOfItem(atPath: temporaryArchive.path)[.size] as? NSNumber
         guard let archiveSize, archiveSize.intValue <= maximumArchiveBytes else {
-            throw UpdaterError("The macOS update ZIP exceeds the allowed size.")
+            throw UpdaterError(AppLanguage.text("File ZIP cập nhật macOS vượt quá dung lượng cho phép.", "The macOS update ZIP exceeds the allowed size."))
         }
         let actualDigest = try sha256(of: temporaryArchive)
         guard actualDigest.caseInsensitiveCompare(update.digest) == .orderedSame else {
-            throw UpdaterError("The downloaded update did not match GitHub's SHA-256 digest.")
+            throw UpdaterError(AppLanguage.text("Bản cập nhật tải về không khớp mã SHA-256 của GitHub.", "The downloaded update did not match GitHub's SHA-256 digest."))
         }
 
         let stagingDirectory = FileManager.default.temporaryDirectory
@@ -208,13 +208,13 @@ final class GitHubUpdater: ObservableObject {
             options: [.skipsHiddenFiles]
         )
         guard let app = entries.first(where: { $0.pathExtension == "app" }) else {
-            throw UpdaterError("The update ZIP did not contain Codex Roster.app.")
+            throw UpdaterError(AppLanguage.text("File ZIP cập nhật không chứa Codex Roster.app.", "The update ZIP did not contain Codex Roster.app."))
         }
         let bundle = Bundle(url: app)
         guard bundle?.bundleIdentifier == "com.codexroster.app",
               let installedVersion = bundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
               installedVersion == update.version else {
-            throw UpdaterError("The update ZIP version does not match the GitHub release.")
+            throw UpdaterError(AppLanguage.text("Phiên bản trong ZIP cập nhật không khớp bản phát hành GitHub.", "The update ZIP version does not match the GitHub release."))
         }
         return app
     }
@@ -236,7 +236,7 @@ final class GitHubUpdater: ObservableObject {
         try process.run()
         process.waitUntilExit()
         guard process.terminationStatus == 0 else {
-            throw UpdaterError("Could not unpack the macOS update ZIP.")
+            throw UpdaterError(AppLanguage.text("Không giải nén được file ZIP cập nhật macOS.", "Could not unpack the macOS update ZIP."))
         }
     }
 

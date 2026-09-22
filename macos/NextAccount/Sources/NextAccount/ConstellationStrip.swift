@@ -35,13 +35,13 @@ private struct ConstellationBadge: View {
     var body: some View {
         VStack(spacing: 4) {
             Image(systemName: provider.icon)
-                .font(.caption.weight(.semibold))
+                .font(PrismTheme.fontCaptionBold)
                 .foregroundStyle(isLive ? PrismTheme.success : Color.secondary)
             Text(provider.compactName)
-                .font(.caption2.weight(.semibold))
+                .font(PrismTheme.fontMicro)
                 .lineLimit(1)
             Text(language.text("\(savedCount)", "\(savedCount)"))
-                .font(.caption2.monospacedDigit())
+                .font(PrismTheme.fontMicro.monospacedDigit())
                 .foregroundStyle(.secondary)
         }
         .frame(minWidth: 48, minHeight: 48)
@@ -57,6 +57,7 @@ private struct ConstellationBadge: View {
         )
         .accessibilityElement(children: .combine)
         .accessibilityLabel(label)
+        .help(label)
     }
 
     private var label: String {

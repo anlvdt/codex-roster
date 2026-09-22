@@ -60,6 +60,7 @@ struct RosterConsoleView: View {
     private func tabButton(_ tab: RosterConsoleTab) -> some View {
         let isSelected = selection.tab == tab
         Button {
+            PrismTheme.triggerHaptic()
             selection.select(tab)
         } label: {
             Label(tab.title(in: language), systemImage: tab.systemImage)
@@ -74,6 +75,7 @@ struct RosterConsoleView: View {
                 .foregroundStyle(isSelected ? .primary : .secondary)
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .help(tab.title(in: language))
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }

@@ -50,6 +50,8 @@ struct PrismFilamentView: View {
     }
 
     private var physicalNotchClearance: CGFloat {
+        // Hug-tight: pull ears 7pt into each side of the measured camera gap
+        // (same formula as NotchGeometry.physicalClearance / pre-da9460b).
         notchWidth > 0 ? max(notchWidth - 14, 170) : 0
     }
 
@@ -65,6 +67,7 @@ struct PrismFilamentView: View {
                 rightEarWing
             }
         } else {
+            // Non-notch / external display: single centered pill (never half-apply ears).
             nonNotchCapsule
         }
     }
@@ -82,11 +85,18 @@ struct PrismFilamentView: View {
                     .font(PrismTheme.fontBodySemibold)
                     .foregroundStyle(PrismTheme.textBright)
                     .fixedSize()
-                Text("\(fivePercent ?? 0)%")
-                    .font(PrismTheme.fontMetricDense)
-                    .monospacedDigit()
-                    .foregroundStyle(fiveTint)
-                    .fixedSize()
+                if let fivePercent {
+                    Text("\(fivePercent)%")
+                        .font(PrismTheme.fontMetricDense)
+                        .monospacedDigit()
+                        .foregroundStyle(fiveTint)
+                        .fixedSize()
+                } else {
+                    Text("—")
+                        .font(PrismTheme.fontBody)
+                        .foregroundStyle(.secondary)
+                        .fixedSize()
+                }
             }
 
             Rectangle()
@@ -99,11 +109,18 @@ struct PrismFilamentView: View {
                     .font(PrismTheme.fontBodySemibold)
                     .foregroundStyle(PrismTheme.textBright)
                     .fixedSize()
-                Text("\(weekPercent ?? 0)%")
-                    .font(PrismTheme.fontMetricDense)
-                    .monospacedDigit()
-                    .foregroundStyle(weekTint)
-                    .fixedSize()
+                if let weekPercent {
+                    Text("\(weekPercent)%")
+                        .font(PrismTheme.fontMetricDense)
+                        .monospacedDigit()
+                        .foregroundStyle(weekTint)
+                        .fixedSize()
+                } else {
+                    Text("—")
+                        .font(PrismTheme.fontBody)
+                        .foregroundStyle(.secondary)
+                        .fixedSize()
+                }
             }
 
             // Banked Reset / Reset Countdown
@@ -277,13 +294,15 @@ struct PrismFilamentView: View {
     }
 
     // MARK: - Ear Shapes & Backgrounds
+    // `.circular` keeps zero-radius top corners truly square. Continuous style
+    // blends curvature into adjacent rounded bottoms and reads as a top gap.
     private var leftEarShape: UnevenRoundedRectangle {
         UnevenRoundedRectangle(
             topLeadingRadius: 0,
             bottomLeadingRadius: 10,
             bottomTrailingRadius: 0,
             topTrailingRadius: 0,
-            style: .continuous
+            style: .circular
         )
     }
 
@@ -293,7 +312,7 @@ struct PrismFilamentView: View {
             bottomLeadingRadius: 0,
             bottomTrailingRadius: 10,
             topTrailingRadius: 0,
-            style: .continuous
+            style: .circular
         )
     }
 

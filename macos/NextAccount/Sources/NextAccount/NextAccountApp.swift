@@ -230,7 +230,7 @@ private struct AccountSidebar: View {
                 Section {
                     activeSessionCard(activeAccount)
                 } header: {
-                    Text(language.text("Telemetry", "Telemetry"))
+                    Text(language.text("Viễn trắc & Tiêu thụ", "Telemetry"))
                 }
             }
             Section {
@@ -514,7 +514,7 @@ private struct ProviderOverview: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label(language.text("AI providers", "AI providers"), systemImage: "square.grid.2x2")
+            Label(language.text("Nhà cung cấp AI", "AI providers"), systemImage: "square.grid.2x2")
                 .font(.headline)
             Text(language.text(
                 "Tình trạng phiên và tài khoản đã lưu của OpenAI, Claude, Cursor và Grok.",
@@ -647,7 +647,7 @@ private struct ProviderStatusRow: View {
                 .disabled(store.isBusyForActions)
             } else if provider != .openAI {
                 Label(
-                    hasLiveSession ? language.text("Live", "Live") : language.text("Offline", "Offline"),
+                    hasLiveSession ? language.text("Đang chạy", "Live") : language.text("Ngoại tuyến", "Offline"),
                     systemImage: hasLiveSession ? "checkmark.circle.fill" : "circle"
                 )
                 .font(.caption.weight(.semibold))
@@ -858,15 +858,16 @@ struct NextActionBanner: View {
     var body: some View {
         HStack(alignment: .center, spacing: 14) {
             Image(systemName: icon(for: action))
-                .font(.title2)
+                .font(RosterSecondaryChrome.iconLarge)
                 .foregroundStyle(tint(for: action))
                 .frame(width: 34)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(action.headline(language: language))
-                    .font(.headline)
+                    .font(RosterSecondaryChrome.section)
+                    .lineLimit(2)
                 Text(action.detail(language: language))
-                    .font(.caption)
+                    .font(RosterSecondaryChrome.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1676,9 +1677,9 @@ struct TokenUsageOverview: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Label(language.text("Mức dùng Codex trên máy này", "Local Codex usage"), systemImage: "chart.bar.xaxis")
-                .font(.headline)
+                .font(RosterSecondaryChrome.section)
             Text(language.text("Thống kê token theo các phiên sử dụng gần đây.", "Token activity from recent sessions."))
-                .font(.subheadline)
+                .font(RosterSecondaryChrome.callout)
                 .foregroundStyle(.secondary)
             if let summary = store.tokenUsage {
                 VStack(alignment: .leading, spacing: 14) {
@@ -1687,12 +1688,12 @@ struct TokenUsageOverview: View {
                             TokenMetric(title: "VibeCafe 7d", tokens: vibe.totalTokens)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(language.text("Chi phí ước tính", "Estimated cost"))
-                                    .font(.caption)
+                                    .font(RosterSecondaryChrome.caption)
                                     .foregroundStyle(.secondary)
                                 Text(String(format: "$%.2f", vibe.estimatedCostUsd))
-                                    .font(.title3.weight(.semibold))
+                                    .font(RosterSecondaryChrome.metric)
                                 Text("\(vibe.sessions) sessions · \(String(format: "%.1f", Double(vibe.activeSeconds) / 3600))h")
-                                    .font(.caption2)
+                                    .font(RosterSecondaryChrome.micro)
                                     .foregroundStyle(.secondary)
                             }
                             Spacer()
@@ -1721,7 +1722,7 @@ struct TokenUsageOverview: View {
                             "Bao gồm token context và cache; không dùng để tính chi phí.",
                             "Includes context and cached tokens; it is not a billing total."
                         ))
-                        .font(.caption)
+                        .font(RosterSecondaryChrome.caption)
                         .foregroundStyle(.secondary)
                         Spacer()
                         Button(language.text("Cập nhật token", "Refresh tokens")) {
@@ -1746,7 +1747,7 @@ struct TokenUsageOverview: View {
                         }
                     }
                 }
-                .font(.subheadline)
+                .font(RosterSecondaryChrome.callout)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -1760,13 +1761,13 @@ private struct TokenUsageDetails: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(language.text("Phân bổ token", "Token breakdown"))
-                .font(.subheadline.weight(.semibold))
+                .font(RosterSecondaryChrome.section)
 
             HStack(spacing: 10) {
                 TokenBreakdownMetric(title: language.text("Input", "Input"), tokens: summary.inputTokens)
                 TokenBreakdownMetric(title: language.text("Output", "Output"), tokens: summary.outputTokens)
                 TokenBreakdownMetric(title: language.text("Cache", "Cache"), tokens: summary.cachedInputTokens)
-                TokenBreakdownMetric(title: language.text("Lý luận", "Reasoning"), tokens: summary.reasoningOutputTokens)
+                TokenBreakdownMetric(title: language.text("Suy luận", "Reasoning"), tokens: summary.reasoningOutputTokens)
             }
 
             HStack(spacing: 6) {
@@ -1779,7 +1780,7 @@ private struct TokenUsageDetails: View {
                 Text(compactTokenCount(summary.cacheWriteInputTokens, in: language.language))
                     .fontWeight(.semibold)
             }
-            .font(.caption)
+            .font(RosterSecondaryChrome.caption)
             .foregroundStyle(.secondary)
 
             if let cost = summary.estimatedCostUsd, cost > 0 {
@@ -1791,13 +1792,13 @@ private struct TokenUsageDetails: View {
                         ),
                         systemImage: "dollarsign.circle.fill"
                     )
-                    .font(.caption.weight(.semibold))
+                    .font(RosterSecondaryChrome.caption.weight(.semibold))
                     .foregroundStyle(PrismTheme.emerald)
 
                     if let todayCost = summary.todayCostUsd, todayCost > 0 {
                         Text("·").foregroundStyle(.tertiary)
                         Text(String(format: language.text("Hôm nay: $%.2f", "Today: $%.2f"), todayCost))
-                            .font(.caption)
+                            .font(RosterSecondaryChrome.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -1812,15 +1813,15 @@ private struct TokenUsageDetails: View {
                         "Sessions: \(main) main, \(sub) subagents"
                     ))
                 }
-                .font(.caption)
+                .font(RosterSecondaryChrome.caption)
                 .foregroundStyle(.secondary)
             }
 
             if !summary.byModel.isEmpty {
-                TokenUsageRanking(title: language.text("Theo model", "By model"), entries: summary.byModel)
+                TokenUsageRanking(title: language.text("Theo model", "By model"), entries: summary.byModel, showBars: true)
             }
             if !summary.byProject.isEmpty {
-                TokenUsageRanking(title: language.text("Theo dự án", "By project"), entries: summary.byProject)
+                TokenUsageRanking(title: language.text("Theo dự án", "By project"), entries: summary.byProject, showBars: false)
             }
         }
         .padding(14)
@@ -1836,10 +1837,10 @@ private struct TokenBreakdownMetric: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
-                .font(.caption)
+                .font(RosterSecondaryChrome.caption)
                 .foregroundStyle(.secondary)
             Text(compactTokenCount(tokens, in: language.language))
-                .font(.subheadline.monospacedDigit().weight(.semibold))
+                .font(RosterSecondaryChrome.section.monospacedDigit())
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1850,27 +1851,50 @@ private struct TokenUsageRanking: View {
     @EnvironmentObject private var language: LanguageStore
     let title: String
     let entries: [TokenUsageBreakdown]
+    var showBars: Bool = false
+
+    private var ranked: [TokenUsageBreakdown] {
+        Array(entries.sorted { $0.tokens > $1.tokens }.prefix(showBars ? 6 : 3))
+    }
+
+    private var maxTokens: UInt64 {
+        ranked.map(\.tokens).max() ?? 1
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
-                .font(.caption.weight(.medium))
+                .font(RosterSecondaryChrome.caption.weight(.medium))
                 .foregroundStyle(.secondary)
-            ForEach(entries.prefix(3)) { entry in
-                HStack(spacing: 8) {
-                    Text(entry.label)
-                        .lineLimit(1)
-                    Spacer()
-                    if let cost = entry.estimatedCostUsd, cost > 0 {
-                        Text(String(format: "$%.2f", cost))
-                            .font(.caption.monospacedDigit().weight(.medium))
-                            .foregroundStyle(PrismTheme.emerald)
+            ForEach(ranked) { entry in
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 8) {
+                        Text(entry.label)
+                            .lineLimit(1)
+                            .font(RosterSecondaryChrome.callout)
+                        Spacer(minLength: 4)
+                        if let cost = entry.estimatedCostUsd, cost > 0 {
+                            Text(String(format: "$%.2f", cost))
+                                .font(RosterSecondaryChrome.caption.monospacedDigit().weight(.medium))
+                                .foregroundStyle(PrismTheme.emerald)
+                        }
+                        Text(compactTokenCount(entry.tokens, in: language.language))
+                            .font(RosterSecondaryChrome.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
                     }
-                    Text(compactTokenCount(entry.tokens, in: language.language))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                    if showBars {
+                        GeometryReader { geo in
+                            let ratio = maxTokens == 0 ? 0 : CGFloat(entry.tokens) / CGFloat(maxTokens)
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(PrismTheme.trackFill)
+                                Capsule()
+                                    .fill(PrismTheme.accent.opacity(0.75))
+                                    .frame(width: max(4, geo.size.width * ratio))
+                            }
+                        }
+                        .frame(height: 4)
+                    }
                 }
-                .font(.subheadline)
             }
         }
     }
@@ -1888,14 +1912,16 @@ private struct TokenMetric: View {
                     .font(PrismTheme.fontMicro)
                     .foregroundStyle(.tint)
                 Text(title)
-                    .font(.subheadline.weight(.medium))
+                    .font(RosterSecondaryChrome.callout.weight(.medium))
                     .foregroundStyle(.secondary)
             }
             Text(compactTokenCount(tokens, in: language.language))
-                .font(.system(.title2, design: .rounded).weight(.bold))
+                .font(RosterSecondaryChrome.metricLarge)
                 .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
             Text(language.text("token", "tokens"))
-                .font(.caption)
+                .font(RosterSecondaryChrome.caption)
                 .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1922,18 +1948,18 @@ private struct TokenUsageChart: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(language.text("Hoạt động 7 ngày", "Seven-day activity"))
-                        .font(.subheadline.weight(.semibold))
+                        .font(RosterSecondaryChrome.section)
                     Text(language.text("Trung bình \(compactTokenCount(average, in: language.language)) token/ngày", "Average \(compactTokenCount(average, in: language.language)) tokens/day"))
-                        .font(.caption)
+                        .font(RosterSecondaryChrome.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 3) {
                     Text(language.text("Cao nhất", "Peak"))
-                        .font(.caption)
+                        .font(RosterSecondaryChrome.caption)
                         .foregroundStyle(.secondary)
                     Text(compactTokenCount(maximum, in: language.language))
-                        .font(.subheadline.monospacedDigit().weight(.semibold))
+                        .font(RosterSecondaryChrome.section.monospacedDigit())
                 }
             }
 
@@ -1977,7 +2003,7 @@ private struct TokenDayColumn: View {
     var body: some View {
         VStack(spacing: 6) {
             Text(isLatest || isPeak ? compactTokenCount(day.tokens, in: language) : " ")
-                .font(.caption.monospacedDigit())
+                .font(RosterSecondaryChrome.caption.monospacedDigit())
                 .foregroundStyle(isLatest ? Color.accentColor : Color.secondary)
                 .lineLimit(1)
             ZStack(alignment: .bottom) {
@@ -1989,7 +2015,7 @@ private struct TokenDayColumn: View {
             }
             .frame(width: 24, height: 78)
             Text(dayLabel)
-                .font(.caption.weight(isLatest ? .semibold : .regular))
+                .font(RosterSecondaryChrome.caption.weight(isLatest ? .semibold : .regular))
                 .foregroundStyle(isLatest ? Color.accentColor : Color.secondary)
         }
         .frame(maxWidth: .infinity)
@@ -2162,7 +2188,7 @@ struct OpenAIStatusCard: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Label(language.text("Trạng thái dịch vụ OpenAI", "OpenAI service status"), systemImage: "dot.radiowaves.left.and.right")
-                    .font(.headline)
+                    .font(RosterSecondaryChrome.section)
                 Spacer()
                 Button { openURL(sourceURL) } label: {
                     Label("status.openai.com", systemImage: "arrow.up.right.square")
@@ -2176,7 +2202,8 @@ struct OpenAIStatusCard: View {
                     Image(systemName: status.isOperational ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                         .foregroundStyle(status.isOperational ? .green : .orange)
                     Text(localizedOpenAIStatus(status.description, language: language.language))
-                        .font(.body.weight(.semibold))
+                        .font(RosterSecondaryChrome.body.weight(.semibold))
+                        .lineLimit(2)
                     Spacer()
                     Button(language.text("Cập nhật", "Refresh")) { store.refreshOpenAIStatus() }
                         .controlSize(.small)
@@ -2187,7 +2214,7 @@ struct OpenAIStatusCard: View {
                     HStack(spacing: 8) {
                         ForEach(status.codexComponents) { component in
                             Label(component.name, systemImage: component.isOperational ? "circle.fill" : "exclamationmark.circle.fill")
-                                .font(.caption)
+                                .font(RosterSecondaryChrome.caption)
                                 .foregroundStyle(component.isOperational ? Color.secondary : PrismTheme.warning)
                                 .lineLimit(2)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -2205,7 +2232,7 @@ struct OpenAIStatusCard: View {
                         Button(language.text("Tải lại", "Retry")) { store.refreshOpenAIStatus() }
                     }
                 }
-                .font(.subheadline)
+                .font(RosterSecondaryChrome.callout)
                 .foregroundStyle(.secondary)
             }
         }
@@ -2217,10 +2244,25 @@ struct OpenAIStatusCard: View {
 }
 
 private func localizedOpenAIStatus(_ description: String, language: AppLanguage) -> String {
-    guard language == .vietnamese, description == "All Systems Operational" else {
+    guard language == .vietnamese else {
         return description
     }
-    return "Mọi hệ thống đang hoạt động"
+    switch description {
+    case "All Systems Operational":
+        return "Mọi hệ thống đang hoạt động"
+    case "Degraded Performance":
+        return "Hiệu năng bị giảm"
+    case "Partial System Outage":
+        return "Gián đoạn một phần"
+    case "Major Service Outage":
+        return "Gián đoạn nghiêm trọng"
+    case "Minor Service Outage":
+        return "Gián đoạn nhỏ"
+    case "Under Maintenance":
+        return "Đang bảo trì"
+    default:
+        return description
+    }
 }
 
 struct GlobalResetOutlookCard: View {
@@ -2229,18 +2271,18 @@ struct GlobalResetOutlookCard: View {
     @Environment(\.openURL) private var openURL
     @State private var showingSignalDetails = false
 
-    private let sourceURL = URL(string: "https://x.com/thsottiaux")!
+    private let sourceURL = URL(string: "https://codex-resets.com/")!
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label(language.text("Tibo reset radar", "Tibo reset radar"), systemImage: "antenna.radiowaves.left.and.right")
-                    .font(.headline)
+                Label(language.text("Dự báo reset OpenAI", "OpenAI reset outlook"), systemImage: "antenna.radiowaves.left.and.right")
+                    .font(RosterSecondaryChrome.section)
                 Spacer()
                 Button {
                     openURL(outlookSourceURL ?? sourceURL)
                 } label: {
-                    Label("@thsottiaux", systemImage: "arrow.up.right.square")
+                    Label("codex-resets.com", systemImage: "arrow.up.right.square")
                 }
                 .buttonStyle(.link)
                 .controlSize(.small)
@@ -2248,25 +2290,20 @@ struct GlobalResetOutlookCard: View {
 
             if let outlook = store.resetOutlook {
                 let isConfirmedReset = outlook.lastResetIsConfirmed == true
-                let urgencyColor = forecastColor(max(outlook.chance24Hours, outlook.chance48Hours), high: .orange)
+                let status = ResetOutlookPresentation.headline(outlook, language: language.language)
+                let statusTint: Color = {
+                    let kind = outlook.signalKind ?? ""
+                    if kind.hasPrefix("confirmed") || isConfirmedReset { return .green }
+                    if kind.hasPrefix("scheduled") { return .orange }
+                    return .secondary
+                }()
 
-                // One full-width row of metrics; the card used to stack these
-                // vertically and leave half of its width blank.
+                // Match codex-resets.com: status + schedule, not forecast %.
                 HStack(alignment: .top, spacing: 12) {
                     ResetOutlookMetric(
-                        title: language.text("24 giờ", "24 hours"),
-                        value: "\(outlook.chance24Hours)%",
-                        tint: forecastColor(outlook.chance24Hours)
-                    )
-                    ResetOutlookMetric(
-                        title: language.text("48 giờ", "48 hours"),
-                        value: "\(outlook.chance48Hours)%",
-                        tint: forecastColor(outlook.chance48Hours)
-                    )
-                    ResetOutlookMetric(
-                        title: language.text("Giờ thường reset", "Reset window"),
-                        value: formatResetWindow(outlook, language: language.language),
-                        tint: .secondary
+                        title: language.text("Trạng thái", "Status"),
+                        value: status,
+                        tint: statusTint
                     )
                     if let scheduledResetAt = outlook.nextResetAt {
                         ResetOutlookMetric(
@@ -2275,15 +2312,27 @@ struct GlobalResetOutlookCard: View {
                             tint: .orange
                         )
                     }
+                    ResetOutlookMetric(
+                        title: language.text("Reset gần nhất", "Latest reset"),
+                        value: formattedResetDate(outlook.lastResetAt, language: language.language),
+                        tint: .secondary
+                    )
+                    if !outlook.windowLabel.isEmpty {
+                        ResetOutlookMetric(
+                            title: language.text("Giờ thường reset", "Reset window"),
+                            value: formatResetWindow(outlook, language: language.language),
+                            tint: .secondary
+                        )
+                    }
                 }
 
                 HStack(spacing: 7) {
                     Circle()
-                        .fill(urgencyColor)
+                        .fill(statusTint == .secondary ? Color.accentColor : statusTint)
                         .frame(width: 8, height: 8)
                     Text(language.text(
-                        "Độ tin cậy: \(localizedConfidence(outlook.confidence))",
-                        "Confidence: \(localizedConfidence(outlook.confidence))"
+                        "Dữ liệu từ Codex Resets (codex-resets.com)",
+                        "Data from Codex Resets (codex-resets.com)"
                     ))
                     if isConfirmedReset {
                         Text("·").foregroundStyle(.tertiary)
@@ -2291,21 +2340,10 @@ struct GlobalResetOutlookCard: View {
                             .fontWeight(.medium)
                             .foregroundStyle(.green)
                     }
-                    if let cadenceDays = outlook.cadenceDays {
-                        Text("·").foregroundStyle(.tertiary)
-                        Text(language.text(
-                            "Nhịp ~\(String(format: "%.1f", cadenceDays)) ngày",
-                            "Cadence ~\(String(format: "%.1f", cadenceDays)) days"
-                        ))
-                        if outlook.cadenceAccelerating == true {
-                            Text(language.text("(tăng nhanh)", "(accelerating)"))
-                                .foregroundStyle(.orange)
-                        }
-                    }
 
                     Spacer(minLength: 8)
 
-                    Button(language.text("Chi tiết tín hiệu", "Signal details")) {
+                    Button(language.text("Chi tiết", "Details")) {
                         showingSignalDetails.toggle()
                     }
                     .controlSize(.small)
@@ -2316,11 +2354,11 @@ struct GlobalResetOutlookCard: View {
                         .controlSize(.small)
                         .disabled(store.isLoadingResetOutlook)
                 }
-                .font(.caption)
+                .font(RosterSecondaryChrome.caption)
                 .foregroundStyle(.secondary)
 
                 Text(language.text("Quota tài khoản là xác nhận cuối cùng.", "Account quota is the final confirmation."))
-                    .font(.caption)
+                    .font(RosterSecondaryChrome.caption)
                     .foregroundStyle(.tertiary)
             } else {
                 HStack {
@@ -2333,7 +2371,7 @@ struct GlobalResetOutlookCard: View {
                         Button(language.text("Tải lại", "Retry")) { store.refreshResetOutlook() }
                     }
                 }
-                .font(.subheadline)
+                .font(RosterSecondaryChrome.callout)
                 .foregroundStyle(.secondary)
             }
         }
@@ -2349,18 +2387,18 @@ struct GlobalResetOutlookCard: View {
                 Text(isConfirmedReset
                     ? language.text("Lần reset gần nhất", "Last reset")
                     : language.text("Tín hiệu gần nhất", "Latest signal"))
-                    .font(.caption)
+                    .font(RosterSecondaryChrome.caption)
                     .foregroundStyle(.secondary)
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(formattedResetDate(outlook.lastResetAt, language: language.language))
-                        .font(.subheadline.weight(.semibold))
+                        .font(RosterSecondaryChrome.section)
                     TimelineView(.periodic(from: .now, by: 60)) { context in
                         Text(formattedRelativeResetDate(
                             outlook.lastResetAt,
                             relativeTo: context.date,
                             language: language.language
                         ))
-                        .font(.caption)
+                        .font(RosterSecondaryChrome.caption)
                         .foregroundStyle(.tertiary)
                     }
                 }
@@ -2369,10 +2407,10 @@ struct GlobalResetOutlookCard: View {
             if let summary = outlook.signalSummary, !summary.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(language.text("Tóm tắt tín hiệu", "Signal summary"))
-                        .font(.caption)
+                        .font(RosterSecondaryChrome.caption)
                         .foregroundStyle(.secondary)
                     Text(localizedSignalSummary(summary))
-                        .font(.caption)
+                        .font(RosterSecondaryChrome.caption)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                 }
@@ -2381,15 +2419,15 @@ struct GlobalResetOutlookCard: View {
             if let timeline = store.resetTimeline, !timeline.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(language.text("Lịch sử reset", "Reset history"))
-                        .font(.caption)
+                        .font(RosterSecondaryChrome.caption)
                         .foregroundStyle(.secondary)
                     ForEach(timeline.prefix(3)) { event in
                         HStack(alignment: .top, spacing: 6) {
                             Text(event.date)
-                                .font(.caption2.monospacedDigit())
+                                .font(RosterSecondaryChrome.micro.monospacedDigit())
                                 .foregroundStyle(.tertiary)
                             Text(event.summary)
-                                .font(.caption2)
+                                .font(RosterSecondaryChrome.micro)
                                 .lineLimit(3)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -2400,16 +2438,16 @@ struct GlobalResetOutlookCard: View {
             if let juice = store.resetJuice, !juice.efforts.isEmpty {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(language.text("Mức effort còn lại", "Remaining effort levels"))
-                        .font(.caption)
+                        .font(RosterSecondaryChrome.caption)
                         .foregroundStyle(.secondary)
                     HStack(spacing: 12) {
                         ForEach(juice.efforts.prefix(4)) { effort in
                             HStack(spacing: 4) {
                                 Text(effort.effort.capitalized)
-                                    .font(.caption2)
+                                    .font(RosterSecondaryChrome.micro)
                                     .foregroundStyle(.secondary)
                                 Text("\(effort.current)")
-                                    .font(.caption2.monospacedDigit().weight(.medium))
+                                    .font(RosterSecondaryChrome.micro.monospacedDigit().weight(.medium))
                                     .foregroundStyle(effort.delta > 0 ? .green : effort.delta < 0 ? .red : .secondary)
                             }
                         }
@@ -2434,27 +2472,8 @@ struct GlobalResetOutlookCard: View {
         }
     }
 
-    private func forecastColor(_ percent: Int, high: Color = .orange) -> Color {
-        switch percent {
-        case 0..<20: return .green
-        case 20..<50: return high
-        case 50..<75: return .orange
-        default: return .red
-        }
-    }
-
-    private func localizedConfidence(_ value: String) -> String {
-        guard language.language == .vietnamese else { return value.capitalized }
-        return switch value.lowercased() {
-        case "high": "Cao"
-        case "medium": "Trung bình"
-        case "low": "Thấp"
-        default: value
-        }
-    }
-
     private var outlookSourceURL: URL? {
-        trustedTiboSourceURL(store.resetOutlook?.sourceUrl)
+        trustedResetSourceURL(store.resetOutlook?.sourceUrl)
     }
 }
 
@@ -2466,12 +2485,15 @@ private struct ResetOutlookMetric: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
-                .font(.caption)
+                .font(RosterSecondaryChrome.caption)
                 .foregroundStyle(.secondary)
+                .lineLimit(2)
             Text(value)
-                .font(.title3.weight(.bold))
+                .font(RosterSecondaryChrome.metric)
                 .foregroundStyle(tint)
                 .monospacedDigit()
+                .lineLimit(2)
+                .minimumScaleFactor(0.75)
         }
         .frame(minWidth: 112, maxWidth: .infinity, alignment: .leading)
         .padding(11)
@@ -2670,10 +2692,11 @@ struct AddAccountSheet: View {
         GroupBox {
             VStack(alignment: .leading, spacing: 8) {
                 Text(modeDetailTitle)
-                    .font(.headline)
+                    .font(RosterSecondaryChrome.section)
                 Text(modeDetailBody)
-                    .font(.subheadline)
+                    .font(RosterSecondaryChrome.callout)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
@@ -2684,7 +2707,7 @@ struct AddAccountSheet: View {
                 "Cổng 1455/1457 đang bận — Chỉ thêm sẽ báo lỗi trừ khi bạn thoát Desktop trước (hoặc chọn Thêm & chuyển).",
                 "Ports 1455/1457 are busy — Add only will fail unless you quit Desktop first (or choose Add & switch)."
             ), systemImage: "exclamationmark.triangle.fill")
-            .font(.footnote)
+            .font(RosterSecondaryChrome.footnote)
             .foregroundStyle(.orange)
         }
 
@@ -2712,17 +2735,18 @@ struct AddAccountSheet: View {
             HStack(spacing: 12) {
                 if isFinished {
                     Image(systemName: "checkmark.circle.fill")
-                        .font(.title2)
+                        .font(RosterSecondaryChrome.iconLarge)
                         .foregroundStyle(.green)
                 } else {
                     ProgressView()
                         .controlSize(.small)
                 }
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(progressTitle).font(.headline)
+                    Text(progressTitle).font(RosterSecondaryChrome.section)
                     Text(saveStatusText)
-                        .font(.subheadline)
+                        .font(RosterSecondaryChrome.callout)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2741,12 +2765,12 @@ struct AddAccountSheet: View {
             .foregroundStyle(.green)
         } else if case let .failed(message) = store.newAccountLoginState {
             Text(message)
-                .font(.footnote)
+                .font(RosterSecondaryChrome.footnote)
                 .foregroundStyle(.red)
         }
 
         Label(progressSafetyNote, systemImage: "lock.shield")
-            .font(.footnote)
+            .font(RosterSecondaryChrome.footnote)
             .foregroundStyle(.secondary)
 
         HStack {
@@ -3237,7 +3261,7 @@ private struct SessionDiagnosticsPanel: View {
             tint: account.hasTransientUsageError ? .orange : .accentColor
         )
         DiagnosticMetric(
-            title: language.text("Live session", "Live session"),
+            title: language.text("Phiên đang chạy", "Live session"),
             value: account.isActive
                 ? language.text("Đang dùng", "Active now")
                 : language.text("Đã lưu, chưa nạp", "Saved, not loaded"),
@@ -3321,12 +3345,13 @@ struct ReloginAccountSheet: View {
                         Text(isCompleting
                             ? language.text("Đang tự động cập nhật", "Updating automatically")
                             : language.text("Đang chờ đúng tài khoản", "Waiting for the correct account"))
-                            .font(.headline)
+                            .font(RosterSecondaryChrome.section)
                         Text(isCompleting
                             ? language.text("Đang lưu phiên và kiểm tra lại quota…", "Saving the session and checking quota…")
                             : language.text("Không cần tải lại hay bấm Lưu — Roster tự hoàn tất khi nhận diện \(account.email).", "No reload or Save click needed — Roster finishes when it detects \(account.email)."))
-                            .font(.subheadline)
+                            .font(RosterSecondaryChrome.callout)
                             .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -3338,13 +3363,13 @@ struct ReloginAccountSheet: View {
                     "Sau tài khoản này, Roster tự mở lần lượt \(queuedCount) tài khoản còn lại.",
                     "After this account, Roster will automatically open the remaining \(queuedCount) accounts in sequence."
                 ), systemImage: "list.number")
-                .font(.footnote.weight(.medium))
+                .font(RosterSecondaryChrome.footnote.weight(.medium))
                 .foregroundStyle(.tint)
             }
 
             if let localError {
                 Label(localError, systemImage: "exclamationmark.triangle.fill")
-                    .font(.footnote)
+                    .font(RosterSecondaryChrome.footnote)
                     .foregroundStyle(.orange)
             }
 
@@ -3352,7 +3377,7 @@ struct ReloginAccountSheet: View {
                 "Phiên Codex đang dùng được sao lưu trước khi mở đăng nhập mới. Hủy sẽ khôi phục phiên trước. Phải đăng nhập đúng \(account.email).",
                 "The current Codex session is backed up before the new sign-in. Cancel restores it. You must sign in as \(account.email)."
             ), systemImage: "lock.shield")
-            .font(.footnote)
+            .font(RosterSecondaryChrome.footnote)
             .foregroundStyle(.secondary)
 
             HStack {
@@ -3448,7 +3473,7 @@ struct AccountEditorSheet: View {
                 "Đặt tên để dễ nhận biết tài khoản.",
                 "Choose a name that makes the account easy to recognize."
             ))
-            .font(.caption)
+            .font(RosterSecondaryChrome.caption)
             .foregroundStyle(.secondary)
 
             HStack {
@@ -3482,7 +3507,7 @@ private struct UsageCard: View {
                 Text(language.text("Còn \(window.displayRemainingPercent)%", "\(window.displayRemainingPercent)% remaining"))
                     .font(.title2.weight(.semibold))
                 ProgressView(value: Double(window.displayRemainingPercent), total: 100)
-                    .tint(window.isDepleted ? .red : (window.remainingPercent < 20 ? .orange : .accentColor))
+                    .tint(PrismTheme.quotaTint(percent: window.displayRemainingPercent))
                 Text(language.text("Đặt lại \(window.resetAt.value.formatted(date: .abbreviated, time: .shortened))", "Resets \(window.resetAt.value.formatted(date: .abbreviated, time: .shortened))"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -3843,7 +3868,7 @@ private struct MenuBarLiveSignals: View {
                         .foregroundStyle(rosterActionBlue)
                 }
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Tibo radar")
+                    Text(language.text("Dự báo reset", "Reset outlook"))
                         .font(.caption.weight(.semibold))
                     Text(resetSignalText)
                         .font(.caption.monospacedDigit())
@@ -3876,7 +3901,7 @@ private struct MenuBarLiveSignals: View {
         guard let outlook = store.resetOutlook else {
             return language.text("Đang theo dõi", "Monitoring")
         }
-        return "\(outlook.chance24Hours)% / 24H"
+        return ResetOutlookPresentation.headline(outlook, language: language.language)
     }
 }
 
@@ -4063,7 +4088,11 @@ struct AboutView: View {
     private let codexProfilesURL = URL(string: "https://github.com/Ducksss/codex-profiles")!
     private let codexSwitchboardURL = URL(string: "https://github.com/vyctorbrzezowski/codex-switchboard")!
     private let vibeUsageURL = URL(string: "https://github.com/vibe-cafe/vibe-usage")!
-    private let tiboXURL = URL(string: "https://x.com/thsottiaux")!
+    private let tokentabURL = URL(string: "https://github.com/damejan80/tokentab")!
+    private let codeburnURL = URL(string: "https://github.com/getagentseal/codeburn")!
+    private let agentMonitorURL = URL(string: "https://github.com/donvito/agent-monitor")!
+    private let codexResetURL = URL(string: "https://codex-reset.com/")!
+    private let codexResetsURL = URL(string: "https://codex-resets.com/")!
     private let openAIBrandURL = URL(string: "https://openai.com/brand/")!
     private let codexPricingURL = URL(string: "https://learn.chatgpt.com/docs/pricing")!
 
@@ -4108,7 +4137,7 @@ struct AboutView: View {
                 HStack(alignment: .top, spacing: 14) {
                     AboutPanel(title: language.text("Tóm tắt", "Overview"), icon: "person.3.sequence.fill") {
                         AboutBullet(icon: "person.crop.circle", text: language.text("Nhìn ngay phiên đang dùng, quota, thời điểm reset và banked reset.", "See the active session, quota, reset time, and banked resets at a glance."))
-                        AboutBullet(icon: "antenna.radiowaves.left.and.right", text: language.text("Theo dõi live trạng thái OpenAI và tín hiệu reset công khai của Tibo.", "Monitor OpenAI service health and Tibo's public reset signals live."))
+                        AboutBullet(icon: "antenna.radiowaves.left.and.right", text: language.text("Theo dõi live trạng thái OpenAI và Codex Reset outlook công khai.", "Monitor OpenAI service health and the public Codex Reset outlook live."))
                         AboutBullet(icon: "arrow.left.arrow.right.circle", text: language.text("Chuyển nhanh từ notch đến tài khoản còn quota hoặc có banked reset.", "Quick-switch from the notch to accounts with usable quota or banked resets."))
                     }
 
@@ -4153,7 +4182,7 @@ struct AboutView: View {
                     }
                     AboutFeatureGroup(title: language.text("Theo dõi & sao lưu", "Monitoring & backup")) {
                         AboutBullet(icon: "chart.bar.xaxis", text: language.text("Thống kê token cục bộ theo ngày, 7 ngày, 30 ngày và 12 tháng từ session logs.", "Read local session logs for token totals by day, 7 days, 30 days, and 12 months."))
-                        AboutBullet(icon: "waveform.path.ecg", text: language.text("Đọc trực tiếp tín hiệu reset công khai của Tibo trên X, rồi xác nhận riêng bằng quota tài khoản thực tế.", "Read Tibo's public reset signals directly from X, then verify separately against actual account quota."))
+                        AboutBullet(icon: "waveform.path.ecg", text: language.text("Đọc Codex Reset outlook từ API công khai, rồi xác nhận riêng bằng quota tài khoản Codex thực tế.", "Read the Codex Reset outlook from the public API, then verify separately against actual Codex account quota."))
                         AboutBullet(icon: "lock.shield", text: language.text("Xuất/nhập file backup có mật khẩu; tự giữ 5 backup phiên đầy đủ được mã hóa bằng khóa Keychain trên máy này.", "Export/import password-protected backups; keep five full session backups encrypted with this Mac's Keychain key."))
                         AboutBullet(icon: "arrow.counterclockwise", text: language.text("Khôi phục danh sách hoặc phiên sao lưu gần nhất sau khi xác nhận.", "Restore the latest account list or saved sessions after confirmation."))
                     }
@@ -4202,8 +4231,8 @@ struct AboutView: View {
                 AboutDisclosurePanel(title: language.text("Nguồn tham khảo & giấy phép", "References & licenses"), icon: "link") {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(language.text(
-                            "Đã đối chiếu lại nguồn ngày 22/08/2026. Nền tảng gốc và từng nguồn tham khảo được ghi rõ vai trò, giấy phép và ranh giới sử dụng bên dưới.",
-                            "Sources re-audited on August 22, 2026. The original foundation and every reference are listed below with their role, license, and usage boundary."
+                            "Đã đối chiếu lại nguồn ngày 22/09/2026 với CREDITS.md. Nền tảng gốc và từng nguồn tham khảo được ghi rõ vai trò, giấy phép và ranh giới sử dụng bên dưới.",
+                            "Sources re-audited on September 22, 2026 against CREDITS.md. The original foundation and every reference are listed below with their role, license, and usage boundary."
                         ))
                         .font(RosterSecondaryChrome.callout)
                         .foregroundStyle(.secondary)
@@ -4215,7 +4244,7 @@ struct AboutView: View {
                         )
                         ReferenceLink(
                             title: "steipete / CodexBar",
-                            detail: language.text("Tham khảo UX notch, trạng thái quota và cách trình bày thời điểm reset; triển khai độc lập.", "Reference for notch UX, quota states, and reset-time presentation; independently implemented."),
+                            detail: language.text("Tham khảo UX notch, trạng thái quota, reset và schema usage đa provider; triển khai độc lập.", "Reference for notch UX, quota/reset states, and multi-provider usage schemas; independently implemented."),
                             badge: "MIT · UI/UX reference",
                             url: codexBarURL
                         )
@@ -4238,18 +4267,42 @@ struct AboutView: View {
                             url: codexSwitchboardURL
                         )
                         ReferenceLink(
+                            title: "damejan80 / tokentab",
+                            detail: language.text("Tham khảo tổng hợp session log và báo cáo token cục bộ; triển khai độc lập.", "Reference for local session-log aggregation and token reports; independently reimplemented."),
+                            badge: "MIT · token accounting research",
+                            url: tokentabURL
+                        )
+                        ReferenceLink(
+                            title: "getagentseal / codeburn",
+                            detail: language.text("Tham khảo cache accounting, subagent sidechain và fallback token tích lũy; triển khai độc lập.", "Reference for cache accounting, subagent sidechains, and cumulative-token fallback; independently reimplemented."),
+                            badge: "MIT · token accounting research",
+                            url: codeburnURL
+                        )
+                        ReferenceLink(
+                            title: "donvito / agent-monitor",
+                            detail: language.text("Tham khảo cây subagent (thread_source / parent_thread_id) và ước lượng USD theo model; triển khai độc lập.", "Reference for subagent hierarchy (thread_source / parent_thread_id) and per-model USD estimates; independently reimplemented."),
+                            badge: "MIT · subagent / pricing research",
+                            url: agentMonitorURL
+                        )
+                        ReferenceLink(
                             title: "VibeCafe / @vibe-cafe/vibe-usage",
                             detail: language.text("Nguồn collector và API usage tùy chọn cho thống kê VibeCafe 7 ngày; Codex Roster tích hợp theo endpoint/format công khai và không nhập mã nguồn upstream.", "Optional collector and usage API source for VibeCafe 7-day statistics; Codex Roster integrates against the public endpoint/format without importing upstream source code."),
                             badge: "MIT · usage integration",
                             url: vibeUsageURL
                         )
                         ReferenceLink(
-                            title: "Tibo / @thsottiaux",
-                            detail: language.text("Nguồn tín hiệu reset công khai được đọc trực tiếp từ hồ sơ X; quota tài khoản vẫn là xác nhận cuối cùng.", "Public reset signals read directly from the X profile; account quota remains the final confirmation."),
-                            badge: "X public profile · signal source",
-                            url: tiboXURL
+                            title: "codex-resets.com",
+                            detail: language.text("API công khai cho trạng thái / lịch sử reset Codex (source of truth cho cam kết & sự kiện); Data from Codex Resets. Không gửi credential hay quota tài khoản.", "Public API for Codex reset status/history (source of truth for commitment & events); Data from Codex Resets. Never sends credentials or account quota."),
+                            badge: "Public API · attribution required",
+                            url: codexResetsURL
                         )
-                        Text(language.text("Ngoại trừ nền tảng MIT được ghi rõ, Codex Roster không đưa mã nguồn, tài sản, credential hay state của các dự án tham khảo vào ứng dụng.", "Except for the credited MIT foundation, Codex Roster does not incorporate source code, assets, credentials, or state from the reference projects."))
+                        ReferenceLink(
+                            title: "codex-reset.com",
+                            detail: language.text("API phụ: timeline / juice / forecast (không hiện % 24h/48h trên notch hay Operations; UI chính lấy lịch từ codex-resets.com).", "Secondary API: timeline / juice / forecast (% 24h/48h not shown on notch or Operations; primary schedule comes from codex-resets.com)."),
+                            badge: "Public API · optional detail",
+                            url: codexResetURL
+                        )
+                        Text(language.text("Ngoại trừ nền tảng MIT được ghi rõ, Codex Roster không đưa mã nguồn, tài sản, credential hay state của các dự án tham khảo vào ứng dụng. Chi tiết đầy đủ: CREDITS.md.", "Except for the credited MIT foundation, Codex Roster does not incorporate source code, assets, credentials, or state from the reference projects. Full detail: CREDITS.md."))
                             .font(RosterSecondaryChrome.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -4343,19 +4396,55 @@ private struct AboutDisclosurePanel<Content: View>: View {
     let title: String
     let icon: String
     @ViewBuilder let content: Content
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isExpanded = false
 
     var body: some View {
-        DisclosureGroup {
-            VStack(alignment: .leading, spacing: 10) {
-                content
-                    .font(RosterSecondaryChrome.body)
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                if reduceMotion {
+                    isExpanded.toggle()
+                } else {
+                    withAnimation(RosterSecondaryChrome.disclosureSpring) {
+                        isExpanded.toggle()
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.right")
+                        .font(RosterSecondaryChrome.micro.weight(.bold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    Label(title, systemImage: icon)
+                        .font(RosterSecondaryChrome.section)
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, 10)
-        } label: {
-            Label(title, systemImage: icon)
-                .font(RosterSecondaryChrome.section)
-                .foregroundStyle(.primary)
+            .buttonStyle(.plain)
+            .pointingHandCursor()
+            .accessibilityLabel(title)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityValue(isExpanded
+                ? AppLanguage.text("Đang mở", "Expanded")
+                : AppLanguage.text("Đang đóng", "Collapsed"))
+            .accessibilityHint(AppLanguage.text(
+                "Nhấn để mở hoặc đóng phần này",
+                "Press to expand or collapse this section"
+            ))
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 10) {
+                    content
+                        .font(RosterSecondaryChrome.body)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 10)
+            }
         }
         .padding(14)
         .background(

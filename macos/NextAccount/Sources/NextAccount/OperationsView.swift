@@ -34,6 +34,8 @@ struct OperationsView: View {
             store.refreshTokenUsage(silently: true)
             store.refreshOpenAIStatus(silently: true)
             store.refreshResetOutlook(silently: true)
+            store.refreshResetTimeline(silently: true)
+            store.refreshResetJuice(silently: true)
             store.refreshProviderStatus(silently: true)
         }
     }
@@ -108,7 +110,7 @@ struct OperationsView: View {
                     opsChip(language.text("Banked \(banked)", "Banked \(banked)"), tint: PrismTheme.warning)
                 }
                 if deferred > 0 {
-                    opsChip(language.text("Chưa XM \(deferred)", "Unverified \(deferred)"), tint: PrismTheme.textSecondary)
+                    opsChip(language.text("Chưa xác minh \(deferred)", "Unverified \(deferred)"), tint: PrismTheme.textSecondary)
                 }
             }
             Text(language.text(
@@ -176,15 +178,30 @@ struct OperationsView: View {
                 .foregroundStyle(.secondary)
             }
 
-            HStack {
-                Button(language.text("Kiểm tra ngay", "Run refresh check")) {
+            HStack(spacing: 8) {
+                Button {
                     store.runUsageWindowCheck()
+                } label: {
+                    HStack(spacing: 5) {
+                        if store.isWorking || store.isBusyForActions {
+                            ProgressView().controlSize(.mini)
+                        }
+                        Text(language.text("Kiểm tra ngay", "Run refresh check"))
+                    }
                 }
                 .controlSize(.small)
                 .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
+
                 if store.autoSwitchWhenExhausted {
-                    Button(language.text("Kiểm tra & chuyển", "Check & switch")) {
+                    Button {
                         store.runAutoSwitchCheck()
+                    } label: {
+                        HStack(spacing: 5) {
+                            if store.isCheckingAutoSwitch {
+                                ProgressView().controlSize(.mini)
+                            }
+                            Text(language.text("Kiểm tra & chuyển", "Check & switch"))
+                        }
                     }
                     .controlSize(.small)
                     .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)

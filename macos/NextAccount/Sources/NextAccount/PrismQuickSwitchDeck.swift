@@ -8,6 +8,7 @@ struct PrismQuickSwitchDeck: View {
     @EnvironmentObject private var updater: GitHubUpdater
     @Environment(\.openURL) private var openURL
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @AppStorage("codex_roster_notch_pinned_live") private var isPinnedLive = false
     @AppStorage(NotchRosterLayout.rosterExpandedKey) private var isRosterExpanded = false
@@ -42,17 +43,42 @@ struct PrismQuickSwitchDeck: View {
         return store.sortedAccounts(matching)
     }
 
-    private var rosterGridHeight: CGFloat {
-        NotchRosterLayout.rosterGridHeight(
-            accountCount: filteredAccounts.count,
+    private var rosterSectionCounts: [Int] {
+        NotchRosterLayout.planSectionAccountCounts(from: filteredAccounts)
+    }
+
+    private var rosterColumnCount: Int {
+        NotchRosterLayout.columnCount(
+            sectionCounts: rosterSectionCounts,
             expanded: isRosterExpanded
         )
+    }
+
+    private var rosterGridHeight: CGFloat {
+        NotchRosterLayout.rosterGridHeight(
+            sectionCounts: rosterSectionCounts,
+            expanded: isRosterExpanded
+        )
+    }
+
+    private var rosterNeedsScroll: Bool {
+        NotchRosterLayout.needsRosterScroll(
+            sectionCounts: rosterSectionCounts,
+            expanded: isRosterExpanded
+        )
+    }
+
+    private var orderedRosterAccounts: [SavedAccount] {
+        let grouped = Dictionary(grouping: filteredAccounts, by: \.planGroupKey)
+        return ["pro", "plus", "team", "other", "free"].flatMap {
+            store.sortedAccounts(grouped[$0] ?? [])
+        }
     }
 
     private var switchableShortcutMap: [UUID: Int] {
         var map: [UUID: Int] = [:]
         var nextShortcut = 1
-        for account in filteredAccounts {
+        for account in orderedRosterAccounts {
             // Shortcuts only for accounts that can actually be switched to —
             // usable quota or a redeemable banked reset (not exhausted-only).
             let canSwitch = account.isUsableForSwitch || account.restingHasBankedReset
@@ -82,7 +108,7 @@ struct PrismQuickSwitchDeck: View {
 
     private var deckHeight: CGFloat {
         NotchRosterLayout.deckHeight(
-            accountCount: filteredAccounts.count,
+            sectionCounts: rosterSectionCounts,
             expanded: isRosterExpanded,
             hasNextActionCaption: hasNextActionCaption
         )
@@ -95,16 +121,26 @@ struct PrismQuickSwitchDeck: View {
 
             nextActionCaptionRow
 
-            // Lower Deck: Full-width 2-column account switchboard
+            // Lower Deck: Full-width flexible account switchboard
             lowerSwitchboardDeck
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .padding(.horizontal, NotchRosterLayout.deckHorizontalInset)
         .padding(.top, NotchRosterLayout.deckTopInset)
         .padding(.bottom, NotchRosterLayout.deckBottomInset)
-        .frame(width: NotchRosterLayout.deckWidth, height: deckHeight, alignment: .top)
+        .frame(
+            minWidth: NotchRosterLayout.deckWidth,
+            idealWidth: NotchRosterLayout.deckWidth,
+            maxWidth: NotchRosterLayout.deckWidth,
+            minHeight: deckHeight,
+            idealHeight: deckHeight,
+            maxHeight: deckHeight,
+            alignment: .top
+        )
         .animation(PrismTheme.snapSpring, value: isRosterExpanded)
         .animation(PrismTheme.snapSpring, value: filteredAccounts.count)
         .animation(PrismTheme.snapSpring, value: hasNextActionCaption)
+        .animation(PrismTheme.snapSpring, value: rosterColumnCount)
     }
 
     /// Compact “what to do next” line — omitted when all-clear (no mid-deck gap;
@@ -130,19 +166,26 @@ struct PrismQuickSwitchDeck: View {
         }
     }
 
-    // MARK: - Upper Deck (Live | Camera gap | Usage) — balanced heights, minimal void
+    // MARK: - Upper Deck (Live | Camera gap | Usage) — balanced heights, stretch to fill
     private var upperDeckFramingNotch: some View {
-        HStack(alignment: .center, spacing: 8) {
+        let geometry = NotchGeometry.detect()
+        let centerGapWidth = geometry.hasNotch
+            ? geometry.cameraWidth
+            : 156
+        return HStack(alignment: .top, spacing: 8) {
             upperLeftWing
-                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-            // Fixed camera clearance — keep content out from under the notch.
-            upperCenterNotchGap
-                .frame(width: 156, alignment: .center)
+            // Camera clearance column — measured width on notch Macs so wings
+            // never sit under the housing; fixed comfort width on non-notch.
+            upperCenterNotchGap(geometry: geometry)
+                .frame(width: centerGapWidth)
+                .frame(maxHeight: .infinity, alignment: .top)
 
             upperRightWing
-                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     // MARK: - Upper Left Wing (Active identity + compact dual quota)
@@ -190,8 +233,10 @@ struct PrismQuickSwitchDeck: View {
                 showLabels: true,
                 compact: true
             )
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .fill(PrismTheme.surfacePanel)
@@ -303,7 +348,7 @@ struct PrismQuickSwitchDeck: View {
     }
 
     // MARK: - Upper Center Notch Gap (tight under camera)
-    private var upperCenterNotchGap: some View {
+    private func upperCenterNotchGap(geometry: NotchGeometry) -> some View {
         VStack(spacing: 6) {
             HStack(spacing: 5) {
                 let statusIndicator = store.openAIStatus?.indicator ?? "none"
@@ -365,7 +410,7 @@ struct PrismQuickSwitchDeck: View {
                     )
             )
         }
-        .padding(.top, topNotchClearance)
+        .padding(.top, topNotchClearance(for: geometry))
         .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -401,10 +446,12 @@ struct PrismQuickSwitchDeck: View {
         }
     }
 
-    private var topNotchClearance: CGFloat {
-        let maxInset = NSScreen.screens.map(\.safeAreaInsets.top).max() ?? 0
-        // Keep controls clear of the camera housing without a tall dead band.
-        return max(maxInset + 4, 28)
+    /// Vertical clearance so center-column controls sit flush under the camera
+    /// housing. Accounts for the outer `deckTopInset` so total top offset == inset.
+    /// Non-notch: zero extra clearance (only the shared deck top inset).
+    private func topNotchClearance(for geometry: NotchGeometry) -> CGFloat {
+        guard geometry.hasNotch else { return 0 }
+        return max(0, geometry.inset - NotchRosterLayout.deckTopInset)
     }
 
     // MARK: - Upper Right Wing (Telemetry — denser strip)
@@ -415,19 +462,7 @@ struct PrismQuickSwitchDeck: View {
                     .font(PrismTheme.fontBodyCompactBold)
                 Spacer(minLength: 4)
                 if let outlook = store.resetOutlook {
-                    HStack(spacing: 3) {
-                        Image(systemName: "antenna.radiowaves.left.and.right")
-                            .font(PrismTheme.fontMicro)
-                            .foregroundStyle(.secondary)
-                        Text("24h \(outlook.chance24Hours)%")
-                            .font(PrismTheme.fontChip)
-                            .foregroundStyle(outlook.chance24Hours >= 50 ? PrismTheme.amber : PrismTheme.emerald)
-                        Text("·").foregroundStyle(.tertiary)
-                        Text("48h \(outlook.chance48Hours)%")
-                            .font(PrismTheme.fontChip)
-                            .foregroundStyle(outlook.chance48Hours >= 50 ? PrismTheme.amber : PrismTheme.emerald)
-                    }
-                    .help(outlook.windowLabel)
+                    resetOutlookBadge(outlook)
                 }
                 Button {
                     PrismTheme.triggerHaptic()
@@ -436,6 +471,8 @@ struct PrismQuickSwitchDeck: View {
                     store.refreshUsage(scope: .allSaved)
                     store.refreshTokenUsage(silently: true)
                     store.refreshResetOutlook(silently: true)
+                    store.refreshResetTimeline(silently: true)
+                    store.refreshResetJuice(silently: true)
                     store.refreshOpenAIStatus(silently: true)
                 } label: {
                     Group {
@@ -494,14 +531,127 @@ struct PrismQuickSwitchDeck: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            if let juice = store.resetJuice, !juice.efforts.isEmpty {
+                HStack(spacing: 6) {
+                    Text(language.text("Juice", "Juice"))
+                        .font(PrismTheme.fontMicro)
+                        .foregroundStyle(.secondary)
+                    ForEach(juice.efforts.prefix(4)) { effort in
+                        HStack(spacing: 2) {
+                            Text(effort.effort.prefix(1).uppercased())
+                                .font(PrismTheme.fontMicro)
+                                .foregroundStyle(.tertiary)
+                            Text("\(effort.current)")
+                                .font(PrismTheme.fontChip)
+                                .monospacedDigit()
+                                .foregroundStyle(
+                                    effort.delta > 0 ? PrismTheme.emerald
+                                        : effort.delta < 0 ? PrismTheme.ruby
+                                        : PrismTheme.textSecondary
+                                )
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+                .help(language.text("Mức effort còn lại (codex-reset)", "Remaining effort levels (codex-reset)"))
+            }
+
+            if let event = store.resetTimeline?.first {
+                HStack(alignment: .top, spacing: 4) {
+                    Text(event.date)
+                        .font(PrismTheme.fontMicro)
+                        .foregroundStyle(.tertiary)
+                        .monospacedDigit()
+                    Text(event.summary)
+                        .font(PrismTheme.fontChip)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                    Spacer(minLength: 0)
+                }
+                .help(language.text("Sự kiện reset gần nhất", "Latest reset timeline event"))
+            }
+
             usageWingFooter
         }
         .padding(10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(PrismTheme.surfacePanel)
                 .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(PrismTheme.surfaceFill, lineWidth: 0.8))
         )
+    }
+
+    private func resetOutlookBadge(_ outlook: ResetOutlook) -> some View {
+        Button {
+            PrismTheme.triggerHaptic()
+            if let url = outlook.sourceUrl.flatMap(URL.init) {
+                openURL(url)
+            } else {
+                openURL(URL(string: "https://codex-resets.com")!)
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .font(PrismTheme.fontMicro)
+                    .foregroundStyle(PrismTheme.accent)
+                Text(resetOutlookHeadline(outlook))
+                    .font(PrismTheme.fontChip)
+                    .foregroundStyle(PrismTheme.textPrimary)
+                    .lineLimit(1)
+                Image(systemName: "arrow.up.right")
+                    .font(PrismTheme.fontMicro)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2.5)
+            .background(
+                Capsule()
+                    .fill(PrismTheme.surfaceMuted)
+                    .overlay(Capsule().strokeBorder(PrismTheme.surfaceFill, lineWidth: 0.8))
+            )
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .help(resetOutlookTooltip(for: outlook))
+    }
+
+    private func resetOutlookHeadline(_ outlook: ResetOutlook) -> String {
+        ResetOutlookPresentation.headline(outlook, language: language.language)
+    }
+
+    private func resetOutlookTooltip(for outlook: ResetOutlook) -> String {
+        var lines: [String] = [resetOutlookHeadline(outlook)]
+        lines.append(language.text(
+            "Dữ liệu từ Codex Resets · codex-resets.com (không phải lịch reset cá nhân)",
+            "Data from Codex Resets · codex-resets.com (not your account reset schedule)"
+        ))
+        if let date = ResetOutlookPresentation.parseDate(outlook.nextResetAt) {
+            let formatter = DateFormatter()
+            formatter.locale = language.language.locale
+            formatter.dateFormat = "HH:mm dd/MM/yyyy zzz"
+            lines.append(language.text("Lịch dự kiến: ", "Scheduled: ") + formatter.string(from: date))
+        }
+        if let date = ResetOutlookPresentation.parseDate(outlook.lastResetAt) {
+            lines.append(language.text(
+                "Reset gần nhất: ",
+                "Latest reset: "
+            ) + date.formatted(.dateTime.day().month().year().locale(language.language.locale)))
+        }
+        if let summary = outlook.signalSummary, !summary.isEmpty {
+            lines.append("• " + summary)
+        } else if !outlook.windowLabel.isEmpty {
+            lines.append(language.text(
+                "• Khung giờ: \(outlook.windowLabel)",
+                "• Window: \(outlook.windowLabel)"
+            ))
+        }
+        lines.append(language.text(
+            "Nhấp để xem thông báo gốc trên codex-resets.com",
+            "Click to view the source announcement on codex-resets.com"
+        ))
+        return lines.joined(separator: "\n")
     }
 
     private var githubRepoURL: URL {
@@ -564,7 +714,7 @@ struct PrismQuickSwitchDeck: View {
         .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(PrismTheme.surfaceQuiet))
     }
 
-    // MARK: - Lower Deck: 2-Column Full-Width Account Switchboard
+    // MARK: - Lower Deck: Flexible Full-Width Account Switchboard
     private var lowerSwitchboardDeck: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
@@ -620,8 +770,12 @@ struct PrismQuickSwitchDeck: View {
                         "See every account without scrolling"
                     )
                 ) {
-                    withAnimation(PrismTheme.snapSpring) {
+                    if reduceMotion {
                         isRosterExpanded.toggle()
+                    } else {
+                        withAnimation(PrismTheme.snapSpring) {
+                            isRosterExpanded.toggle()
+                        }
                     }
                 }
 
@@ -633,8 +787,12 @@ struct PrismQuickSwitchDeck: View {
                         "Pin open continuously (⌘P)"
                     )
                 ) {
-                    withAnimation(PrismTheme.snapSpring) {
+                    if reduceMotion {
                         isPinnedLive.toggle()
+                    } else {
+                        withAnimation(PrismTheme.snapSpring) {
+                            isPinnedLive.toggle()
+                        }
                     }
                 }
                 .keyboardShortcut("p", modifiers: [.command])
@@ -704,34 +862,72 @@ struct PrismQuickSwitchDeck: View {
             }
 
             ScrollView {
-                let columns = [
-                    GridItem(.flexible(), spacing: 6),
-                    GridItem(.flexible(), spacing: 6)
-                ]
+                let accounts = orderedRosterAccounts
+                let ranges = NotchRosterLayout.columnRanges(accountCount: accounts.count, columns: rosterColumnCount)
+                let showHeaders = rosterSectionCounts.count > 1
+                let shortcuts = switchableShortcutMap
 
-                LazyVGrid(columns: columns, spacing: NotchRosterLayout.rowSpacing) {
-                    ForEach(filteredAccounts) { account in
-                        PrismCompactAccountCard(
-                            account: account,
-                            shortcutIndex: switchableShortcutMap[account.id],
-                            justSwitchedID: $justSwitchedID,
-                            openEditAccount: openEditAccount,
-                            openReloginFlow: openReloginFlow
-                        )
+                HStack(alignment: .top, spacing: NotchRosterLayout.columnSpacing) {
+                    ForEach(ranges.indices, id: \.self) { column in
+                        let range = ranges[column]
+                        VStack(alignment: .leading, spacing: NotchRosterLayout.rowSpacing) {
+                            ForEach(Array(accounts[range])) { account in
+                                let index = accounts.firstIndex(where: { $0.id == account.id }) ?? range.lowerBound
+                                let startsGroup = index == range.lowerBound || accounts[index - 1].planGroupKey != account.planGroupKey
+                                if showHeaders && startsGroup {
+                                    let continued = index > 0 && accounts[index - 1].planGroupKey == account.planGroupKey
+                                    let count = accounts.filter { $0.planGroupKey == account.planGroupKey }.count
+                                    Text("\(planGroupTitle(account.planGroupKey)) · \(count)" + (continued ? language.text(" · tiếp", " · continued") : ""))
+                                        .font(PrismTheme.fontChip)
+                                        .foregroundStyle(PrismTheme.textSecondary)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .frame(height: NotchRosterLayout.sectionHeaderHeight)
+                                        .padding(.top, index == range.lowerBound ? 0 : NotchRosterLayout.sectionHeaderTopGap)
+                                }
+                                PrismCompactAccountCard(
+                                    account: account,
+                                    shortcutIndex: shortcuts[account.id],
+                                    justSwitchedID: $justSwitchedID,
+                                    openEditAccount: openEditAccount,
+                                    openReloginFlow: openReloginFlow,
+                                    meterWidth: rosterColumnCount <= 2 ? 39 : 31
+                                )
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
                     }
                 }
-                .padding(.vertical, 2)
+                .frame(maxWidth: .infinity, alignment: .top)
+                .padding(.vertical, NotchRosterLayout.gridVerticalPadding / 2)
             }
+            .scrollDisabled(!rosterNeedsScroll)
+            .frame(maxWidth: .infinity)
             .frame(height: rosterGridHeight)
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, NotchRosterLayout.switchboardHorizontalInset)
         .padding(.top, 6)
         .padding(.bottom, 4)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(PrismTheme.surfaceQuiet)
                 .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(PrismTheme.borderSubtle, lineWidth: 0.8))
         )
+        .onAppear {
+            store.refreshResetOutlook(silently: true)
+            store.refreshResetTimeline(silently: true)
+            store.refreshResetJuice(silently: true)
+        }
+    }
+
+    private func planGroupTitle(_ key: String) -> String {
+        switch key {
+        case "pro": return language.text("Pro", "Pro")
+        case "plus": return language.text("Plus", "Plus")
+        case "team": return language.text("Team / Business", "Team / Business")
+        case "free": return language.text("Free / Go", "Free / Go")
+        default: return language.text("Khác", "Other")
+        }
     }
 
     private func toolbarIconButton(
@@ -773,8 +969,12 @@ struct PrismQuickSwitchDeck: View {
         let isSelected = rosterFilter == filter
         return Button {
             PrismTheme.triggerHaptic()
-            withAnimation(PrismTheme.snapSpring) {
+            if reduceMotion {
                 rosterFilter = filter
+            } else {
+                withAnimation(PrismTheme.snapSpring) {
+                    rosterFilter = filter
+                }
             }
         } label: {
             Text(label)
@@ -794,12 +994,14 @@ struct PrismQuickSwitchDeck: View {
 private struct PrismCompactAccountCard: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let account: SavedAccount
     let shortcutIndex: Int?
     @Binding var justSwitchedID: UUID?
     let openEditAccount: (SavedAccount) -> Void
     let openReloginFlow: (UUID) -> Void
+    var meterWidth: CGFloat = 48
 
     var body: some View {
         // Freeze the row identity for Login / menu actions — never use selection
@@ -879,7 +1081,24 @@ private struct PrismCompactAccountCard: View {
                         ))
                     }
 
-                    if let balance = account.creditsBalanceDisplay, account.monthlyQuotaRemainingPercent == nil {
+                        if account.hasWeeklyResetWithin24Hours {
+                            HStack(spacing: 2) {
+                                Image(systemName: "clock.arrow.circlepath")
+                                    .font(PrismTheme.fontMicro)
+                                Text("24h")
+                                    .font(PrismTheme.fontMicroChip)
+                            }
+                            .padding(.horizontal, 3)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(PrismTheme.chipFill(PrismTheme.amber, opacity: 0.16)))
+                            .foregroundStyle(PrismTheme.amber)
+                            .help(language.text(
+                                "Weekly reset trong 24 giờ tới",
+                                "Weekly reset within the next 24 hours"
+                            ))
+                        }
+
+                        if let balance = account.creditsBalanceDisplay, account.monthlyQuotaRemainingPercent == nil {
                         Text(language.text("Cr \(balance)", "Cr \(balance)"))
                             .font(PrismTheme.fontMicroChip)
                             .padding(.horizontal, 3)
@@ -921,9 +1140,9 @@ private struct PrismCompactAccountCard: View {
                 fivePercent: quota,
                 weekPercent: week,
                 monthPercent: account.monthlyQuotaRemainingPercent,
-                width: 48,
+                width: meterWidth,
                 height: 3,
-                showAxisLabels: false,
+                showAxisLabels: true,
                 showPercents: true
             )
             .fixedSize()
@@ -933,7 +1152,7 @@ private struct PrismCompactAccountCard: View {
                     HStack(spacing: 2) {
                         Image(systemName: "checkmark.circle.fill")
                             .font(PrismTheme.fontChipIcon)
-                        Text(language.text("Dùng", "Active"))
+                        Text(language.text("Đang dùng", "Active"))
                             .font(PrismTheme.fontCaptionBold)
                     }
                     .foregroundStyle(PrismTheme.emerald)
@@ -967,10 +1186,14 @@ private struct PrismCompactAccountCard: View {
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 4)
-        .frame(height: NotchRosterLayout.rowHeight - 2, alignment: .center)
+        .frame(height: NotchRosterLayout.rowHeight, alignment: .center)
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .fill(isJustSwitched ? PrismTheme.chipFill(PrismTheme.accent) : (account.isActive ? PrismTheme.surfaceSoft : PrismTheme.surfaceFaint))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .strokeBorder(account.isActive ? PrismTheme.emerald.opacity(0.55) : .clear, lineWidth: 1)
+                }
         )
         .contextMenu {
             Button {
@@ -1029,8 +1252,12 @@ private struct PrismCompactAccountCard: View {
     private func switchButton(targetID: UUID) -> some View {
         Button {
             PrismTheme.triggerHaptic()
-            withAnimation(PrismTheme.pressFeedback) {
+            if reduceMotion {
                 justSwitchedID = targetID
+            } else {
+                withAnimation(PrismTheme.pressFeedback) {
+                    justSwitchedID = targetID
+                }
             }
             guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
             store.activate(target, force: true)
@@ -1047,6 +1274,8 @@ private struct PrismCompactAccountCard: View {
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
+        .disabled(store.isBusyForActions || store.isWorking)
+        .opacity(store.isBusyForActions ? 0.6 : 1.0)
         .fixedSize()
     }
 

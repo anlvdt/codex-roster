@@ -1785,6 +1785,7 @@ final class AccountStore: ObservableObject {
                     // Account-authenticated usage is the source of truth for
                     // personal banked credits and actual quota resets.
                     ResetNotifier.showAccountSignals(self.accounts)
+                    ResetNotifier.showOpenAIIncidentIfNeeded(self.openAIStatus)
                     if Date.now >= nextPublicSignalCheck {
                         if let signals = try? await self.cli.decode(
                             [GlobalResetEvent].self,
@@ -2119,8 +2120,8 @@ final class AccountStore: ObservableObject {
     func refreshResetTimeline(silently: Bool = false) {
         Task {
             do {
-                let timeline = try await cli.decode([ResetTimelineEvent].self, arguments: ["reset-timeline"])
-                resetTimeline = timeline
+                let payload = try await cli.decode(ResetTimelinePayload.self, arguments: ["reset-timeline"])
+                resetTimeline = payload.events
             } catch {
                 if !silently { errorMessage = error.localizedDescription }
             }
@@ -3343,8 +3344,11 @@ struct ResetOutlook: Decodable {
     let lastResetAt: String
     let nextResetAt: String?
     let lastResetIsConfirmed: Bool?
+    /// Retained for API decode / legacy callers; UI no longer surfaces forecast %.
     let chance24Hours: Int
     let chance48Hours: Int
+    /// Retained for API decode; UI follows codex-resets.com schedule/status instead.
+    let signalPercent: Int?
     let confidence: String
     let windowLabel: String
     let windowTimezone: String?
@@ -3356,6 +3360,47 @@ struct ResetOutlook: Decodable {
     let sourceFreshness: String?
     let cadenceDays: Double?
     let cadenceAccelerating: Bool?
+}
+
+/// Schedule/status copy aligned with codex-resets.com (no 24h/48h/signal %).
+enum ResetOutlookPresentation {
+    static func parseDate(_ value: String?) -> Date? {
+        guard let value else { return nil }
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return withFraction.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+    }
+
+    static func headline(_ outlook: ResetOutlook, language: AppLanguage) -> String {
+        let kind = outlook.signalKind ?? ""
+        let banked = kind.contains("banked")
+        let name = banked ? "Banked reset" : "Reset"
+        if kind.hasPrefix("scheduled") {
+            if let date = parseDate(outlook.nextResetAt) {
+                if date <= Date() {
+                    return language == .vietnamese
+                        ? "\(name): chờ xác nhận"
+                        : "\(name): awaiting confirmation"
+                }
+                let formatter = DateFormatter()
+                formatter.locale = language.locale
+                formatter.dateFormat = "HH:mm dd/MM"
+                let prefix = language == .vietnamese ? "\(name) dự kiến" : "\(name) scheduled"
+                return "\(prefix) · \(formatter.string(from: date))"
+            }
+            return language == .vietnamese
+                ? "\(name): đã có thông báo"
+                : "\(name): announced"
+        }
+        if kind.hasPrefix("confirmed") {
+            return language == .vietnamese
+                ? "\(name): đã xác nhận"
+                : "\(name): confirmed"
+        }
+        return language == .vietnamese
+            ? "Reset: đang theo dõi"
+            : "Reset: watching"
+    }
 }
 
 private struct GlobalResetEvent: Decodable {
@@ -3378,6 +3423,12 @@ struct ResetTimelineEvent: Decodable, Identifiable {
     let resetKind: String?
 }
 
+/// Matches Rust `ResetTimeline` JSON from `codex-roster reset-timeline --json`.
+private struct ResetTimelinePayload: Decodable {
+    let updatedAt: String?
+    let events: [ResetTimelineEvent]
+}
+
 struct ResetJuice: Decodable {
     let status: String
     let model: String?
@@ -3395,16 +3446,20 @@ struct ResetJuiceEffort: Decodable, Identifiable {
     var id: String { effort }
 }
 
-func trustedTiboSourceURL(_ value: String?) -> URL? {
+func trustedResetSourceURL(_ value: String?) -> URL? {
     guard let value,
           let components = URLComponents(string: value),
           components.scheme?.lowercased() == "https",
-          components.host?.lowercased() == "x.com",
           components.user == nil,
           components.password == nil,
           components.port == nil,
           components.query == nil,
           components.fragment == nil else { return nil }
+    let host = components.host?.lowercased() ?? ""
+    if host == "codex-resets.com" || host == "codex-reset.com" {
+        return components.url
+    }
+    guard host == "x.com" else { return nil }
     let path = components.path.split(separator: "/")
     guard path.count == 3,
           path[0].lowercased() == "thsottiaux",
@@ -3412,6 +3467,11 @@ func trustedTiboSourceURL(_ value: String?) -> URL? {
           !path[2].isEmpty,
           path[2].allSatisfy(\.isNumber) else { return nil }
     return components.url
+}
+
+/// Legacy alias kept for any remaining call sites / tests mid-rename.
+func trustedTiboSourceURL(_ value: String?) -> URL? {
+    trustedResetSourceURL(value)
 }
 
 private enum ResetNotifier {
@@ -3423,12 +3483,18 @@ private enum ResetNotifier {
         var availableCountByAccount: [String: Int] = [:]
         var usageByAccount: [String: UsageObservation] = [:]
         var pendingResetByWindow: [String: PendingReset] = [:]
+        /// Last weekly/5H remaining we already warned about (cross edge ≤15%).
+        var lowQuotaWarnedPercentByAccount: [String: Int] = [:]
+        /// Last OpenAI status indicator we notified about.
+        var lastOpenAIIndicator: String?
 
         private enum CodingKeys: String, CodingKey {
             case seenCreditIDs
             case availableCountByAccount
             case usageByAccount
             case pendingResetByWindow
+            case lowQuotaWarnedPercentByAccount
+            case lastOpenAIIndicator
         }
 
         init() {}
@@ -3439,6 +3505,8 @@ private enum ResetNotifier {
             availableCountByAccount = try values.decodeIfPresent([String: Int].self, forKey: .availableCountByAccount) ?? [:]
             usageByAccount = try values.decodeIfPresent([String: UsageObservation].self, forKey: .usageByAccount) ?? [:]
             pendingResetByWindow = try values.decodeIfPresent([String: PendingReset].self, forKey: .pendingResetByWindow) ?? [:]
+            lowQuotaWarnedPercentByAccount = try values.decodeIfPresent([String: Int].self, forKey: .lowQuotaWarnedPercentByAccount) ?? [:]
+            lastOpenAIIndicator = try values.decodeIfPresent(String.self, forKey: .lastOpenAIIndicator)
         }
     }
 
@@ -3484,29 +3552,50 @@ private enum ResetNotifier {
             let accountKey = account.id.uuidString
             showNewBankedResets(for: account, accountKey: accountKey, state: &state)
             showDetectedQuotaReset(for: account, accountKey: accountKey, state: &state)
+            showLowQuotaWarning(for: account, accountKey: accountKey, state: &state)
         }
         if state != previousState {
             saveSignalState(state)
         }
     }
 
+    /// Notify once when OpenAI status leaves operational (`indicator != none`).
+    static func showOpenAIIncidentIfNeeded(_ status: OpenAIServiceStatus?) {
+        guard let status else { return }
+        var state = loadSignalState()
+        let previous = state.lastOpenAIIndicator
+        state.lastOpenAIIndicator = status.indicator
+        defer { saveSignalState(state) }
+        guard status.indicator != "none" else { return }
+        guard previous != status.indicator else { return }
+        enqueue(
+            identifier: "codex-roster-openai-\(status.indicator)-\(status.updatedAt)",
+            title: AppLanguage.text("OpenAI đang sự cố", "OpenAI service issue"),
+            subtitle: status.description,
+            body: AppLanguage.text(
+                "Trạng thái dịch vụ không còn ổn định. Kiểm tra notch hoặc Operations.",
+                "Service status is no longer healthy. Check the notch or Operations."
+            )
+        )
+    }
+
     static func showPublicSignal(_ signal: GlobalResetEvent) {
         let title = switch signal.kind {
         case "confirmed_banked_reset":
-            AppLanguage.text("Tibo: banked reset đã được cấp", "Tibo: banked reset confirmed")
+            AppLanguage.text("Codex Reset: banked reset đã được cấp", "Codex Reset: banked reset confirmed")
         case "scheduled_banked_reset":
-            AppLanguage.text("Tibo báo banked reset sắp tới", "Tibo scheduled a banked reset")
+            AppLanguage.text("Codex Reset: banked reset sắp tới", "Codex Reset: banked reset scheduled")
         case "confirmed_global_reset":
-            AppLanguage.text("Tibo xác nhận mass reset", "Tibo confirmed a global reset")
+            AppLanguage.text("Codex Reset: mass reset đã xác nhận", "Codex Reset: global reset confirmed")
         case "scheduled_global_reset":
-            AppLanguage.text("Tibo báo mass reset sắp tới", "Tibo scheduled a global reset")
+            AppLanguage.text("Codex Reset: mass reset sắp tới", "Codex Reset: global reset scheduled")
         default:
-            AppLanguage.text("Tibo phát tín hiệu reset", "Tibo posted a reset signal")
+            AppLanguage.text("Codex Reset: tín hiệu reset mới", "Codex Reset: new reset signal")
         }
         enqueue(
-            identifier: "codex-roster-tibo-\(signal.id)",
+            identifier: "codex-roster-reset-\(signal.id)",
             title: title,
-            subtitle: "@thsottiaux · X",
+            subtitle: "codex-resets.com",
             body: signal.summary,
             url: signal.url
         )
@@ -3520,6 +3609,43 @@ private enum ResetNotifier {
             body: AppLanguage.text(
                 "Quota Codex đã được đặt lại. Bạn có thể tiếp tục sử dụng.",
                 "Codex quota has been reset. You can continue using it."
+            )
+        )
+    }
+
+    private static func showLowQuotaWarning(
+        for account: SavedAccount,
+        accountKey: String,
+        state: inout SignalState
+    ) {
+        // Active account only — avoid fan-out noise across the whole roster.
+        guard account.isActive, !account.archived else { return }
+        let weekly = account.usage?.weekly?.displayRemainingPercent
+        let five = account.usage?.fiveHour?.displayRemainingPercent
+        let bottleneck = [weekly, five].compactMap { $0 }.min()
+        guard let remaining = bottleneck else { return }
+        let previous = state.lowQuotaWarnedPercentByAccount[accountKey]
+        // Cross below 15% once; clear when recovered above 25% so a later dip can warn again.
+        if remaining > 25 {
+            state.lowQuotaWarnedPercentByAccount[accountKey] = remaining
+            return
+        }
+        guard remaining <= 15 else { return }
+        if let previous, previous <= 15 { return }
+        state.lowQuotaWarnedPercentByAccount[accountKey] = remaining
+        let windowLabel: String = {
+            if let weekly, weekly == remaining {
+                return AppLanguage.text("Tuần", "Weekly")
+            }
+            return AppLanguage.text("5 giờ", "5-hour")
+        }()
+        enqueue(
+            identifier: "codex-roster-low-quota-\(accountKey)-\(remaining)",
+            title: AppLanguage.text("Quota sắp hết", "Quota running low"),
+            subtitle: account.displayName,
+            body: AppLanguage.text(
+                "\(windowLabel) còn \(remaining)%. Cân nhắc chuyển tài khoản từ notch.",
+                "\(windowLabel) at \(remaining)%. Consider switching from the notch."
             )
         )
     }
@@ -3745,7 +3871,7 @@ private final class ResetNotificationDelegate: NSObject, UNUserNotificationCente
     ) {
         defer { completionHandler() }
         guard let value = response.notification.request.content.userInfo["url"] as? String,
-              let url = trustedTiboSourceURL(value) else { return }
+              let url = trustedResetSourceURL(value) else { return }
         NSWorkspace.shared.open(url)
     }
 }
@@ -3985,16 +4111,44 @@ struct SavedAccount: Identifiable, Decodable {
 
     /// Weekly-dominant ranking: `weekly * 1000 + fiveHour` so any weekly gap
     /// outranks any 5H-only difference. Depleted weekly → `-1`.
+    /// Usable accounts whose weekly window resets within 24h get a Switchboard-
+    /// style urgency boost so they surface above otherwise-equal peers.
     var switchQuotaScore: Int {
-        if let weekly = usage?.weekly {
-            if weekly.isDepleted { return -1 }
-            let five = usage?.fiveHour?.remainingPercent ?? 0
-            return weekly.remainingPercent * 1000 + five
+        let base: Int = {
+            if let weekly = usage?.weekly {
+                if weekly.isDepleted { return -1 }
+                let five = usage?.fiveHour?.remainingPercent ?? 0
+                return weekly.remainingPercent * 1000 + five
+            }
+            if let fiveHour = usage?.fiveHour {
+                return fiveHour.isDepleted ? -1 : fiveHour.remainingPercent
+            }
+            return -1
+        }()
+        if base >= 0, isUsableForSwitch, hasWeeklyResetWithin24Hours {
+            return base + 1_000_000
         }
-        if let fiveHour = usage?.fiveHour {
-            return fiveHour.isDepleted ? -1 : fiveHour.remainingPercent
+        return base
+    }
+
+    /// True when the weekly window still has a future reset within 24 hours.
+    var hasWeeklyResetWithin24Hours: Bool {
+        guard let weekly = usage?.weekly else { return false }
+        let resetAt = weekly.resetAt.value
+        let now = Date()
+        guard resetAt > now else { return false }
+        return resetAt.timeIntervalSince(now) <= 24 * 60 * 60
+    }
+
+    /// Coarse plan band for roster section headers (Switchboard-style grouping).
+    var planGroupKey: String {
+        switch planSortRank {
+        case 0: return "pro"
+        case 1: return "plus"
+        case 2: return "team"
+        case 3: return "free"
+        default: return "other"
         }
-        return -1
     }
 
     /// Single source of truth for where an account belongs in the triage board.
@@ -4099,7 +4253,12 @@ func accountSortIsOrderedByWeeklyQuota(_ left: SavedAccount, _ right: SavedAccou
 }
 
 /// Shared notch roster sizing: collapsed scroll area inside a panoramic deck;
-/// expanded fits all 2-column rows for typical ≤20 accounts.
+/// expanded shows the full roster without scrolling for typical sizes.
+///
+/// Expand grows height to fit every account row **and** plan-section header.
+/// When that would exceed `maxFittedRows`, columns densify (2→4) before any
+/// scroll is allowed. Pathological rosters (dozens of accounts across many
+/// plan bands after max columns) may still scroll — that edge case is intentional.
 ///
 /// Pass `hasNextActionCaption: true` only when the caption row is visible so
 /// all-clear layouts do not reserve a tall empty footer under Danh bạ.
@@ -4107,31 +4266,154 @@ enum NotchRosterLayout {
     /// Expanded panoramic width (keep in sync with `NotchWindowView.maxExpandedWidth`
     /// and `PrismQuickSwitchDeck` frame).
     static let deckWidth: CGFloat = 1020
-    static let collapsedDeckHeight: CGFloat = 476
+    static let collapsedDeckHeight: CGFloat = 490
     static let collapsedRosterHeight: CGFloat = 280
     /// Compact next-action caption between upper wings and roster.
     static let nextActionCaptionHeight: CGFloat = 22
     /// Outer chrome around the panoramic deck (keep in sync with PrismQuickSwitchDeck).
     static let deckHorizontalInset: CGFloat = 12
-    static let deckTopInset: CGFloat = 6
-    static let deckBottomInset: CGFloat = 4
+    static let deckTopInset: CGFloat = deckHorizontalInset
+    static let deckBottomInset: CGFloat = deckHorizontalInset
+    /// Inner padding of the lower switchboard chrome (keep in sync with deck).
+    static let switchboardHorizontalInset: CGFloat = 10
     /// Spacing between upper wings / caption / roster.
     static let deckSectionSpacing: CGFloat = 4
     /// Dense roster cell: name + email/status + trailing meters/button.
     static let rowHeight: CGFloat = 48
+    /// Plan-band header row — shorter than account cards (avoid empty void).
+    static let sectionHeaderHeight: CGFloat = 18
+    /// Extra top padding on non-first plan headers in the grid.
+    static let sectionHeaderTopGap: CGFloat = 4
     static let rowSpacing: CGFloat = 4
-    static let gridVerticalPadding: CGFloat = 2
-    /// Soft cap (~24 accounts) so pathological rosters stay screen-safe.
+    /// Total vertical padding inside the roster scroll content (top + bottom).
+    static let gridVerticalPadding: CGFloat = 4
+    static let columnSpacing: CGFloat = 6
+    /// Floor so expanded cards do not crush name/email/meters.
+    static let minComfortableCardWidth: CGFloat = 290
+    static let minColumns = 2
+    static let maxColumns = 4
+    /// Soft cap so pathological rosters stay screen-safe (~14" MacBook).
     static let maxFittedRows = 12
     static let rosterExpandedKey = "codex_roster_notch_roster_expanded"
 
-    static func rosterGridHeight(accountCount: Int, expanded: Bool) -> CGFloat {
+    /// Usable width inside the LazyVGrid (deck minus outer + switchboard insets).
+    static var rosterContentWidth: CGFloat {
+        deckWidth - 2 * deckHorizontalInset - 2 * switchboardHorizontalInset
+    }
+
+    /// Plan-band section sizes in switchboard display order (non-empty only).
+    static func planSectionAccountCounts(from accounts: [SavedAccount]) -> [Int] {
+        let groupOrder = ["pro", "plus", "team", "other", "free"]
+        let grouped = Dictionary(grouping: accounts, by: \.planGroupKey)
+        return groupOrder.compactMap { key in
+            guard let list = grouped[key], !list.isEmpty else { return nil }
+            return list.count
+        }
+    }
+
+    /// Contiguous slices: read down a column, then continue in the next one.
+    static func columnRanges(accountCount: Int, columns: Int) -> [Range<Int>] {
+        let count = max(0, accountCount)
+        let cols = max(1, columns)
+        let rows = max(1, (count + cols - 1) / cols)
+        return (0..<cols).map { column in
+            let start = min(count, column * rows)
+            return start..<min(count, start + rows)
+        }
+    }
+
+    /// Section fragments in each column, including continued groups.
+    static func columnSectionCounts(sectionCounts: [Int], columns: Int) -> [[Int]] {
+        let counts = sectionCounts.filter { $0 > 0 }
+        return columnRanges(accountCount: counts.reduce(0, +), columns: columns).map { range in
+            var offset = 0
+            return counts.compactMap { count in
+                defer { offset += count }
+                let overlap = min(range.upperBound, offset + count) - max(range.lowerBound, offset)
+                return overlap > 0 ? overlap : nil
+            }
+        }
+    }
+
+    static func contentRowCount(sectionCounts: [Int], columns: Int) -> Int {
+        let showHeaders = sectionCounts.filter { $0 > 0 }.count > 1
+        return max(1, columnSectionCounts(sectionCounts: sectionCounts, columns: columns).map {
+            $0.reduce(0, +) + (showHeaders ? $0.count : 0)
+        }.max() ?? 0)
+    }
+
+    static func accountRowCount(sectionCounts: [Int], columns: Int) -> Int {
+        max(1, columnRanges(accountCount: sectionCounts.reduce(0) { $0 + max(0, $1) }, columns: columns)
+            .map(\.count).max() ?? 0)
+    }
+
+    /// Columns that still keep cards at/above `minComfortableCardWidth`.
+    static func maxColumnsForComfortableWidth() -> Int {
+        let usable = rosterContentWidth
+        let fitted = Int(floor((usable + columnSpacing) / (minComfortableCardWidth + columnSpacing)))
+        return max(minColumns, min(maxColumns, fitted))
+    }
+
+    /// Prefer filling deck width for larger rosters; stay 2-col when small.
+    static func preferredColumnCount(sectionCounts: [Int]) -> Int {
+        let total = sectionCounts.reduce(0, +)
+        let widthCap = maxColumnsForComfortableWidth()
+        if total <= 7 { return minColumns }
+        return widthCap
+    }
+
+    /// Prefer width-aware columns; densify further only to avoid expand scroll.
+    static func columnCount(sectionCounts: [Int], expanded: Bool) -> Int {
+        guard expanded else { return minColumns }
+        let preferred = preferredColumnCount(sectionCounts: sectionCounts)
+        for columns in preferred...maxColumns {
+            if contentRowCount(sectionCounts: sectionCounts, columns: columns) <= maxFittedRows {
+                return columns
+            }
+        }
+        return maxColumns
+    }
+
+    /// Collapsed always scrolls inside a fixed viewport; expand scrolls only when
+    /// content still overflows after column densify.
+    static func needsRosterScroll(sectionCounts: [Int], expanded: Bool) -> Bool {
+        guard expanded else { return true }
+        let columns = columnCount(sectionCounts: sectionCounts, expanded: true)
+        return contentRowCount(sectionCounts: sectionCounts, columns: columns) > maxFittedRows
+    }
+
+    static func rosterGridHeight(sectionCounts: [Int], expanded: Bool) -> CGFloat {
         guard expanded else { return collapsedRosterHeight }
-        let rows = max(1, Int(ceil(Double(max(accountCount, 0)) / 2.0)))
-        let fittedRows = min(rows, maxFittedRows)
-        return CGFloat(fittedRows) * rowHeight
-            + CGFloat(max(0, fittedRows - 1)) * rowSpacing
-            + gridVerticalPadding
+        let columns = columnCount(sectionCounts: sectionCounts, expanded: true)
+        let showHeaders = sectionCounts.filter { $0 > 0 }.count > 1
+        let heights = columnSectionCounts(sectionCounts: sectionCounts, columns: columns).map { counts in
+            let headers = showHeaders ? counts.count : 0
+            let rows = counts.reduce(0, +)
+            return CGFloat(headers) * sectionHeaderHeight
+                + CGFloat(max(0, headers - 1)) * sectionHeaderTopGap
+                + CGFloat(rows) * rowHeight
+                + CGFloat(max(0, headers + rows - 1)) * rowSpacing
+                + gridVerticalPadding
+        }
+        let contentHeight = max(rowHeight + gridVerticalPadding, heights.max() ?? 0)
+        let viewportLimit = CGFloat(maxFittedRows) * rowHeight
+            + CGFloat(maxFittedRows - 1) * rowSpacing + gridVerticalPadding
+        return min(contentHeight, viewportLimit)
+    }
+
+    static func rosterGridHeight(accountCount: Int, expanded: Bool) -> CGFloat {
+        let counts = accountCount > 0 ? [accountCount] : []
+        return rosterGridHeight(sectionCounts: counts, expanded: expanded)
+    }
+
+    static func deckHeight(
+        sectionCounts: [Int],
+        expanded: Bool,
+        hasNextActionCaption: Bool = false
+    ) -> CGFloat {
+        collapsedDeckHeight - collapsedRosterHeight
+            + rosterGridHeight(sectionCounts: sectionCounts, expanded: expanded)
+            + (hasNextActionCaption ? nextActionCaptionHeight : 0)
     }
 
     static func deckHeight(
@@ -4139,9 +4421,12 @@ enum NotchRosterLayout {
         expanded: Bool,
         hasNextActionCaption: Bool = false
     ) -> CGFloat {
-        collapsedDeckHeight - collapsedRosterHeight
-            + rosterGridHeight(accountCount: accountCount, expanded: expanded)
-            + (hasNextActionCaption ? nextActionCaptionHeight : 0)
+        let counts = accountCount > 0 ? [accountCount] : []
+        return deckHeight(
+            sectionCounts: counts,
+            expanded: expanded,
+            hasNextActionCaption: hasNextActionCaption
+        )
     }
 }
 

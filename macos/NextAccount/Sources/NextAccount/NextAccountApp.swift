@@ -4117,6 +4117,8 @@ private struct AboutView: View {
                     .layoutPriority(1)
                 }
 
+                RosterSecondaryLinkBar(current: .about)
+
                 LanguagePreferencePicker()
                     .padding(14)
                     .background(

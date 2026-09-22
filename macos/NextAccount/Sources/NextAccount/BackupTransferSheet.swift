@@ -46,6 +46,11 @@ struct BackupTransferSheet: View {
             .font(RosterSecondaryChrome.body)
             .foregroundStyle(.secondary)
 
+            RosterSecondaryLinkBar(
+                current: isExport ? .exportBackup : .importBackup,
+                dismissBeforeNavigate: true
+            )
+
             if !isExport {
                 Text(language.text(
                     "Cảnh báo: snapshot nhập vào có thể giữ refresh token cũ hơn phiên Codex đang sống. Hãy Save current trước; đừng kích hoạt hàng vừa nhập một cách mù quáng — có thể buộc đăng nhập lại.",

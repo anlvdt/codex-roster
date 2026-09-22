@@ -5,7 +5,6 @@ import SwiftUI
 struct AutomationSettingsView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
-    @Environment(\.openWindow) private var openWindow
     @State private var confirmingFullBackupRestore = false
 
     var body: some View {
@@ -13,6 +12,8 @@ struct AutomationSettingsView: View {
             VStack(alignment: .leading, spacing: RosterSecondaryChrome.sectionSpacing) {
                 Label(language.text("Cài đặt", "Settings"), systemImage: "gearshape.2")
                     .font(RosterSecondaryChrome.title)
+
+                RosterSecondaryLinkBar(current: .settings)
 
                 LanguagePreferencePicker()
                     .padding(14)
@@ -162,17 +163,6 @@ struct AutomationSettingsView: View {
                         }
                         .disabled(store.isWorking)
                         Spacer()
-                    }
-                    .controlSize(.small)
-
-                    Button {
-                        openWindow(id: "operations")
-                        RosterWindowSurface.presentNamedWindow(id: "operations")
-                    } label: {
-                        Label(
-                            language.text("Mở cửa sổ Vận hành…", "Open Operations…"),
-                            systemImage: "wrench.and.screwdriver"
-                        )
                     }
                     .controlSize(.small)
                 }

@@ -84,3 +84,37 @@ import Testing
     let overscan = 1 / scale
     #expect(frame.maxY == topFlush + overscan)
 }
+
+@Test func expandedRosterCountsPlanSectionHeadersInHeight() {
+    // 20 accounts across 4 plan bands: naive ceil(20/2)=10 undersizes the
+    // real grid (4 headers + 4×3 account rows = 16). Expand must densify
+    // columns and fit without scrolling for this typical size.
+    let sections = [5, 5, 5, 5]
+    #expect(NotchRosterLayout.contentRowCount(sectionCounts: sections, columns: 2) == 16)
+    #expect(NotchRosterLayout.columnCount(sectionCounts: sections, expanded: true) == 3)
+    #expect(NotchRosterLayout.contentRowCount(sectionCounts: sections, columns: 3) == 12)
+    #expect(!NotchRosterLayout.needsRosterScroll(sectionCounts: sections, expanded: true))
+
+    let height = NotchRosterLayout.rosterGridHeight(sectionCounts: sections, expanded: true)
+    let expected = 12 * NotchRosterLayout.rowHeight
+        + 11 * NotchRosterLayout.rowSpacing
+        + NotchRosterLayout.gridVerticalPadding
+    #expect(height == expected)
+}
+
+@Test func collapsedRosterKeepsFixedScrollViewport() {
+    let sections = [5, 5, 5, 5]
+    #expect(NotchRosterLayout.needsRosterScroll(sectionCounts: sections, expanded: false))
+    #expect(
+        NotchRosterLayout.rosterGridHeight(sectionCounts: sections, expanded: false)
+            == NotchRosterLayout.collapsedRosterHeight
+    )
+    #expect(NotchRosterLayout.columnCount(sectionCounts: sections, expanded: false) == 2)
+}
+
+@Test func singlePlanBandSkipsHeadersAndFitsTwoColumns() {
+    let sections = [10]
+    #expect(NotchRosterLayout.contentRowCount(sectionCounts: sections, columns: 2) == 5)
+    #expect(NotchRosterLayout.columnCount(sectionCounts: sections, expanded: true) == 2)
+    #expect(!NotchRosterLayout.needsRosterScroll(sectionCounts: sections, expanded: true))
+}

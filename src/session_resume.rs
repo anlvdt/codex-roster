@@ -632,9 +632,11 @@ mod tests {
             Some("dddddddd-dddd-dddd-dddd-dddddddddddd")
         );
         assert_eq!(hint.status, "ready");
-        assert!(take_pending_continue_hint(&app_data, true)
-            .expect("second take")
-            .is_none());
+        assert!(
+            take_pending_continue_hint(&app_data, true)
+                .expect("second take")
+                .is_none()
+        );
     }
 
     fn filetime_set(path: &Path, when: SystemTime) {

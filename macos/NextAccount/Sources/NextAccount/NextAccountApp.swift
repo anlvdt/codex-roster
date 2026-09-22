@@ -4063,6 +4063,10 @@ struct AboutView: View {
     private let codexProfilesURL = URL(string: "https://github.com/Ducksss/codex-profiles")!
     private let codexSwitchboardURL = URL(string: "https://github.com/vyctorbrzezowski/codex-switchboard")!
     private let vibeUsageURL = URL(string: "https://github.com/vibe-cafe/vibe-usage")!
+    private let tokentabURL = URL(string: "https://github.com/damejan80/tokentab")!
+    private let codeburnURL = URL(string: "https://github.com/getagentseal/codeburn")!
+    private let agentMonitorURL = URL(string: "https://github.com/donvito/agent-monitor")!
+    private let codexResetURL = URL(string: "https://codex-reset.com/")!
     private let tiboXURL = URL(string: "https://x.com/thsottiaux")!
     private let openAIBrandURL = URL(string: "https://openai.com/brand/")!
     private let codexPricingURL = URL(string: "https://learn.chatgpt.com/docs/pricing")!
@@ -4202,8 +4206,8 @@ struct AboutView: View {
                 AboutDisclosurePanel(title: language.text("Nguồn tham khảo & giấy phép", "References & licenses"), icon: "link") {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(language.text(
-                            "Đã đối chiếu lại nguồn ngày 22/08/2026. Nền tảng gốc và từng nguồn tham khảo được ghi rõ vai trò, giấy phép và ranh giới sử dụng bên dưới.",
-                            "Sources re-audited on August 22, 2026. The original foundation and every reference are listed below with their role, license, and usage boundary."
+                            "Đã đối chiếu lại nguồn ngày 22/09/2026 với CREDITS.md. Nền tảng gốc và từng nguồn tham khảo được ghi rõ vai trò, giấy phép và ranh giới sử dụng bên dưới.",
+                            "Sources re-audited on September 22, 2026 against CREDITS.md. The original foundation and every reference are listed below with their role, license, and usage boundary."
                         ))
                         .font(RosterSecondaryChrome.callout)
                         .foregroundStyle(.secondary)
@@ -4215,7 +4219,7 @@ struct AboutView: View {
                         )
                         ReferenceLink(
                             title: "steipete / CodexBar",
-                            detail: language.text("Tham khảo UX notch, trạng thái quota và cách trình bày thời điểm reset; triển khai độc lập.", "Reference for notch UX, quota states, and reset-time presentation; independently implemented."),
+                            detail: language.text("Tham khảo UX notch, trạng thái quota, reset và schema usage đa provider; triển khai độc lập.", "Reference for notch UX, quota/reset states, and multi-provider usage schemas; independently implemented."),
                             badge: "MIT · UI/UX reference",
                             url: codexBarURL
                         )
@@ -4238,10 +4242,34 @@ struct AboutView: View {
                             url: codexSwitchboardURL
                         )
                         ReferenceLink(
+                            title: "damejan80 / tokentab",
+                            detail: language.text("Tham khảo tổng hợp session log và báo cáo token cục bộ; triển khai độc lập.", "Reference for local session-log aggregation and token reports; independently reimplemented."),
+                            badge: "MIT · token accounting research",
+                            url: tokentabURL
+                        )
+                        ReferenceLink(
+                            title: "getagentseal / codeburn",
+                            detail: language.text("Tham khảo cache accounting, subagent sidechain và fallback token tích lũy; triển khai độc lập.", "Reference for cache accounting, subagent sidechains, and cumulative-token fallback; independently reimplemented."),
+                            badge: "MIT · token accounting research",
+                            url: codeburnURL
+                        )
+                        ReferenceLink(
+                            title: "donvito / agent-monitor",
+                            detail: language.text("Tham khảo cây subagent (thread_source / parent_thread_id) và ước lượng USD theo model; triển khai độc lập.", "Reference for subagent hierarchy (thread_source / parent_thread_id) and per-model USD estimates; independently reimplemented."),
+                            badge: "MIT · subagent / pricing research",
+                            url: agentMonitorURL
+                        )
+                        ReferenceLink(
                             title: "VibeCafe / @vibe-cafe/vibe-usage",
                             detail: language.text("Nguồn collector và API usage tùy chọn cho thống kê VibeCafe 7 ngày; Codex Roster tích hợp theo endpoint/format công khai và không nhập mã nguồn upstream.", "Optional collector and usage API source for VibeCafe 7-day statistics; Codex Roster integrates against the public endpoint/format without importing upstream source code."),
                             badge: "MIT · usage integration",
                             url: vibeUsageURL
+                        )
+                        ReferenceLink(
+                            title: "codex-reset.com",
+                            detail: language.text("Radar chuẩn hóa bài đăng Tibo khi X cắt ngắn; không gửi credential hay quota tài khoản.", "Normalization radar for truncated Tibo posts; never sends credentials or account quota."),
+                            badge: "Public API · reset radar",
+                            url: codexResetURL
                         )
                         ReferenceLink(
                             title: "Tibo / @thsottiaux",
@@ -4249,7 +4277,7 @@ struct AboutView: View {
                             badge: "X public profile · signal source",
                             url: tiboXURL
                         )
-                        Text(language.text("Ngoại trừ nền tảng MIT được ghi rõ, Codex Roster không đưa mã nguồn, tài sản, credential hay state của các dự án tham khảo vào ứng dụng.", "Except for the credited MIT foundation, Codex Roster does not incorporate source code, assets, credentials, or state from the reference projects."))
+                        Text(language.text("Ngoại trừ nền tảng MIT được ghi rõ, Codex Roster không đưa mã nguồn, tài sản, credential hay state của các dự án tham khảo vào ứng dụng. Chi tiết đầy đủ: CREDITS.md.", "Except for the credited MIT foundation, Codex Roster does not incorporate source code, assets, credentials, or state from the reference projects. Full detail: CREDITS.md."))
                             .font(RosterSecondaryChrome.caption)
                             .foregroundStyle(.secondary)
                     }

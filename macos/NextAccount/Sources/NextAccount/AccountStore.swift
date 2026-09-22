@@ -4126,19 +4126,32 @@ enum NotchRosterLayout {
     static let deckHorizontalInset: CGFloat = 12
     static let deckTopInset: CGFloat = 6
     static let deckBottomInset: CGFloat = 4
+    /// Inner padding of the lower switchboard chrome (keep in sync with deck).
+    static let switchboardHorizontalInset: CGFloat = 10
     /// Spacing between upper wings / caption / roster.
     static let deckSectionSpacing: CGFloat = 4
     /// Dense roster cell: name + email/status + trailing meters/button.
     static let rowHeight: CGFloat = 48
+    /// Plan-band header row — shorter than account cards (avoid empty void).
+    static let sectionHeaderHeight: CGFloat = 18
+    /// Extra top padding on non-first plan headers in the grid.
+    static let sectionHeaderTopGap: CGFloat = 4
     static let rowSpacing: CGFloat = 4
     /// Total vertical padding inside the roster scroll content (top + bottom).
     static let gridVerticalPadding: CGFloat = 4
     static let columnSpacing: CGFloat = 6
+    /// Floor so expanded cards do not crush name/email/meters.
+    static let minComfortableCardWidth: CGFloat = 290
     static let minColumns = 2
     static let maxColumns = 4
     /// Soft cap so pathological rosters stay screen-safe (~14" MacBook).
     static let maxFittedRows = 12
     static let rosterExpandedKey = "codex_roster_notch_roster_expanded"
+
+    /// Usable width inside the LazyVGrid (deck minus outer + switchboard insets).
+    static var rosterContentWidth: CGFloat {
+        deckWidth - 2 * deckHorizontalInset - 2 * switchboardHorizontalInset
+    }
 
     /// Plan-band section sizes in switchboard display order (non-empty only).
     static func planSectionAccountCounts(from accounts: [SavedAccount]) -> [Int] {
@@ -4165,10 +4178,35 @@ enum NotchRosterLayout {
         return max(1, rows)
     }
 
-    /// Prefer 2 columns; densify up to `maxColumns` so expand can avoid scrolling.
+    /// Account-only row count (excludes plan headers) at a column count.
+    static func accountRowCount(sectionCounts: [Int], columns: Int) -> Int {
+        let cols = max(1, columns)
+        guard !sectionCounts.isEmpty else { return 1 }
+        return sectionCounts.reduce(0) { partial, count in
+            partial + max(1, Int(ceil(Double(max(count, 0)) / Double(cols))))
+        }
+    }
+
+    /// Columns that still keep cards at/above `minComfortableCardWidth`.
+    static func maxColumnsForComfortableWidth() -> Int {
+        let usable = rosterContentWidth
+        let fitted = Int(floor((usable + columnSpacing) / (minComfortableCardWidth + columnSpacing)))
+        return max(minColumns, min(maxColumns, fitted))
+    }
+
+    /// Prefer filling deck width for larger rosters; stay 2-col when small.
+    static func preferredColumnCount(sectionCounts: [Int]) -> Int {
+        let total = sectionCounts.reduce(0, +)
+        let widthCap = maxColumnsForComfortableWidth()
+        if total <= 7 { return minColumns }
+        return widthCap
+    }
+
+    /// Prefer width-aware columns; densify further only to avoid expand scroll.
     static func columnCount(sectionCounts: [Int], expanded: Bool) -> Int {
         guard expanded else { return minColumns }
-        for columns in minColumns...maxColumns {
+        let preferred = preferredColumnCount(sectionCounts: sectionCounts)
+        for columns in preferred...maxColumns {
             if contentRowCount(sectionCounts: sectionCounts, columns: columns) <= maxFittedRows {
                 return columns
             }
@@ -4187,11 +4225,22 @@ enum NotchRosterLayout {
     static func rosterGridHeight(sectionCounts: [Int], expanded: Bool) -> CGFloat {
         guard expanded else { return collapsedRosterHeight }
         let columns = columnCount(sectionCounts: sectionCounts, expanded: true)
-        let rows = contentRowCount(sectionCounts: sectionCounts, columns: columns)
-        let fittedRows = min(rows, maxFittedRows)
-        return CGFloat(fittedRows) * rowHeight
-            + CGFloat(max(0, fittedRows - 1)) * rowSpacing
-            + gridVerticalPadding
+        let showHeaders = sectionCounts.count > 1
+        let headerCount = showHeaders ? sectionCounts.count : 0
+        let accountRows = accountRowCount(sectionCounts: sectionCounts, columns: columns)
+        let logicalRows = headerCount + accountRows
+        // Scroll viewport: keep a dense rowHeight budget (conservative).
+        if logicalRows > maxFittedRows {
+            return CGFloat(maxFittedRows) * rowHeight
+                + CGFloat(max(0, maxFittedRows - 1)) * rowSpacing
+                + gridVerticalPadding
+        }
+        // Exact fit: headers are shorter than cards — prevents bottom void.
+        let headerBlock = CGFloat(headerCount) * sectionHeaderHeight
+            + CGFloat(max(0, headerCount - 1)) * sectionHeaderTopGap
+        let accountBlock = CGFloat(accountRows) * rowHeight
+        let spacingBlock = CGFloat(max(0, logicalRows - 1)) * rowSpacing
+        return headerBlock + accountBlock + spacingBlock + gridVerticalPadding
     }
 
     static func rosterGridHeight(accountCount: Int, expanded: Bool) -> CGFloat {

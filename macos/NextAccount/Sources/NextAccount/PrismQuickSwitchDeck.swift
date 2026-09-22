@@ -114,16 +114,26 @@ struct PrismQuickSwitchDeck: View {
 
             nextActionCaptionRow
 
-            // Lower Deck: Full-width 2-column account switchboard
+            // Lower Deck: Full-width flexible account switchboard
             lowerSwitchboardDeck
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .padding(.horizontal, NotchRosterLayout.deckHorizontalInset)
         .padding(.top, NotchRosterLayout.deckTopInset)
         .padding(.bottom, NotchRosterLayout.deckBottomInset)
-        .frame(width: NotchRosterLayout.deckWidth, height: deckHeight, alignment: .top)
+        .frame(
+            minWidth: NotchRosterLayout.deckWidth,
+            idealWidth: NotchRosterLayout.deckWidth,
+            maxWidth: NotchRosterLayout.deckWidth,
+            minHeight: deckHeight,
+            idealHeight: deckHeight,
+            maxHeight: deckHeight,
+            alignment: .top
+        )
         .animation(PrismTheme.snapSpring, value: isRosterExpanded)
         .animation(PrismTheme.snapSpring, value: filteredAccounts.count)
         .animation(PrismTheme.snapSpring, value: hasNextActionCaption)
+        .animation(PrismTheme.snapSpring, value: rosterColumnCount)
     }
 
     /// Compact “what to do next” line — omitted when all-clear (no mid-deck gap;
@@ -149,24 +159,26 @@ struct PrismQuickSwitchDeck: View {
         }
     }
 
-    // MARK: - Upper Deck (Live | Camera gap | Usage) — balanced heights, minimal void
+    // MARK: - Upper Deck (Live | Camera gap | Usage) — balanced heights, stretch to fill
     private var upperDeckFramingNotch: some View {
         let geometry = NotchGeometry.detect()
         let centerGapWidth = geometry.hasNotch
             ? geometry.cameraWidth
             : 156
-        return HStack(alignment: .center, spacing: 8) {
+        return HStack(alignment: .top, spacing: 8) {
             upperLeftWing
-                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
             // Camera clearance column — measured width on notch Macs so wings
             // never sit under the housing; fixed comfort width on non-notch.
             upperCenterNotchGap(geometry: geometry)
-                .frame(width: centerGapWidth, alignment: .center)
+                .frame(width: centerGapWidth)
+                .frame(maxHeight: .infinity, alignment: .top)
 
             upperRightWing
-                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     // MARK: - Upper Left Wing (Active identity + compact dual quota)
@@ -214,8 +226,10 @@ struct PrismQuickSwitchDeck: View {
                 showLabels: true,
                 compact: true
             )
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .fill(PrismTheme.surfacePanel)
@@ -446,7 +460,7 @@ struct PrismQuickSwitchDeck: View {
                             .font(PrismTheme.fontMicro)
                             .foregroundStyle(.secondary)
                         if let signalPercent = outlook.signalPercent {
-                            Text(language.text("Cam kết \(signalPercent)%", "Tibo \(signalPercent)%"))
+                            Text(language.text("Cam kết \(signalPercent)%", "Commit \(signalPercent)%"))
                                 .font(PrismTheme.fontChip)
                                 .foregroundStyle(signalPercent >= 50 ? PrismTheme.amber : PrismTheme.emerald)
                             Text("·").foregroundStyle(.tertiary)
@@ -574,6 +588,7 @@ struct PrismQuickSwitchDeck: View {
             usageWingFooter
         }
         .padding(10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(PrismTheme.surfacePanel)
@@ -641,7 +656,7 @@ struct PrismQuickSwitchDeck: View {
         .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(PrismTheme.surfaceQuiet))
     }
 
-    // MARK: - Lower Deck: 2-Column Full-Width Account Switchboard
+    // MARK: - Lower Deck: Flexible Full-Width Account Switchboard
     private var lowerSwitchboardDeck: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
@@ -790,7 +805,13 @@ struct PrismQuickSwitchDeck: View {
 
             ScrollView {
                 let columns = Array(
-                    repeating: GridItem(.flexible(), spacing: NotchRosterLayout.columnSpacing),
+                    repeating: GridItem(
+                        .flexible(
+                            minimum: NotchRosterLayout.minComfortableCardWidth * 0.72,
+                            maximum: .infinity
+                        ),
+                        spacing: NotchRosterLayout.columnSpacing
+                    ),
                     count: rosterColumnCount
                 )
                 let grouped = Dictionary(grouping: filteredAccounts, by: \.planGroupKey)
@@ -806,9 +827,19 @@ struct PrismQuickSwitchDeck: View {
                             Text(planGroupTitle(section.key))
                                 .font(PrismTheme.fontChip)
                                 .foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .frame(
+                                    maxWidth: .infinity,
+                                    minHeight: NotchRosterLayout.sectionHeaderHeight,
+                                    maxHeight: NotchRosterLayout.sectionHeaderHeight,
+                                    alignment: .leading
+                                )
                                 .gridCellColumns(rosterColumnCount)
-                                .padding(.top, section.key == sections.first?.key ? 0 : 4)
+                                .padding(
+                                    .top,
+                                    section.key == sections.first?.key
+                                        ? 0
+                                        : NotchRosterLayout.sectionHeaderTopGap
+                                )
                         }
                         ForEach(section.accounts) { account in
                             PrismCompactAccountCard(
@@ -816,19 +847,23 @@ struct PrismQuickSwitchDeck: View {
                                 shortcutIndex: switchableShortcutMap[account.id],
                                 justSwitchedID: $justSwitchedID,
                                 openEditAccount: openEditAccount,
-                                openReloginFlow: openReloginFlow
+                                openReloginFlow: openReloginFlow,
+                                meterWidth: rosterColumnCount <= 2 ? 56 : 48
                             )
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .top)
                 .padding(.vertical, NotchRosterLayout.gridVerticalPadding / 2)
             }
             .scrollDisabled(!rosterNeedsScroll)
+            .frame(maxWidth: .infinity)
             .frame(height: rosterGridHeight)
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, NotchRosterLayout.switchboardHorizontalInset)
         .padding(.top, 6)
         .padding(.bottom, 4)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(PrismTheme.surfaceQuiet)
@@ -922,6 +957,7 @@ private struct PrismCompactAccountCard: View {
     @Binding var justSwitchedID: UUID?
     let openEditAccount: (SavedAccount) -> Void
     let openReloginFlow: (UUID) -> Void
+    var meterWidth: CGFloat = 48
 
     var body: some View {
         // Freeze the row identity for Login / menu actions — never use selection
@@ -1060,7 +1096,7 @@ private struct PrismCompactAccountCard: View {
                 fivePercent: quota,
                 weekPercent: week,
                 monthPercent: account.monthlyQuotaRemainingPercent,
-                width: 48,
+                width: meterWidth,
                 height: 3,
                 showAxisLabels: false,
                 showPercents: true

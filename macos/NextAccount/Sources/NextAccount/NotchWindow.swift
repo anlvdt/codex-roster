@@ -153,7 +153,8 @@ struct NotchWindowView: View {
             bottomLeadingRadius: isExpanded ? 24 : 12,
             bottomTrailingRadius: isExpanded ? 24 : 12,
             topTrailingRadius: 0,
-            style: .continuous
+            // Circular keeps zero-radius tops square; continuous softens them.
+            style: .circular
         )
     }
 
@@ -340,7 +341,9 @@ struct NotchWindowView: View {
                 earWidth: earWidth,
                 compactHeight: compactHeight
             )
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                // Top-align so ears sit flush under the window's top edge
+                // (center alignment left a hairline wallpaper strip on notch).
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

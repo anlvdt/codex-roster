@@ -79,12 +79,19 @@ struct NotchGeometry: Equatable {
     }
 
     /// Top-centered window frame, pixel-aligned, anchored on `centerX`.
+    ///
+    /// The top edge is derived as `align(maxY) - h` (never by re-rounding
+    /// `origin.y`, which can drift the top below `maxY`). On notch Macs the
+    /// frame is shifted up by one physical pixel so anti-aliased ear tops stay
+    /// flush under the bezel without revealing wallpaper.
     func windowFrame(width: CGFloat, height: CGFloat) -> NSRect {
         let scale = backingScaleFactor
         let w = Self.align(width, scale: scale)
         let h = Self.align(height, scale: scale)
         let x = Self.align(centerX - w / 2, scale: scale)
-        let y = Self.align(screenFrame.maxY - h, scale: scale)
+        let topFlush = Self.align(screenFrame.maxY, scale: scale)
+        let overscan = hasNotch ? (1 / scale) : 0
+        let y = topFlush - h + overscan
         return NSRect(x: x, y: y, width: w, height: h)
     }
 }

@@ -279,13 +279,15 @@ struct PrismFilamentView: View {
     }
 
     // MARK: - Ear Shapes & Backgrounds
+    // `.circular` keeps zero-radius top corners truly square. Continuous style
+    // blends curvature into adjacent rounded bottoms and reads as a top gap.
     private var leftEarShape: UnevenRoundedRectangle {
         UnevenRoundedRectangle(
             topLeadingRadius: 0,
             bottomLeadingRadius: 10,
             bottomTrailingRadius: 0,
             topTrailingRadius: 0,
-            style: .continuous
+            style: .circular
         )
     }
 
@@ -295,7 +297,7 @@ struct PrismFilamentView: View {
             bottomLeadingRadius: 0,
             bottomTrailingRadius: 10,
             topTrailingRadius: 0,
-            style: .continuous
+            style: .circular
         )
     }
 

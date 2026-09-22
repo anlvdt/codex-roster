@@ -12,6 +12,8 @@ struct OperationsView: View {
             VStack(alignment: .leading, spacing: RosterSecondaryChrome.sectionSpacing) {
                 header
 
+                RosterSecondaryLinkBar(current: .operations)
+
                 nextActionSection
 
                 attentionSummary

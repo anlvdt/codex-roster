@@ -50,8 +50,9 @@ struct PrismFilamentView: View {
     }
 
     private var physicalNotchClearance: CGFloat {
-        // Exact measured camera gap — never shrink/fudge (was `notchWidth - 14`).
-        notchWidth > 0 ? notchWidth : 0
+        // Hug-tight: pull ears 7pt into each side of the measured camera gap
+        // (same formula as NotchGeometry.physicalClearance / pre-da9460b).
+        notchWidth > 0 ? max(notchWidth - 14, 170) : 0
     }
 
     var body: some View {

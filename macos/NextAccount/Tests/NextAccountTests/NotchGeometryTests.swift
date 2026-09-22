@@ -2,6 +2,38 @@ import CoreGraphics
 import Testing
 @testable import CodexRoster
 
+@Test func physicalClearanceHugsCameraWithFourteenPointInset() {
+    let notched = NotchGeometry(
+        cameraWidth: 185,
+        inset: 37,
+        centerX: 720,
+        screenFrame: CGRect(x: 0, y: 0, width: 1440, height: 900),
+        backingScaleFactor: 2
+    )
+    #expect(notched.hasNotch)
+    #expect(notched.physicalClearance == 171) // 185 - 14
+    #expect(notched.cameraWidth == 185) // expanded popup keeps raw width
+
+    let tight = NotchGeometry(
+        cameraWidth: 175,
+        inset: 37,
+        centerX: 720,
+        screenFrame: CGRect(x: 0, y: 0, width: 1440, height: 900),
+        backingScaleFactor: 2
+    )
+    #expect(tight.physicalClearance == 170) // floor
+
+    let nonNotch = NotchGeometry(
+        cameraWidth: 0,
+        inset: 0,
+        centerX: 960,
+        screenFrame: CGRect(x: 0, y: 0, width: 1920, height: 1080),
+        backingScaleFactor: 2
+    )
+    #expect(!nonNotch.hasNotch)
+    #expect(nonNotch.physicalClearance == 0)
+}
+
 @Test func notchWindowFrameNudgesTopAboveScreenMaxY() {
     let geometry = NotchGeometry(
         cameraWidth: 180,

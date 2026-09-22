@@ -19,8 +19,13 @@ struct NotchGeometry: Equatable {
 
     var hasNotch: Bool { cameraWidth > 0 && inset > 0 }
 
-    /// Compact ear-to-ear clearance: exact measured camera width (no fudge).
-    var physicalClearance: CGFloat { hasNotch ? cameraWidth : 0 }
+    /// Compact ear-to-ear clearance. Shrinks the measured camera gap by 14pt so
+    /// ears tuck into the housing (proven hug look from `fc944fa` / pre-`da9460b`).
+    /// Expanded popup still uses raw `cameraWidth` to keep content out from under
+    /// the camera.
+    var physicalClearance: CGFloat {
+        hasNotch ? max(cameraWidth - 14, 170) : 0
+    }
 
     /// Detect the best screen for notch chrome: largest `safeAreaInsets.top`,
     /// falling back to `main` / first screen for non-notch machines.

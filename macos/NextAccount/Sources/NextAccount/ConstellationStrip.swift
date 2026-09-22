@@ -57,6 +57,7 @@ private struct ConstellationBadge: View {
         )
         .accessibilityElement(children: .combine)
         .accessibilityLabel(label)
+        .help(label)
     }
 
     private var label: String {

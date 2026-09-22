@@ -180,7 +180,7 @@ struct AutomationSettingsView: View {
             Button(language.text("Hủy", "Cancel"), role: .cancel) {}
         } message: {
             Text(language.text(
-                "Danh sách hiện tại sẽ được thay bằng bản sao tự động gần nhất. Save current trước; đừng kích hoạt hàng vừa khôi phục một cách mù quáng.",
+                "Danh sách hiện tại sẽ được thay bằng bản sao tự động gần nhất trên máy này. Hãy lưu lại tài khoản hiện tại trước; không nên kích hoạt ngay các hàng vừa khôi phục khi chưa kiểm tra.",
                 "The current list will be replaced by this Mac's latest automatic backup. Save current first; do not activate restored rows blindly."
             ))
         }

@@ -230,7 +230,7 @@ private struct AccountSidebar: View {
                 Section {
                     activeSessionCard(activeAccount)
                 } header: {
-                    Text(language.text("Telemetry", "Telemetry"))
+                    Text(language.text("Viễn trắc & Tiêu thụ", "Telemetry"))
                 }
             }
             Section {
@@ -514,7 +514,7 @@ private struct ProviderOverview: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label(language.text("AI providers", "AI providers"), systemImage: "square.grid.2x2")
+            Label(language.text("Nhà cung cấp AI", "AI providers"), systemImage: "square.grid.2x2")
                 .font(.headline)
             Text(language.text(
                 "Tình trạng phiên và tài khoản đã lưu của OpenAI, Claude, Cursor và Grok.",
@@ -647,7 +647,7 @@ private struct ProviderStatusRow: View {
                 .disabled(store.isBusyForActions)
             } else if provider != .openAI {
                 Label(
-                    hasLiveSession ? language.text("Live", "Live") : language.text("Offline", "Offline"),
+                    hasLiveSession ? language.text("Đang chạy", "Live") : language.text("Ngoại tuyến", "Offline"),
                     systemImage: hasLiveSession ? "checkmark.circle.fill" : "circle"
                 )
                 .font(.caption.weight(.semibold))
@@ -1767,7 +1767,7 @@ private struct TokenUsageDetails: View {
                 TokenBreakdownMetric(title: language.text("Input", "Input"), tokens: summary.inputTokens)
                 TokenBreakdownMetric(title: language.text("Output", "Output"), tokens: summary.outputTokens)
                 TokenBreakdownMetric(title: language.text("Cache", "Cache"), tokens: summary.cachedInputTokens)
-                TokenBreakdownMetric(title: language.text("Lý luận", "Reasoning"), tokens: summary.reasoningOutputTokens)
+                TokenBreakdownMetric(title: language.text("Suy luận", "Reasoning"), tokens: summary.reasoningOutputTokens)
             }
 
             HStack(spacing: 6) {
@@ -2244,10 +2244,25 @@ struct OpenAIStatusCard: View {
 }
 
 private func localizedOpenAIStatus(_ description: String, language: AppLanguage) -> String {
-    guard language == .vietnamese, description == "All Systems Operational" else {
+    guard language == .vietnamese else {
         return description
     }
-    return "Mọi hệ thống đang hoạt động"
+    switch description {
+    case "All Systems Operational":
+        return "Mọi hệ thống đang hoạt động"
+    case "Degraded Performance":
+        return "Hiệu năng bị giảm"
+    case "Partial System Outage":
+        return "Gián đoạn một phần"
+    case "Major Service Outage":
+        return "Gián đoạn nghiêm trọng"
+    case "Minor Service Outage":
+        return "Gián đoạn nhỏ"
+    case "Under Maintenance":
+        return "Đang bảo trì"
+    default:
+        return description
+    }
 }
 
 struct GlobalResetOutlookCard: View {
@@ -2261,7 +2276,7 @@ struct GlobalResetOutlookCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label(language.text("Reset outlook", "Reset outlook"), systemImage: "antenna.radiowaves.left.and.right")
+                Label(language.text("Dự báo reset OpenAI", "OpenAI reset outlook"), systemImage: "antenna.radiowaves.left.and.right")
                     .font(RosterSecondaryChrome.section)
                 Spacer()
                 Button {
@@ -3277,7 +3292,7 @@ private struct SessionDiagnosticsPanel: View {
             tint: account.hasTransientUsageError ? .orange : .accentColor
         )
         DiagnosticMetric(
-            title: language.text("Live session", "Live session"),
+            title: language.text("Phiên đang chạy", "Live session"),
             value: account.isActive
                 ? language.text("Đang dùng", "Active now")
                 : language.text("Đã lưu, chưa nạp", "Saved, not loaded"),
@@ -3523,7 +3538,7 @@ private struct UsageCard: View {
                 Text(language.text("Còn \(window.displayRemainingPercent)%", "\(window.displayRemainingPercent)% remaining"))
                     .font(.title2.weight(.semibold))
                 ProgressView(value: Double(window.displayRemainingPercent), total: 100)
-                    .tint(window.isDepleted ? .red : (window.remainingPercent < 20 ? .orange : .accentColor))
+                    .tint(PrismTheme.quotaTint(percent: window.displayRemainingPercent))
                 Text(language.text("Đặt lại \(window.resetAt.value.formatted(date: .abbreviated, time: .shortened))", "Resets \(window.resetAt.value.formatted(date: .abbreviated, time: .shortened))"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -3884,7 +3899,7 @@ private struct MenuBarLiveSignals: View {
                         .foregroundStyle(rosterActionBlue)
                 }
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(language.text("Reset outlook", "Reset outlook"))
+                    Text(language.text("Dự báo reset", "Reset outlook"))
                         .font(.caption.weight(.semibold))
                     Text(resetSignalText)
                         .font(.caption.monospacedDigit())

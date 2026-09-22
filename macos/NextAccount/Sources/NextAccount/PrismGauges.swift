@@ -69,7 +69,7 @@ struct PrismDualChamberGauge: View {
             VStack(alignment: .leading, spacing: compact ? 2 : 3) {
                 HStack(spacing: 4) {
                     if compact {
-                        Text(language.text("Wk", "Wk"))
+                        Text(language.text("Tuần", "Wk"))
                             .font(PrismTheme.fontChip)
                             .foregroundStyle(.secondary)
                             .frame(width: 22, alignment: .leading)

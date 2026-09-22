@@ -85,11 +85,18 @@ struct PrismFilamentView: View {
                     .font(PrismTheme.fontBodySemibold)
                     .foregroundStyle(PrismTheme.textBright)
                     .fixedSize()
-                Text("\(fivePercent ?? 0)%")
-                    .font(PrismTheme.fontMetricDense)
-                    .monospacedDigit()
-                    .foregroundStyle(fiveTint)
-                    .fixedSize()
+                if let fivePercent {
+                    Text("\(fivePercent)%")
+                        .font(PrismTheme.fontMetricDense)
+                        .monospacedDigit()
+                        .foregroundStyle(fiveTint)
+                        .fixedSize()
+                } else {
+                    Text("—")
+                        .font(PrismTheme.fontBody)
+                        .foregroundStyle(.secondary)
+                        .fixedSize()
+                }
             }
 
             Rectangle()
@@ -102,11 +109,18 @@ struct PrismFilamentView: View {
                     .font(PrismTheme.fontBodySemibold)
                     .foregroundStyle(PrismTheme.textBright)
                     .fixedSize()
-                Text("\(weekPercent ?? 0)%")
-                    .font(PrismTheme.fontMetricDense)
-                    .monospacedDigit()
-                    .foregroundStyle(weekTint)
-                    .fixedSize()
+                if let weekPercent {
+                    Text("\(weekPercent)%")
+                        .font(PrismTheme.fontMetricDense)
+                        .monospacedDigit()
+                        .foregroundStyle(weekTint)
+                        .fixedSize()
+                } else {
+                    Text("—")
+                        .font(PrismTheme.fontBody)
+                        .foregroundStyle(.secondary)
+                        .fixedSize()
+                }
             }
 
             // Banked Reset / Reset Countdown

@@ -86,19 +86,18 @@ import Testing
 }
 
 @Test func expandedRosterCountsPlanSectionHeadersInHeight() {
-    // 20 accounts across 4 plan bands: naive ceil(20/2)=10 undersizes the
-    // real grid (4 headers + 4×3 account rows = 16). Expand must densify
-    // columns and fit without scrolling for this typical size.
+    // Contiguous columns include only their own section headers.
+    // The tallest of three columns has seven accounts and two headers.
     let sections = [5, 5, 5, 5]
-    #expect(NotchRosterLayout.contentRowCount(sectionCounts: sections, columns: 2) == 16)
+    #expect(NotchRosterLayout.contentRowCount(sectionCounts: sections, columns: 2) == 12)
     #expect(NotchRosterLayout.columnCount(sectionCounts: sections, expanded: true) == 3)
-    #expect(NotchRosterLayout.contentRowCount(sectionCounts: sections, columns: 3) == 12)
+    #expect(NotchRosterLayout.contentRowCount(sectionCounts: sections, columns: 3) == 9)
     #expect(!NotchRosterLayout.needsRosterScroll(sectionCounts: sections, expanded: true))
 
     let height = NotchRosterLayout.rosterGridHeight(sectionCounts: sections, expanded: true)
     // Headers use sectionHeaderHeight (not full rowHeight) to avoid bottom void.
-    let headerCount = 4
-    let accountRows = 8
+    let headerCount = 2
+    let accountRows = 7
     let logicalRows = headerCount + accountRows
     let expected = CGFloat(headerCount) * NotchRosterLayout.sectionHeaderHeight
         + CGFloat(headerCount - 1) * NotchRosterLayout.sectionHeaderTopGap
@@ -138,4 +137,17 @@ import Testing
 @Test func comfortableWidthCapsColumnsBeforeCrush() {
     // Panoramic deck (~996pt usable) keeps cards ≥ minComfortableCardWidth → 3 cols.
     #expect(NotchRosterLayout.maxColumnsForComfortableWidth() == 3)
+}
+
+@Test func rosterColumnsPreserveEveryAccountInReadingOrder() {
+    for count in 0...80 {
+        for columns in 1...4 {
+            let ranges = NotchRosterLayout.columnRanges(accountCount: count, columns: columns)
+            #expect(ranges.flatMap { Array($0) } == Array(0..<count))
+            #expect(ranges.count == columns)
+        }
+    }
+    #expect(NotchRosterLayout.columnRanges(accountCount: 15, columns: 3) == [0..<5, 5..<10, 10..<15])
+    #expect(NotchRosterLayout.columnSectionCounts(sectionCounts: [5, 3, 7], columns: 3) == [[5], [3, 2], [5]])
+    #expect(NotchRosterLayout.contentRowCount(sectionCounts: [5, 3, 7], columns: 3) == 7)
 }

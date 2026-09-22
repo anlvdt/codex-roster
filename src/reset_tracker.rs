@@ -212,7 +212,10 @@ fn resolve_active_watch_signal(watch: &ResetsWatch) -> ResolvedOutlookSignal {
             .unwrap_or_default(),
         source_url: source_url_from(watch.source.as_ref(), watch.id.as_deref()),
         last_reset_is_confirmed: false,
-        next_reset_at: watch.scheduled_for.clone().or_else(|| watch.target_at.clone()),
+        next_reset_at: watch
+            .scheduled_for
+            .clone()
+            .or_else(|| watch.target_at.clone()),
         window_label: watch.label.clone(),
         window_timezone: None,
     }
@@ -504,10 +507,9 @@ pub fn fetch_new_reset_events(app_data_dir: &Path) -> Result<Vec<ResetEvent>> {
             if let Some(event) = scheduled_status_event(status.data.scheduled_reset.as_ref()) {
                 push_unique_event(&mut events, event);
             }
-            if let Some(event) = announcement_event(
-                status.data.latest_reset.as_ref(),
-                map_completed_reset_kind,
-            ) {
+            if let Some(event) =
+                announcement_event(status.data.latest_reset.as_ref(), map_completed_reset_kind)
+            {
                 push_unique_event(&mut events, event);
             }
             if let Some(event) = watch_event(status.data.active_watch.as_ref()) {
@@ -934,9 +936,7 @@ mod tests {
                     scheduled_for: Some("2026-09-23T07:00:00.000Z".into()),
                     text: Some("promised a reset for Tuesday".into()),
                     source: Some(ResetsSource {
-                        url: Some(
-                            "https://x.com/thsottiaux/status/2102254445082116335".into(),
-                        ),
+                        url: Some("https://x.com/thsottiaux/status/2102254445082116335".into()),
                     }),
                 }),
                 active_watch: None,

@@ -25,7 +25,8 @@ struct PrismDualChamberGauge: View {
                         Text("5H")
                             .font(PrismTheme.fontChip)
                             .foregroundStyle(.secondary)
-                            .frame(width: 22, alignment: .leading)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .frame(minWidth: 30, alignment: .leading)
                     } else {
                         Label {
                             Text(language.text("Cửa sổ 5 giờ", "5-hour window"))
@@ -72,7 +73,8 @@ struct PrismDualChamberGauge: View {
                         Text(language.text("Tuần", "Wk"))
                             .font(PrismTheme.fontChip)
                             .foregroundStyle(.secondary)
-                            .frame(width: 22, alignment: .leading)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .frame(minWidth: 30, alignment: .leading)
                     } else {
                         Label {
                             Text(language.text("Hạn mức tuần", "Weekly quota"))
@@ -246,8 +248,8 @@ struct PrismFilamentBar: View {
                 Text(label)
                     .font(PrismTheme.fontMicro)
                     .foregroundStyle(PrismTheme.textSecondary)
-                    .frame(width: 14, alignment: .leading)
-                    .fixedSize()
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(minWidth: 14, alignment: .leading)
             }
 
             GeometryReader { geo in

@@ -52,7 +52,7 @@ We also reviewed [vyctorbrzezowski/codex-switchboard](https://github.com/vyctorb
 
 ## Public Codex reset outlook
 
-Codex Roster consumes the public [Codex Resets](https://codex-resets.com/) API (`/api/v1/status`, `/api/v1/resets`) as the source of truth for commitment / scheduled / latest Codex reset events, and [codex-reset.com](https://codex-reset.com/) forecast endpoints for 24h/48h outlook and Watch `signal_percent`. Display surfaces credit Codex Resets (for example “Data from [Codex Resets](https://codex-resets.com/)”). Requests never include account identifiers, credentials, saved sessions, or quota data. Public reset posts remain advisory; authenticated per-account quota returned by Codex is the final confirmation that a reset or banked credit reached an account.
+Codex Roster consumes the public [Codex Resets](https://codex-resets.com/) API (`/api/v1/status`, `/api/v1/resets`) as the source of truth for commitment / scheduled / latest Codex reset events. Live UI (notch chip, Operations outlook, menu-bar signal) shows that schedule/status only — not 24h/48h or Watch `%` — and credits “Data from [Codex Resets](https://codex-resets.com/)”. [codex-reset.com](https://codex-reset.com/) forecast / timeline / juice endpoints remain available for optional detail surfaces. Requests never include account identifiers, credentials, saved sessions, or quota data. Public reset posts remain advisory; authenticated per-account quota returned by Codex is the final confirmation that a reset or banked credit reached an account.
 
 ## VibeCafe usage integration
 

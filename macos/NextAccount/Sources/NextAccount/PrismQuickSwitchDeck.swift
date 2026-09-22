@@ -14,6 +14,7 @@ struct PrismQuickSwitchDeck: View {
     @AppStorage(NotchRosterLayout.rosterExpandedKey) private var isRosterExpanded = false
 
     var openSettings: () -> Void = {}
+    var openOperations: () -> Void = {}
     var openAddAccountFlow: () -> Void = {}
     /// Must receive the clicked row's account ID — never pick "first requiresLogin".
     var openReloginFlow: (UUID) -> Void = { _ in }
@@ -807,6 +808,9 @@ struct PrismQuickSwitchDeck: View {
                     Divider()
                     Button { openSettings() } label: {
                         Label(language.text("Cài đặt…", "Settings…"), systemImage: "gearshape")
+                    }
+                    Button { openOperations() } label: {
+                        Label(language.text("Vận hành…", "Operations…"), systemImage: "wrench.and.screwdriver")
                     }
                     Button { openBackupFlow(.export) } label: {
                         Label(language.text("Sao lưu", "Export backup"), systemImage: "square.and.arrow.up")

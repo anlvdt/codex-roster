@@ -1052,7 +1052,7 @@ final class AccountStore: ObservableObject {
             if self.accounts.contains(where: { $0.id == activated.account.id && $0.isActive }) {
                 self.lastQuotaRefreshAt = .now
             }
-            await self.applySessionResumeIfNeeded(activated.sessionResume)
+            await self.applySessionResumeIfNeeded(activated.sessionResume, continueExhausted: false)
         }
     }
 
@@ -1076,12 +1076,18 @@ final class AccountStore: ObservableObject {
         }
     }
 
-    /// After a successful activate, reopen the *target* account's last remembered
-    /// Codex workspace. Prefers `codex app <cwd>`, then Desktop deep-link, then
-    /// Finder. Does not burn RTs and cannot inject Desktop thread UI across accounts.
-    private func applySessionResumeIfNeeded(_ hint: SessionResumeHint?) async {
+    /// After a successful activate/auto-switch, reopen a remembered Codex thread.
+    ///
+    /// - `continueExhausted == true` (auto-switch): reopen the thread that hit
+    ///   usage limits so work continues on the new account's quota.
+    /// - otherwise (manual Đổi): reopen that account's last remembered workspace/thread.
+    private func applySessionResumeIfNeeded(
+        _ hint: SessionResumeHint?,
+        continueExhausted: Bool
+    ) async {
         guard autoResumeSession else { return }
         guard let hint else {
+            logSessionResume("no hint from activate/auto-switch JSON continueExhausted=\(continueExhausted)")
             sessionResumeCaption = AppLanguage.text(
                 "Auto-resume: không có gợi ý phiên sau khi đổi tài khoản",
                 "Auto-resume: no session hint after account switch"
@@ -1093,36 +1099,35 @@ final class AccountStore: ObservableObject {
 
         switch hint.status {
         case "missing":
+            logSessionResume("status=missing continueExhausted=\(continueExhausted)")
             sessionResumeCaption = AppLanguage.text(
-                "Chưa nhớ workspace cho tài khoản này — mở dự án một lần rồi đổi lại",
-                "No remembered workspace for this account — open a project once, then switch again"
+                continueExhausted
+                    ? "Không tìm thấy thread vừa hết quota để tiếp tục"
+                    : "Chưa nhớ thread/workspace cho tài khoản này — mở dự án một lần rồi đổi lại",
+                continueExhausted
+                    ? "Could not find the usage-limit thread to continue"
+                    : "No remembered thread/workspace for this account — open a project once, then switch again"
             )
             scheduleSessionResumeCaptionClear()
             return
         case "cwd_gone":
-            if let sessionID = hint.sessionId, !sessionID.isEmpty {
-                sessionResumeCaption = AppLanguage.text(
-                    "Thư mục đã nhớ không còn — `codex resume \(shortSessionID(sessionID))`",
-                    "Remembered folder is gone — `codex resume \(shortSessionID(sessionID))`"
-                )
-            } else {
-                sessionResumeCaption = AppLanguage.text(
-                    "Thư mục workspace đã nhớ không còn trên máy",
-                    "Remembered workspace folder is gone on this Mac"
-                )
-            }
-            scheduleSessionResumeCaptionClear()
-            return
+            // Folder gone, but thread id may still open in Desktop / CLI.
+            break
         case "rollout_gone":
-            sessionResumeCaption = AppLanguage.text(
-                "Rollout đã nhớ không còn trên máy",
-                "Remembered rollout is no longer on this Mac"
-            )
-            scheduleSessionResumeCaptionClear()
-            return
+            logSessionResume("status=rollout_gone path=\(hint.rolloutPath ?? "-")")
+            // Thread id can still resume from state_5 even if rollout path is stale.
+            if hint.sessionId == nil || hint.sessionId?.isEmpty == true {
+                sessionResumeCaption = AppLanguage.text(
+                    "Rollout đã nhớ không còn trên máy",
+                    "Remembered rollout is no longer on this Mac"
+                )
+                scheduleSessionResumeCaptionClear()
+                return
+            }
         case "ready", "ready_cli":
             break
         default:
+            logSessionResume("unexpected status=\(hint.status)")
             sessionResumeCaption = AppLanguage.text(
                 "Auto-resume: trạng thái \(hint.status)",
                 "Auto-resume: status \(hint.status)"
@@ -1131,57 +1136,77 @@ final class AccountStore: ObservableObject {
             return
         }
 
-        // Desktop just finished acceptance — brief settle before asking it to open a workspace.
-        try? await Task.sleep(for: .milliseconds(1200))
-
-        if let cwd = hint.cwd, !cwd.isEmpty, FileManager.default.fileExists(atPath: cwd) {
-            let projectName = URL(fileURLWithPath: cwd).lastPathComponent
-            sessionResumeCaption = AppLanguage.text(
-                "Đang khôi phục phiên · \(projectName)",
-                "Resuming session · \(projectName)"
-            )
-            let result = await openRememberedWorkspace(cwd: cwd, sessionID: hint.sessionId)
-            switch result {
-            case .openedDesktop:
-                sessionResumeCaption = AppLanguage.text(
-                    "Đã khôi phục workspace · \(projectName)",
-                    "Restored workspace · \(projectName)"
-                )
-            case .openedFinder:
-                sessionResumeCaption = AppLanguage.text(
-                    "Đã mở thư mục · \(projectName) (Desktop deep-link lỗi)",
-                    "Opened folder · \(projectName) (Desktop deep-link failed)"
-                )
-            case .failed:
-                if let sessionID = hint.sessionId, !sessionID.isEmpty {
-                    sessionResumeCaption = AppLanguage.text(
-                        "Khôi phục thất bại — `codex resume \(shortSessionID(sessionID))` · \(projectName)",
-                        "Resume failed — `codex resume \(shortSessionID(sessionID))` · \(projectName)"
-                    )
-                } else {
-                    sessionResumeCaption = AppLanguage.text(
-                        "Không mở được workspace đã nhớ · \(projectName)",
-                        "Could not open the remembered workspace · \(projectName)"
-                    )
-                }
-            }
-            scheduleSessionResumeCaptionClear()
-            return
-        }
-
-        if let sessionID = hint.sessionId, !sessionID.isEmpty {
-            sessionResumeCaption = AppLanguage.text(
-                "Đã nhớ session \(shortSessionID(sessionID)) — mở bằng `codex resume \(shortSessionID(sessionID))`",
-                "Remembered session \(shortSessionID(sessionID)) — open with `codex resume \(shortSessionID(sessionID))`"
-            )
-            scheduleSessionResumeCaptionClear()
-            return
-        }
-
-        sessionResumeCaption = AppLanguage.text(
-            "Auto-resume: không có cwd/session để khôi phục",
-            "Auto-resume: no cwd/session to restore"
+        logSessionResume(
+            "begin continueExhausted=\(continueExhausted) status=\(hint.status) session=\(hint.sessionId ?? "-") cwd=\(hint.cwd ?? "-")"
         )
+
+        let projectName = hint.cwd.flatMap { path -> String? in
+            guard !path.isEmpty else { return nil }
+            return URL(fileURLWithPath: path).lastPathComponent
+        }
+        let label = projectName ?? hint.sessionId.map(shortSessionID) ?? "session"
+        sessionResumeCaption = AppLanguage.text(
+            continueExhausted
+                ? "Đang tiếp tục thread hết quota · \(label)"
+                : "Đang khôi phục phiên · \(label)",
+            continueExhausted
+                ? "Continuing usage-limit thread · \(label)"
+                : "Resuming session · \(label)"
+        )
+
+        // Cold Desktop after web-session clear needs several seconds before
+        // deep-link navigation works (sidebar_ready ≈ 7s on this machine).
+        await waitForDesktopResumeReady(minimumSettle: .seconds(5), maximumWait: .seconds(14))
+
+        let result = await openRememberedWorkspace(cwd: hint.cwd, sessionID: hint.sessionId)
+        logSessionResume("result=\(String(describing: result)) label=\(label) continueExhausted=\(continueExhausted)")
+        switch result {
+        case .openedThread:
+            var queuedContinue = false
+            if continueExhausted, let sessionID = hint.sessionId, !sessionID.isEmpty {
+                // Deep-link only selects the thread; queue a continue turn so Codex
+                // actually resumes work on the new account's quota.
+                queuedContinue = await queueContinueMessage(threadID: sessionID)
+                logSessionResume("queue continue thread=\(sessionID) ok=\(queuedContinue)")
+            }
+            if continueExhausted {
+                sessionResumeCaption = AppLanguage.text(
+                    queuedContinue
+                        ? "Đã gửi tiếp tục thread hết quota · \(label)"
+                        : "Đã mở thread hết quota · \(label) (chưa gửi được tin tiếp tục)",
+                    queuedContinue
+                        ? "Queued continue on usage-limit thread · \(label)"
+                        : "Opened usage-limit thread · \(label) (continue message not queued)"
+                )
+            } else {
+                sessionResumeCaption = AppLanguage.text(
+                    "Đã khôi phục thread · \(label)",
+                    "Restored thread · \(label)"
+                )
+            }
+        case .openedDesktop:
+            sessionResumeCaption = AppLanguage.text(
+                "Đã mở workspace · \(label)",
+                "Opened workspace · \(label)"
+            )
+        case .openedFinder:
+            sessionResumeCaption = AppLanguage.text(
+                "Đã mở thư mục · \(label) (Desktop deep-link lỗi)",
+                "Opened folder · \(label) (Desktop deep-link failed)"
+            )
+        case .failed:
+            if let sessionID = hint.sessionId, !sessionID.isEmpty {
+                sessionResumeCaption = AppLanguage.text(
+                    "Khôi phục thất bại — `codex resume \(shortSessionID(sessionID))` · \(label)",
+                    "Resume failed — `codex resume \(shortSessionID(sessionID))` · \(label)"
+                )
+            } else {
+                sessionResumeCaption = AppLanguage.text(
+                    "Không mở được workspace đã nhớ · \(label)",
+                    "Could not open the remembered workspace · \(label)"
+                )
+            }
+        }
         scheduleSessionResumeCaptionClear()
     }
 
@@ -1198,54 +1223,145 @@ final class AccountStore: ObservableObject {
     }
 
     private enum SessionResumeOpenResult {
+        case openedThread
         case openedDesktop
         case openedFinder
         case failed
     }
 
-    /// Opens the remembered project for the account just switched *to*.
-    /// Waits for `codex app` exit status (previous MVP returned success on spawn alone).
-    private func openRememberedWorkspace(cwd: String, sessionID: String?) async -> SessionResumeOpenResult {
-        if await runCodexAppWorkspace(cwd) {
-            return .openedDesktop
+    /// Wait until Desktop is up long enough for deep-link handlers + app-server.
+    private func waitForDesktopResumeReady(
+        minimumSettle: Duration,
+        maximumWait: Duration
+    ) async {
+        let start = ContinuousClock.now
+        while !ChatGPTDesktop.isRunning {
+            if ContinuousClock.now - start > maximumWait { return }
+            try? await Task.sleep(for: .milliseconds(250))
         }
-        if await openCodexDesktopDeepLink(cwd: cwd) {
-            return .openedDesktop
+        let elapsed = ContinuousClock.now - start
+        if elapsed < minimumSettle {
+            try? await Task.sleep(for: minimumSettle - elapsed)
         }
-        if await openFolderInFinder(cwd) {
-            return .openedFinder
+    }
+
+    /// Opens the remembered thread (preferred) or project for the account just switched *to*.
+    private func openRememberedWorkspace(cwd: String?, sessionID: String?) async -> SessionResumeOpenResult {
+        if let sessionID, !sessionID.isEmpty {
+            // Retry: first deliveries during cold hydrate are often dropped.
+            for attempt in 1...6 {
+                logSessionResume("thread deep-link attempt \(attempt) id=\(sessionID)")
+                let delivered = await openCodexThreadDeepLink(sessionID: sessionID)
+                if delivered {
+                    if await desktopLogConfirmsThreadOpen(sessionID: sessionID, withinSeconds: 3.5) {
+                        return .openedThread
+                    }
+                    logSessionResume("open delivered but no Desktop resume evidence yet")
+                }
+                try? await Task.sleep(for: .milliseconds(1500))
+            }
+            // Final attempt — only claim thread resume when Desktop log confirms.
+            if await openCodexThreadDeepLink(sessionID: sessionID),
+               await desktopLogConfirmsThreadOpen(sessionID: sessionID, withinSeconds: 5) {
+                return .openedThread
+            }
+            logSessionResume("thread deep-link exhausted without Desktop resume evidence")
         }
-        _ = sessionID // reserved for future non-interactive resume hooks
+
+        let cwdPath = cwd?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !cwdPath.isEmpty, FileManager.default.fileExists(atPath: cwdPath) {
+            if await runCodexAppWorkspace(cwdPath) {
+                return .openedDesktop
+            }
+            if await openCodexNewThreadDeepLink(cwd: cwdPath) {
+                return .openedDesktop
+            }
+            if await openFolderInFinder(cwdPath) {
+                return .openedFinder
+            }
+        }
         return .failed
     }
 
     private func runCodexAppWorkspace(_ cwd: String) async -> Bool {
-        let candidates = [
-            FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".local/bin/codex").path,
-            "/opt/homebrew/bin/codex",
-            "/usr/local/bin/codex",
-        ]
-        for binary in candidates where FileManager.default.isExecutableFile(atPath: binary) {
-            let ok = await runProcessAndWait(
+        for binary in codexCLIBinaries where FileManager.default.isExecutableFile(atPath: binary) {
+            // `codex app` exits in ~2s when Desktop is already up; treat a clean
+            // exit as success. If it is still running past the timeout, kill and
+            // still succeed when Desktop is running (workspace handoff started).
+            let outcome = await runProcessOutcome(
                 executable: binary,
                 arguments: ["app", cwd],
-                timeoutSeconds: 12
+                timeoutSeconds: 8
             )
-            if ok {
+            switch outcome {
+            case .exited(0):
                 return true
+            case .stillRunning:
+                if ChatGPTDesktop.isRunning { return true }
+            case .exited, .failedToStart:
+                continue
             }
         }
         return false
     }
 
-    /// Same LaunchServices path Roster uses to relaunch Desktop, with a workspace URL.
-    private func openCodexDesktopDeepLink(cwd: String) async -> Bool {
+    /// Exact-thread resume — OpenAI-confirmed contract (`codex://threads/<threadId>`).
+    private func openCodexThreadDeepLink(sessionID: String) async -> Bool {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/?#")
+        let encoded = sessionID.addingPercentEncoding(withAllowedCharacters: allowed) ?? sessionID
+        return await openCodexURL("codex://threads/\(encoded)")
+    }
+
+    /// After auto-switch, open the blocked thread then queue a user turn so Desktop
+    /// actually continues (deep-link alone only navigates). Uses `codex queue`.
+    private func queueContinueMessage(threadID: String) async -> Bool {
+        let message = "Continue the interrupted task after the account usage-limit switch."
+        for binary in codexCLIBinaries where FileManager.default.isExecutableFile(atPath: binary) {
+            let outcome = await runProcessCapturingOutput(
+                executable: binary,
+                arguments: ["queue", "--thread", threadID, "--message", message],
+                timeoutSeconds: 20
+            )
+            switch outcome {
+            case let .exited(status, stdout, stderr):
+                let combined = stdout + "\n" + stderr
+                if status == 0, combined.localizedCaseInsensitiveContains("Queued message") {
+                    return true
+                }
+                logSessionResume(
+                    "codex queue exit=\(status) via=\(binary) out=\(String(combined.prefix(240)))"
+                )
+            case .stillRunning:
+                logSessionResume("codex queue still running via=\(binary)")
+            case .failedToStart:
+                continue
+            }
+        }
+        return false
+    }
+
+    private var codexCLIBinaries: [String] {
+        [
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".local/bin/codex").path,
+            "/opt/homebrew/bin/codex",
+            "/usr/local/bin/codex",
+        ]
+    }
+
+    /// Workspace fallback when thread id cannot be opened (opens a new thread at cwd).
+    private func openCodexNewThreadDeepLink(cwd: String) async -> Bool {
         var allowed = CharacterSet.urlQueryAllowed
         allowed.remove(charactersIn: ":/?#[]@!$&'()*+,;=")
         let encodedPath = cwd.addingPercentEncoding(withAllowedCharacters: allowed) ?? cwd
-        let url = "codex://threads/new?path=\(encodedPath)"
-        let bundleIDs = ["com.openai.codex", "com.openai.chat"]
+        return await openCodexURL("codex://threads/new?path=\(encodedPath)")
+    }
+
+    private func openCodexURL(_ url: String) async -> Bool {
+        // `com.openai.chat` is stale on current installs — ChatGPT.app is
+        // `com.openai.codex`. Prefer resolved IDs that LaunchServices knows.
+        let bundleIDs = ChatGPTDesktop.resolvableBundleIDs()
         for bundleID in bundleIDs {
             if await runProcessAndWait(
                 executable: "/usr/bin/open",
@@ -1255,7 +1371,7 @@ final class AccountStore: ObservableObject {
                 return true
             }
         }
-        for path in ["/Applications/ChatGPT.app", "/Applications/Codex.app"]
+        for path in ChatGPTDesktop.knownDesktopAppPaths
         where FileManager.default.fileExists(atPath: path) {
             if await runProcessAndWait(
                 executable: "/usr/bin/open",
@@ -1265,7 +1381,11 @@ final class AccountStore: ObservableObject {
                 return true
             }
         }
-        return false
+        return await runProcessAndWait(
+            executable: "/usr/bin/open",
+            arguments: [url],
+            timeoutSeconds: 8
+        )
     }
 
     private func openFolderInFinder(_ cwd: String) async -> Bool {
@@ -1281,11 +1401,94 @@ final class AccountStore: ObservableObject {
         }
     }
 
-    private func runProcessAndWait(
+    /// Scan recent Codex Desktop logs for evidence the thread deep-link landed.
+    private func desktopLogConfirmsThreadOpen(sessionID: String, withinSeconds: Double) async -> Bool {
+        let root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/com.openai.codex", isDirectory: true)
+        let cutoff = Date().addingTimeInterval(-max(withinSeconds + 30, 60))
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                let fm = FileManager.default
+                guard let enumerator = fm.enumerator(
+                    at: root,
+                    includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+                    options: [.skipsHiddenFiles]
+                ) else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                var candidates: [(Date, URL)] = []
+                while let item = enumerator.nextObject() as? URL {
+                    guard item.pathExtension == "log" else { continue }
+                    let values = try? item.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
+                    guard values?.isRegularFile == true,
+                          let modified = values?.contentModificationDate,
+                          modified >= cutoff else { continue }
+                    candidates.append((modified, item))
+                }
+                candidates.sort { $0.0 > $1.0 }
+                for (_, url) in candidates.prefix(8) {
+                    guard let handle = try? FileHandle(forReadingFrom: url) else { continue }
+                    defer { try? handle.close() }
+                    // Read trailing 256 KiB — enough for recent navigation events.
+                    let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                    if size > 262_144 {
+                        try? handle.seek(toOffset: UInt64(size - 262_144))
+                    }
+                    guard let data = try? handle.readToEnd(),
+                          let text = String(data: data, encoding: .utf8) else { continue }
+                    let hasId = text.contains("conversationId=\(sessionID)")
+                        || text.contains("threadId=\(sessionID)")
+                    let hasResume = text.contains("maybe_resume_success")
+                        || text.contains("method=thread/resume")
+                        || text.contains("name=thread_navigation outcome=success")
+                        || text.contains("name=thread_navigation")
+                    if hasId && hasResume {
+                        continuation.resume(returning: true)
+                        return
+                    }
+                }
+                continuation.resume(returning: false)
+            }
+        }
+    }
+
+    private func logSessionResume(_ message: String) {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/com.codexroster.codex-roster", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("session-resume.log")
+        let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(message)\n"
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: url.path) {
+                if let handle = try? FileHandle(forWritingTo: url) {
+                    defer { try? handle.close() }
+                    try? handle.seekToEnd()
+                    try? handle.write(contentsOf: data)
+                }
+            } else {
+                try? data.write(to: url)
+            }
+        }
+    }
+
+    private enum ProcessRunOutcome {
+        case exited(Int32)
+        case stillRunning
+        case failedToStart
+    }
+
+    private enum ProcessCaptureOutcome {
+        case exited(status: Int32, stdout: String, stderr: String)
+        case stillRunning
+        case failedToStart
+    }
+
+    private func runProcessOutcome(
         executable: String,
         arguments: [String],
         timeoutSeconds: Double
-    ) async -> Bool {
+    ) async -> ProcessRunOutcome {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let process = Process()
@@ -1296,7 +1499,7 @@ final class AccountStore: ObservableObject {
                 do {
                     try process.run()
                 } catch {
-                    continuation.resume(returning: false)
+                    continuation.resume(returning: .failedToStart)
                     return
                 }
                 let deadline = Date().addingTimeInterval(timeoutSeconds)
@@ -1306,12 +1509,79 @@ final class AccountStore: ObservableObject {
                 if process.isRunning {
                     process.terminate()
                     process.waitUntilExit()
-                    continuation.resume(returning: false)
+                    continuation.resume(returning: .stillRunning)
                     return
                 }
                 process.waitUntilExit()
-                continuation.resume(returning: process.terminationStatus == 0)
+                continuation.resume(returning: .exited(process.terminationStatus))
             }
+        }
+    }
+
+    private func runProcessCapturingOutput(
+        executable: String,
+        arguments: [String],
+        timeoutSeconds: Double
+    ) async -> ProcessCaptureOutcome {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: executable)
+                process.arguments = arguments
+                let stdoutPipe = Pipe()
+                let stderrPipe = Pipe()
+                process.standardOutput = stdoutPipe
+                process.standardError = stderrPipe
+                do {
+                    try process.run()
+                } catch {
+                    continuation.resume(returning: .failedToStart)
+                    return
+                }
+                let deadline = Date().addingTimeInterval(timeoutSeconds)
+                while process.isRunning, Date() < deadline {
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
+                if process.isRunning {
+                    process.terminate()
+                    process.waitUntilExit()
+                    continuation.resume(returning: .stillRunning)
+                    return
+                }
+                process.waitUntilExit()
+                let stdout = String(
+                    data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(),
+                    encoding: .utf8
+                ) ?? ""
+                let stderr = String(
+                    data: stderrPipe.fileHandleForReading.readDataToEndOfFile(),
+                    encoding: .utf8
+                ) ?? ""
+                continuation.resume(
+                    returning: .exited(
+                        status: process.terminationStatus,
+                        stdout: stdout,
+                        stderr: stderr
+                    )
+                )
+            }
+        }
+    }
+
+    private func runProcessAndWait(
+        executable: String,
+        arguments: [String],
+        timeoutSeconds: Double
+    ) async -> Bool {
+        switch await runProcessOutcome(
+            executable: executable,
+            arguments: arguments,
+            timeoutSeconds: timeoutSeconds
+        ) {
+        case .exited(0):
+            return true
+        case .exited, .stillRunning, .failedToStart:
+            return false
         }
     }
 
@@ -1960,7 +2230,7 @@ final class AccountStore: ObservableObject {
                 autoSwitchState = .switched(applied.candidateDisplayName ?? candidateName)
                 autoSwitchAllExhaustedNotified = false
                 autoSwitchCooldownUntil = Date.now.addingTimeInterval(30)
-                await self.applySessionResumeIfNeeded(applied.sessionResume)
+                await self.applySessionResumeIfNeeded(applied.sessionResume, continueExhausted: true)
             default:
                 autoSwitchState = .checkFailed
             }
@@ -2500,6 +2770,21 @@ private enum ChatGPTDesktop {
         "/Applications/ChatGPT.app",
         "/Applications/Codex.app",
     ]
+    /// Public read-only view for session-resume deep links.
+    static var knownDesktopAppPaths: [String] { knownAppPaths }
+
+    /// Bundle IDs that LaunchServices can actually resolve on this Mac.
+    /// Filters out stale ids like `com.openai.chat` when only `com.openai.codex` is installed.
+    static func resolvableBundleIDs() -> [String] {
+        let resolved = bundleIdentifiers.filter { id in
+            NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) != nil
+                || knownAppPaths.contains(where: { path in
+                    FileManager.default.fileExists(atPath: path)
+                        && bundleIdentifier(at: URL(fileURLWithPath: path)) == id
+                })
+        }
+        return resolved.isEmpty ? ["com.openai.codex"] : resolved
+    }
     private static let terminatePollInterval: Duration = .milliseconds(50)
     /// Wait long enough for ChatGPT/Codex to flush rotated refresh tokens on
     /// graceful quit before escalating to forceTerminate / SIGKILL.

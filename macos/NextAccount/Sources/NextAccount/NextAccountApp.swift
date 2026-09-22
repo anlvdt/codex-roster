@@ -186,7 +186,7 @@ struct CodexRosterApp: App {
                 .environmentObject(language)
                 .environment(\.locale, language.language.locale)
         }
-        .defaultSize(width: 720, height: 560)
+        .defaultSize(width: RosterSecondaryChrome.aboutWidth, height: RosterSecondaryChrome.aboutHeight)
 
         // Named Window (not Settings scene): LSUIElement/.accessory apps often
         // never surface showSettingsWindow:, so the notch menu opens this id.
@@ -196,7 +196,15 @@ struct CodexRosterApp: App {
                 .environmentObject(language)
                 .environment(\.locale, language.language.locale)
         }
-        .defaultSize(width: 470, height: 580)
+        .defaultSize(width: RosterSecondaryChrome.windowWidth, height: RosterSecondaryChrome.settingsHeight)
+
+        Window(language.text("Vận hành", "Operations"), id: "operations") {
+            OperationsView()
+                .environmentObject(store)
+                .environmentObject(language)
+                .environment(\.locale, language.language.locale)
+        }
+        .defaultSize(width: RosterSecondaryChrome.windowWidth, height: RosterSecondaryChrome.operationsHeight)
     }
 
 }
@@ -457,12 +465,7 @@ private struct AccountSidebar: View {
 
     private func openAboutWindow() {
         openWindow(id: "about")
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        DispatchQueue.main.async {
-            NSApplication.shared.windows
-                .first(where: { $0.identifier?.rawValue == "about" })?
-                .makeKeyAndOrderFront(nil)
-        }
+        RosterWindowSurface.presentNamedWindow(id: "about")
     }
 
 }
@@ -686,191 +689,6 @@ private struct ProviderStatusRow: View {
     }
 }
 
-/// Automation and recovery are settings, not status, so they answer to the
-/// standard Settings shortcut instead of trailing the Overview scroll.
-struct AutomationSettingsView: View {
-    @EnvironmentObject private var store: AccountStore
-    @EnvironmentObject private var language: LanguageStore
-    @State private var confirmingFullBackupRestore = false
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                Label(language.text("Tự động hóa", "Automation"), systemImage: "gearshape.2")
-                    .font(.headline)
-                    .padding(.bottom, 2)
-                Text(language.text(
-                    "Khi thêm tài khoản: chọn Chỉ thêm (giữ phiên live/Desktop) hoặc Thêm & chuyển. Chỉ thêm dùng CODEX_HOME tạm và import snapshot — không tắt Desktop. Nếu cổng 1455/1457 bận, Chỉ thêm sẽ báo lỗi.",
-                    "When adding an account: choose Add only (keep the live session/Desktop) or Add & switch. Add only uses a temporary CODEX_HOME and imports a snapshot — it never quits Desktop. If ports 1455/1457 are busy, Add only fails."
-                ))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Divider()
-                Toggle(language.text("Tự động kiểm tra cửa sổ quota đến hạn", "Automatically check due quota windows"), isOn: Binding(
-                    get: { store.autoStartUsageWindows },
-                    set: { store.setAutoStartUsageWindows($0) }
-                ))
-                .disabled(store.isWorking)
-                Text(language.text(
-                    "Kiểm tra các cửa sổ quota tuần đã đến hạn theo lịch nền. Việc này không đăng nhập lại các tài khoản không hoạt động; theo dõi quota live vẫn chạy riêng khi app hoạt động.",
-                    "Checks due weekly quota windows in the background. It does not sign into inactive accounts; live quota monitoring runs separately while the app is active."
-                ))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                if store.isRefreshingQuotaInBackground {
-                    HStack(spacing: 6) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text(language.text("Đang cập nhật quota…", "Updating quota…"))
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                } else if let lastQuotaRefreshAt = store.lastQuotaRefreshAt {
-                    Text(language.text(
-                        "Đã cập nhật \(lastQuotaRefreshAt.formatted(date: .omitted, time: .shortened))",
-                        "Updated \(lastQuotaRefreshAt.formatted(date: .omitted, time: .shortened))"
-                    ))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-                Divider()
-                Toggle(language.text("Tự động chuyển khi hết quota", "Auto-switch when quota is exhausted"), isOn: Binding(
-                    get: { store.autoSwitchWhenExhausted },
-                    set: { store.setAutoSwitchWhenExhausted($0) }
-                ))
-                .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
-                Text(language.text(
-                    "Khi tài khoản Codex (~/.codex) còn 0%: tìm tài khoản còn quota → force-quit ChatGPT → chuyển phiên → mở lại Desktop. Nhãn phiên theo ~/.codex, không đọc cookie đăng nhập riêng trong ChatGPT.",
-                    "When the Codex account (~/.codex) hits 0%: find an account with quota → force-quit ChatGPT → switch session → relaunch Desktop. The session label follows ~/.codex and does not read a separate ChatGPT cookie login."
-                ))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if let autoSwitchState = store.autoSwitchState {
-                    Text(autoSwitchStatusText(autoSwitchState))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Toggle(language.text("Tự khôi phục phiên / Auto-resume session", "Auto-resume session"), isOn: Binding(
-                    get: { store.autoResumeSession },
-                    set: { store.setAutoResumeSession($0) }
-                ))
-                .disabled(store.isBusyForActions)
-                Text(language.text(
-                    "Trước khi Đổi/auto-switch: nhớ rollout Codex (session id + thư mục dự án) của tài khoản đang rời. Sau khi vào tài khoản đích thành công: mở lại workspace đã nhớ của tài khoản đó (`codex app`). Không chuyển được thread ChatGPT Desktop giữa các tài khoản; dùng `codex resume <id>` cho CLI.",
-                    "Before Đổi/auto-switch: remember that account’s Codex rollout (session id + project folder). After a successful switch onto an account: reopen that account’s remembered workspace (`codex app`). ChatGPT Desktop threads cannot move across accounts; use `codex resume <id>` for CLI."
-                ))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Toggle(language.text("Mở Codex Roster khi đăng nhập macOS", "Open Codex Roster at login"), isOn: Binding(
-                    get: { store.launchAtLoginEnabled },
-                    set: { store.setLaunchAtLogin($0) }
-                ))
-                .disabled(store.isWorking)
-                Text(language.text("Duy trì notch và các kiểm tra tự động sau khi bạn đăng nhập vào máy Mac.", "Keeps the notch and automatic checks available after you sign in to your Mac."))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Toggle(language.text("Hiện notch quota trên cùng màn hình", "Show the quota notch at the top of the screen"), isOn: Binding(
-                    get: { store.notchPanelEnabled },
-                    set: { store.setNotchPanelEnabled($0) }
-                ))
-                Text(language.text("Tắt để gỡ panel khỏi menu bar; mở lại bất cứ lúc nào. Nhấn ⌃⌥R để mở hoặc đóng notch từ bàn phím, Esc để đóng.", "Turn off to remove the panel from the menu bar; you can turn it back on anytime. Press ⌃⌥R to open or close the notch from the keyboard, Esc to close it."))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                HStack {
-                    Button(language.text("Kiểm tra ngay", "Run refresh check now")) {
-                        store.runUsageWindowCheck()
-                    }
-                    .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
-                    if store.autoSwitchWhenExhausted {
-                        Button(language.text("Kiểm tra & chuyển", "Check & switch")) {
-                            store.runAutoSwitchCheck()
-                        }
-                        .disabled(store.isBusyForActions || store.isCheckingAutoSwitch)
-                    }
-                    Spacer()
-                    Button(language.text("Khôi phục tài khoản cũ", "Recover older accounts")) {
-                        store.recoverLegacySnapshots()
-                    }
-                    .disabled(store.isWorking)
-                }
-                .controlSize(.small)
-                Button(language.text("Khôi phục phiên sao lưu", "Restore saved sessions")) {
-                    confirmingFullBackupRestore = true
-                }
-                .controlSize(.small)
-                .disabled(store.isWorking)
-                Text(language.text("Tự động giữ 5 bản sao đầy đủ được mã hóa bằng khóa trong Keychain của máy này; khôi phục xong có thể đăng nhập lại Codex.", "Keeps 5 full backups encrypted with this Mac's Keychain key; restored accounts can sign in to Codex again."))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(language.text(
-                    "Nếu macOS hỏi quyền Keychain cho \"com.codexroster.app\", hãy Allow / Always Allow — đó là khóa mã hóa cục bộ, không phải mật khẩu OpenAI. Xem Giới thiệu để biết thêm.",
-                    "If macOS asks for Keychain access to \"com.codexroster.app\", choose Allow / Always Allow — that is the local encryption key, not your OpenAI password. See About for details."
-                ))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(width: 470, height: 660)
-        .confirmationDialog(
-            language.text("Khôi phục phiên sao lưu?", "Restore saved sessions?"),
-            isPresented: $confirmingFullBackupRestore,
-            titleVisibility: .visible
-        ) {
-            Button(language.text("Khôi phục", "Restore"), role: .destructive) {
-                store.restoreLatestFullBackup()
-            }
-            Button(language.text("Hủy", "Cancel"), role: .cancel) {}
-        } message: {
-            Text(language.text(
-                "Danh sách hiện tại sẽ được thay bằng bản sao tự động gần nhất. Snapshot khôi phục có thể giữ refresh token cũ hơn phiên Codex đang sống — hãy Save current trước và đừng kích hoạt hàng vừa khôi phục một cách mù quáng (có thể buộc đăng nhập lại).",
-                "The current account list will be replaced by this Mac's most recent automatic backup. Restored snapshots may hold stale refresh tokens vs live Codex — save the current session first and do not activate restored rows blindly (that can force re-login)."
-            ))
-        }
-        .background {
-            Color.clear
-        }
-    }
-
-    private func autoSwitchStatusText(_ state: AutoSwitchState) -> String {
-        switch state {
-        case .waitingForLogin:
-            language.text("Tự động chuyển tạm dừng trong khi bạn đăng nhập.", "Auto-switch is paused while you sign in.")
-        case .allAccountsExhausted:
-            language.text("Tất cả tài khoản đã hết quota; tự động chuyển sẽ thử lại sau.", "All accounts are out of quota; auto-switch will try again later.")
-        case .bankedResetAvailable(let account, let count, let isActive):
-            if isActive {
-                language.text(
-                    "\(account) đã hết quota nhưng còn \(count) banked reset. App giữ reset an toàn, không tự tiêu; hãy dùng reset trong Codex rồi Auto-switch sẽ kiểm tra lại.",
-                    "\(account) is out of quota but has \(count) banked reset. The app preserves it instead of spending it silently; redeem it in Codex and Auto-switch will check again."
-                )
-            } else {
-                language.text(
-                    "Không còn account có quota dùng ngay; \(account) còn \(count) banked reset chưa redeem. Auto-switch không chuyển sang account vẫn 0%.",
-                    "No account has immediately usable quota; \(account) has \(count) unredeemed banked reset. Auto-switch will not move to an account that is still at 0%."
-                )
-            }
-        case .closingDesktop:
-            language.text("Đang đóng ChatGPT/Codex trước khi chuyển tài khoản hết quota…", "Closing ChatGPT/Codex before switching the exhausted account…")
-        case .switchingAccount:
-            language.text("Đang chuyển phiên ~/.codex sang tài khoản còn quota…", "Switching the ~/.codex session to an account with quota…")
-        case .relaunchingDesktop:
-            language.text("Đang mở lại ChatGPT để khớp phiên Codex vừa chuyển…", "Relaunching ChatGPT to match the switched Codex session…")
-        case .desktopRelaunchFailed:
-            language.text("Đã chuyển phiên nhưng không thể mở lại ChatGPT. Hãy thử nút Mở lại ChatGPT.", "The session switched, but ChatGPT could not be relaunched. Try Relaunch ChatGPT.")
-        case .waitingForProcesses:
-            language.text("Không đóng được ChatGPT/Codex; hãy đóng thủ công rồi bấm Kiểm tra & chuyển.", "Could not quit ChatGPT/Codex; quit it manually, then tap Check & switch.")
-        case .switched(let name):
-            language.text("Đã tự động chuyển sang \(name) và mở lại ChatGPT.", "Automatically switched to \(name) and relaunched ChatGPT.")
-        case .checkFailed:
-            language.text("Không thể kiểm tra/chuyển quota tự động. Thử Kiểm tra & chuyển.", "Could not auto-check/switch quota. Try Check & switch.")
-        case .generationInProgress:
-            language.text("Codex đang tạo phản hồi; Auto-switch chờ phiên yên trước khi chuyển.", "Codex is generating a response; Auto-switch is waiting for the session to become idle.")
-        }
-    }
-}
-
 /// The single most useful thing the user can do right now. Derived from the
 /// same `AccountTriage` buckets the board renders, so the banner can never
 /// recommend something the board contradicts.
@@ -1048,7 +866,7 @@ enum NextAction {
     }
 }
 
-private struct NextActionBanner: View {
+struct NextActionBanner: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @Binding var selection: UUID?
@@ -1869,7 +1687,7 @@ private struct StarMapHero: View {
     }
 }
 
-private struct TokenUsageOverview: View {
+struct TokenUsageOverview: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
 
@@ -2351,7 +2169,7 @@ private func compactTimeRemaining(until date: Date, language: AppLanguage) -> St
     return language == .vietnamese ? "còn \(minutes) phút" : "\(minutes)m left"
 }
 
-private struct OpenAIStatusCard: View {
+struct OpenAIStatusCard: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @Environment(\.openURL) private var openURL
@@ -2422,7 +2240,7 @@ private func localizedOpenAIStatus(_ description: String, language: AppLanguage)
     return "Mọi hệ thống đang hoạt động"
 }
 
-private struct GlobalResetOutlookCard: View {
+struct GlobalResetOutlookCard: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @Environment(\.openURL) private var openURL
@@ -2802,7 +2620,7 @@ struct AddAccountSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Label(language.text("Thêm tài khoản", "Add account"), systemImage: "plus.circle.fill")
-                .font(.title2.weight(.bold))
+                .font(RosterSecondaryChrome.title)
                 .foregroundStyle(.tint)
 
             if isChoosingMode {
@@ -2811,8 +2629,8 @@ struct AddAccountSheet: View {
                 progressBody
             }
         }
-        .padding(24)
-        .frame(width: 520)
+        .padding(RosterSecondaryChrome.contentPadding)
+        .frame(width: RosterSecondaryChrome.sheetWidth)
         .interactiveDismissDisabled(store.isPendingLogin)
         .onAppear {
             // Resume an in-flight login (app relaunch / sheet reopen).
@@ -3493,7 +3311,7 @@ struct ReloginAccountSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Label(language.text("Đăng nhập lại", "Sign in again"), systemImage: "arrow.triangle.2.circlepath")
-                .font(.title2.weight(.bold))
+                .font(RosterSecondaryChrome.title)
                 .foregroundStyle(.orange)
 
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -3501,6 +3319,7 @@ struct ReloginAccountSheet: View {
                     "Đăng nhập \(account.email) trong cửa sổ vừa mở. Roster sẽ tự xác minh và cập nhật phiên này.",
                     "Sign in as \(account.email) in the window that just opened. Roster will verify and update this session automatically."
                 ))
+                .font(RosterSecondaryChrome.body)
                 .foregroundStyle(.secondary)
                 Button {
                     copyAccountEmail(account.email)
@@ -3578,7 +3397,7 @@ struct ReloginAccountSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 500)
+        .frame(width: RosterSecondaryChrome.sheetWidth)
         .interactiveDismissDisabled(store.isPendingLogin || isCompleting)
         .onAppear {
             guard !didStart else { return }
@@ -3630,10 +3449,10 @@ struct AccountEditorSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Label(language.text("Sửa tài khoản", "Edit account"), systemImage: "pencil.circle.fill")
-                .font(.title2.weight(.bold))
+                .font(RosterSecondaryChrome.title)
                 .foregroundStyle(.tint)
             Text(account.email)
-                .font(.subheadline)
+                .font(RosterSecondaryChrome.body)
                 .foregroundStyle(.secondary)
 
             Form {
@@ -3660,7 +3479,7 @@ struct AccountEditorSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 480)
+        .frame(width: RosterSecondaryChrome.sheetWidth)
         .background {
             Color.clear
         }
@@ -3945,6 +3764,7 @@ struct MenuBarView: View {
     var body: some View {
         PrismQuickSwitchDeck(
             openSettings: openSettings,
+            openOperations: openOperations,
             openAddAccountFlow: openAddAccountFlow,
             openReloginFlow: openReloginFlow,
             openBackupFlow: openBackupFlow,
@@ -3957,15 +3777,16 @@ struct MenuBarView: View {
     }
 
     private func openSettings() {
-        // Mirror openAbout: Settings scene + showSettingsWindow: is a no-op for
-        // this .accessory / statusBar notch app.
+        // Named Window (not Settings scene): LSUIElement/.accessory apps often
+        // never surface showSettingsWindow:. Notch is `.statusBar`, so elevate
+        // this window above it and collapse the panel first.
         openWindow(id: "settings")
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        DispatchQueue.main.async {
-            NSApplication.shared.windows
-                .first(where: { $0.identifier?.rawValue == "settings" })?
-                .makeKeyAndOrderFront(nil)
-        }
+        RosterWindowSurface.presentNamedWindow(id: "settings")
+    }
+
+    private func openOperations() {
+        openWindow(id: "operations")
+        RosterWindowSurface.presentNamedWindow(id: "operations")
     }
 
     private func openReloginFlow(_ accountID: UUID) {
@@ -3992,12 +3813,7 @@ struct MenuBarView: View {
 
     private func openAbout() {
         openWindow(id: "about")
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        DispatchQueue.main.async {
-            NSApplication.shared.windows
-                .first(where: { $0.identifier?.rawValue == "about" })?
-                .makeKeyAndOrderFront(nil)
-        }
+        RosterWindowSurface.presentNamedWindow(id: "about")
     }
 
     private func refreshMenuBar() {
@@ -4285,26 +4101,26 @@ private struct AboutView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 15))
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Codex Roster")
-                            .font(.title.weight(.bold))
+                            .font(RosterSecondaryChrome.title)
                             .lineLimit(1)
                         Text(language.text("Quản lý tài khoản ChatGPT dùng với Codex", "ChatGPT account manager for Codex"))
+                            .font(RosterSecondaryChrome.body)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         Text(language.text("Phiên bản", "Version") + " " + appVersion)
-                            .font(.body)
+                            .font(RosterSecondaryChrome.caption)
                             .foregroundStyle(.tertiary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .layoutPriority(1)
-                    Picker(language.text("Ngôn ngữ", "Language"), selection: $language.language) {
-                        ForEach(AppLanguage.allCases) { option in
-                            Text(option.displayName).tag(option)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .fixedSize()
                 }
+
+                LanguagePreferencePicker()
+                    .padding(14)
+                    .background(
+                        RosterSecondaryChrome.cardFill,
+                        in: RoundedRectangle(cornerRadius: RosterSecondaryChrome.cardRadius)
+                    )
 
                 HStack(spacing: 10) {
                     AboutMetric(icon: "lock.shield.fill", title: "Local-first", detail: language.text("Dữ liệu ở trên Mac", "Data stays on this Mac"))
@@ -4366,7 +4182,7 @@ private struct AboutView: View {
                     }
                     AboutFeatureGroup(title: language.text("Trải nghiệm hệ thống", "System experience")) {
                         AboutBullet(icon: "macbook", text: language.text("Notch là bảng điều khiển chính: quota, chuyển nhanh, tự chuyển, trạng thái dịch vụ, refresh, cài đặt và thoát. Bật/tắt trong Cài đặt, mở bằng ⌃⌥R, đóng bằng Esc.", "The notch is the main control surface: quota, quick switching, auto-switch, service state, refresh, settings, and quit. Toggle it in Settings, open with ⌃⌥R, close with Esc."))
-                        AboutBullet(icon: "power", text: language.text("Tùy chọn mở Codex Roster khi đăng nhập macOS; hỗ trợ phím tắt, Dark Mode và song ngữ Việt–Anh (mặc định Tiếng Việt).", "Optionally launch at macOS sign-in; supports keyboard shortcuts, Dark Mode, and Vietnamese–English (Vietnamese by default)."))
+                        AboutBullet(icon: "power", text: language.text("Tùy chọn mở Codex Roster khi đăng nhập macOS; hỗ trợ phím tắt, Dark Mode và song ngữ Việt–Anh (mặc định theo hệ thống).", "Optionally launch at macOS sign-in; supports keyboard shortcuts, Dark Mode, and Vietnamese–English (defaults to system language)."))
                         AboutBullet(icon: "desktopcomputer", text: language.text("macOS là nền tảng duy nhất đang được phát triển và phát hành; app Windows và Linux hiện tạm dừng, mã nguồn được giữ lại để bảo trì trong tương lai.", "macOS is the only actively developed and released platform; Windows and Linux apps are paused, with source retained for future maintenance."))
                     }
                 }
@@ -4398,7 +4214,7 @@ private struct AboutView: View {
                         "“Codex”, “ChatGPT”, “OpenAI” và các nhãn hiệu liên quan thuộc về OpenAI; các tên này chỉ được dùng để mô tả khả năng tương thích của ứng dụng.",
                         "“Codex”, “ChatGPT”, “OpenAI”, and related marks belong to OpenAI; these names are used only to describe app compatibility."
                     ))
-                    .font(.title3)
+                    .font(RosterSecondaryChrome.callout)
                     .foregroundStyle(.secondary)
                     Button(language.text("Xem hướng dẫn thương hiệu OpenAI", "View OpenAI brand guidelines")) {
                         openURL(openAIBrandURL)
@@ -4412,6 +4228,8 @@ private struct AboutView: View {
                             "Đã đối chiếu lại nguồn ngày 22/08/2026. Nền tảng gốc và từng nguồn tham khảo được ghi rõ vai trò, giấy phép và ranh giới sử dụng bên dưới.",
                             "Sources re-audited on August 22, 2026. The original foundation and every reference are listed below with their role, license, and usage boundary."
                         ))
+                        .font(RosterSecondaryChrome.callout)
+                        .foregroundStyle(.secondary)
                         ReferenceLink(
                             title: "Pimpmuckl / codex-account-switcher",
                             detail: language.text("Nền tảng CLI gốc của Jonathan Liebig; Codex Roster là bản phát triển lại cho macOS.", "Original CLI foundation by Jonathan Liebig; Codex Roster is a macOS product rework."),
@@ -4455,15 +4273,15 @@ private struct AboutView: View {
                             url: tiboXURL
                         )
                         Text(language.text("Ngoại trừ nền tảng MIT được ghi rõ, Codex Roster không đưa mã nguồn, tài sản, credential hay state của các dự án tham khảo vào ứng dụng.", "Except for the credited MIT foundation, Codex Roster does not incorporate source code, assets, credentials, or state from the reference projects."))
-                            .font(.title3)
+                            .font(RosterSecondaryChrome.caption)
                             .foregroundStyle(.secondary)
                     }
                     .padding(.top, 6)
                 }
             }
-            .padding(24)
+            .padding(RosterSecondaryChrome.contentPadding)
         }
-        .frame(minWidth: 720, minHeight: 560)
+        .rosterSecondaryFrame(width: RosterSecondaryChrome.aboutWidth, height: RosterSecondaryChrome.aboutHeight)
         .navigationTitle(language.text("Giới thiệu Codex Roster", "About Codex Roster"))
         .background {
             Color.clear
@@ -4485,17 +4303,17 @@ private struct ReferenceLink: View {
                     Label(title, systemImage: "arrow.up.right.square")
                 }
                 .buttonStyle(.link)
-                .font(.title3.weight(.semibold))
+                .font(RosterSecondaryChrome.section.weight(.semibold))
 
                 Text(badge)
-                    .font(.body.weight(.medium))
+                    .font(RosterSecondaryChrome.footnote.weight(.medium))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
                     .background(.quaternary, in: Capsule())
             }
             Text(detail)
-                .font(.title3)
+                .font(RosterSecondaryChrome.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }

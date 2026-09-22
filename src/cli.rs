@@ -188,11 +188,13 @@ enum Command {
         #[command(subcommand)]
         command: Option<VibeUsageCommand>,
     },
+    /// Global Codex Reset outlook (codex-resets.com status + codex-reset.com forecast).
     ResetOutlook {
         #[arg(long)]
         json: bool,
     },
-    /// Return newly verified global reset events once, for desktop notifications.
+    /// Return newly published Codex reset events once, for desktop notifications
+    /// (codex-resets.com status/list + forecast official_signal).
     ResetEvents {
         #[arg(long)]
         json: bool,
@@ -782,7 +784,7 @@ pub fn run() -> Result<()> {
             } else {
                 if let Some(signal_percent) = outlook.signal_percent {
                     println!(
-                        "Global reset outlook: Tibo commitment {signal_percent}%, {}% in 24h, {}% in 48h",
+                        "Global reset outlook: commitment {signal_percent}%, {}% in 24h, {}% in 48h",
                         outlook.chance_24_hours, outlook.chance_48_hours
                     );
                 } else {

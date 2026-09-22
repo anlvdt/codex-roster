@@ -43,10 +43,18 @@ import Testing
     ))
 }
 
-@Test func trustedTiboSourceURLAcceptsOnlyCanonicalStatusLinks() {
+@Test func trustedResetSourceURLAcceptsCanonicalStatusAndSiteLinks() {
     #expect(
-        trustedTiboSourceURL("https://x.com/thsottiaux/status/2090964822422949999")?.absoluteString
+        trustedResetSourceURL("https://x.com/thsottiaux/status/2090964822422949999")?.absoluteString
             == "https://x.com/thsottiaux/status/2090964822422949999"
+    )
+    #expect(
+        trustedResetSourceURL("https://codex-resets.com/")?.absoluteString
+            == "https://codex-resets.com/"
+    )
+    #expect(
+        trustedResetSourceURL("https://codex-reset.com/api/forecast")?.absoluteString
+            == "https://codex-reset.com/api/forecast"
     )
     for value in [
         "https://evil.example/phish",
@@ -57,7 +65,7 @@ import Testing
         "https://x.com/thsottiaux/status/not-a-tweet",
         "https://x.com/thsottiaux/status/2090964822422949999?redirect=1",
     ] {
-        #expect(trustedTiboSourceURL(value) == nil)
+        #expect(trustedResetSourceURL(value) == nil)
     }
 }
 

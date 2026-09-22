@@ -22,7 +22,7 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
   - **Add only · don’t switch** — signs in under an isolated `CODEX_HOME`, imports `auth.json` into the roster, and leaves live `~/.codex` / ChatGPT Desktop on the current account (no Desktop quit, no web-session clear, no activate, no auto-resume of the new row).
   - **Add & switch** — existing flow: backs up the live session, runs `codex login` against `~/.codex` (may quit Desktop only when login ports 1455/1457 are busy), and leaves the new credential as the live session.
 - Close and relaunch ChatGPT/Codex Desktop after a confirmed account switch.
-- Refresh local Codex token statistics, public OpenAI Status, and reset signals from [Tibo / @thsottiaux on X](https://x.com/thsottiaux), normalized through the independent [Codex Reset radar](https://codex-reset.com/) when X truncates long posts.
+- Refresh local Codex token statistics, public OpenAI Status, and the public [Codex Reset outlook](https://codex-resets.com/) (with forecast probabilities from [codex-reset.com](https://codex-reset.com/)).
 - Sync usage to [VibeCafe](https://vibecafe.ai/) via the optional [`@vibe-cafe/vibe-usage`](https://github.com/vibe-cafe/vibe-usage) collector; its token and estimated-cost statistics remain separate from OpenAI quota/banked-reset credits.
 - When VibeCafe is configured, Roster automatically syncs every 30 minutes and shows the official 7-day API totals (tokens, estimated cost, sessions, and active time) in Status.
 - Offer Vietnamese and English; Vietnamese is the default.
@@ -131,7 +131,7 @@ codex-roster providers usage PROVIDER [ACCOUNT_ID] [--json]
 
 ### Privacy, status, and credits
 
-Saved account data remains on this Mac. OpenAI Status, Tibo's public X profile, and Codex Reset radar requests never include account credentials, identifiers, saved sessions, or quota data. The 24h/48h values are public-signal forecast scores, not statistical probabilities: explicit delivery times anchor scheduled resets, unscheduled hints decay with age, and a confirmed reset remains visible as the latest completed milestone. Public reset posts are advisory; authenticated per-account quota returned by Codex remains the source of truth. Read [OpenAI's current ChatGPT and Codex pricing documentation](https://learn.chatgpt.com/docs/pricing) for plan and usage policy.
+Saved account data remains on this Mac. OpenAI Status and Codex Reset outlook requests (codex-resets.com / codex-reset.com) never include account credentials, identifiers, saved sessions, or quota data. The 24h/48h values are public-signal forecast scores, not statistical probabilities. Public reset posts are advisory; authenticated per-account quota returned by Codex remains the source of truth. Read [OpenAI's current ChatGPT and Codex pricing documentation](https://learn.chatgpt.com/docs/pricing) for plan and usage policy.
 
 Codex Roster is MIT licensed. It is maintained by [LE AN (@anlvdt)](https://github.com/anlvdt). See [AUTHORS.md](AUTHORS.md) and [CREDITS.md](CREDITS.md) for original-foundation, research, and license attribution.
 
@@ -156,7 +156,7 @@ swift build --package-path macos/NextAccount
   - **Chỉ thêm · không đổi phiên** — đăng nhập vào `CODEX_HOME` tạm, import `auth.json` vào roster, giữ nguyên `~/.codex` / ChatGPT Desktop trên tài khoản hiện tại (không tắt Desktop, không xóa web session, không kích hoạt / auto-resume hàng mới).
   - **Thêm & chuyển** — luồng cũ: sao lưu phiên live, `codex login` vào `~/.codex` (có thể đóng Desktop nếu cổng 1455/1457 bận), để credential mới làm phiên đang dùng.
 - Đóng rồi mở lại ChatGPT/Codex Desktop sau khi bạn xác nhận chuyển tài khoản.
-- Theo dõi token Codex cục bộ, trạng thái công khai OpenAI và tín hiệu reset từ [Tibo / @thsottiaux trên X](https://x.com/thsottiaux); dùng radar độc lập [Codex Reset](https://codex-reset.com/) để chuẩn hóa khi X cắt ngắn bài đăng dài.
+- Theo dõi token Codex cục bộ, trạng thái công khai OpenAI và [Codex Reset outlook](https://codex-resets.com/) (xác suất forecast từ [codex-reset.com](https://codex-reset.com/)).
 - Nếu đã cấu hình VibeCafe qua collector tùy chọn [`@vibe-cafe/vibe-usage`](https://github.com/vibe-cafe/vibe-usage), Roster tự đồng bộ mỗi 30 phút và hiển thị thống kê API chính thức trong Status: token, chi phí ước tính, số phiên và thời gian hoạt động trong 7 ngày; các thống kê này tách biệt với quota/banked reset credit của OpenAI.
 - Hỗ trợ Tiếng Việt và English; mặc định là Tiếng Việt.
 
@@ -244,6 +244,6 @@ codex-roster providers usage PROVIDER [ACCOUNT_ID] [--json]
 
 ### Riêng tư, trạng thái và ghi nhận
 
-Dữ liệu tài khoản lưu trên máy Mac. Kiểm tra OpenAI Status, đọc hồ sơ X công khai của Tibo và truy vấn Codex Reset không gửi credential, định danh tài khoản, phiên đã lưu hay dữ liệu quota. Giá trị 24h/48h là điểm dự báo từ tín hiệu công khai, không phải xác suất thống kê: thời điểm giao rõ ràng sẽ neo tín hiệu hẹn trước, tín hiệu mơ hồ giảm theo độ mới, còn reset đã xác nhận được hiển thị như mốc hoàn tất gần nhất. Bài đăng reset công khai chỉ là tín hiệu tham khảo; quota có xác thực do Codex trả về cho từng tài khoản vẫn là nguồn xác nhận cuối cùng. Xem [tài liệu pricing và usage chính thức của ChatGPT/Codex](https://learn.chatgpt.com/docs/pricing) để biết chính sách gói và quota mới nhất.
+Dữ liệu tài khoản lưu trên máy Mac. Kiểm tra OpenAI Status và Codex Reset outlook (codex-resets.com / codex-reset.com) không gửi credential, định danh tài khoản, phiên đã lưu hay dữ liệu quota. Giá trị 24h/48h là điểm dự báo từ tín hiệu công khai, không phải xác suất thống kê. Bài đăng reset công khai chỉ là tín hiệu tham khảo; quota có xác thực do Codex trả về cho từng tài khoản vẫn là nguồn xác nhận cuối cùng. Xem [tài liệu pricing và usage chính thức của ChatGPT/Codex](https://learn.chatgpt.com/docs/pricing) để biết chính sách gói và quota mới nhất.
 
 Codex Roster dùng giấy phép MIT, được duy trì bởi [LE AN (@anlvdt)](https://github.com/anlvdt). Xem [AUTHORS.md](AUTHORS.md) và [CREDITS.md](CREDITS.md) để biết ghi nhận tác giả, nguồn tham khảo và ranh giới giấy phép.

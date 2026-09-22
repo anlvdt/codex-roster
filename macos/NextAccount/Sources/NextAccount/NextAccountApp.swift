@@ -2256,18 +2256,18 @@ struct GlobalResetOutlookCard: View {
     @Environment(\.openURL) private var openURL
     @State private var showingSignalDetails = false
 
-    private let sourceURL = URL(string: "https://x.com/thsottiaux")!
+    private let sourceURL = URL(string: "https://codex-resets.com/")!
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label(language.text("Tibo reset radar", "Tibo reset radar"), systemImage: "antenna.radiowaves.left.and.right")
+                Label(language.text("Reset outlook", "Reset outlook"), systemImage: "antenna.radiowaves.left.and.right")
                     .font(RosterSecondaryChrome.section)
                 Spacer()
                 Button {
                     openURL(outlookSourceURL ?? sourceURL)
                 } label: {
-                    Label("@thsottiaux", systemImage: "arrow.up.right.square")
+                    Label("codex-resets.com", systemImage: "arrow.up.right.square")
                 }
                 .buttonStyle(.link)
                 .controlSize(.small)
@@ -2283,7 +2283,7 @@ struct GlobalResetOutlookCard: View {
                 HStack(alignment: .top, spacing: 12) {
                     if let signalPercent = outlook.signalPercent {
                         ResetOutlookMetric(
-                            title: language.text("Cam kết Tibo", "Tibo commitment"),
+                            title: language.text("Cam kết", "Commitment"),
                             value: "\(signalPercent)%",
                             tint: forecastColor(signalPercent, high: .red)
                         )
@@ -2489,7 +2489,7 @@ struct GlobalResetOutlookCard: View {
     }
 
     private var outlookSourceURL: URL? {
-        trustedTiboSourceURL(store.resetOutlook?.sourceUrl)
+        trustedResetSourceURL(store.resetOutlook?.sourceUrl)
     }
 }
 
@@ -3884,7 +3884,7 @@ private struct MenuBarLiveSignals: View {
                         .foregroundStyle(rosterActionBlue)
                 }
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Tibo radar")
+                    Text(language.text("Reset outlook", "Reset outlook"))
                         .font(.caption.weight(.semibold))
                     Text(resetSignalText)
                         .font(.caption.monospacedDigit())
@@ -4111,7 +4111,7 @@ struct AboutView: View {
     private let codeburnURL = URL(string: "https://github.com/getagentseal/codeburn")!
     private let agentMonitorURL = URL(string: "https://github.com/donvito/agent-monitor")!
     private let codexResetURL = URL(string: "https://codex-reset.com/")!
-    private let tiboXURL = URL(string: "https://x.com/thsottiaux")!
+    private let codexResetsURL = URL(string: "https://codex-resets.com/")!
     private let openAIBrandURL = URL(string: "https://openai.com/brand/")!
     private let codexPricingURL = URL(string: "https://learn.chatgpt.com/docs/pricing")!
 
@@ -4156,7 +4156,7 @@ struct AboutView: View {
                 HStack(alignment: .top, spacing: 14) {
                     AboutPanel(title: language.text("Tóm tắt", "Overview"), icon: "person.3.sequence.fill") {
                         AboutBullet(icon: "person.crop.circle", text: language.text("Nhìn ngay phiên đang dùng, quota, thời điểm reset và banked reset.", "See the active session, quota, reset time, and banked resets at a glance."))
-                        AboutBullet(icon: "antenna.radiowaves.left.and.right", text: language.text("Theo dõi live trạng thái OpenAI và tín hiệu reset công khai của Tibo.", "Monitor OpenAI service health and Tibo's public reset signals live."))
+                        AboutBullet(icon: "antenna.radiowaves.left.and.right", text: language.text("Theo dõi live trạng thái OpenAI và Codex Reset outlook công khai.", "Monitor OpenAI service health and the public Codex Reset outlook live."))
                         AboutBullet(icon: "arrow.left.arrow.right.circle", text: language.text("Chuyển nhanh từ notch đến tài khoản còn quota hoặc có banked reset.", "Quick-switch from the notch to accounts with usable quota or banked resets."))
                     }
 
@@ -4201,7 +4201,7 @@ struct AboutView: View {
                     }
                     AboutFeatureGroup(title: language.text("Theo dõi & sao lưu", "Monitoring & backup")) {
                         AboutBullet(icon: "chart.bar.xaxis", text: language.text("Thống kê token cục bộ theo ngày, 7 ngày, 30 ngày và 12 tháng từ session logs.", "Read local session logs for token totals by day, 7 days, 30 days, and 12 months."))
-                        AboutBullet(icon: "waveform.path.ecg", text: language.text("Đọc trực tiếp tín hiệu reset công khai của Tibo trên X, rồi xác nhận riêng bằng quota tài khoản thực tế.", "Read Tibo's public reset signals directly from X, then verify separately against actual account quota."))
+                        AboutBullet(icon: "waveform.path.ecg", text: language.text("Đọc Codex Reset outlook từ API công khai, rồi xác nhận riêng bằng quota tài khoản Codex thực tế.", "Read the Codex Reset outlook from the public API, then verify separately against actual Codex account quota."))
                         AboutBullet(icon: "lock.shield", text: language.text("Xuất/nhập file backup có mật khẩu; tự giữ 5 backup phiên đầy đủ được mã hóa bằng khóa Keychain trên máy này.", "Export/import password-protected backups; keep five full session backups encrypted with this Mac's Keychain key."))
                         AboutBullet(icon: "arrow.counterclockwise", text: language.text("Khôi phục danh sách hoặc phiên sao lưu gần nhất sau khi xác nhận.", "Restore the latest account list or saved sessions after confirmation."))
                     }
@@ -4310,16 +4310,16 @@ struct AboutView: View {
                             url: vibeUsageURL
                         )
                         ReferenceLink(
-                            title: "codex-reset.com",
-                            detail: language.text("Radar chuẩn hóa bài đăng Tibo khi X cắt ngắn; không gửi credential hay quota tài khoản.", "Normalization radar for truncated Tibo posts; never sends credentials or account quota."),
-                            badge: "Public API · reset radar",
-                            url: codexResetURL
+                            title: "codex-resets.com",
+                            detail: language.text("API công khai cho trạng thái / lịch sử reset Codex (source of truth cho cam kết & sự kiện); Data from Codex Resets. Không gửi credential hay quota tài khoản.", "Public API for Codex reset status/history (source of truth for commitment & events); Data from Codex Resets. Never sends credentials or account quota."),
+                            badge: "Public API · attribution required",
+                            url: codexResetsURL
                         )
                         ReferenceLink(
-                            title: "Tibo / @thsottiaux",
-                            detail: language.text("Nguồn tín hiệu reset công khai được đọc trực tiếp từ hồ sơ X; quota tài khoản vẫn là xác nhận cuối cùng.", "Public reset signals read directly from the X profile; account quota remains the final confirmation."),
-                            badge: "X public profile · signal source",
-                            url: tiboXURL
+                            title: "codex-reset.com",
+                            detail: language.text("API forecast 24h/48h, timeline, juice và status-history cho Codex Reset outlook.", "Forecast 24h/48h, timeline, juice, and status-history APIs for Codex Reset outlook."),
+                            badge: "Public API · forecast",
+                            url: codexResetURL
                         )
                         Text(language.text("Ngoại trừ nền tảng MIT được ghi rõ, Codex Roster không đưa mã nguồn, tài sản, credential hay state của các dự án tham khảo vào ứng dụng. Chi tiết đầy đủ: CREDITS.md.", "Except for the credited MIT foundation, Codex Roster does not incorporate source code, assets, credentials, or state from the reference projects. Full detail: CREDITS.md."))
                             .font(RosterSecondaryChrome.caption)

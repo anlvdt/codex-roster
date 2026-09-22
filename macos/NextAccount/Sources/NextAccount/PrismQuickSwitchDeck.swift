@@ -43,9 +43,27 @@ struct PrismQuickSwitchDeck: View {
         return store.sortedAccounts(matching)
     }
 
+    private var rosterSectionCounts: [Int] {
+        NotchRosterLayout.planSectionAccountCounts(from: filteredAccounts)
+    }
+
+    private var rosterColumnCount: Int {
+        NotchRosterLayout.columnCount(
+            sectionCounts: rosterSectionCounts,
+            expanded: isRosterExpanded
+        )
+    }
+
     private var rosterGridHeight: CGFloat {
         NotchRosterLayout.rosterGridHeight(
-            accountCount: filteredAccounts.count,
+            sectionCounts: rosterSectionCounts,
+            expanded: isRosterExpanded
+        )
+    }
+
+    private var rosterNeedsScroll: Bool {
+        NotchRosterLayout.needsRosterScroll(
+            sectionCounts: rosterSectionCounts,
             expanded: isRosterExpanded
         )
     }
@@ -83,7 +101,7 @@ struct PrismQuickSwitchDeck: View {
 
     private var deckHeight: CGFloat {
         NotchRosterLayout.deckHeight(
-            accountCount: filteredAccounts.count,
+            sectionCounts: rosterSectionCounts,
             expanded: isRosterExpanded,
             hasNextActionCaption: hasNextActionCaption
         )
@@ -771,10 +789,10 @@ struct PrismQuickSwitchDeck: View {
             }
 
             ScrollView {
-                let columns = [
-                    GridItem(.flexible(), spacing: 6),
-                    GridItem(.flexible(), spacing: 6)
-                ]
+                let columns = Array(
+                    repeating: GridItem(.flexible(), spacing: NotchRosterLayout.columnSpacing),
+                    count: rosterColumnCount
+                )
                 let grouped = Dictionary(grouping: filteredAccounts, by: \.planGroupKey)
                 let groupOrder = ["pro", "plus", "team", "other", "free"]
                 let sections = groupOrder.compactMap { key -> (key: String, accounts: [SavedAccount])? in
@@ -789,7 +807,7 @@ struct PrismQuickSwitchDeck: View {
                                 .font(PrismTheme.fontChip)
                                 .foregroundStyle(.secondary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .gridCellColumns(2)
+                                .gridCellColumns(rosterColumnCount)
                                 .padding(.top, section.key == sections.first?.key ? 0 : 4)
                         }
                         ForEach(section.accounts) { account in
@@ -803,8 +821,9 @@ struct PrismQuickSwitchDeck: View {
                         }
                     }
                 }
-                .padding(.vertical, 2)
+                .padding(.vertical, NotchRosterLayout.gridVerticalPadding / 2)
             }
+            .scrollDisabled(!rosterNeedsScroll)
             .frame(height: rosterGridHeight)
         }
         .padding(.horizontal, 10)

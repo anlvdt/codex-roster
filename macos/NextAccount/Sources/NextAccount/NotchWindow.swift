@@ -102,8 +102,10 @@ struct NotchWindowView: View {
         store.accounts.first { $0.isActive && !store.isArchived($0) }
     }
 
-    private var rosterAccountCount: Int {
-        store.accounts.filter { !$0.archived }.count
+    private var rosterSectionCounts: [Int] {
+        NotchRosterLayout.planSectionAccountCounts(
+            from: store.accounts.filter { !$0.archived }
+        )
     }
 
     private var hasNextActionCaption: Bool {
@@ -113,7 +115,7 @@ struct NotchWindowView: View {
 
     private var expandedPanelHeight: CGFloat {
         NotchRosterLayout.deckHeight(
-            accountCount: rosterAccountCount,
+            sectionCounts: rosterSectionCounts,
             expanded: isRosterExpanded,
             hasNextActionCaption: hasNextActionCaption
         )

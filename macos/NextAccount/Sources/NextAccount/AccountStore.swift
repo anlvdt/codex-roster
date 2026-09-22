@@ -4105,7 +4105,12 @@ func accountSortIsOrderedByWeeklyQuota(_ left: SavedAccount, _ right: SavedAccou
 }
 
 /// Shared notch roster sizing: collapsed scroll area inside a panoramic deck;
-/// expanded fits all 2-column rows for typical ≤20 accounts.
+/// expanded shows the full roster without scrolling for typical sizes.
+///
+/// Expand grows height to fit every account row **and** plan-section header.
+/// When that would exceed `maxFittedRows`, columns densify (2→4) before any
+/// scroll is allowed. Pathological rosters (dozens of accounts across many
+/// plan bands after max columns) may still scroll — that edge case is intentional.
 ///
 /// Pass `hasNextActionCaption: true` only when the caption row is visible so
 /// all-clear layouts do not reserve a tall empty footer under Danh bạ.
@@ -4126,18 +4131,82 @@ enum NotchRosterLayout {
     /// Dense roster cell: name + email/status + trailing meters/button.
     static let rowHeight: CGFloat = 48
     static let rowSpacing: CGFloat = 4
-    static let gridVerticalPadding: CGFloat = 2
-    /// Soft cap (~24 accounts) so pathological rosters stay screen-safe.
+    /// Total vertical padding inside the roster scroll content (top + bottom).
+    static let gridVerticalPadding: CGFloat = 4
+    static let columnSpacing: CGFloat = 6
+    static let minColumns = 2
+    static let maxColumns = 4
+    /// Soft cap so pathological rosters stay screen-safe (~14" MacBook).
     static let maxFittedRows = 12
     static let rosterExpandedKey = "codex_roster_notch_roster_expanded"
 
-    static func rosterGridHeight(accountCount: Int, expanded: Bool) -> CGFloat {
+    /// Plan-band section sizes in switchboard display order (non-empty only).
+    static func planSectionAccountCounts(from accounts: [SavedAccount]) -> [Int] {
+        let groupOrder = ["pro", "plus", "team", "other", "free"]
+        let grouped = Dictionary(grouping: accounts, by: \.planGroupKey)
+        return groupOrder.compactMap { key in
+            guard let list = grouped[key], !list.isEmpty else { return nil }
+            return list.count
+        }
+    }
+
+    /// Grid rows needed for sectioned accounts at a given column count.
+    /// Each non-empty plan band starts on a fresh row after its header when
+    /// multiple bands are visible — leftover cells are not shared across bands.
+    static func contentRowCount(sectionCounts: [Int], columns: Int) -> Int {
+        let cols = max(1, columns)
+        guard !sectionCounts.isEmpty else { return 1 }
+        let showHeaders = sectionCounts.count > 1
+        var rows = 0
+        for count in sectionCounts {
+            if showHeaders { rows += 1 }
+            rows += max(1, Int(ceil(Double(max(count, 0)) / Double(cols))))
+        }
+        return max(1, rows)
+    }
+
+    /// Prefer 2 columns; densify up to `maxColumns` so expand can avoid scrolling.
+    static func columnCount(sectionCounts: [Int], expanded: Bool) -> Int {
+        guard expanded else { return minColumns }
+        for columns in minColumns...maxColumns {
+            if contentRowCount(sectionCounts: sectionCounts, columns: columns) <= maxFittedRows {
+                return columns
+            }
+        }
+        return maxColumns
+    }
+
+    /// Collapsed always scrolls inside a fixed viewport; expand scrolls only when
+    /// content still overflows after column densify.
+    static func needsRosterScroll(sectionCounts: [Int], expanded: Bool) -> Bool {
+        guard expanded else { return true }
+        let columns = columnCount(sectionCounts: sectionCounts, expanded: true)
+        return contentRowCount(sectionCounts: sectionCounts, columns: columns) > maxFittedRows
+    }
+
+    static func rosterGridHeight(sectionCounts: [Int], expanded: Bool) -> CGFloat {
         guard expanded else { return collapsedRosterHeight }
-        let rows = max(1, Int(ceil(Double(max(accountCount, 0)) / 2.0)))
+        let columns = columnCount(sectionCounts: sectionCounts, expanded: true)
+        let rows = contentRowCount(sectionCounts: sectionCounts, columns: columns)
         let fittedRows = min(rows, maxFittedRows)
         return CGFloat(fittedRows) * rowHeight
             + CGFloat(max(0, fittedRows - 1)) * rowSpacing
             + gridVerticalPadding
+    }
+
+    static func rosterGridHeight(accountCount: Int, expanded: Bool) -> CGFloat {
+        let counts = accountCount > 0 ? [accountCount] : []
+        return rosterGridHeight(sectionCounts: counts, expanded: expanded)
+    }
+
+    static func deckHeight(
+        sectionCounts: [Int],
+        expanded: Bool,
+        hasNextActionCaption: Bool = false
+    ) -> CGFloat {
+        collapsedDeckHeight - collapsedRosterHeight
+            + rosterGridHeight(sectionCounts: sectionCounts, expanded: expanded)
+            + (hasNextActionCaption ? nextActionCaptionHeight : 0)
     }
 
     static func deckHeight(
@@ -4145,9 +4214,12 @@ enum NotchRosterLayout {
         expanded: Bool,
         hasNextActionCaption: Bool = false
     ) -> CGFloat {
-        collapsedDeckHeight - collapsedRosterHeight
-            + rosterGridHeight(accountCount: accountCount, expanded: expanded)
-            + (hasNextActionCaption ? nextActionCaptionHeight : 0)
+        let counts = accountCount > 0 ? [accountCount] : []
+        return deckHeight(
+            sectionCounts: counts,
+            expanded: expanded,
+            hasNextActionCaption: hasNextActionCaption
+        )
     }
 }
 

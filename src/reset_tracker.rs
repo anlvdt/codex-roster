@@ -24,6 +24,9 @@ pub struct ResetOutlook {
     pub last_reset_is_confirmed: bool,
     pub chance_24_hours: u8,
     pub chance_48_hours: u8,
+    /// codex-reset.com "Tibo commitment" lead % (`probabilities.signal_percent`).
+    /// Distinct from `confidence`, which is experimental model-fit (often "low").
+    pub signal_percent: Option<u8>,
     pub confidence: String,
     pub window_label: String,
     pub window_timezone: Option<String>,
@@ -99,57 +102,138 @@ struct NotificationState {
 pub fn fetch_reset_outlook() -> Result<ResetOutlook> {
     let now = OffsetDateTime::now_utc();
     let forecast = fetch_forecast()?;
-    let feed_signal = fetch_feed_signal_metadata(now);
+    // Prefer forecast.official_signal (current announcement) over /api/feed.signal,
+    // which can lag on an older candidate while Tibo already posted a dated commitment.
+    let outlook_signal = resolve_outlook_signal(&forecast, now);
+    let signal_percent = resolve_signal_percent(&forecast);
 
-    let (signal_kind, signal_summary, source_url, last_reset_is_confirmed) = match feed_signal {
+    Ok(ResetOutlook {
+        updated_at: forecast.updated_at,
+        last_reset_at: forecast.last_reset_at,
+        next_reset_at: outlook_signal.next_reset_at,
+        last_reset_is_confirmed: outlook_signal.last_reset_is_confirmed,
+        chance_24_hours: forecast.probabilities.rounded_24h,
+        chance_48_hours: forecast.probabilities.rounded_48h,
+        signal_percent,
+        confidence: forecast.confidence,
+        window_label: outlook_signal
+            .window_label
+            .unwrap_or(forecast.time_window.label),
+        window_timezone: outlook_signal
+            .window_timezone
+            .or(forecast.time_window.timezone),
+        window_start_hour: forecast.time_window.start_hour,
+        window_end_hour: forecast.time_window.end_hour,
+        signal_kind: outlook_signal.signal_kind,
+        signal_summary: outlook_signal.signal_summary,
+        source_url: outlook_signal.source_url,
+        source_freshness: "codex_reset_forecast_api".to_owned(),
+        cadence_days: forecast.cadence.as_ref().and_then(|c| c.recent_median_days),
+        cadence_accelerating: forecast.cadence.as_ref().and_then(|c| c.accelerating),
+    })
+}
+
+/// Site lead metric ("Tibo commitment" / Watch strength), not the 24h/48h model odds
+/// and not `confidence` (walk-forward model-fit label, often stuck on "low").
+fn resolve_signal_percent(forecast: &ForecastResponse) -> Option<u8> {
+    forecast
+        .probabilities
+        .signal_percent
+        .or(forecast.probabilities.commitment_floor_percent)
+        .or_else(|| forecast.signal_score.as_ref().and_then(|score| score.value))
+        .or_else(|| {
+            forecast
+                .official_signal
+                .as_ref()
+                .and_then(|official| official.score.as_ref())
+                .and_then(|score| score.value)
+        })
+        .filter(|&percent| percent > 0)
+}
+
+struct ResolvedOutlookSignal {
+    signal_kind: String,
+    signal_summary: String,
+    source_url: String,
+    last_reset_is_confirmed: bool,
+    next_reset_at: Option<String>,
+    window_label: Option<String>,
+    window_timezone: Option<String>,
+}
+
+fn resolve_outlook_signal(
+    forecast: &ForecastResponse,
+    now: OffsetDateTime,
+) -> ResolvedOutlookSignal {
+    if let Some(official) = forecast.official_signal.as_ref() {
+        return resolve_official_outlook_signal(official);
+    }
+
+    match fetch_feed_signal_metadata(now) {
         Some(signal) => {
             let kind = signal
                 .kind
                 .as_deref()
                 .map(map_feed_signal_kind)
                 .unwrap_or("none");
+            // Only treat explicit verification as confirmation. `active: true` alone
+            // used to mark stale candidates (e.g. week-old "Reset all propagated") as confirmed.
             let confirmed = signal
                 .reset_verification_status
                 .as_deref()
-                .is_some_and(|status| status == "confirmed")
-                || signal.active == Some(true);
-            (
-                kind.to_owned(),
-                signal.summary.clone().unwrap_or_default(),
-                signal
+                .is_some_and(|status| status == "confirmed");
+            ResolvedOutlookSignal {
+                signal_kind: kind.to_owned(),
+                signal_summary: signal.summary.clone().unwrap_or_default(),
+                source_url: signal
                     .url
                     .clone()
                     .unwrap_or_else(|| X_PROFILE_ENDPOINT.to_owned()),
-                confirmed,
-            )
+                last_reset_is_confirmed: confirmed,
+                next_reset_at: None,
+                window_label: None,
+                window_timezone: None,
+            }
         }
-        None => (
-            "none".to_owned(),
-            "No actionable reset signal in Tibo's latest public posts.".to_owned(),
-            X_PROFILE_ENDPOINT.to_owned(),
-            false,
-        ),
-    };
+        None => ResolvedOutlookSignal {
+            signal_kind: "none".to_owned(),
+            signal_summary: "No actionable reset signal in Tibo's latest public posts.".to_owned(),
+            source_url: X_PROFILE_ENDPOINT.to_owned(),
+            last_reset_is_confirmed: false,
+            next_reset_at: None,
+            window_label: None,
+            window_timezone: None,
+        },
+    }
+}
 
-    Ok(ResetOutlook {
-        updated_at: forecast.updated_at,
-        last_reset_at: forecast.last_reset_at,
-        next_reset_at: None,
-        last_reset_is_confirmed,
-        chance_24_hours: forecast.probabilities.rounded_24h,
-        chance_48_hours: forecast.probabilities.rounded_48h,
-        confidence: forecast.confidence,
-        window_label: forecast.time_window.label,
-        window_timezone: forecast.time_window.timezone,
-        window_start_hour: forecast.time_window.start_hour,
-        window_end_hour: forecast.time_window.end_hour,
-        signal_kind,
-        signal_summary,
-        source_url,
-        source_freshness: "codex_reset_forecast_api".to_owned(),
-        cadence_days: forecast.cadence.as_ref().and_then(|c| c.recent_median_days),
-        cadence_accelerating: forecast.cadence.as_ref().and_then(|c| c.accelerating),
-    })
+fn resolve_official_outlook_signal(official: &ForecastOfficialSignal) -> ResolvedOutlookSignal {
+    let next_reset_at = official
+        .window
+        .as_ref()
+        .and_then(|window| window.target_at.clone().or_else(|| window.end_at.clone()));
+    ResolvedOutlookSignal {
+        signal_kind: map_official_signal_kind(official).to_owned(),
+        signal_summary: official.summary.clone().unwrap_or_default(),
+        source_url: official
+            .url
+            .clone()
+            .unwrap_or_else(|| X_PROFILE_ENDPOINT.to_owned()),
+        // An announced / dated commitment is not a completed reset.
+        last_reset_is_confirmed: matches!(
+            official.signal_type.as_deref(),
+            Some("confirmed") | Some("landed") | Some("propagated")
+        ),
+        next_reset_at,
+        window_label: official
+            .window
+            .as_ref()
+            .and_then(|window| window.label.clone()),
+        window_timezone: official
+            .window
+            .as_ref()
+            .and_then(|window| window.time_zone.clone()),
+    }
 }
 
 fn map_feed_signal_kind(kind: &str) -> &'static str {
@@ -158,6 +242,21 @@ fn map_feed_signal_kind(kind: &str) -> &'static str {
         "scheduled" => "scheduled_global_reset",
         "candidate" => "reset_hint",
         _ => "none",
+    }
+}
+
+fn map_official_signal_kind(official: &ForecastOfficialSignal) -> &'static str {
+    match official.signal_type.as_deref() {
+        Some("dated_commitment") | Some("commitment") | Some("scheduled") => {
+            "scheduled_global_reset"
+        }
+        Some("confirmed") | Some("landed") | Some("propagated") => "confirmed_global_reset",
+        Some("tease") | Some("hint") => "reset_hint",
+        _ => match official.signal_tier.as_deref() {
+            Some("likely") | Some("scheduled") | Some("announced") => "scheduled_global_reset",
+            Some("confirmed") => "confirmed_global_reset",
+            _ => "reset_hint",
+        },
     }
 }
 
@@ -220,7 +319,41 @@ fn fetch_feed_signal_metadata(now: OffsetDateTime) -> Option<ResetFeedSignal> {
 pub fn fetch_new_reset_events(app_data_dir: &Path) -> Result<Vec<ResetEvent>> {
     let now = OffsetDateTime::now_utc();
     let posts = fetch_reset_posts(now)?;
-    process_reset_events(app_data_dir, reset_events(&posts), now)
+    let mut events = reset_events(&posts);
+    // Forecast official_signal catches dated commitments the local classifier
+    // historically missed (e.g. "promised a reset for Tuesday" without "Codex").
+    if let Ok(forecast) = fetch_forecast()
+        && let Some(event) = official_signal_event(forecast.official_signal.as_ref())
+        && !events.iter().any(|existing| existing.id == event.id)
+    {
+        events.push(event);
+    }
+    process_reset_events(app_data_dir, events, now)
+}
+
+fn official_signal_event(official: Option<&ForecastOfficialSignal>) -> Option<ResetEvent> {
+    let official = official?;
+    let id = official.tweet_id.clone()?;
+    let announced_at = official.at.clone()?;
+    let summary = official.summary.clone().unwrap_or_default();
+    if summary.trim().is_empty() {
+        return None;
+    }
+    let kind = map_official_signal_kind(official);
+    if kind == "none" {
+        return None;
+    }
+    let url = official
+        .url
+        .clone()
+        .or_else(|| trusted_tibo_post_url(&id))?;
+    Some(ResetEvent {
+        id,
+        announced_at,
+        summary,
+        url,
+        kind: kind.to_owned(),
+    })
 }
 
 #[derive(Deserialize)]
@@ -240,6 +373,8 @@ struct ResetFeedSignal {
     summary: Option<String>,
     url: Option<String>,
     kind: Option<String>,
+    /// Kept for schema compatibility; do not treat as confirmation on its own.
+    #[allow(dead_code)]
     active: Option<bool>,
     #[serde(default)]
     reset_verification_status: Option<String>,
@@ -261,12 +396,58 @@ struct ForecastResponse {
     time_window: ForecastTimeWindow,
     #[serde(default)]
     cadence: Option<ForecastCadence>,
+    /// Current public announcement from the radar (dated commitment / tease).
+    /// Prefer this over `/api/feed.signal`, which can lag behind.
+    #[serde(default)]
+    official_signal: Option<ForecastOfficialSignal>,
+    /// Aggregate Watch / commitment score shown as the site lead percent.
+    #[serde(default)]
+    signal_score: Option<ForecastSignalScore>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ForecastOfficialSignal {
+    tweet_id: Option<String>,
+    summary: Option<String>,
+    at: Option<String>,
+    url: Option<String>,
+    #[allow(dead_code)]
+    kind: Option<String>,
+    signal_type: Option<String>,
+    signal_tier: Option<String>,
+    #[serde(default)]
+    score: Option<ForecastSignalScore>,
+    #[serde(default)]
+    window: Option<ForecastOfficialWindow>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ForecastSignalScore {
+    #[serde(default)]
+    value: Option<u8>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ForecastOfficialWindow {
+    label: Option<String>,
+    #[allow(dead_code)]
+    start_at: Option<String>,
+    end_at: Option<String>,
+    time_zone: Option<String>,
+    #[allow(dead_code)]
+    target_kind: Option<String>,
+    target_at: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct ForecastProbabilities {
     rounded_24h: u8,
     rounded_48h: u8,
+    /// Site "Tibo commitment" / Watch lead percent (e.g. 93).
+    #[serde(default)]
+    signal_percent: Option<u8>,
+    #[serde(default)]
+    commitment_floor_percent: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -662,13 +843,41 @@ fn classify_post(text: &str) -> Option<SignalKind> {
     ]
     .iter()
     .any(|prefix| text.trim_start().starts_with(prefix));
+    // Tibo often announces without naming Codex ("promised a reset for Tuesday").
+    let dated_reset_promise = [
+        "promised a reset",
+        "promise a reset",
+        "promised reset",
+        "a reset for monday",
+        "a reset for tuesday",
+        "a reset for wednesday",
+        "a reset for thursday",
+        "a reset for friday",
+        "a reset for saturday",
+        "a reset for sunday",
+        "reset for monday",
+        "reset for tuesday",
+        "reset for wednesday",
+        "reset for thursday",
+        "reset for friday",
+        "reset for saturday",
+        "reset for sunday",
+        "reset this tuesday",
+        "reset this monday",
+        "reset tomorrow",
+        "coming tuesday",
+        "coming in tuesday",
+    ]
+    .iter()
+    .any(|phrase| text.contains(phrase));
     let relevant_scope = text.contains("codex")
         || text.contains("chatgpt work")
         || text.contains("usage limit")
         || text.contains("rate limit")
         || text.contains("paid user")
         || text.contains("banked reset")
-        || starts_with_reset_signal;
+        || starts_with_reset_signal
+        || dated_reset_promise;
     if !mentions_reset || !relevant_scope {
         return None;
     }
@@ -724,25 +933,26 @@ fn classify_post(text: &str) -> Option<SignalKind> {
         });
     }
 
-    let scheduled = [
-        "will credit",
-        "will reset",
-        "will do a full reset",
-        "do a full reset",
-        "will be there",
-        "will land",
-        "should land",
-        "lands in",
-        "land in",
-        "propagating in the next hour",
-        "in the next hour",
-        "next 30 minutes",
-        "later in the day",
-        "later today",
-        "tomorrow",
-    ]
-    .iter()
-    .any(|phrase| text.contains(phrase));
+    let scheduled = dated_reset_promise
+        || [
+            "will credit",
+            "will reset",
+            "will do a full reset",
+            "do a full reset",
+            "will be there",
+            "will land",
+            "should land",
+            "lands in",
+            "land in",
+            "propagating in the next hour",
+            "in the next hour",
+            "next 30 minutes",
+            "later in the day",
+            "later today",
+            "tomorrow",
+        ]
+        .iter()
+        .any(|phrase| text.contains(phrase));
     if scheduled {
         return Some(if banked {
             SignalKind::ScheduledBanked
@@ -950,6 +1160,12 @@ mod tests {
             Some(SignalKind::ConfirmedReset)
         );
         assert_eq!(
+            classify_post(
+                "Ladies and gentlemen... start... your... ENGINES. We are almost Tuesday and I promised a reset for Tuesday. Among some other things. See you soon."
+            ),
+            Some(SignalKind::ScheduledReset)
+        );
+        assert_eq!(
             classify_post("Why did you switch to Codex? Don't say reset."),
             None
         );
@@ -957,6 +1173,97 @@ mod tests {
         assert_eq!(classify_post("I've reset my password."), None);
         assert_eq!(classify_post("We have reset the staging database."), None);
         assert_eq!(classify_post("Reset my password tomorrow."), None);
+    }
+
+    #[test]
+    fn maps_official_dated_commitment_to_scheduled_outlook() {
+        let official = ForecastOfficialSignal {
+            tweet_id: Some("2102254445082116335".into()),
+            summary: Some("I promised a reset for Tuesday.".into()),
+            at: Some("2026-09-22T04:31:32.000Z".into()),
+            url: Some("https://x.com/thsottiaux/status/2102254445082116335".into()),
+            kind: Some("signal".into()),
+            signal_type: Some("dated_commitment".into()),
+            signal_tier: Some("likely".into()),
+            score: Some(ForecastSignalScore { value: Some(93) }),
+            window: Some(ForecastOfficialWindow {
+                label: Some("end of Tuesday".into()),
+                start_at: Some("2026-09-22T04:31:32.000Z".into()),
+                end_at: Some("2026-09-23T06:59:59.999Z".into()),
+                time_zone: Some("America/Los_Angeles".into()),
+                target_kind: Some("deadline".into()),
+                target_at: Some("2026-09-23T06:59:59.999Z".into()),
+            }),
+        };
+        let resolved = resolve_official_outlook_signal(&official);
+        assert_eq!(resolved.signal_kind, "scheduled_global_reset");
+        assert_eq!(
+            resolved.next_reset_at.as_deref(),
+            Some("2026-09-23T06:59:59.999Z")
+        );
+        assert!(!resolved.last_reset_is_confirmed);
+        assert_eq!(resolved.window_label.as_deref(), Some("end of Tuesday"));
+
+        let event = official_signal_event(Some(&official)).expect("event");
+        assert_eq!(event.id, "2102254445082116335");
+        assert_eq!(event.kind, "scheduled_global_reset");
+    }
+
+    #[test]
+    fn prefers_site_commitment_percent_over_model_confidence_label() {
+        let from_probabilities = ForecastResponse {
+            updated_at: "2026-09-22T05:00:00.000Z".into(),
+            probabilities: ForecastProbabilities {
+                rounded_24h: 20,
+                rounded_48h: 35,
+                signal_percent: Some(93),
+                commitment_floor_percent: Some(93),
+            },
+            confidence: "low".into(),
+            last_reset_at: "2026-09-12T08:09:17.000Z".into(),
+            time_window: ForecastTimeWindow {
+                label: "11 PM - 2 AM".into(),
+                timezone: Some("UTC".into()),
+                start_hour: Some(23),
+                end_hour: Some(2),
+            },
+            cadence: None,
+            official_signal: None,
+            signal_score: Some(ForecastSignalScore { value: Some(93) }),
+        };
+        assert_eq!(resolve_signal_percent(&from_probabilities), Some(93));
+
+        let from_official_score = ForecastResponse {
+            updated_at: "2026-09-22T05:00:00.000Z".into(),
+            probabilities: ForecastProbabilities {
+                rounded_24h: 10,
+                rounded_48h: 20,
+                signal_percent: None,
+                commitment_floor_percent: None,
+            },
+            confidence: "low".into(),
+            last_reset_at: "2026-09-12T08:09:17.000Z".into(),
+            time_window: ForecastTimeWindow {
+                label: "11 PM - 2 AM".into(),
+                timezone: Some("UTC".into()),
+                start_hour: Some(23),
+                end_hour: Some(2),
+            },
+            cadence: None,
+            signal_score: None,
+            official_signal: Some(ForecastOfficialSignal {
+                tweet_id: Some("1".into()),
+                summary: Some("promised a reset".into()),
+                at: Some("2026-09-22T04:31:32.000Z".into()),
+                url: None,
+                kind: None,
+                signal_type: Some("dated_commitment".into()),
+                signal_tier: Some("likely".into()),
+                score: Some(ForecastSignalScore { value: Some(100) }),
+                window: None,
+            }),
+        };
+        assert_eq!(resolve_signal_percent(&from_official_score), Some(100));
     }
 
     #[test]

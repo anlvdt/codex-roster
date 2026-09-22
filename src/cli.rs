@@ -780,10 +780,17 @@ pub fn run() -> Result<()> {
             if json {
                 print_json(&outlook)?;
             } else {
-                println!(
-                    "Global reset outlook: {}% in 24h, {}% in 48h",
-                    outlook.chance_24_hours, outlook.chance_48_hours
-                );
+                if let Some(signal_percent) = outlook.signal_percent {
+                    println!(
+                        "Global reset outlook: Tibo commitment {signal_percent}%, {}% in 24h, {}% in 48h",
+                        outlook.chance_24_hours, outlook.chance_48_hours
+                    );
+                } else {
+                    println!(
+                        "Global reset outlook: {}% in 24h, {}% in 48h",
+                        outlook.chance_24_hours, outlook.chance_48_hours
+                    );
+                }
                 println!("Last reset: {}", outlook.last_reset_at);
             }
             Ok(())

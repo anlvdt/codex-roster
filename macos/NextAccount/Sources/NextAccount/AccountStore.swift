@@ -3249,6 +3249,8 @@ struct ResetOutlook: Decodable {
     let lastResetIsConfirmed: Bool?
     let chance24Hours: Int
     let chance48Hours: Int
+    /// codex-reset.com "Tibo commitment" lead % — not the model-fit `confidence` label.
+    let signalPercent: Int?
     let confidence: String
     let windowLabel: String
     let windowTimezone: String?

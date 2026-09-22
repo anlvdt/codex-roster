@@ -3249,7 +3249,7 @@ struct ResetOutlook: Decodable {
     let lastResetIsConfirmed: Bool?
     let chance24Hours: Int
     let chance48Hours: Int
-    /// codex-reset.com "Tibo commitment" lead % — not the model-fit `confidence` label.
+    /// codex-reset.com Watch / commitment lead % — not the model-fit `confidence` label.
     let signalPercent: Int?
     let confidence: String
     let windowLabel: String
@@ -3307,16 +3307,20 @@ struct ResetJuiceEffort: Decodable, Identifiable {
     var id: String { effort }
 }
 
-func trustedTiboSourceURL(_ value: String?) -> URL? {
+func trustedResetSourceURL(_ value: String?) -> URL? {
     guard let value,
           let components = URLComponents(string: value),
           components.scheme?.lowercased() == "https",
-          components.host?.lowercased() == "x.com",
           components.user == nil,
           components.password == nil,
           components.port == nil,
           components.query == nil,
           components.fragment == nil else { return nil }
+    let host = components.host?.lowercased() ?? ""
+    if host == "codex-resets.com" || host == "codex-reset.com" {
+        return components.url
+    }
+    guard host == "x.com" else { return nil }
     let path = components.path.split(separator: "/")
     guard path.count == 3,
           path[0].lowercased() == "thsottiaux",
@@ -3324,6 +3328,11 @@ func trustedTiboSourceURL(_ value: String?) -> URL? {
           !path[2].isEmpty,
           path[2].allSatisfy(\.isNumber) else { return nil }
     return components.url
+}
+
+/// Legacy alias kept for any remaining call sites / tests mid-rename.
+func trustedTiboSourceURL(_ value: String?) -> URL? {
+    trustedResetSourceURL(value)
 }
 
 private enum ResetNotifier {
@@ -3434,20 +3443,20 @@ private enum ResetNotifier {
     static func showPublicSignal(_ signal: GlobalResetEvent) {
         let title = switch signal.kind {
         case "confirmed_banked_reset":
-            AppLanguage.text("Tibo: banked reset đã được cấp", "Tibo: banked reset confirmed")
+            AppLanguage.text("Codex Reset: banked reset đã được cấp", "Codex Reset: banked reset confirmed")
         case "scheduled_banked_reset":
-            AppLanguage.text("Tibo báo banked reset sắp tới", "Tibo scheduled a banked reset")
+            AppLanguage.text("Codex Reset: banked reset sắp tới", "Codex Reset: banked reset scheduled")
         case "confirmed_global_reset":
-            AppLanguage.text("Tibo xác nhận mass reset", "Tibo confirmed a global reset")
+            AppLanguage.text("Codex Reset: mass reset đã xác nhận", "Codex Reset: global reset confirmed")
         case "scheduled_global_reset":
-            AppLanguage.text("Tibo báo mass reset sắp tới", "Tibo scheduled a global reset")
+            AppLanguage.text("Codex Reset: mass reset sắp tới", "Codex Reset: global reset scheduled")
         default:
-            AppLanguage.text("Tibo phát tín hiệu reset", "Tibo posted a reset signal")
+            AppLanguage.text("Codex Reset: tín hiệu reset mới", "Codex Reset: new reset signal")
         }
         enqueue(
-            identifier: "codex-roster-tibo-\(signal.id)",
+            identifier: "codex-roster-reset-\(signal.id)",
             title: title,
-            subtitle: "@thsottiaux · X",
+            subtitle: "codex-resets.com",
             body: signal.summary,
             url: signal.url
         )
@@ -3723,7 +3732,7 @@ private final class ResetNotificationDelegate: NSObject, UNUserNotificationCente
     ) {
         defer { completionHandler() }
         guard let value = response.notification.request.content.userInfo["url"] as? String,
-              let url = trustedTiboSourceURL(value) else { return }
+              let url = trustedResetSourceURL(value) else { return }
         NSWorkspace.shared.open(url)
     }
 }

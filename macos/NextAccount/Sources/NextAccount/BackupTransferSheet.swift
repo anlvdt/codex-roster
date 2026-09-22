@@ -36,13 +36,14 @@ struct BackupTransferSheet: View {
                     : language.text("Nhập bản sao lưu mã hóa", "Import encrypted backup"),
                 systemImage: isExport ? "lock.doc.fill" : "lock.doc"
             )
-            .font(.title2.weight(.bold))
+            .font(RosterSecondaryChrome.title)
             .foregroundStyle(.tint)
 
             Text(language.text(
                 "Bản sao lưu chứa phiên đăng nhập Codex. Mật khẩu chỉ dùng để mã hóa hoặc giải mã file này và không được lưu lại.",
                 "A backup contains Codex sign-in snapshots. The password is used only to encrypt or decrypt this file and is never stored."
             ))
+            .font(RosterSecondaryChrome.body)
             .foregroundStyle(.secondary)
 
             if !isExport {
@@ -93,7 +94,7 @@ struct BackupTransferSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 520)
+        .frame(width: RosterSecondaryChrome.sheetWidth)
     }
 
     private var canTransfer: Bool {

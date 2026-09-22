@@ -215,21 +215,25 @@ struct NotchWindowView: View {
             AddAccountSheet()
                 .environmentObject(store)
                 .environmentObject(language)
+                .background(ElevatePresentedWindow())
         }
         .sheet(item: $accountForRelogin) { account in
             ReloginAccountSheet(account: account, queuedCount: 0, cancelQueue: {})
                 .environmentObject(store)
                 .environmentObject(language)
+                .background(ElevatePresentedWindow())
         }
         .sheet(item: $backupOperation) { op in
             BackupTransferSheet(operation: op)
                 .environmentObject(store)
                 .environmentObject(language)
+                .background(ElevatePresentedWindow())
         }
         .sheet(item: $accountForEditing) { account in
             AccountEditorSheet(account: account)
                 .environmentObject(store)
                 .environmentObject(language)
+                .background(ElevatePresentedWindow())
         }
         .task {
             store.startCoreMonitoring()
@@ -254,6 +258,11 @@ struct NotchWindowView: View {
                 NSApplication.shared.activate(ignoringOtherApps: true)
                 expand()
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .collapseNotchPanel)) { _ in
+            hoverTask?.cancel()
+            collapseTask?.cancel()
+            if isExpanded { collapse() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .showDashboard)) { _ in
             // Second-instance / Dock reopen: reveal the notch (no companion window).

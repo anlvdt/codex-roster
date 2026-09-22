@@ -432,6 +432,14 @@ where
                 Some("Close Codex and ChatGPT before automatic switching.".to_owned()),
             ));
         }
+        // Freeze the live thread that hit usage limits BEFORE swapping auth.
+        // Shared ~/.codex keeps that thread; the new account's quota pays for
+        // the next turns. Do not use the target account's old workspace hint.
+        let _ = crate::session_resume::capture_pending_continue(
+            &self.env.app_data_dir,
+            &self.env.codex_root,
+            active.id,
+        );
         let activated = if force {
             self.activate_with_expected_active(candidate.id, true, Some(active.id))?
         } else {
@@ -451,7 +459,14 @@ where
             Some(account_display_name(&candidate)),
             None,
         );
-        output.session_resume = activated.session_resume;
+        let auto_resume_enabled = settings.auto_resume_session;
+        output.session_resume = crate::session_resume::take_pending_continue_hint(
+            &self.env.app_data_dir,
+            auto_resume_enabled,
+        )
+        .ok()
+        .flatten()
+        .or(activated.session_resume);
         Ok(output)
     }
 
@@ -889,6 +904,9 @@ where
                 synced_metadata_at.duration_since(started).as_millis(),
             );
         }
+        // Tenure floor for the next switch-away capture so idle accounts do not
+        // inherit another account's shared ~/.codex/sessions rollout.
+        let _ = crate::session_resume::mark_activated(&self.env.app_data_dir, account_id);
         let auto_resume_enabled = load_settings(&self.env.app_data_dir)
             .map(|settings| settings.auto_resume_session)
             .unwrap_or(true);

@@ -148,7 +148,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Remember Codex rollout cwd/session on switch; reopen workspace after activate.
+    /// Remember Codex rollout cwd/session on switch; reopen thread after activate.
     AutoResumeSession {
         #[arg(long, conflicts_with = "disable")]
         enable: bool,

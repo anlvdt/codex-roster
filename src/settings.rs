@@ -15,7 +15,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub auto_switch_when_exhausted: bool,
     /// Remember the outgoing Codex rollout (session id + cwd) on switch and
-    /// reopen that account's last workspace after a later activate. Default on.
+    /// reopen that account's last thread via Desktop deep-link after activate.
+    /// Default on.
     #[serde(default = "default_auto_resume_session")]
     pub auto_resume_session: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

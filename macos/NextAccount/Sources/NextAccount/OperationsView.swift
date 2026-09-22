@@ -34,6 +34,8 @@ struct OperationsView: View {
             store.refreshTokenUsage(silently: true)
             store.refreshOpenAIStatus(silently: true)
             store.refreshResetOutlook(silently: true)
+            store.refreshResetTimeline(silently: true)
+            store.refreshResetJuice(silently: true)
             store.refreshProviderStatus(silently: true)
         }
     }

@@ -436,6 +436,8 @@ struct PrismQuickSwitchDeck: View {
                     store.refreshUsage(scope: .allSaved)
                     store.refreshTokenUsage(silently: true)
                     store.refreshResetOutlook(silently: true)
+                    store.refreshResetTimeline(silently: true)
+                    store.refreshResetJuice(silently: true)
                     store.refreshOpenAIStatus(silently: true)
                 } label: {
                     Group {
@@ -492,6 +494,47 @@ struct PrismQuickSwitchDeck: View {
                     .font(PrismTheme.fontCaption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if let juice = store.resetJuice, !juice.efforts.isEmpty {
+                HStack(spacing: 6) {
+                    Text(language.text("Juice", "Juice"))
+                        .font(PrismTheme.fontMicro)
+                        .foregroundStyle(.secondary)
+                    ForEach(juice.efforts.prefix(4)) { effort in
+                        HStack(spacing: 2) {
+                            Text(effort.effort.prefix(1).uppercased())
+                                .font(PrismTheme.fontMicro)
+                                .foregroundStyle(.tertiary)
+                            Text("\(effort.current)")
+                                .font(PrismTheme.fontChip)
+                                .monospacedDigit()
+                                .foregroundStyle(
+                                    effort.delta > 0 ? PrismTheme.emerald
+                                        : effort.delta < 0 ? PrismTheme.ruby
+                                        : PrismTheme.textSecondary
+                                )
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+                .help(language.text("Mức effort còn lại (codex-reset)", "Remaining effort levels (codex-reset)"))
+            }
+
+            if let event = store.resetTimeline?.first {
+                HStack(alignment: .top, spacing: 4) {
+                    Text(event.date)
+                        .font(PrismTheme.fontMicro)
+                        .foregroundStyle(.tertiary)
+                        .monospacedDigit()
+                    Text(event.summary)
+                        .font(PrismTheme.fontChip)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                    Spacer(minLength: 0)
+                }
+                .help(language.text("Sự kiện reset gần nhất", "Latest reset timeline event"))
             }
 
             usageWingFooter
@@ -708,16 +751,32 @@ struct PrismQuickSwitchDeck: View {
                     GridItem(.flexible(), spacing: 6),
                     GridItem(.flexible(), spacing: 6)
                 ]
+                let grouped = Dictionary(grouping: filteredAccounts, by: \.planGroupKey)
+                let groupOrder = ["pro", "plus", "team", "other", "free"]
+                let sections = groupOrder.compactMap { key -> (key: String, accounts: [SavedAccount])? in
+                    guard let accounts = grouped[key], !accounts.isEmpty else { return nil }
+                    return (key, store.sortedAccounts(accounts))
+                }
 
                 LazyVGrid(columns: columns, spacing: NotchRosterLayout.rowSpacing) {
-                    ForEach(filteredAccounts) { account in
-                        PrismCompactAccountCard(
-                            account: account,
-                            shortcutIndex: switchableShortcutMap[account.id],
-                            justSwitchedID: $justSwitchedID,
-                            openEditAccount: openEditAccount,
-                            openReloginFlow: openReloginFlow
-                        )
+                    ForEach(sections, id: \.key) { section in
+                        if sections.count > 1 {
+                            Text(planGroupTitle(section.key))
+                                .font(PrismTheme.fontChip)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .gridCellColumns(2)
+                                .padding(.top, section.key == sections.first?.key ? 0 : 4)
+                        }
+                        ForEach(section.accounts) { account in
+                            PrismCompactAccountCard(
+                                account: account,
+                                shortcutIndex: switchableShortcutMap[account.id],
+                                justSwitchedID: $justSwitchedID,
+                                openEditAccount: openEditAccount,
+                                openReloginFlow: openReloginFlow
+                            )
+                        }
                     }
                 }
                 .padding(.vertical, 2)
@@ -732,6 +791,21 @@ struct PrismQuickSwitchDeck: View {
                 .fill(PrismTheme.surfaceQuiet)
                 .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(PrismTheme.borderSubtle, lineWidth: 0.8))
         )
+        .onAppear {
+            store.refreshResetOutlook(silently: true)
+            store.refreshResetTimeline(silently: true)
+            store.refreshResetJuice(silently: true)
+        }
+    }
+
+    private func planGroupTitle(_ key: String) -> String {
+        switch key {
+        case "pro": return language.text("Pro", "Pro")
+        case "plus": return language.text("Plus", "Plus")
+        case "team": return language.text("Team / Business", "Team / Business")
+        case "free": return language.text("Free / Go", "Free / Go")
+        default: return language.text("Khác", "Other")
+        }
     }
 
     private func toolbarIconButton(
@@ -879,7 +953,24 @@ private struct PrismCompactAccountCard: View {
                         ))
                     }
 
-                    if let balance = account.creditsBalanceDisplay, account.monthlyQuotaRemainingPercent == nil {
+                        if account.hasWeeklyResetWithin24Hours {
+                            HStack(spacing: 2) {
+                                Image(systemName: "clock.arrow.circlepath")
+                                    .font(PrismTheme.fontMicro)
+                                Text("24h")
+                                    .font(PrismTheme.fontMicroChip)
+                            }
+                            .padding(.horizontal, 3)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(PrismTheme.chipFill(PrismTheme.amber, opacity: 0.16)))
+                            .foregroundStyle(PrismTheme.amber)
+                            .help(language.text(
+                                "Weekly reset trong 24 giờ tới",
+                                "Weekly reset within the next 24 hours"
+                            ))
+                        }
+
+                        if let balance = account.creditsBalanceDisplay, account.monthlyQuotaRemainingPercent == nil {
                         Text(language.text("Cr \(balance)", "Cr \(balance)"))
                             .font(PrismTheme.fontMicroChip)
                             .padding(.horizontal, 3)

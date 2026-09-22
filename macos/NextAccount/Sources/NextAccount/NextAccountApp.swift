@@ -4394,19 +4394,43 @@ private struct AboutDisclosurePanel<Content: View>: View {
     let title: String
     let icon: String
     @ViewBuilder let content: Content
+    @State private var isExpanded = false
 
     var body: some View {
-        DisclosureGroup {
-            VStack(alignment: .leading, spacing: 10) {
-                content
-                    .font(RosterSecondaryChrome.body)
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.snappy(duration: 0.2)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    Label(title, systemImage: icon)
+                        .font(RosterSecondaryChrome.section)
+                        .foregroundStyle(.primary)
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, 10)
-        } label: {
-            Label(title, systemImage: icon)
-                .font(RosterSecondaryChrome.section)
-                .foregroundStyle(.primary)
+            .buttonStyle(.plain)
+            .pointingHandCursor()
+            .accessibilityAddTraits(.isButton)
+            .accessibilityValue(isExpanded
+                ? AppLanguage.text("Đang mở", "Expanded")
+                : AppLanguage.text("Đang đóng", "Collapsed"))
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 10) {
+                    content
+                        .font(RosterSecondaryChrome.body)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 10)
+            }
         }
         .padding(14)
         .background(

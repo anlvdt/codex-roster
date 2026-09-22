@@ -1817,10 +1817,10 @@ private struct TokenUsageDetails: View {
             }
 
             if !summary.byModel.isEmpty {
-                TokenUsageRanking(title: language.text("Theo model", "By model"), entries: summary.byModel)
+                TokenUsageRanking(title: language.text("Theo model", "By model"), entries: summary.byModel, showBars: true)
             }
             if !summary.byProject.isEmpty {
-                TokenUsageRanking(title: language.text("Theo dự án", "By project"), entries: summary.byProject)
+                TokenUsageRanking(title: language.text("Theo dự án", "By project"), entries: summary.byProject, showBars: false)
             }
         }
         .padding(14)
@@ -1850,27 +1850,50 @@ private struct TokenUsageRanking: View {
     @EnvironmentObject private var language: LanguageStore
     let title: String
     let entries: [TokenUsageBreakdown]
+    var showBars: Bool = false
+
+    private var ranked: [TokenUsageBreakdown] {
+        Array(entries.sorted { $0.tokens > $1.tokens }.prefix(showBars ? 6 : 3))
+    }
+
+    private var maxTokens: UInt64 {
+        ranked.map(\.tokens).max() ?? 1
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
-            ForEach(entries.prefix(3)) { entry in
-                HStack(spacing: 8) {
-                    Text(entry.label)
-                        .lineLimit(1)
-                    Spacer()
-                    if let cost = entry.estimatedCostUsd, cost > 0 {
-                        Text(String(format: "$%.2f", cost))
-                            .font(.caption.monospacedDigit().weight(.medium))
-                            .foregroundStyle(PrismTheme.emerald)
+            ForEach(ranked) { entry in
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 8) {
+                        Text(entry.label)
+                            .lineLimit(1)
+                            .font(.subheadline)
+                        Spacer(minLength: 4)
+                        if let cost = entry.estimatedCostUsd, cost > 0 {
+                            Text(String(format: "$%.2f", cost))
+                                .font(.caption.monospacedDigit().weight(.medium))
+                                .foregroundStyle(PrismTheme.emerald)
+                        }
+                        Text(compactTokenCount(entry.tokens, in: language.language))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
                     }
-                    Text(compactTokenCount(entry.tokens, in: language.language))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                    if showBars {
+                        GeometryReader { geo in
+                            let ratio = maxTokens == 0 ? 0 : CGFloat(entry.tokens) / CGFloat(maxTokens)
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(PrismTheme.trackFill)
+                                Capsule()
+                                    .fill(PrismTheme.accent.opacity(0.75))
+                                    .frame(width: max(4, geo.size.width * ratio))
+                            }
+                        }
+                        .frame(height: 4)
+                    }
                 }
-                .font(.subheadline)
             }
         }
     }

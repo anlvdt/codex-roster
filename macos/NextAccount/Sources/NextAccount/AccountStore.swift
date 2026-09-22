@@ -1696,6 +1696,7 @@ final class AccountStore: ObservableObject {
                     // Account-authenticated usage is the source of truth for
                     // personal banked credits and actual quota resets.
                     ResetNotifier.showAccountSignals(self.accounts)
+                    ResetNotifier.showOpenAIIncidentIfNeeded(self.openAIStatus)
                     if Date.now >= nextPublicSignalCheck {
                         if let signals = try? await self.cli.decode(
                             [GlobalResetEvent].self,
@@ -3326,12 +3327,18 @@ private enum ResetNotifier {
         var availableCountByAccount: [String: Int] = [:]
         var usageByAccount: [String: UsageObservation] = [:]
         var pendingResetByWindow: [String: PendingReset] = [:]
+        /// Last weekly/5H remaining we already warned about (cross edge ≤15%).
+        var lowQuotaWarnedPercentByAccount: [String: Int] = [:]
+        /// Last OpenAI status indicator we notified about.
+        var lastOpenAIIndicator: String?
 
         private enum CodingKeys: String, CodingKey {
             case seenCreditIDs
             case availableCountByAccount
             case usageByAccount
             case pendingResetByWindow
+            case lowQuotaWarnedPercentByAccount
+            case lastOpenAIIndicator
         }
 
         init() {}
@@ -3342,6 +3349,8 @@ private enum ResetNotifier {
             availableCountByAccount = try values.decodeIfPresent([String: Int].self, forKey: .availableCountByAccount) ?? [:]
             usageByAccount = try values.decodeIfPresent([String: UsageObservation].self, forKey: .usageByAccount) ?? [:]
             pendingResetByWindow = try values.decodeIfPresent([String: PendingReset].self, forKey: .pendingResetByWindow) ?? [:]
+            lowQuotaWarnedPercentByAccount = try values.decodeIfPresent([String: Int].self, forKey: .lowQuotaWarnedPercentByAccount) ?? [:]
+            lastOpenAIIndicator = try values.decodeIfPresent(String.self, forKey: .lastOpenAIIndicator)
         }
     }
 
@@ -3387,10 +3396,31 @@ private enum ResetNotifier {
             let accountKey = account.id.uuidString
             showNewBankedResets(for: account, accountKey: accountKey, state: &state)
             showDetectedQuotaReset(for: account, accountKey: accountKey, state: &state)
+            showLowQuotaWarning(for: account, accountKey: accountKey, state: &state)
         }
         if state != previousState {
             saveSignalState(state)
         }
+    }
+
+    /// Notify once when OpenAI status leaves operational (`indicator != none`).
+    static func showOpenAIIncidentIfNeeded(_ status: OpenAIServiceStatus?) {
+        guard let status else { return }
+        var state = loadSignalState()
+        let previous = state.lastOpenAIIndicator
+        state.lastOpenAIIndicator = status.indicator
+        defer { saveSignalState(state) }
+        guard status.indicator != "none" else { return }
+        guard previous != status.indicator else { return }
+        enqueue(
+            identifier: "codex-roster-openai-\(status.indicator)-\(status.updatedAt)",
+            title: AppLanguage.text("OpenAI đang sự cố", "OpenAI service issue"),
+            subtitle: status.description,
+            body: AppLanguage.text(
+                "Trạng thái dịch vụ không còn ổn định. Kiểm tra notch hoặc Operations.",
+                "Service status is no longer healthy. Check the notch or Operations."
+            )
+        )
     }
 
     static func showPublicSignal(_ signal: GlobalResetEvent) {
@@ -3423,6 +3453,43 @@ private enum ResetNotifier {
             body: AppLanguage.text(
                 "Quota Codex đã được đặt lại. Bạn có thể tiếp tục sử dụng.",
                 "Codex quota has been reset. You can continue using it."
+            )
+        )
+    }
+
+    private static func showLowQuotaWarning(
+        for account: SavedAccount,
+        accountKey: String,
+        state: inout SignalState
+    ) {
+        // Active account only — avoid fan-out noise across the whole roster.
+        guard account.isActive, !account.archived else { return }
+        let weekly = account.usage?.weekly?.displayRemainingPercent
+        let five = account.usage?.fiveHour?.displayRemainingPercent
+        let bottleneck = [weekly, five].compactMap { $0 }.min()
+        guard let remaining = bottleneck else { return }
+        let previous = state.lowQuotaWarnedPercentByAccount[accountKey]
+        // Cross below 15% once; clear when recovered above 25% so a later dip can warn again.
+        if remaining > 25 {
+            state.lowQuotaWarnedPercentByAccount[accountKey] = remaining
+            return
+        }
+        guard remaining <= 15 else { return }
+        if let previous, previous <= 15 { return }
+        state.lowQuotaWarnedPercentByAccount[accountKey] = remaining
+        let windowLabel: String = {
+            if let weekly, weekly == remaining {
+                return AppLanguage.text("Tuần", "Weekly")
+            }
+            return AppLanguage.text("5 giờ", "5-hour")
+        }()
+        enqueue(
+            identifier: "codex-roster-low-quota-\(accountKey)-\(remaining)",
+            title: AppLanguage.text("Quota sắp hết", "Quota running low"),
+            subtitle: account.displayName,
+            body: AppLanguage.text(
+                "\(windowLabel) còn \(remaining)%. Cân nhắc chuyển tài khoản từ notch.",
+                "\(windowLabel) at \(remaining)%. Consider switching from the notch."
             )
         )
     }
@@ -3888,16 +3955,44 @@ struct SavedAccount: Identifiable, Decodable {
 
     /// Weekly-dominant ranking: `weekly * 1000 + fiveHour` so any weekly gap
     /// outranks any 5H-only difference. Depleted weekly → `-1`.
+    /// Usable accounts whose weekly window resets within 24h get a Switchboard-
+    /// style urgency boost so they surface above otherwise-equal peers.
     var switchQuotaScore: Int {
-        if let weekly = usage?.weekly {
-            if weekly.isDepleted { return -1 }
-            let five = usage?.fiveHour?.remainingPercent ?? 0
-            return weekly.remainingPercent * 1000 + five
+        let base: Int = {
+            if let weekly = usage?.weekly {
+                if weekly.isDepleted { return -1 }
+                let five = usage?.fiveHour?.remainingPercent ?? 0
+                return weekly.remainingPercent * 1000 + five
+            }
+            if let fiveHour = usage?.fiveHour {
+                return fiveHour.isDepleted ? -1 : fiveHour.remainingPercent
+            }
+            return -1
+        }()
+        if base >= 0, isUsableForSwitch, hasWeeklyResetWithin24Hours {
+            return base + 1_000_000
         }
-        if let fiveHour = usage?.fiveHour {
-            return fiveHour.isDepleted ? -1 : fiveHour.remainingPercent
+        return base
+    }
+
+    /// True when the weekly window still has a future reset within 24 hours.
+    var hasWeeklyResetWithin24Hours: Bool {
+        guard let weekly = usage?.weekly else { return false }
+        let resetAt = weekly.resetAt.value
+        let now = Date()
+        guard resetAt > now else { return false }
+        return resetAt.timeIntervalSince(now) <= 24 * 60 * 60
+    }
+
+    /// Coarse plan band for roster section headers (Switchboard-style grouping).
+    var planGroupKey: String {
+        switch planSortRank {
+        case 0: return "pro"
+        case 1: return "plus"
+        case 2: return "team"
+        case 3: return "free"
+        default: return "other"
         }
-        return -1
     }
 
     /// Single source of truth for where an account belongs in the triage board.

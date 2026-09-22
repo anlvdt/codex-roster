@@ -2031,8 +2031,8 @@ final class AccountStore: ObservableObject {
     func refreshResetTimeline(silently: Bool = false) {
         Task {
             do {
-                let timeline = try await cli.decode([ResetTimelineEvent].self, arguments: ["reset-timeline"])
-                resetTimeline = timeline
+                let payload = try await cli.decode(ResetTimelinePayload.self, arguments: ["reset-timeline"])
+                resetTimeline = payload.events
             } catch {
                 if !silently { errorMessage = error.localizedDescription }
             }
@@ -3280,6 +3280,12 @@ struct ResetTimelineEvent: Decodable, Identifiable {
     let scope: String?
     let confidence: String?
     let resetKind: String?
+}
+
+/// Matches Rust `ResetTimeline` JSON from `codex-roster reset-timeline --json`.
+private struct ResetTimelinePayload: Decodable {
+    let updatedAt: String?
+    let events: [ResetTimelineEvent]
 }
 
 struct ResetJuice: Decodable {

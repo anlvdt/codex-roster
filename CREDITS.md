@@ -4,7 +4,9 @@ Codex Roster is an independent native macOS application built for the Codex comm
 
 Except for the original MIT foundation explicitly identified below, Codex Roster does not include source code, visual assets, account data, credentials, or state from the referenced projects.
 
-## Reference audit — 2026-09-16
+## Reference audit — 2026-09-22
+
+Synced with the About → References & licenses panel in the macOS app on 2026-09-22.
 
 | Source | Revision reviewed | Role in Codex Roster | License / boundary |
 | --- | --- | --- | --- |
@@ -18,7 +20,12 @@ Except for the original MIT foundation explicitly identified below, Codex Roster
 | [getagentseal/codeburn](https://github.com/getagentseal/codeburn) | `v0.9.24` / `desktop-v0.9.24` reviewed 2026-09-16 | Codex cache-accounting, subagent sidechain handling, cumulative-token fallback, and session-file validation research | MIT; independently reimplemented |
 | [vibe-cafe/vibe-usage](https://github.com/vibe-cafe/vibe-usage) | `@vibe-cafe/vibe-usage@0.10.21` reviewed 2026-09-05 | Optional VibeCafe collector/API integration for 7-day tokens, estimated cost, sessions, and active time | MIT; public endpoint/response format integrated independently, no upstream source imported |
 | [donvito/agent-monitor](https://github.com/donvito/agent-monitor) | `main` reviewed 2026-09-16 | Codex subagent hierarchy extraction (`thread_source`, `parent_thread_id`) and token USD pricing rate research | MIT; independently reimplemented |
+
 The reviewed updates were applied selectively. Roster preserves the stricter local-first rule from current switching research: it does not refresh inactive accounts' OAuth refresh tokens in the background.
+
+## Agent Monitor
+
+We reviewed [donvito/agent-monitor](https://github.com/donvito/agent-monitor) for local Codex (and other agent) session trees, subagent parent links, and per-model token/USD breakdowns. Codex Roster independently reimplements only the Codex-relevant pieces already present in session metadata (`thread_source`, `parent_thread_id`) and local USD rate estimates. No dashboard UI, traces, or session contents were copied. Agent Monitor is MIT licensed.
 
 ## Tokentab and CodeBurn
 

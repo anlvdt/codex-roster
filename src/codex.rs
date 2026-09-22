@@ -707,11 +707,7 @@ pub fn set_configured_model(codex_root: &Path, new_model: &str) -> Result<()> {
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("model")
-            && trimmed
-                .splitn(2, '=')
-                .next()
-                .map(str::trim)
-                == Some("model")
+            && trimmed.splitn(2, '=').next().map(str::trim) == Some("model")
         {
             new_lines.push(format!("model = \"{new_model}\""));
             replaced = true;

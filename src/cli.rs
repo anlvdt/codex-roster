@@ -696,7 +696,11 @@ pub fn run() -> Result<()> {
             } else {
                 println!(
                     "Auto-resume session: {}",
-                    if status.enabled { "enabled" } else { "disabled" }
+                    if status.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
                 );
             }
             Ok(())

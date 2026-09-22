@@ -15,9 +15,7 @@ use crate::operation_lock::OperationLock;
 use crate::repository::SnapshotRepository;
 use crate::secrets::{MigratingSecretStore, SecretStore};
 use crate::settings::{load_settings, save_settings};
-use crate::usage::{
-    usage_error_blocks_activation, usage_error_is_deferred_access_token_refresh,
-};
+use crate::usage::{usage_error_blocks_activation, usage_error_is_deferred_access_token_refresh};
 
 use super::App;
 
@@ -69,9 +67,7 @@ where
         let mut due_accounts = Vec::new();
         for account in &accounts {
             if account.archived {
-                output
-                    .skipped
-                    .push(format!("{}: archived", account.email));
+                output.skipped.push(format!("{}: archived", account.email));
                 continue;
             }
             // Session longevity: never mass-probe deferred / login-blocking rows.

@@ -12,8 +12,6 @@ struct OperationsView: View {
             VStack(alignment: .leading, spacing: RosterSecondaryChrome.sectionSpacing) {
                 header
 
-                RosterSecondaryLinkBar(current: .operations)
-
                 nextActionSection
 
                 attentionSummary
@@ -31,10 +29,7 @@ struct OperationsView: View {
             .rosterSecondaryPadding()
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .rosterSecondaryFrame(
-            width: RosterSecondaryChrome.operationsWidth,
-            height: RosterSecondaryChrome.operationsHeight
-        )
+        .rosterSecondaryContent()
         .onAppear {
             store.refreshTokenUsage(silently: true)
             store.refreshOpenAIStatus(silently: true)
@@ -215,7 +210,7 @@ struct OperationsView: View {
     private func opsStatusRow(icon: String, title: String, detail: String) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: icon)
-                .font(.body)
+                .font(RosterSecondaryChrome.body)
                 .foregroundStyle(PrismTheme.accent)
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 2) {

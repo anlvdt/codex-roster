@@ -85,7 +85,6 @@ struct NotchWindowView: View {
     // Sheet presentation states directly inside the Notch Console
     @State private var showingAddAccount = false
     @State private var accountForRelogin: SavedAccount? = nil
-    @State private var backupOperation: BackupOperation? = nil
     @State private var accountForEditing: SavedAccount? = nil
 
     private let maxExpandedWidth: CGFloat = NotchRosterLayout.deckWidth
@@ -203,6 +202,7 @@ struct NotchWindowView: View {
             alignment: .top
         )
         .preferredColorScheme(.dark)
+        .rosterConsoleOpenBridge()
         .background {
             NotchWindowConfigurator(
                 isExpanded: isWindowExpanded,
@@ -225,12 +225,6 @@ struct NotchWindowView: View {
         }
         .sheet(item: $accountForRelogin) { account in
             ReloginAccountSheet(account: account, queuedCount: 0, cancelQueue: {})
-                .environmentObject(store)
-                .environmentObject(language)
-                .background(ElevatePresentedWindow())
-        }
-        .sheet(item: $backupOperation) { op in
-            BackupTransferSheet(operation: op)
                 .environmentObject(store)
                 .environmentObject(language)
                 .background(ElevatePresentedWindow())
@@ -288,14 +282,6 @@ struct NotchWindowView: View {
                   let account = store.accounts.first(where: { $0.id == id }) else { return }
             if !isExpanded { expand() }
             accountForRelogin = account
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .exportBackup)) { _ in
-            if !isExpanded { expand() }
-            backupOperation = .export
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .importBackup)) { _ in
-            if !isExpanded { expand() }
-            backupOperation = .import
         }
         .onReceive(NotificationCenter.default.publisher(for: .editAccount)) { notification in
             let id = (notification.object as? String).flatMap(UUID.init(uuidString:))

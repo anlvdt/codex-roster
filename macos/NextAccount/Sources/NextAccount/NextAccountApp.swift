@@ -161,10 +161,10 @@ struct CodexRosterApp: App {
             }
             CommandGroup(after: .newItem) {
                 Button(language.text("Xuất bản sao lưu…", "Export backup…")) {
-                    NotificationCenter.default.post(name: .exportBackup, object: nil)
+                    RosterConsolePresenter.request(.exportBackup)
                 }
                 Button(language.text("Nhập bản sao lưu…", "Import backup…")) {
-                    NotificationCenter.default.post(name: .importBackup, object: nil)
+                    RosterConsolePresenter.request(.importBackup)
                 }
             }
             CommandGroup(after: .toolbar) {
@@ -181,30 +181,13 @@ struct CodexRosterApp: App {
             }
         }
 
-        Window(language.text("Giới thiệu", "About"), id: "about") {
-            AboutView()
-                .environmentObject(language)
-                .environment(\.locale, language.language.locale)
-        }
-        .defaultSize(width: RosterSecondaryChrome.aboutWidth, height: RosterSecondaryChrome.aboutHeight)
-
-        // Named Window (not Settings scene): LSUIElement/.accessory apps often
-        // never surface showSettingsWindow:, so the notch menu opens this id.
-        Window(language.text("Cài đặt", "Settings"), id: "settings") {
-            AutomationSettingsView()
+        Window(language.text("Bảng điều khiển", "Roster Console"), id: RosterConsoleTab.windowID) {
+            RosterConsoleView()
                 .environmentObject(store)
                 .environmentObject(language)
                 .environment(\.locale, language.language.locale)
         }
-        .defaultSize(width: RosterSecondaryChrome.windowWidth, height: RosterSecondaryChrome.settingsHeight)
-
-        Window(language.text("Vận hành", "Operations"), id: "operations") {
-            OperationsView()
-                .environmentObject(store)
-                .environmentObject(language)
-                .environment(\.locale, language.language.locale)
-        }
-        .defaultSize(width: RosterSecondaryChrome.operationsWidth, height: RosterSecondaryChrome.operationsHeight)
+        .defaultSize(width: RosterSecondaryChrome.consoleWidth, height: RosterSecondaryChrome.consoleHeight)
     }
 
 }
@@ -464,8 +447,7 @@ private struct AccountSidebar: View {
     }
 
     private func openAboutWindow() {
-        openWindow(id: "about")
-        RosterWindowSurface.presentNamedWindow(id: "about")
+        RosterConsolePresenter.open(.about, using: openWindow)
     }
 
 }
@@ -3779,16 +3761,14 @@ struct MenuBarView: View {
     }
 
     private func openSettings() {
-        // Named Window (not Settings scene): LSUIElement/.accessory apps often
-        // never surface showSettingsWindow:. Notch is `.statusBar`, so elevate
-        // this window above it and collapse the panel first.
-        openWindow(id: "settings")
-        RosterWindowSurface.presentNamedWindow(id: "settings")
+        // Named console window (not Settings scene): LSUIElement/.accessory apps
+        // often never surface showSettingsWindow:. Notch is `.statusBar`, so
+        // elevate the hub above it and collapse the panel first.
+        RosterConsolePresenter.open(.settings, using: openWindow)
     }
 
     private func openOperations() {
-        openWindow(id: "operations")
-        RosterWindowSurface.presentNamedWindow(id: "operations")
+        RosterConsolePresenter.open(.operations, using: openWindow)
     }
 
     private func openReloginFlow(_ accountID: UUID) {
@@ -3802,11 +3782,7 @@ struct MenuBarView: View {
     }
 
     private func openBackupFlow(_ op: BackupOperation) {
-        if op == .export {
-            NotificationCenter.default.post(name: .exportBackup, object: nil)
-        } else {
-            NotificationCenter.default.post(name: .importBackup, object: nil)
-        }
+        RosterConsolePresenter.open(op == .export ? .exportBackup : .importBackup, using: openWindow)
     }
 
     private func openEditAccount(_ account: SavedAccount) {
@@ -3814,8 +3790,7 @@ struct MenuBarView: View {
     }
 
     private func openAbout() {
-        openWindow(id: "about")
-        RosterWindowSurface.presentNamedWindow(id: "about")
+        RosterConsolePresenter.open(.about, using: openWindow)
     }
 
     private func refreshMenuBar() {
@@ -4075,7 +4050,7 @@ enum AppInfo {
     }
 }
 
-private struct AboutView: View {
+struct AboutView: View {
     @EnvironmentObject private var language: LanguageStore
     @Environment(\.openURL) private var openURL
 
@@ -4094,7 +4069,7 @@ private struct AboutView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: RosterSecondaryChrome.sectionSpacing) {
                 HStack(alignment: .center, spacing: 15) {
                     Image(nsImage: NSApplication.shared.applicationIconImage)
                         .resizable()
@@ -4116,8 +4091,6 @@ private struct AboutView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .layoutPriority(1)
                 }
-
-                RosterSecondaryLinkBar(current: .about)
 
                 LanguagePreferencePicker()
                     .padding(14)
@@ -4283,13 +4256,10 @@ private struct AboutView: View {
                     .padding(.top, 6)
                 }
             }
-            .padding(RosterSecondaryChrome.contentPadding)
+            .rosterSecondaryPadding()
         }
-        .rosterSecondaryFrame(width: RosterSecondaryChrome.aboutWidth, height: RosterSecondaryChrome.aboutHeight)
+        .rosterSecondaryContent()
         .navigationTitle(language.text("Giới thiệu Codex Roster", "About Codex Roster"))
-        .background {
-            Color.clear
-        }
     }
 }
 
@@ -4333,14 +4303,17 @@ private struct AboutMetric: View {
         VStack(alignment: .leading, spacing: 4) {
             Image(systemName: icon)
                 .foregroundStyle(.tint)
-            Text(title).font(.title3.weight(.semibold))
+            Text(title).font(RosterSecondaryChrome.section)
             Text(detail)
-                .font(.body)
+                .font(RosterSecondaryChrome.caption)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, minHeight: 74, alignment: .leading)
         .padding(11)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 11))
+        .background(
+            RosterSecondaryChrome.cardFill,
+            in: RoundedRectangle(cornerRadius: RosterSecondaryChrome.cardRadius)
+        )
     }
 }
 
@@ -4352,14 +4325,17 @@ private struct AboutPanel<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Label(title, systemImage: icon)
-                .font(.title2.weight(.semibold))
+                .font(RosterSecondaryChrome.section)
                 .foregroundStyle(.primary)
             content
-                .font(.title3)
+                .font(RosterSecondaryChrome.body)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 13))
+        .background(
+            RosterSecondaryChrome.cardFill,
+            in: RoundedRectangle(cornerRadius: RosterSecondaryChrome.cardRadius)
+        )
     }
 }
 
@@ -4372,17 +4348,20 @@ private struct AboutDisclosurePanel<Content: View>: View {
         DisclosureGroup {
             VStack(alignment: .leading, spacing: 10) {
                 content
-                    .font(.title3)
+                    .font(RosterSecondaryChrome.body)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 10)
         } label: {
             Label(title, systemImage: icon)
-                .font(.title2.weight(.semibold))
+                .font(RosterSecondaryChrome.section)
                 .foregroundStyle(.primary)
         }
         .padding(14)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 13))
+        .background(
+            RosterSecondaryChrome.cardFill,
+            in: RoundedRectangle(cornerRadius: RosterSecondaryChrome.cardRadius)
+        )
     }
 }
 
@@ -4392,7 +4371,7 @@ private struct AboutBullet: View {
 
     var body: some View {
         Label(text, systemImage: icon)
-            .font(.title3)
+            .font(RosterSecondaryChrome.body)
             .foregroundStyle(.secondary)
     }
 }
@@ -4404,7 +4383,7 @@ private struct AboutFeatureGroup<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
-                .font(.title3.weight(.bold))
+                .font(RosterSecondaryChrome.section)
                 .foregroundStyle(.primary)
             content
         }

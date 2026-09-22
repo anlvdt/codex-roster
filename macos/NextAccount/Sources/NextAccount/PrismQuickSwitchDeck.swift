@@ -540,7 +540,7 @@ struct PrismQuickSwitchDeck: View {
                         HStack(spacing: 2) {
                             Text(effort.effort.prefix(1).uppercased())
                                 .font(PrismTheme.fontMicro)
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(.secondary)
                             Text("\(effort.current)")
                                 .font(PrismTheme.fontChip)
                                 .monospacedDigit()
@@ -560,7 +560,7 @@ struct PrismQuickSwitchDeck: View {
                 HStack(alignment: .top, spacing: 4) {
                     Text(event.date)
                         .font(PrismTheme.fontMicro)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
                         .monospacedDigit()
                     Text(event.summary)
                         .font(PrismTheme.fontChip)
@@ -1124,7 +1124,7 @@ private struct PrismCompactAccountCard: View {
                     if let status = rowStatus {
                         Text("·")
                             .font(PrismTheme.fontCaption)
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(.secondary)
                         Text(status.text)
                             .font(PrismTheme.fontCaption)
                             .foregroundStyle(status.tint)

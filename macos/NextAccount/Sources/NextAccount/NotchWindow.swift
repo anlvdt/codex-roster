@@ -79,8 +79,7 @@ struct NotchWindowView: View {
     @State private var collapseTask: Task<Void, Never>?
     @State private var keyMonitors: [Any] = []
     @State private var isWindowExpanded = false
-    @State private var notchInset: CGFloat = detectInitialNotch().inset
-    @State private var notchWidth: CGFloat = detectInitialNotch().camera
+    @State private var geometry: NotchGeometry = .detect()
 
     // Sheet presentation states directly inside the Notch Console
     @State private var showingAddAccount = false
@@ -89,11 +88,13 @@ struct NotchWindowView: View {
 
     private let maxExpandedWidth: CGFloat = NotchRosterLayout.deckWidth
     private let earWidth: CGFloat = 126
-    private var physicalNotchClearance: CGFloat {
-        notchWidth > 0 ? max(notchWidth - 14, 170) : 0
-    }
+    /// Non-notch compact pill width (centered under the top edge).
+    private let nonNotchCompactWidth: CGFloat = 270
+    private var hasNotch: Bool { geometry.hasNotch }
+    private var notchInset: CGFloat { geometry.inset }
+    private var notchWidth: CGFloat { geometry.cameraWidth }
     private var compactWidth: CGFloat {
-        notchWidth > 0 ? physicalNotchClearance + 2 * earWidth : 270
+        hasNotch ? geometry.physicalClearance + 2 * earWidth : nonNotchCompactWidth
     }
     private let miniDiameter: CGFloat = 20
 
@@ -211,8 +212,7 @@ struct NotchWindowView: View {
                 expandedWidth: maxExpandedWidth,
                 expandedHeight: expandedPanelHeight,
                 panelEnabled: store.notchPanelEnabled,
-                notchInset: $notchInset,
-                notchWidth: $notchWidth
+                geometry: $geometry
             )
         }
 
@@ -297,6 +297,13 @@ struct NotchWindowView: View {
         .onChange(of: store.notchPanelEnabled) { _, enabled in
             if !enabled { collapse() }
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
+            // Re-detect notch vs non-notch when displays connect/disconnect or rearrange.
+            let measured = NotchGeometry.detect()
+            if geometry != measured {
+                geometry = measured
+            }
+        }
         .onDisappear {
             hoverTask?.cancel()
             collapseTask?.cancel()
@@ -325,7 +332,14 @@ struct NotchWindowView: View {
                 expand()
             }
         } label: {
-            PrismFilamentView(account: activeAccount, diameter: miniDiameter, compact: true, notchWidth: notchWidth, earWidth: earWidth, compactHeight: compactHeight)
+            PrismFilamentView(
+                account: activeAccount,
+                diameter: miniDiameter,
+                compact: true,
+                notchWidth: hasNotch ? notchWidth : 0,
+                earWidth: earWidth,
+                compactHeight: compactHeight
+            )
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 .contentShape(Rectangle())
         }
@@ -423,21 +437,6 @@ struct NotchWindowView: View {
         }
     }
 
-    private static func detectInitialNotch() -> (camera: CGFloat, inset: CGFloat) {
-        let screens = NSScreen.screens
-        guard let screen = screens.max(by: { $0.safeAreaInsets.top < $1.safeAreaInsets.top }) ?? NSScreen.main ?? screens.first else {
-            return (0, 0)
-        }
-        let inset = screen.safeAreaInsets.top
-        let camera: CGFloat
-        if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
-            camera = max(0, right.minX - left.maxX)
-        } else {
-            camera = 0
-        }
-        return (camera, inset)
-    }
-
     private func installKeyMonitors() {
         guard keyMonitors.isEmpty else { return }
         if let local = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { event in
@@ -471,8 +470,7 @@ private struct NotchWindowConfigurator: NSViewRepresentable {
     let expandedWidth: CGFloat
     let expandedHeight: CGFloat
     let panelEnabled: Bool
-    @Binding var notchInset: CGFloat
-    @Binding var notchWidth: CGFloat
+    @Binding var geometry: NotchGeometry
 
     func makeNSView(context: Context) -> NotchHitTestView {
         let view = NotchHitTestView()
@@ -511,39 +509,23 @@ private struct NotchWindowConfigurator: NSViewRepresentable {
             window.isExcludedFromWindowsMenu = true
             window.ignoresMouseEvents = false
 
-            let screen = preferredNotchScreen(for: window)
-            let inset = screen.safeAreaInsets.top
-            if notchInset != inset {
-                notchInset = inset
-            }
-            let camera: CGFloat
-            if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
-                camera = max(0, right.minX - left.maxX)
-            } else {
-                camera = 0
-            }
-            if notchWidth != camera {
-                notchWidth = camera
+            let measured = NotchGeometry.detect(fallbackScreen: window.screen)
+            if geometry != measured {
+                geometry = measured
             }
 
             // Dynamic sizing: only occupy compact capsule bounds when collapsed so
             // menu-bar icons and menus remain directly clickable without interception.
+            // Frame is anchored on measured notch centerX (or screen midX when non-notch)
+            // and snapped to the pixel grid to avoid half-pixel blur / 1px drift.
             let targetWidth = isExpanded ? expandedWidth : compactWidth
             let targetHeight = isExpanded ? expandedHeight : compactHeight
-            let x = screen.frame.midX - targetWidth / 2
-            let y = screen.frame.maxY - targetHeight
-            let targetFrame = NSRect(x: x, y: y, width: targetWidth, height: targetHeight)
+            let targetFrame = measured.windowFrame(width: targetWidth, height: targetHeight)
             if window.frame != targetFrame {
                 window.setFrame(targetFrame, display: true, animate: false)
             }
             window.orderFrontRegardless()
         }
-    }
-
-    private func preferredNotchScreen(for window: NSWindow) -> NSScreen {
-        NSScreen.screens.max { left, right in
-            left.safeAreaInsets.top < right.safeAreaInsets.top
-        } ?? window.screen ?? NSScreen.main ?? NSScreen.screens[0]
     }
 }
 

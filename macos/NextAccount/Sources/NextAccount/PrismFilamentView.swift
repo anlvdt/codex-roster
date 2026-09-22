@@ -50,7 +50,8 @@ struct PrismFilamentView: View {
     }
 
     private var physicalNotchClearance: CGFloat {
-        notchWidth > 0 ? max(notchWidth - 14, 170) : 0
+        // Exact measured camera gap — never shrink/fudge (was `notchWidth - 14`).
+        notchWidth > 0 ? notchWidth : 0
     }
 
     var body: some View {
@@ -65,6 +66,7 @@ struct PrismFilamentView: View {
                 rightEarWing
             }
         } else {
+            // Non-notch / external display: single centered pill (never half-apply ears).
             nonNotchCapsule
         }
     }

@@ -133,13 +133,18 @@ struct PrismQuickSwitchDeck: View {
 
     // MARK: - Upper Deck (Live | Camera gap | Usage) — balanced heights, minimal void
     private var upperDeckFramingNotch: some View {
-        HStack(alignment: .center, spacing: 8) {
+        let geometry = NotchGeometry.detect()
+        let centerGapWidth = geometry.hasNotch
+            ? geometry.cameraWidth
+            : 156
+        return HStack(alignment: .center, spacing: 8) {
             upperLeftWing
                 .frame(maxWidth: .infinity, alignment: .topLeading)
 
-            // Fixed camera clearance — keep content out from under the notch.
-            upperCenterNotchGap
-                .frame(width: 156, alignment: .center)
+            // Camera clearance column — measured width on notch Macs so wings
+            // never sit under the housing; fixed comfort width on non-notch.
+            upperCenterNotchGap(geometry: geometry)
+                .frame(width: centerGapWidth, alignment: .center)
 
             upperRightWing
                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -304,7 +309,7 @@ struct PrismQuickSwitchDeck: View {
     }
 
     // MARK: - Upper Center Notch Gap (tight under camera)
-    private var upperCenterNotchGap: some View {
+    private func upperCenterNotchGap(geometry: NotchGeometry) -> some View {
         VStack(spacing: 6) {
             HStack(spacing: 5) {
                 let statusIndicator = store.openAIStatus?.indicator ?? "none"
@@ -366,7 +371,7 @@ struct PrismQuickSwitchDeck: View {
                     )
             )
         }
-        .padding(.top, topNotchClearance)
+        .padding(.top, topNotchClearance(for: geometry))
         .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -402,10 +407,12 @@ struct PrismQuickSwitchDeck: View {
         }
     }
 
-    private var topNotchClearance: CGFloat {
-        let maxInset = NSScreen.screens.map(\.safeAreaInsets.top).max() ?? 0
-        // Keep controls clear of the camera housing without a tall dead band.
-        return max(maxInset + 4, 28)
+    /// Vertical clearance so center-column controls sit flush under the camera
+    /// housing. Accounts for the outer `deckTopInset` so total top offset == inset.
+    /// Non-notch: zero extra clearance (only the shared deck top inset).
+    private func topNotchClearance(for geometry: NotchGeometry) -> CGFloat {
+        guard geometry.hasNotch else { return 0 }
+        return max(0, geometry.inset - NotchRosterLayout.deckTopInset)
     }
 
     // MARK: - Upper Right Wing (Telemetry — denser strip)

@@ -2283,7 +2283,7 @@ struct GlobalResetOutlookCard: View {
                 HStack(alignment: .top, spacing: 12) {
                     if let signalPercent = outlook.signalPercent {
                         ResetOutlookMetric(
-                            title: language.text("Cam kết", "Commitment"),
+                            title: language.text("Tín hiệu cam kết", "Signal commitment"),
                             value: "\(signalPercent)%",
                             tint: forecastColor(signalPercent, high: .red)
                         )
@@ -3918,7 +3918,7 @@ private struct MenuBarLiveSignals: View {
             return language.text("Đang theo dõi", "Monitoring")
         }
         if let signalPercent = outlook.signalPercent {
-            return language.text("Cam kết \(signalPercent)%", "Commitment \(signalPercent)%")
+            return language.text("Tín hiệu \(signalPercent)%", "Signal \(signalPercent)%")
         }
         return "\(outlook.chance24Hours)% / 24H"
     }

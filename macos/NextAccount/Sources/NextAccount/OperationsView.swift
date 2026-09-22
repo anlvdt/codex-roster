@@ -118,7 +118,7 @@ struct OperationsView: View {
                 "Per-account details and quota bars stay on the notch — this is a count-only snapshot."
             ))
             .font(RosterSecondaryChrome.footnote)
-            .foregroundStyle(.tertiary)
+            .foregroundStyle(.secondary)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)

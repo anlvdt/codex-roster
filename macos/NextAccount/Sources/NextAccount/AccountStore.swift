@@ -359,13 +359,6 @@ final class AccountStore: ObservableObject {
         }
     }
 
-    /// Sum of redeemable banked resets across non-archived accounts (display only).
-    var totalBankedResetsAcrossRoster: Int {
-        accounts
-            .filter { !$0.archived }
-            .reduce(0) { $0 + $1.bankedResetCount }
-    }
-
     var hasRunningCodexProcesses: Bool {
         ChatGPTDesktop.isRunning
     }
@@ -1251,6 +1244,9 @@ final class AccountStore: ObservableObject {
             enqueue: { id in
                 let open = await self.openRememberedWorkspace(cwd: nil, sessionID: id)
                 self.logSessionResume("batch open thread=\(id) result=\(String(describing: open))")
+                guard case .openedThread = open, self.autoResumeSession, !Task.isCancelled else {
+                    return false
+                }
                 let queued = await self.queueContinueMessage(threadID: id)
                 self.logSessionResume("batch continue thread=\(id) queued=\(queued)")
                 return queued
@@ -1304,9 +1300,10 @@ final class AccountStore: ObservableObject {
             // Retry: first deliveries during cold hydrate are often dropped.
             for attempt in 1...6 {
                 logSessionResume("thread deep-link attempt \(attempt) id=\(sessionID)")
+                let openedAt = Date()
                 let delivered = await openCodexThreadDeepLink(sessionID: sessionID)
                 if delivered {
-                    if await desktopLogConfirmsThreadOpen(sessionID: sessionID, withinSeconds: 3.5) {
+                    if await desktopLogConfirmsThreadOpen(sessionID: sessionID, since: openedAt, timeoutSeconds: 3.5) {
                         return .openedThread
                     }
                     logSessionResume("open delivered but no Desktop resume evidence yet")
@@ -1314,8 +1311,9 @@ final class AccountStore: ObservableObject {
                 try? await Task.sleep(for: .milliseconds(1500))
             }
             // Final attempt — only claim thread resume when Desktop log confirms.
+            let openedAt = Date()
             if await openCodexThreadDeepLink(sessionID: sessionID),
-               await desktopLogConfirmsThreadOpen(sessionID: sessionID, withinSeconds: 5) {
+               await desktopLogConfirmsThreadOpen(sessionID: sessionID, since: openedAt, timeoutSeconds: 5) {
                 return .openedThread
             }
             logSessionResume("thread deep-link exhausted without Desktop resume evidence")
@@ -1454,11 +1452,19 @@ final class AccountStore: ObservableObject {
         }
     }
 
-    /// Scan recent Codex Desktop logs for evidence the thread deep-link landed.
-    private func desktopLogConfirmsThreadOpen(sessionID: String, withinSeconds: Double) async -> Bool {
+    /// Wait for fresh, thread-specific Desktop evidence that the deep-link landed.
+    private func desktopLogConfirmsThreadOpen(sessionID: String, since: Date, timeoutSeconds: Double) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        repeat {
+            if await desktopLogHasThreadOpen(sessionID: sessionID, since: since) { return true }
+            try? await Task.sleep(for: .milliseconds(250))
+        } while !Task.isCancelled && Date() < deadline
+        return false
+    }
+
+    private func desktopLogHasThreadOpen(sessionID: String, since: Date) async -> Bool {
         let root = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Logs/com.openai.codex", isDirectory: true)
-        let cutoff = Date().addingTimeInterval(-max(withinSeconds + 30, 60))
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
                 let fm = FileManager.default
@@ -1476,7 +1482,7 @@ final class AccountStore: ObservableObject {
                     let values = try? item.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
                     guard values?.isRegularFile == true,
                           let modified = values?.contentModificationDate,
-                          modified >= cutoff else { continue }
+                          modified >= since else { continue }
                     candidates.append((modified, item))
                 }
                 candidates.sort { $0.0 > $1.0 }
@@ -1490,13 +1496,9 @@ final class AccountStore: ObservableObject {
                     }
                     guard let data = try? handle.readToEnd(),
                           let text = String(data: data, encoding: .utf8) else { continue }
-                    let hasId = text.contains("conversationId=\(sessionID)")
-                        || text.contains("threadId=\(sessionID)")
-                    let hasResume = text.contains("maybe_resume_success")
-                        || text.contains("method=thread/resume")
-                        || text.contains("name=thread_navigation outcome=success")
-                        || text.contains("name=thread_navigation")
-                    if hasId && hasResume {
+                    if text.split(separator: "\n").contains(where: {
+                        DesktopResumeEvidence.matches(String($0), threadID: sessionID, since: since)
+                    }) {
                         continuation.resume(returning: true)
                         return
                     }

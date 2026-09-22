@@ -28,3 +28,18 @@ enum SessionResumeBatch {
         return Result(total: ids.count, succeeded: succeeded)
     }
 }
+
+/// A navigation is confirmed only by a fresh success record for that exact thread.
+enum DesktopResumeEvidence {
+    static func matches(_ line: String, threadID: String, since: Date) -> Bool {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let timestamp = formatter.string(from: since)
+        guard line.count >= 24, String(line.prefix(24)) >= timestamp else { return false }
+        guard line.contains("conversationId=\(threadID)") || line.contains("threadId=\(threadID)") else {
+            return false
+        }
+        return line.contains("maybe_resume_success")
+            || (line.contains("method=thread/resume") && line.contains("errorCode=null"))
+    }
+}

@@ -334,19 +334,17 @@ fn discover_interrupted_sessions(codex_root: &Path) -> Result<Vec<DiscoveredSess
     let mut candidates = Vec::new();
     let mut db_available = false;
     let db_path = codex_root.join("state_5.sqlite");
-    if db_path.is_file() {
-        if let Ok(conn) = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
-            if let Ok(mut stmt) = conn.prepare(
-                "SELECT rollout_path FROM threads WHERE COALESCE(archived, 0) = 0
+    if db_path.is_file()
+        && let Ok(conn) = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        && let Ok(mut stmt) = conn.prepare(
+            "SELECT rollout_path FROM threads WHERE COALESCE(archived, 0) = 0
                  AND COALESCE(thread_source, 'user') = 'user'
                  ORDER BY COALESCE(recency_at_ms, updated_at_ms, 0) DESC",
-            ) {
-                if let Ok(rows) = stmt.query_map([], |row| row.get::<_, Option<String>>(0)) {
-                    db_available = true;
-                    candidates.extend(rows.flatten().flatten().map(PathBuf::from));
-                }
-            }
-        }
+        )
+        && let Ok(rows) = stmt.query_map([], |row| row.get::<_, Option<String>>(0))
+    {
+        db_available = true;
+        candidates.extend(rows.flatten().flatten().map(PathBuf::from));
     }
     if !db_available {
         let today = OffsetDateTime::now_utc().date();

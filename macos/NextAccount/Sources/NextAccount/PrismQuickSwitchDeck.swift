@@ -437,7 +437,7 @@ struct PrismQuickSwitchDeck: View {
         activeColor: Color,
         help: String,
         disabled: Bool,
-        onChange: @escaping @Sendable (Bool) -> Void
+        onChange: @escaping (Bool) -> Void
     ) -> some View {
         HStack(spacing: 5) {
             Image(systemName: icon)
@@ -756,27 +756,6 @@ struct PrismQuickSwitchDeck: View {
                     .padding(.vertical, 2)
                     .background(Capsule().fill(PrismTheme.surfaceSoft))
 
-                if store.totalBankedResetsAcrossRoster > 0 {
-                    let total = store.totalBankedResetsAcrossRoster
-                    HStack(spacing: 3) {
-                        Image(systemName: "arrow.counterclockwise")
-                            .font(PrismTheme.fontMicro)
-                        Text("\(total)")
-                            .font(PrismTheme.fontChip)
-                            .monospacedDigit()
-                        Text(language.text("dự phòng", "banked"))
-                            .font(PrismTheme.fontMicroChip)
-                    }
-                    .foregroundStyle(PrismTheme.warning)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(PrismTheme.chipFill(PrismTheme.warning, opacity: 0.14)))
-                    .help(language.text(
-                        "Tổng \(total) banked reset trên toàn roster — chỉ hiển thị, không tự redeem.",
-                        "\(total) banked resets across the roster — display only, never auto-redeemed."
-                    ))
-                }
-
                 Spacer(minLength: 6)
 
                 filterTab(label: language.text("Tất cả", "All"), filter: .all)
@@ -1058,10 +1037,22 @@ private struct PrismCompactAccountCard: View {
             }
 
             VStack(alignment: .leading, spacing: 5) {
-                Text(account.displayName)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(PrismTheme.textPrimary)
-                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(account.displayName)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(PrismTheme.textPrimary)
+                        .lineLimit(1)
+                    if account.bankedResetCount > 0 {
+                        PrismBankedResetCountBadge(
+                            count: account.bankedResetCount,
+                            style: .card,
+                            helpText: language.text(
+                                "\(account.displayName): \(account.bankedResetCount) lượt reset dự phòng",
+                                "\(account.displayName): \(account.bankedResetCount) banked resets"
+                            )
+                        )
+                    }
+                }
                 Text(account.email)
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)

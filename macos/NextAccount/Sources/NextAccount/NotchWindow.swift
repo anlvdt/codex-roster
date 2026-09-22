@@ -75,7 +75,6 @@ struct NotchWindowView: View {
     @AppStorage(NotchRosterLayout.rosterExpandedKey) private var isRosterExpanded = false
 
     @State private var expansionState: NotchExpansionState = .collapsed
-    @State private var hoverTask: Task<Void, Never>?
     @State private var collapseTask: Task<Void, Never>?
     @State private var windowShrinkTask: Task<Void, Never>?
     @State private var keyMonitors: [Any] = []
@@ -254,7 +253,6 @@ struct NotchWindowView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .toggleNotchPanel)) { _ in
             guard store.notchPanelEnabled else { return }
-            hoverTask?.cancel()
             collapseTask?.cancel()
             if isExpanded {
                 collapse()
@@ -264,7 +262,6 @@ struct NotchWindowView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .collapseNotchPanel)) { _ in
-            hoverTask?.cancel()
             collapseTask?.cancel()
             if isExpanded { collapse() }
         }
@@ -309,7 +306,6 @@ struct NotchWindowView: View {
             }
         }
         .onDisappear {
-            hoverTask?.cancel()
             collapseTask?.cancel()
             removeKeyMonitors()
         }
@@ -326,7 +322,6 @@ struct NotchWindowView: View {
     // MARK: - Compact Bar (Top Notch Filament)
     private var compactBar: some View {
         Button {
-            hoverTask?.cancel()
             collapseTask?.cancel()
             PrismTheme.triggerHaptic(type: .alignment)
             NSApplication.shared.activate(ignoringOtherApps: true)
@@ -374,17 +369,9 @@ struct NotchWindowView: View {
         )
     }
     private func handleHover(_ hovering: Bool) {
-        hoverTask?.cancel()
         collapseTask?.cancel()
 
-        if hovering {
-            guard !isExpanded else { return }
-            hoverTask = Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(180))
-                guard !Task.isCancelled else { return }
-                expand()
-            }
-        } else if isExpanded {
+        if !hovering && isExpanded {
             guard !isPinnedLive else { return }
             collapseTask = Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(250))
@@ -396,7 +383,6 @@ struct NotchWindowView: View {
 
     // MARK: - Choreographed Dropdown & 2-Way Bloom Animation
     private func expand() {
-        hoverTask?.cancel()
         collapseTask?.cancel()
         windowShrinkTask?.cancel()
         installKeyMonitors()
@@ -414,7 +400,6 @@ struct NotchWindowView: View {
     }
 
     private func collapse() {
-        hoverTask?.cancel()
         collapseTask?.cancel()
         windowShrinkTask?.cancel()
         removeKeyMonitors()

@@ -96,8 +96,14 @@ import Testing
     #expect(!NotchRosterLayout.needsRosterScroll(sectionCounts: sections, expanded: true))
 
     let height = NotchRosterLayout.rosterGridHeight(sectionCounts: sections, expanded: true)
-    let expected = 12 * NotchRosterLayout.rowHeight
-        + 11 * NotchRosterLayout.rowSpacing
+    // Headers use sectionHeaderHeight (not full rowHeight) to avoid bottom void.
+    let headerCount = 4
+    let accountRows = 8
+    let logicalRows = headerCount + accountRows
+    let expected = CGFloat(headerCount) * NotchRosterLayout.sectionHeaderHeight
+        + CGFloat(headerCount - 1) * NotchRosterLayout.sectionHeaderTopGap
+        + CGFloat(accountRows) * NotchRosterLayout.rowHeight
+        + CGFloat(logicalRows - 1) * NotchRosterLayout.rowSpacing
         + NotchRosterLayout.gridVerticalPadding
     #expect(height == expected)
 }
@@ -112,9 +118,24 @@ import Testing
     #expect(NotchRosterLayout.columnCount(sectionCounts: sections, expanded: false) == 2)
 }
 
-@Test func singlePlanBandSkipsHeadersAndFitsTwoColumns() {
+@Test func singlePlanBandSkipsHeadersAndFitsPreferredColumns() {
     let sections = [10]
     #expect(NotchRosterLayout.contentRowCount(sectionCounts: sections, columns: 2) == 5)
+    // ≥8 accounts prefer width-aware columns (3 on the panoramic deck).
+    #expect(NotchRosterLayout.preferredColumnCount(sectionCounts: sections) == 3)
+    #expect(NotchRosterLayout.columnCount(sectionCounts: sections, expanded: true) == 3)
+    #expect(NotchRosterLayout.contentRowCount(sectionCounts: sections, columns: 3) == 4)
+    #expect(!NotchRosterLayout.needsRosterScroll(sectionCounts: sections, expanded: true))
+}
+
+@Test func smallRosterStaysTwoColumnsWhenExpanded() {
+    let sections = [3, 2]
+    #expect(NotchRosterLayout.preferredColumnCount(sectionCounts: sections) == 2)
     #expect(NotchRosterLayout.columnCount(sectionCounts: sections, expanded: true) == 2)
     #expect(!NotchRosterLayout.needsRosterScroll(sectionCounts: sections, expanded: true))
+}
+
+@Test func comfortableWidthCapsColumnsBeforeCrush() {
+    // Panoramic deck (~996pt usable) keeps cards ≥ minComfortableCardWidth → 3 cols.
+    #expect(NotchRosterLayout.maxColumnsForComfortableWidth() == 3)
 }

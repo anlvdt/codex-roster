@@ -14,6 +14,7 @@
 
 - Notch Auto-switch caption: when decide is `active_has_quota` (no switch needed), show **Monitoring · active has quota** instead of the misleading **No usable candidate**.
 - Auto-resume after **app restart**: when Auto-resume is ON and the live account has usable quota, launch bootstrap always discovers interrupted threads and continues them (same `continue-interrupted` path as quota recovery) — no longer requires a pending-recovery flag or another account switch.
+- Auto-resume usage-limit window retuned to **6 hours** (was 45 minutes / earlier 10 minutes): covers natural ~5H quota resets and slow banked-reset redeem; mid-flight `task_started` cuts stay on a 45-minute mtime window.
 - ChatGPT Desktop showing **Sign in** after account switch: clear Electron `Partitions` (and related) web-session cache on every activate / force-switch / auto-switch relaunch.
 - Console window title stuck on Vietnamese **Bảng điều khiển** after switching the UI to English — sync `NSWindow.title` with `LanguageStore`.
 - Session longevity hardening: bind Login / Delete / Activate by account UUID; stop burning inactive refresh tokens on polls; settle and retry Desktop acceptance using live identity.
@@ -27,7 +28,7 @@
 - Auto-switch cadence: banked-reset wait 20s (was 45s), all-exhausted wait 45s (was 90s), near-cliff poll 5s / 15s, post-switch cooldown 8s / account thrash cooldown 2m; shorter warm/cold resume settle and deep-link retries without skipping Desktop web-session clear.
 - Warm Desktop same-account resume: if deep-link delivers but writes no fresh log line (thread already focused), still queue the continue turn.
 - Auto-resume after `codex queue`: press Codex Desktop’s composer **Play** control (“Queued messages run now”) via Accessibility / Return / trailing-click fallback — newer Desktop builds no longer auto-start queued turns.
-- Auto-resume only continues threads interrupted within the last **10 minutes** (usage-limit / abort event time when available; otherwise rollout mtime) — not stale interrupted history from hours/days ago.
+- Auto-resume interrupt windows: **usage-limit / abort = 6 hours** (covers ~5H quota reset); **mid-flight `task_started` = 45 minutes** via mtime. Uses usage-limit event time when available.
 - Route live UI typography and semantic colors through PrismTheme design tokens.
 
 ## v0.4.7 - 2026-09-16

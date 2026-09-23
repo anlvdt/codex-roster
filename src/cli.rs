@@ -150,10 +150,13 @@ enum Command {
     },
     /// Remember Codex rollout cwd/session on switch; reopen thread after activate.
     AutoResumeSession {
-        #[arg(long, conflicts_with = "disable")]
+        #[arg(long, conflicts_with_all = ["disable", "continue_interrupted"])]
         enable: bool,
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["enable", "continue_interrupted"])]
         disable: bool,
+        /// Discover interrupted / quota-blocked threads (same-account recovery).
+        #[arg(long, conflicts_with_all = ["enable", "disable"])]
+        continue_interrupted: bool,
         #[arg(long)]
         json: bool,
     },
@@ -684,8 +687,22 @@ pub fn run() -> Result<()> {
         Some(Command::AutoResumeSession {
             enable,
             disable,
+            continue_interrupted,
             json,
         }) => {
+            if continue_interrupted {
+                let hint = app.continue_interrupted_sessions()?;
+                if json {
+                    print_json(&hint)?;
+                } else {
+                    println!(
+                        "Continue interrupted: status={} session={}",
+                        hint.status,
+                        hint.session_id.as_deref().unwrap_or("-")
+                    );
+                }
+                return Ok(());
+            }
             let status = if enable {
                 app.set_auto_resume_session(true)?
             } else if disable {

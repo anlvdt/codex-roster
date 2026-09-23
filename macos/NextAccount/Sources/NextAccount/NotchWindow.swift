@@ -75,6 +75,7 @@ struct NotchWindowView: View {
     @AppStorage(NotchRosterLayout.rosterExpandedKey) private var isRosterExpanded = false
 
     @State private var expansionState: NotchExpansionState = .collapsed
+    @State private var hoverTask: Task<Void, Never>?
     @State private var collapseTask: Task<Void, Never>?
     @State private var windowShrinkTask: Task<Void, Never>?
     @State private var keyMonitors: [Any] = []
@@ -253,6 +254,7 @@ struct NotchWindowView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .toggleNotchPanel)) { _ in
             guard store.notchPanelEnabled else { return }
+            hoverTask?.cancel()
             collapseTask?.cancel()
             if isExpanded {
                 collapse()
@@ -262,6 +264,7 @@ struct NotchWindowView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .collapseNotchPanel)) { _ in
+            hoverTask?.cancel()
             collapseTask?.cancel()
             if isExpanded { collapse() }
         }
@@ -306,6 +309,7 @@ struct NotchWindowView: View {
             }
         }
         .onDisappear {
+            hoverTask?.cancel()
             collapseTask?.cancel()
             removeKeyMonitors()
         }
@@ -322,6 +326,7 @@ struct NotchWindowView: View {
     // MARK: - Compact Bar (Top Notch Filament)
     private var compactBar: some View {
         Button {
+            hoverTask?.cancel()
             collapseTask?.cancel()
             PrismTheme.triggerHaptic(type: .alignment)
             NSApplication.shared.activate(ignoringOtherApps: true)
@@ -368,13 +373,40 @@ struct NotchWindowView: View {
             "5-hour \(fiveText), weekly \(weekText)\(bankedText). Open Codex Roster."
         )
     }
+    /// Leave-grace before auto-collapse. Long enough to cross shape edges /
+    /// camera gap / nested menus; short enough that dismiss still feels snappy.
+    private static let hoverCollapseGrace: Duration = .milliseconds(450)
+
     private func handleHover(_ hovering: Bool) {
+        hoverTask?.cancel()
         collapseTask?.cancel()
 
-        if !hovering && isExpanded {
+        if hovering {
+            guard !isExpanded else { return }
+            hoverTask = Task { @MainActor in
+                // Open only after the pointer *lingers* nearly still. A fast
+                // horizontal sweep across the menu-bar pill aborts as drive-by.
+                var tracker = NotchHoverIntent.Tracker(origin: NSEvent.mouseLocation)
+                let interval = Duration.milliseconds(NotchHoverIntent.sampleIntervalMilliseconds)
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: interval)
+                    guard !Task.isCancelled else { return }
+                    switch tracker.ingest(NSEvent.mouseLocation) {
+                    case .keepWaiting:
+                        continue
+                    case .open:
+                        NSApplication.shared.activate(ignoringOtherApps: true)
+                        expand()
+                        return
+                    case .abortDriveBy, .abortTimeout:
+                        return
+                    }
+                }
+            }
+        } else if isExpanded {
             guard !isPinnedLive else { return }
             collapseTask = Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(250))
+                try? await Task.sleep(for: Self.hoverCollapseGrace)
                 guard !Task.isCancelled else { return }
                 collapse()
             }
@@ -383,6 +415,7 @@ struct NotchWindowView: View {
 
     // MARK: - Choreographed Dropdown & 2-Way Bloom Animation
     private func expand() {
+        hoverTask?.cancel()
         collapseTask?.cancel()
         windowShrinkTask?.cancel()
         installKeyMonitors()
@@ -400,6 +433,7 @@ struct NotchWindowView: View {
     }
 
     private func collapse() {
+        hoverTask?.cancel()
         collapseTask?.cancel()
         windowShrinkTask?.cancel()
         removeKeyMonitors()

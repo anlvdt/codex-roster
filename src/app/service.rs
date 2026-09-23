@@ -133,6 +133,24 @@ where
         Ok(crate::model::AutoResumeSessionStatusOutput { enabled })
     }
 
+    /// Live discover interrupted / quota-blocked threads for same-account recovery
+    /// (banked-reset redeem). Does not mutate the pending-continue index used by
+    /// auto-switch.
+    pub fn continue_interrupted_sessions(&self) -> Result<crate::model::SessionResumeHint> {
+        let settings = load_settings(&self.env.app_data_dir)?;
+        let active_id = self
+            .list()?
+            .accounts
+            .into_iter()
+            .find(|account| account.is_active)
+            .map(|account| account.id);
+        crate::session_resume::hint_for_interrupted_sessions(
+            &self.env.codex_root,
+            settings.auto_resume_session,
+            active_id,
+        )
+    }
+
     pub fn auto_switch(&self, apply: bool) -> Result<AutoSwitchOutput> {
         self.auto_switch_with_candidate(apply, None, false)
     }

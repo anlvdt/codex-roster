@@ -20,6 +20,7 @@
 ### Changed
 
 - Faster Auto-switch timing and clearer Auto-switch / Auto-resume chrome in the notch.
+- Notch panel: hover opens only after a deliberate ~280ms linger (drive-by horizontal sweeps abort); leave-grace before auto-collapse is 450ms.
 - Route live UI typography and semantic colors through PrismTheme design tokens.
 
 ## v0.4.7 - 2026-09-16

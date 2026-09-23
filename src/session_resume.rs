@@ -1,6 +1,6 @@
 //! Codex working-session pointers for Auto-resume after account switch.
 //!
-//! Two modes:
+//! Three modes:
 //! 1. **Per-account history** (`capture_for_account` / `hint_for_account`) — last
 //!    workspace remembered for a roster row (manual activate).
 //! 2. **Continue-exhausted thread** (`capture_pending_continue` /
@@ -9,6 +9,9 @@
 //!    reopen that same thread after the new account is live. Session history
 //!    lives under shared `~/.codex` (auth.json is what switches); new turns
 //!    burn the replacement account's quota.
+//! 3. **Same-account quota recovery** (`hint_for_interrupted_sessions`) — after
+//!    a banked reset is redeemed (or any in-place quota recovery), reopen and
+//!    continue interrupted threads without switching accounts.
 //!
 //! Restore never exchanges refresh tokens.
 
@@ -167,6 +170,38 @@ pub fn take_pending_continue_hint(
     let Some(pending) = pending else {
         return Ok(None);
     };
+    Ok(Some(hint_from_pending_threads(true, pending)))
+}
+
+/// Discover interrupted / quota-blocked threads live (no pending-index write).
+/// Used after same-account quota recovery (e.g. banked-reset redeem).
+pub fn hint_for_interrupted_sessions(
+    codex_root: &Path,
+    enabled: bool,
+    from_account_id: Option<Uuid>,
+) -> Result<SessionResumeHint> {
+    if !enabled {
+        return Ok(hint_from_parts(false, None, None, None, None));
+    }
+    let sessions = discover_interrupted_sessions(codex_root)?;
+    let pending = sessions
+        .into_iter()
+        .map(|session| PendingContinueThread {
+            session_id: session.session_id,
+            cwd: session.cwd,
+            rollout_path: Some(session.rollout_path.display().to_string()),
+            from_account_id,
+            reason: "quota_recovered".to_owned(),
+            captured_at: OffsetDateTime::now_utc(),
+        })
+        .collect();
+    Ok(hint_from_pending_threads(true, pending))
+}
+
+fn hint_from_pending_threads(
+    enabled: bool,
+    pending: Vec<PendingContinueThread>,
+) -> SessionResumeHint {
     let mut seen = HashSet::new();
     let mut hints = pending
         .into_iter()
@@ -175,7 +210,7 @@ pub fn take_pending_continue_hint(
         })
         .map(|thread| {
             hint_from_parts(
-                true,
+                enabled,
                 thread.from_account_id,
                 Some(thread.session_id),
                 thread.cwd,
@@ -184,9 +219,9 @@ pub fn take_pending_continue_hint(
         });
     let mut first = hints
         .next()
-        .unwrap_or_else(|| hint_from_parts(true, None, None, None, None));
+        .unwrap_or_else(|| hint_from_parts(enabled, None, None, None, None));
     first.additional_sessions = hints.collect();
-    Ok(Some(first))
+    first
 }
 
 pub fn hint_for_account(
@@ -968,6 +1003,40 @@ mod tests {
         );
         ids.sort();
         assert_eq!(ids, vec!["compact-limit", "normal-limit"]);
+    }
+
+    #[test]
+    fn quota_recovery_discovers_interrupted_threads_without_pending_index() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("codex");
+        let account = Uuid::new_v4();
+        for id in ["blocked-a", "blocked-b"] {
+            let path = day_dir(&root).join(format!("rollout-{id}.jsonl"));
+            write_rollout(&path, id, temp.path().to_str().unwrap(), "user");
+            append_event(&path, serde_json::json!({"type":"task_started"}));
+            append_event(
+                &path,
+                serde_json::json!({
+                    "type":"task_complete",
+                    "error":{"codex_error_info":"usage_limit_exceeded"}
+                }),
+            );
+        }
+        let disabled = hint_for_interrupted_sessions(&root, false, Some(account)).unwrap();
+        assert!(!disabled.enabled);
+        assert_eq!(disabled.status, "disabled");
+
+        let hint = hint_for_interrupted_sessions(&root, true, Some(account)).unwrap();
+        assert!(hint.enabled);
+        assert_eq!(hint.account_id, Some(account));
+        let mut ids = vec![hint.session_id.unwrap()];
+        ids.extend(
+            hint.additional_sessions
+                .into_iter()
+                .map(|h| h.session_id.unwrap()),
+        );
+        ids.sort();
+        assert_eq!(ids, vec!["blocked-a", "blocked-b"]);
     }
 
     #[test]

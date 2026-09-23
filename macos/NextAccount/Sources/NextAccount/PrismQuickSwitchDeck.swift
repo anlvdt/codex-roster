@@ -394,8 +394,8 @@ struct PrismQuickSwitchDeck: View {
                             isOn: store.autoResumeSession,
                             activeColor: PrismTheme.accent,
                             help: language.text(
-                                "Sau khi đổi tài khoản: tiếp tục các thread dang dở / hết quota",
-                                "After account switch: continue interrupted or quota-blocked threads"
+                                "Sau đổi tài khoản hoặc khi quota phục hồi (kể cả banked reset): tiếp tục thread dang dở",
+                                "After account switch or quota recovery (including banked reset): continue interrupted threads"
                             ),
                             disabled: store.isBusyForActions
                         ) { store.setAutoResumeSession($0) }

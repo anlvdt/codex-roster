@@ -89,8 +89,8 @@ struct AutomationSettingsView: View {
                     )
                     .disabled(store.isBusyForActions)
                     Text(language.text(
-                        "Sau khi tự chuyển tài khoản: tiếp tục các cuộc hội thoại đang dang dở hoặc bị chặn vì quota, có hoạt động trong 24 giờ qua.",
-                        "After auto-switch: continue interrupted or quota-blocked conversations active within the last 24 hours."
+                        "Sau khi tự chuyển tài khoản, hoặc khi quota phục hồi (kể cả sau banked reset): tiếp tục các cuộc hội thoại đang dang dở / bị chặn vì quota trong 24 giờ qua.",
+                        "After auto-switch, or when quota recovers (including after a banked reset): continue interrupted or quota-blocked conversations active within the last 24 hours."
                     ))
                     .font(RosterSecondaryChrome.caption)
                     .foregroundStyle(.secondary)
@@ -122,8 +122,8 @@ struct AutomationSettingsView: View {
                         )
                     )
                     Text(language.text(
-                        "⌃⌥R mở/đóng notch · Esc đóng.",
-                        "⌃⌥R toggles the notch · Esc closes it."
+                        "Rê vào notch rồi dừng ~0,3s để mở (rê ngang qua sẽ không mở) · ⌃⌥R hoặc Esc đóng.",
+                        "Hover and pause ~0.3s to open (drive-by sweeps won’t) · ⌃⌥R or Esc to close."
                     ))
                     .font(RosterSecondaryChrome.caption)
                     .foregroundStyle(.secondary)

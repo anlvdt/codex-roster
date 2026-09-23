@@ -1071,8 +1071,8 @@ final class AccountStore: ObservableObject {
 
     /// After a successful activate/auto-switch, reopen a remembered Codex thread.
     ///
-    /// - `continueExhausted == true` (auto-switch): reopen the thread that hit
-    ///   usage limits so work continues on the new account's quota.
+    /// - `continueExhausted == true` (auto-switch or same-account quota recovery):
+    ///   reopen the thread(s) that hit usage limits and queue continue.
     /// - otherwise (manual Đổi): reopen that account's last remembered workspace/thread.
     private func applySessionResumeIfNeeded(
         _ hint: SessionResumeHint?,
@@ -1257,6 +1257,31 @@ final class AccountStore: ObservableObject {
             "Queued continue for \(result.succeeded)/\(result.total) conversations"
         )
         scheduleSessionResumeCaptionClear()
+    }
+
+    /// Same-account quota recovery (timed reset or banked-reset redeem): discover
+    /// interrupted threads and continue them without switching accounts.
+    private func resumeInterruptedSessionsAfterQuotaRecovery() async {
+        guard autoResumeSession else { return }
+        do {
+            let hint: SessionResumeHint = try await cli.decode(
+                SessionResumeHint.self,
+                arguments: ["auto-resume-session", "--continue-interrupted", "--json"]
+            )
+            guard hint.enabled else { return }
+            let hasPrimary = !(hint.sessionId ?? "").isEmpty
+            let hasExtras = hint.additionalSessions.contains { !($0.sessionId ?? "").isEmpty }
+            guard hasPrimary || hasExtras else {
+                logSessionResume("quota recovery: no interrupted threads to continue")
+                return
+            }
+            logSessionResume(
+                "quota recovery resume primary=\(hint.sessionId ?? "-") additional=\(hint.additionalSessions.count)"
+            )
+            await applySessionResumeIfNeeded(hint, continueExhausted: true)
+        } catch {
+            logSessionResume("quota recovery resume failed: \(error.localizedDescription)")
+        }
     }
 
     private func scheduleSessionResumeCaptionClear() {
@@ -2160,9 +2185,11 @@ final class AccountStore: ObservableObject {
                 autoSwitchAllExhaustedNotified = false
                 autoSwitchPausedAllExhausted = false
                 autoSwitchState = nil
-                // Notify user when quota recovers after being exhausted
+                // Notify + auto-resume when quota recovers after being exhausted
+                // (timed reset or banked-reset redeem on the same live account).
                 if wasExhausted {
                     ResetNotifier.showQuotaRecovered()
+                    await self.resumeInterruptedSessionsAfterQuotaRecovery()
                 }
             case "waiting_for_login":
                 autoSwitchState = .waitingForLogin
@@ -2176,6 +2203,8 @@ final class AccountStore: ObservableObject {
                 return
             case "banked_reset_available":
                 // UI-only: banked resets are not spendable quota; never auto-switch here.
+                // Still mark paused so redeem → active_has_quota can trigger auto-resume.
+                autoSwitchPausedAllExhausted = true
                 autoSwitchState = .bankedResetAvailable(
                     account: decision.candidateDisplayName
                         ?? AppLanguage.text("một tài khoản", "an account"),

@@ -6,13 +6,13 @@
 //! 2. **Continue-exhausted thread** (`capture_pending_continue` /
 //!    `take_pending_continue_hint`) — when auto-switch fires because the live
 //!    account hit usage limits, freeze recently interrupted Desktop/CLI
-//!    threads (same 10-minute window) and reopen them after the new account
+//!    threads (usage-limit window below) and reopen them after the new account
 //!    is live. Session history lives under shared `~/.codex` (auth.json is
 //!    what switches); new turns burn the replacement account's quota.
-//! 3. **Same-account quota recovery** (`hint_for_interrupted_sessions`) — after
-//!    a banked reset is redeemed (or any in-place quota recovery), reopen and
-//!    continue threads interrupted within the last 10 minutes without switching
-//!    accounts.
+//! 3. **Same-account quota recovery / launch probe** (`hint_for_interrupted_sessions`)
+//!    — after a banked reset is redeemed, any in-place quota recovery, or Roster
+//!    app restart with Auto-resume ON, reopen and continue threads that still
+//!    need continue without switching accounts.
 //!
 //! Restore never exchanges refresh tokens.
 
@@ -37,10 +37,16 @@ const LOOKBACK_DAYS: i64 = 14;
 const MAX_META_LINES: usize = 8;
 /// Tolerate small clock skew between activate timestamp and rollout mtime.
 const ACTIVATED_GRACE: Duration = Duration::from_secs(5);
-/// Only resume threads interrupted within this window. Stale abandoned
-/// rollouts (often days/hours old) stay interrupted in Codex history but must
-/// not be auto-continued on quota recovery or auto-switch.
-const INTERRUPT_RESUME_WINDOW: Duration = Duration::from_secs(10 * 60);
+/// Mid-flight cuts (`task_started` with no usage-limit event): use rollout
+/// mtime against this short window so an abandoned in-progress turn is not
+/// resumed hours later.
+const MID_FLIGHT_RESUME_WINDOW: Duration = Duration::from_secs(45 * 60);
+/// Usage-limit / abort interrupts: must cover OpenAI’s ~5-hour quota window
+/// plus banked-reset redeem and Desktop relaunch slack. 45m was too short —
+/// natural 5H resets (and slow redeem after failed deep-links) left threads
+/// still needing continue while discovery returned `missing`. 6h keeps
+/// same-day recovery; yesterday’s abandoned interrupts stay excluded.
+const USAGE_LIMIT_RESUME_WINDOW: Duration = Duration::from_secs(6 * 60 * 60);
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionResumePointer {
@@ -371,9 +377,9 @@ fn offset_to_system(ts: OffsetDateTime) -> SystemTime {
 /// Reading only the tail bounds memory for long conversations. Unknown states
 /// are excluded instead of accidentally restarting completed work.
 ///
-/// Eligibility uses [`INTERRUPT_RESUME_WINDOW`] (10 minutes): prefer the
-/// usage-limit / turn-abort event timestamp from the rollout when present;
-/// otherwise fall back to rollout mtime (mid-flight `task_started` cuts).
+/// Eligibility: [`USAGE_LIMIT_RESUME_WINDOW`] for usage-limit / abort event
+/// timestamps; [`MID_FLIGHT_RESUME_WINDOW`] via rollout mtime for bare
+/// `task_started` cuts.
 fn discover_interrupted_sessions(codex_root: &Path) -> Result<Vec<DiscoveredSession>> {
     let mut candidates = Vec::new();
     let mut db_available = false;
@@ -410,8 +416,11 @@ fn discover_interrupted_sessions(codex_root: &Path) -> Result<Vec<DiscoveredSess
         }
     }
     let now = SystemTime::now();
-    let floor = now
-        .checked_sub(INTERRUPT_RESUME_WINDOW)
+    let usage_limit_floor = now
+        .checked_sub(USAGE_LIMIT_RESUME_WINDOW)
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let mid_flight_floor = now
+        .checked_sub(MID_FLIGHT_RESUME_WINDOW)
         .unwrap_or(SystemTime::UNIX_EPOCH);
     let mut sessions = Vec::new();
     for path in candidates {
@@ -431,6 +440,11 @@ fn discover_interrupted_sessions(codex_root: &Path) -> Result<Vec<DiscoveredSess
             state.event_at.unwrap_or(modified)
         } else {
             modified
+        };
+        let floor = if state.from_interrupt_event {
+            usage_limit_floor
+        } else {
+            mid_flight_floor
         };
         if interrupt_at < floor {
             continue;
@@ -952,7 +966,7 @@ mod tests {
                     &path,
                     serde_json::json!({"type":"turn_aborted", "reason":"user_cancelled"}),
                 ),
-                "stale" => filetime_set(&path, SystemTime::now() - Duration::from_secs(30 * 60)),
+                "stale" => filetime_set(&path, SystemTime::now() - Duration::from_secs(90 * 60)),
                 _ => {}
             }
         }
@@ -1004,7 +1018,8 @@ mod tests {
         let root = temp.path().join("codex");
         let path = day_dir(&root).join("rollout-old.jsonl");
         write_rollout(&path, "old", temp.path().to_str().unwrap(), "user");
-        let old = OffsetDateTime::now_utc() - time::Duration::minutes(30);
+        // Outside USAGE_LIMIT_RESUME_WINDOW (6h); mid-flight window is irrelevant.
+        let old = OffsetDateTime::now_utc() - time::Duration::hours(8);
         append_event_at(
             &path,
             &old,
@@ -1020,6 +1035,27 @@ mod tests {
     }
 
     #[test]
+    fn usage_limit_interrupt_within_six_hour_window_is_included() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("codex");
+        let path = day_dir(&root).join("rollout-quota-wait.jsonl");
+        write_rollout(&path, "quota-wait", temp.path().to_str().unwrap(), "user");
+        // Past the old 45m window but inside the 5H quota-reset window.
+        let waited = OffsetDateTime::now_utc() - time::Duration::minutes(90);
+        append_event_at(
+            &path,
+            &waited,
+            serde_json::json!({
+                "type":"task_complete",
+                "error":{"codex_error_info":"usage_limit_exceeded"}
+            }),
+        );
+        let sessions = discover_interrupted_sessions(&root).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "quota-wait");
+    }
+
+    #[test]
     fn interrupt_event_timestamp_preferred_over_fresh_mtime() {
         let temp = tempdir().unwrap();
         let root = temp.path().join("codex");
@@ -1028,7 +1064,7 @@ mod tests {
         write_rollout(&recent_path, "keep", temp.path().to_str().unwrap(), "user");
         write_rollout(&stale_path, "drop", temp.path().to_str().unwrap(), "user");
         let recent = OffsetDateTime::now_utc() - time::Duration::minutes(1);
-        let stale = OffsetDateTime::now_utc() - time::Duration::hours(2);
+        let stale = OffsetDateTime::now_utc() - time::Duration::hours(8);
         let quota_err = serde_json::json!({
             "type":"error",
             "code":"usage_limit_reached",

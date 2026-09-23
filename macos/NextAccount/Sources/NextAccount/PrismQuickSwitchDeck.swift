@@ -482,7 +482,9 @@ struct PrismQuickSwitchDeck: View {
             if let next = readyCandidates.first {
                 return language.text("Sẵn sàng (quota) → \(next.displayName)", "Ready (quota) → \(next.displayName)")
             }
-            return language.text("Chưa có ứng viên sẵn sàng", "No usable candidate")
+            // Active still has quota (auto-switch decide → active_has_quota), so
+            // there is nothing to switch to — not "all exhausted / no candidate".
+            return language.text("Theo dõi · active còn quota", "Monitoring · active has quota")
         }
     }
 

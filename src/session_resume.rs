@@ -5,13 +5,14 @@
 //!    workspace remembered for a roster row (manual activate).
 //! 2. **Continue-exhausted thread** (`capture_pending_continue` /
 //!    `take_pending_continue_hint`) — when auto-switch fires because the live
-//!    account hit usage limits, freeze the *current* Desktop/CLI thread and
-//!    reopen that same thread after the new account is live. Session history
-//!    lives under shared `~/.codex` (auth.json is what switches); new turns
-//!    burn the replacement account's quota.
+//!    account hit usage limits, freeze recently interrupted Desktop/CLI
+//!    threads (same 10-minute window) and reopen them after the new account
+//!    is live. Session history lives under shared `~/.codex` (auth.json is
+//!    what switches); new turns burn the replacement account's quota.
 //! 3. **Same-account quota recovery** (`hint_for_interrupted_sessions`) — after
 //!    a banked reset is redeemed (or any in-place quota recovery), reopen and
-//!    continue interrupted threads without switching accounts.
+//!    continue threads interrupted within the last 10 minutes without switching
+//!    accounts.
 //!
 //! Restore never exchanges refresh tokens.
 
@@ -25,7 +26,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use time::OffsetDateTime;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use crate::file_store::replace_file_with_recovery;
@@ -36,6 +37,10 @@ const LOOKBACK_DAYS: i64 = 14;
 const MAX_META_LINES: usize = 8;
 /// Tolerate small clock skew between activate timestamp and rollout mtime.
 const ACTIVATED_GRACE: Duration = Duration::from_secs(5);
+/// Only resume threads interrupted within this window. Stale abandoned
+/// rollouts (often days/hours old) stay interrupted in Codex history but must
+/// not be auto-continued on quota recovery or auto-switch.
+const INTERRUPT_RESUME_WINDOW: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionResumePointer {
@@ -365,6 +370,10 @@ fn offset_to_system(ts: OffsetDateTime) -> SystemTime {
 /// Discover all recently interrupted user threads, never just the most recent row.
 /// Reading only the tail bounds memory for long conversations. Unknown states
 /// are excluded instead of accidentally restarting completed work.
+///
+/// Eligibility uses [`INTERRUPT_RESUME_WINDOW`] (10 minutes): prefer the
+/// usage-limit / turn-abort event timestamp from the rollout when present;
+/// otherwise fall back to rollout mtime (mid-flight `task_started` cuts).
 fn discover_interrupted_sessions(codex_root: &Path) -> Result<Vec<DiscoveredSession>> {
     let mut candidates = Vec::new();
     let mut db_available = false;
@@ -400,16 +409,35 @@ fn discover_interrupted_sessions(codex_root: &Path) -> Result<Vec<DiscoveredSess
             }
         }
     }
-    let floor = SystemTime::now() - Duration::from_secs(24 * 60 * 60);
+    let now = SystemTime::now();
+    let floor = now
+        .checked_sub(INTERRUPT_RESUME_WINDOW)
+        .unwrap_or(SystemTime::UNIX_EPOCH);
     let mut sessions = Vec::new();
     for path in candidates {
         let Ok(modified) = fs::metadata(&path).and_then(|meta| meta.modified()) else {
             continue;
         };
-        if modified < floor || !rollout_needs_continue(&path).unwrap_or(false) {
+        let Ok(Some(state)) = rollout_continuation_state(&path) else {
+            continue;
+        };
+        if !state.needs_continue {
             continue;
         }
-        if let Ok(Some(session)) = parse_user_session_meta(&path, modified) {
+        // Usage-limit / abort: trust the event clock. In-progress turns keep
+        // a `task_started` timestamp from turn start (often older than the
+        // window) — use mtime so a mid-flight cut still resumes.
+        let interrupt_at = if state.from_interrupt_event {
+            state.event_at.unwrap_or(modified)
+        } else {
+            modified
+        };
+        if interrupt_at < floor {
+            continue;
+        }
+        if let Ok(Some(mut session)) = parse_user_session_meta(&path, modified) {
+            // Sort / dedupe by interrupt freshness, not raw file mtime.
+            session.modified = interrupt_at;
             sessions.push(session);
         }
     }
@@ -423,7 +451,22 @@ fn discover_interrupted_sessions(codex_root: &Path) -> Result<Vec<DiscoveredSess
     Ok(sessions)
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ContinuationState {
+    needs_continue: bool,
+    /// True when the deciding event was usage-limit / abort (not bare task_started).
+    from_interrupt_event: bool,
+    event_at: Option<SystemTime>,
+}
+
+#[cfg(test)]
 fn rollout_needs_continue(path: &Path) -> Result<bool> {
+    Ok(rollout_continuation_state(path)?
+        .map(|state| state.needs_continue)
+        .unwrap_or(false))
+}
+
+fn rollout_continuation_state(path: &Path) -> Result<Option<ContinuationState>> {
     let mut file = File::open(path)?;
     let size = file.metadata()?.len();
     let start = size.saturating_sub(512 * 1024);
@@ -438,34 +481,49 @@ fn rollout_needs_continue(path: &Path) -> Result<bool> {
         .map(|(_, line)| line)
         .collect();
     if let Some(state) = lines.into_iter().rev().find_map(continuation_state) {
-        return Ok(state);
+        return Ok(Some(state));
     }
     if start > 0 {
         // A long turn may start before the tail. Stream older records without
         // retaining conversation content; the latest lifecycle event wins.
         let reader = BufReader::new(File::open(path)?);
-        let mut state = false;
+        let mut state = None;
         for line in reader.lines() {
             if let Some(next) = continuation_state(&line?) {
-                state = next;
+                state = Some(next);
             }
         }
         return Ok(state);
     }
-    Ok(false)
+    Ok(None)
 }
 
-fn continuation_state(line: &str) -> Option<bool> {
+fn continuation_state(line: &str) -> Option<ContinuationState> {
     let value: Value = serde_json::from_str(line).ok()?;
     if value["type"] != "event_msg" {
         return None;
     }
+    let event_at = value
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(parse_event_timestamp);
     let payload = &value["payload"];
     match payload["type"].as_str()? {
-        "task_started" => Some(true),
+        "task_started" => Some(ContinuationState {
+            needs_continue: true,
+            from_interrupt_event: false,
+            event_at,
+        }),
         // Desktop reports quota failures as completed turns with a nested
         // error, including failures during remote compaction.
-        "task_complete" => Some(payload.get("error").is_some_and(is_usage_limit_error)),
+        "task_complete" => {
+            let needs = payload.get("error").is_some_and(is_usage_limit_error);
+            Some(ContinuationState {
+                needs_continue: needs,
+                from_interrupt_event: needs,
+                event_at,
+            })
+        }
         "turn_aborted" | "error" => {
             let reason = payload
                 .get("reason")
@@ -474,16 +532,25 @@ fn continuation_state(line: &str) -> Option<bool> {
                 .unwrap_or("")
                 .to_ascii_lowercase();
             let code = payload.get("code").and_then(Value::as_str).unwrap_or("");
-            Some(
-                code == "usage_limit_reached"
-                    || reason.contains("usage limit")
-                    || reason.contains("usage_limit")
-                    || reason.contains("usagelimit")
-                    || reason.contains("quota"),
-            )
+            let needs = code == "usage_limit_reached"
+                || reason.contains("usage limit")
+                || reason.contains("usage_limit")
+                || reason.contains("usagelimit")
+                || reason.contains("quota");
+            Some(ContinuationState {
+                needs_continue: needs,
+                from_interrupt_event: needs,
+                event_at,
+            })
         }
         _ => None,
     }
+}
+
+fn parse_event_timestamp(raw: &str) -> Option<SystemTime> {
+    OffsetDateTime::parse(raw, &Rfc3339)
+        .ok()
+        .map(offset_to_system)
 }
 
 fn is_usage_limit_error(error: &Value) -> bool {
@@ -845,12 +912,17 @@ mod tests {
     }
 
     fn append_event(path: &Path, payload: Value) {
+        append_event_at(path, &OffsetDateTime::now_utc(), payload);
+    }
+
+    fn append_event_at(path: &Path, at: &OffsetDateTime, payload: Value) {
         use std::io::Write;
         let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+        let timestamp = at.format(&Rfc3339).expect("rfc3339");
         writeln!(
             file,
             "{}",
-            serde_json::json!({"type":"event_msg","payload":payload})
+            serde_json::json!({"timestamp": timestamp, "type":"event_msg","payload":payload})
         )
         .unwrap();
     }
@@ -880,7 +952,7 @@ mod tests {
                     &path,
                     serde_json::json!({"type":"turn_aborted", "reason":"user_cancelled"}),
                 ),
-                "stale" => filetime_set(&path, SystemTime::now() - Duration::from_secs(25 * 3600)),
+                "stale" => filetime_set(&path, SystemTime::now() - Duration::from_secs(30 * 60)),
                 _ => {}
             }
         }
@@ -904,6 +976,70 @@ mod tests {
         ids.sort();
         assert_eq!(ids, vec!["active-a", "blocked-b"]);
         assert!(take_pending_continue_hint(&app, true).unwrap().is_none());
+    }
+
+    #[test]
+    fn recent_interrupted_thread_within_resume_window_is_included() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("codex");
+        let path = day_dir(&root).join("rollout-recent.jsonl");
+        write_rollout(&path, "recent", temp.path().to_str().unwrap(), "user");
+        let recent = OffsetDateTime::now_utc() - time::Duration::minutes(2);
+        append_event_at(
+            &path,
+            &recent,
+            serde_json::json!({
+                "type":"task_complete",
+                "error":{"codex_error_info":"usage_limit_exceeded"}
+            }),
+        );
+        let sessions = discover_interrupted_sessions(&root).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "recent");
+    }
+
+    #[test]
+    fn old_interrupted_thread_outside_resume_window_is_excluded() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("codex");
+        let path = day_dir(&root).join("rollout-old.jsonl");
+        write_rollout(&path, "old", temp.path().to_str().unwrap(), "user");
+        let old = OffsetDateTime::now_utc() - time::Duration::minutes(30);
+        append_event_at(
+            &path,
+            &old,
+            serde_json::json!({
+                "type":"task_complete",
+                "error":{"codex_error_info":"usage_limit_exceeded"}
+            }),
+        );
+        // Fresh mtime must not override a stale interrupt event timestamp.
+        filetime_set(&path, SystemTime::now());
+        let sessions = discover_interrupted_sessions(&root).unwrap();
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn interrupt_event_timestamp_preferred_over_fresh_mtime() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("codex");
+        let recent_path = day_dir(&root).join("rollout-keep.jsonl");
+        let stale_path = day_dir(&root).join("rollout-drop.jsonl");
+        write_rollout(&recent_path, "keep", temp.path().to_str().unwrap(), "user");
+        write_rollout(&stale_path, "drop", temp.path().to_str().unwrap(), "user");
+        let recent = OffsetDateTime::now_utc() - time::Duration::minutes(1);
+        let stale = OffsetDateTime::now_utc() - time::Duration::hours(2);
+        let quota_err = serde_json::json!({
+            "type":"error",
+            "code":"usage_limit_reached",
+            "message":"usage limit"
+        });
+        append_event_at(&recent_path, &recent, quota_err.clone());
+        append_event_at(&stale_path, &stale, quota_err);
+        filetime_set(&stale_path, SystemTime::now());
+        let sessions = discover_interrupted_sessions(&root).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "keep");
     }
 
     #[test]

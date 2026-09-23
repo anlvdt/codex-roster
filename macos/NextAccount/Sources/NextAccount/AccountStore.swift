@@ -272,6 +272,9 @@ final class AccountStore: ObservableObject {
     private let archivedAccountsMigrationKeys = ["codexRoster.archivedAccountIDs", "accountHub.archivedAccountIDs"]
     private var legacyArchivedAccountIDs: Set<UUID>
     private let legacyAutoSwitchWhenExhaustedKey = "codexRoster.autoSwitchWhenExhausted"
+    /// Survives app relaunch: after banked-reset / all-exhausted, resume when
+    /// the live account regains usable quota (timed reset or redeem).
+    private let pendingQuotaRecoveryResumeKey = "codexRoster.pendingQuotaRecoveryResume"
     private let accountSortModeKey = "codexRoster.accountSortMode"
     /// One-shot migration: force quota-first so users actually see remaining-quota order.
     private let accountSortModeV2Key = "codexRoster.accountSortMode.v2"
@@ -280,10 +283,21 @@ final class AccountStore: ObservableObject {
     private var quotaRefreshTask: Task<Void, Never>?
     private var vibeUsageTask: Task<Void, Never>?
     private var autoSwitchAllExhaustedNotified = false
-    /// Set when decide reports `all_accounts_exhausted`. While true, monitoring
-    /// may still call decide to detect recovery, but must not close Desktop or apply.
+    /// Set when decide reports `all_accounts_exhausted` or `banked_reset_available`.
+    /// While true, monitoring may still call decide to detect recovery, but must
+    /// not close Desktop or apply a switch.
     private var autoSwitchPausedAllExhausted = false
+    /// True while waiting for banked-reset redeem (faster poll than natural reset).
+    private var autoSwitchPausedForBankedReset = false
     private var autoSwitchCooldownUntil: Date?
+    /// Last observed live-account exhaustion — used to detect redeem/reset
+    /// transitions on the quota refresh path (independent of auto-switch poll).
+    private var lastObservedActiveExhausted: Bool?
+
+    private var pendingQuotaRecoveryResume: Bool {
+        get { UserDefaults.standard.bool(forKey: pendingQuotaRecoveryResumeKey) }
+        set { UserDefaults.standard.set(newValue, forKey: pendingQuotaRecoveryResumeKey) }
+    }
     private var isInteractiveLoginInProgress = false
     private var isAddAccountSession = false
     /// Isolated-home enroll path; mutually exclusive with `isAddAccountSession`.
@@ -1156,8 +1170,12 @@ final class AccountStore: ObservableObject {
         )
 
         // Cold Desktop after web-session clear needs several seconds before
-        // deep-link navigation works (sidebar_ready ≈ 7s on this machine).
-        await waitForDesktopResumeReady(minimumSettle: .seconds(5), maximumWait: .seconds(14))
+        // deep-link navigation works. Same-account recovery keeps Desktop warm.
+        let warmDesktop = ChatGPTDesktop.isRunning
+        await waitForDesktopResumeReady(
+            minimumSettle: warmDesktop ? .milliseconds(800) : .seconds(4),
+            maximumWait: warmDesktop ? .seconds(6) : .seconds(12)
+        )
 
         let result = await openRememberedWorkspace(cwd: hint.cwd, sessionID: hint.sessionId)
         logSessionResume("result=\(String(describing: result)) label=\(label) continueExhausted=\(continueExhausted)")
@@ -1229,9 +1247,13 @@ final class AccountStore: ObservableObject {
             return
         }
         logSessionResume(
-            "batch begin count=\(targets.count) ids=\(targets.compactMap(\.sessionId).joined(separator: ","))"
+            "batch begin count=\(targets.count) ids=\(targets.compactMap(\.sessionId).joined(separator: ",")) desktopRunning=\(ChatGPTDesktop.isRunning)"
         )
-        await waitForDesktopResumeReady(minimumSettle: .seconds(5), maximumWait: .seconds(14))
+        let warmDesktop = ChatGPTDesktop.isRunning
+        await waitForDesktopResumeReady(
+            minimumSettle: warmDesktop ? .milliseconds(800) : .seconds(4),
+            maximumWait: warmDesktop ? .seconds(6) : .seconds(12)
+        )
         let result = await SessionResumeBatch.run(
             threadIDs: targets.compactMap(\.sessionId),
             shouldContinue: { self.autoResumeSession },
@@ -1262,13 +1284,19 @@ final class AccountStore: ObservableObject {
     /// Same-account quota recovery (timed reset or banked-reset redeem): discover
     /// interrupted threads and continue them without switching accounts.
     private func resumeInterruptedSessionsAfterQuotaRecovery() async {
-        guard autoResumeSession else { return }
+        guard autoResumeSession else {
+            logSessionResume("quota recovery skipped: auto-resume disabled")
+            return
+        }
         do {
             let hint: SessionResumeHint = try await cli.decode(
                 SessionResumeHint.self,
                 arguments: ["auto-resume-session", "--continue-interrupted", "--json"]
             )
-            guard hint.enabled else { return }
+            guard hint.enabled else {
+                logSessionResume("quota recovery: hint disabled")
+                return
+            }
             let hasPrimary = !(hint.sessionId ?? "").isEmpty
             let hasExtras = hint.additionalSessions.contains { !($0.sessionId ?? "").isEmpty }
             guard hasPrimary || hasExtras else {
@@ -1276,12 +1304,43 @@ final class AccountStore: ObservableObject {
                 return
             }
             logSessionResume(
-                "quota recovery resume primary=\(hint.sessionId ?? "-") additional=\(hint.additionalSessions.count)"
+                "quota recovery resume primary=\(hint.sessionId ?? "-") additional=\(hint.additionalSessions.count) desktopRunning=\(ChatGPTDesktop.isRunning)"
             )
             await applySessionResumeIfNeeded(hint, continueExhausted: true)
         } catch {
             logSessionResume("quota recovery resume failed: \(error.localizedDescription)")
         }
+    }
+
+    /// Quota refresh can notice redeem/reset sooner than the paused auto-switch
+    /// poll — fire the same-account resume as soon as the live account is usable.
+    private func resumeAfterQuotaRefreshIfNeeded() async {
+        guard autoResumeSession else { return }
+        guard let active = accounts.first(where: { $0.isActive && !isArchived($0) }) else { return }
+        let exhausted = active.isExhaustedForSwitch
+        let recoveredFromPending = !exhausted && pendingQuotaRecoveryResume
+        let recoveredFromTransition = lastObservedActiveExhausted == true && !exhausted
+        if exhausted {
+            // Arm recovery so a later redeem/reset still resumes after relaunch.
+            if active.bankedResetCount > 0 || autoSwitchPausedAllExhausted {
+                pendingQuotaRecoveryResume = true
+            }
+            lastObservedActiveExhausted = true
+            return
+        }
+        lastObservedActiveExhausted = false
+        guard recoveredFromPending || recoveredFromTransition else { return }
+        logSessionResume(
+            "quota refresh detected recovery pending=\(recoveredFromPending) transition=\(recoveredFromTransition) — resuming"
+        )
+        pendingQuotaRecoveryResume = false
+        autoSwitchPausedAllExhausted = false
+        autoSwitchPausedForBankedReset = false
+        autoSwitchAllExhaustedNotified = false
+        if case .bankedResetAvailable = autoSwitchState { autoSwitchState = nil }
+        if case .allAccountsExhausted = autoSwitchState { autoSwitchState = nil }
+        ResetNotifier.showQuotaRecovered()
+        await resumeInterruptedSessionsAfterQuotaRecovery()
     }
 
     private func scheduleSessionResumeCaptionClear() {
@@ -1323,22 +1382,45 @@ final class AccountStore: ObservableObject {
     private func openRememberedWorkspace(cwd: String?, sessionID: String?) async -> SessionResumeOpenResult {
         if let sessionID, !sessionID.isEmpty {
             // Retry: first deliveries during cold hydrate are often dropped.
-            for attempt in 1...6 {
+            // Warm Desktop (same-account recovery) confirms faster.
+            let warmDesktop = ChatGPTDesktop.isRunning
+            // Warm same-account recovery rarely writes fresh Desktop log lines
+            // (thread often already focused). Confirm briefly, then fall through.
+            let confirmTimeout = warmDesktop ? 1.2 : 3.5
+            let retryGap: Duration = warmDesktop ? .milliseconds(400) : .milliseconds(1200)
+            let attempts = warmDesktop ? 2 : 6
+            var anyDelivered = false
+            for attempt in 1...attempts {
                 logSessionResume("thread deep-link attempt \(attempt) id=\(sessionID)")
                 let openedAt = Date()
                 let delivered = await openCodexThreadDeepLink(sessionID: sessionID)
                 if delivered {
-                    if await desktopLogConfirmsThreadOpen(sessionID: sessionID, since: openedAt, timeoutSeconds: 3.5) {
+                    anyDelivered = true
+                    if await desktopLogConfirmsThreadOpen(
+                        sessionID: sessionID,
+                        since: openedAt,
+                        timeoutSeconds: confirmTimeout
+                    ) {
                         return .openedThread
                     }
                     logSessionResume("open delivered but no Desktop resume evidence yet")
                 }
-                try? await Task.sleep(for: .milliseconds(1500))
+                try? await Task.sleep(for: retryGap)
             }
-            // Final attempt — only claim thread resume when Desktop log confirms.
+            if anyDelivered && (warmDesktop || ChatGPTDesktop.isRunning) {
+                logSessionResume(
+                    "warm Desktop: deep-link delivered without fresh log evidence — treating as opened"
+                )
+                return .openedThread
+            }
+            // Final cold-path attempt with stricter log confirmation.
             let openedAt = Date()
             if await openCodexThreadDeepLink(sessionID: sessionID),
-               await desktopLogConfirmsThreadOpen(sessionID: sessionID, since: openedAt, timeoutSeconds: 5) {
+               await desktopLogConfirmsThreadOpen(
+                sessionID: sessionID,
+                since: openedAt,
+                timeoutSeconds: 5.0
+               ) {
                 return .openedThread
             }
             logSessionResume("thread deep-link exhausted without Desktop resume evidence")
@@ -1924,6 +2006,7 @@ final class AccountStore: ObservableObject {
             self.autoSwitchAllExhaustedNotified = false
             // Off→on clears the all-exhausted pause so monitoring can retry.
             self.autoSwitchPausedAllExhausted = false
+            self.autoSwitchPausedForBankedReset = false
             if enabled {
                 Task { await self.checkAutoSwitchWhenExhausted() }
             }
@@ -2001,19 +2084,73 @@ final class AccountStore: ObservableObject {
     func startAutoSwitchMonitoring() {
         guard autoSwitchTask == nil else { return }
         autoSwitchTask = Task { [weak self] in
+            // refresh() is async — wait for an active row before the
+            // recovery bootstrap, otherwise we no-op on an empty roster.
+            for _ in 0..<40 {
+                if self?.accounts.contains(where: \.isActive) == true { break }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+            await self?.bootstrapQuotaRecoveryResumeIfNeeded()
             while !Task.isCancelled {
                 await self?.checkAutoSwitchWhenExhausted()
-                // While all accounts are exhausted, decide still runs (to spot
-                // active recovery) but poll much slower — matches Rust worker
-                // backoff and avoids mass AT probes every minute.
+                // While paused, decide still runs (to spot recovery) but poll
+                // cadence depends on why we paused:
+                // - banked reset: user may redeem any moment → 45s
+                // - all exhausted (natural reset): slower → 90s (was 300s)
                 let interval: Duration
                 if self?.autoSwitchPausedAllExhausted == true {
-                    interval = .seconds(300)
+                    interval = (self?.autoSwitchPausedForBankedReset == true)
+                        ? .seconds(45)
+                        : .seconds(90)
                 } else {
                     interval = self?.quotaPollInterval ?? .seconds(60)
                 }
                 try? await Task.sleep(for: interval)
             }
+        }
+    }
+
+    /// First launch of the recovery-pending logic: seed exhaustion baseline and
+    /// resume once if the live account is already usable with interrupted threads
+    /// (covers banked-reset redeem that happened before the flag existed).
+    private func bootstrapQuotaRecoveryResumeIfNeeded() async {
+        guard autoResumeSession else {
+            logSessionResume("bootstrap: skipped — auto-resume off")
+            return
+        }
+        let defaults = UserDefaults.standard
+        let firstRun = defaults.object(forKey: pendingQuotaRecoveryResumeKey) == nil
+        guard let active = accounts.first(where: { $0.isActive && !isArchived($0) }) else {
+            logSessionResume("bootstrap: skipped — no active account yet")
+            return
+        }
+        let exhausted = active.isExhaustedForSwitch
+        lastObservedActiveExhausted = exhausted
+        if exhausted {
+            if active.bankedResetCount > 0 {
+                pendingQuotaRecoveryResume = true
+                autoSwitchPausedForBankedReset = true
+                autoSwitchPausedAllExhausted = true
+            }
+            if firstRun { defaults.set(pendingQuotaRecoveryResume, forKey: pendingQuotaRecoveryResumeKey) }
+            logSessionResume(
+                "bootstrap: active exhausted banked=\(active.bankedResetCount) pending=\(pendingQuotaRecoveryResume)"
+            )
+            return
+        }
+        if firstRun {
+            // Initialize the key so later launches don't re-enter this path.
+            defaults.set(false, forKey: pendingQuotaRecoveryResumeKey)
+            logSessionResume("bootstrap: probing interrupted threads after upgrade")
+            await resumeInterruptedSessionsAfterQuotaRecovery()
+            return
+        }
+        if pendingQuotaRecoveryResume {
+            logSessionResume("bootstrap: pending recovery with usable active — resuming")
+            pendingQuotaRecoveryResume = false
+            await resumeInterruptedSessionsAfterQuotaRecovery()
+        } else {
+            logSessionResume("bootstrap: active usable, no pending recovery")
         }
     }
 
@@ -2181,20 +2318,29 @@ final class AccountStore: ObservableObject {
             let decision: AutoSwitchOutput = try await cli.decode(AutoSwitchOutput.self, arguments: ["auto-switch"])
             switch decision.status {
             case "active_has_quota":
-                let wasExhausted = autoSwitchAllExhaustedNotified || autoSwitchPausedAllExhausted
+                let shouldResume =
+                    pendingQuotaRecoveryResume
+                    || autoSwitchAllExhaustedNotified
+                    || autoSwitchPausedAllExhausted
+                pendingQuotaRecoveryResume = false
                 autoSwitchAllExhaustedNotified = false
                 autoSwitchPausedAllExhausted = false
+                autoSwitchPausedForBankedReset = false
                 autoSwitchState = nil
                 // Notify + auto-resume when quota recovers after being exhausted
                 // (timed reset or banked-reset redeem on the same live account).
-                if wasExhausted {
+                if shouldResume {
                     ResetNotifier.showQuotaRecovered()
                     await self.resumeInterruptedSessionsAfterQuotaRecovery()
+                } else {
+                    logSessionResume("active_has_quota without recovery pending — skip auto-resume")
                 }
             case "waiting_for_login":
                 autoSwitchState = .waitingForLogin
             case "all_accounts_exhausted":
                 autoSwitchPausedAllExhausted = true
+                autoSwitchPausedForBankedReset = false
+                pendingQuotaRecoveryResume = true
                 if !autoSwitchAllExhaustedNotified {
                     autoSwitchState = .allAccountsExhausted
                     autoSwitchAllExhaustedNotified = true
@@ -2203,8 +2349,11 @@ final class AccountStore: ObservableObject {
                 return
             case "banked_reset_available":
                 // UI-only: banked resets are not spendable quota; never auto-switch here.
-                // Still mark paused so redeem → active_has_quota can trigger auto-resume.
+                // Mark recovery-pending so redeem → usable quota triggers auto-resume
+                // even across app relaunches / in-memory flag loss.
                 autoSwitchPausedAllExhausted = true
+                autoSwitchPausedForBankedReset = true
+                pendingQuotaRecoveryResume = true
                 autoSwitchState = .bankedResetAvailable(
                     account: decision.candidateDisplayName
                         ?? AppLanguage.text("một tài khoản", "an account"),
@@ -2212,8 +2361,10 @@ final class AccountStore: ObservableObject {
                     isActive: decision.candidateAccountId == decision.activeAccountId
                 )
             case "ready":
-                // An eligible usable candidate exists — clear any all-exhausted pause.
+                // Account-switch path owns resume via apply session_resume hint.
+                pendingQuotaRecoveryResume = false
                 autoSwitchPausedAllExhausted = false
+                autoSwitchPausedForBankedReset = false
                 autoSwitchAllExhaustedNotified = false
                 guard !isBusyForActions else { return }
                 guard !CodexActivityDetector.isTurnActive() else {
@@ -2306,13 +2457,13 @@ final class AccountStore: ObservableObject {
                         )
                     }
                     autoSwitchState = .checkFailed
-                    autoSwitchCooldownUntil = Date.now.addingTimeInterval(60)
+                    autoSwitchCooldownUntil = Date.now.addingTimeInterval(30)
                     return
                 }
                 try await reloadAccountsAfterSwitch()
                 autoSwitchState = .switched(applied.candidateDisplayName ?? candidateName)
                 autoSwitchAllExhaustedNotified = false
-                autoSwitchCooldownUntil = Date.now.addingTimeInterval(30)
+                autoSwitchCooldownUntil = Date.now.addingTimeInterval(15)
                 await self.applySessionResumeIfNeeded(applied.sessionResume, continueExhausted: true)
             default:
                 autoSwitchState = .checkFailed
@@ -2346,6 +2497,7 @@ final class AccountStore: ObservableObject {
             _ = try await cli.data(arguments: ["refresh-usage", "--json"])
             try await reloadAccountsAfterSwitch()
             lastQuotaRefreshAt = .now
+            await resumeAfterQuotaRefreshIfNeeded()
         } catch {
             // The last verified quota stays visible; manual refresh can surface the error.
         }
@@ -2368,6 +2520,7 @@ final class AccountStore: ObservableObject {
             _ = try await cli.data(arguments: ["usage", activeAccount.id.uuidString, "--json"])
             try await reloadAccountsAfterSwitch()
             lastQuotaRefreshAt = .now
+            await resumeAfterQuotaRefreshIfNeeded()
         } catch {
             // The last verified quota stays visible; manual refresh can surface the error.
         }
@@ -2460,11 +2613,11 @@ final class AccountStore: ObservableObject {
         // Fast path: Desktop already running → poll immediately after a short
         // beat. Cold launch still gets a longer head start before the loop.
         if ChatGPTDesktop.isRunning {
-            try? await Task.sleep(for: .milliseconds(400))
+            try? await Task.sleep(for: .milliseconds(300))
         } else {
-            try? await Task.sleep(for: .milliseconds(800))
+            try? await Task.sleep(for: .milliseconds(500))
         }
-        let deadline = ContinuousClock.now + .seconds(12)
+        let deadline = ContinuousClock.now + .seconds(10)
         var sawMatchingLiveIdentity = false
         while ContinuousClock.now < deadline {
             guard ChatGPTDesktop.isRunning else {
@@ -2880,9 +3033,9 @@ private enum ChatGPTDesktop {
     private static let terminatePollInterval: Duration = .milliseconds(50)
     /// Wait long enough for ChatGPT/Codex to flush rotated refresh tokens on
     /// graceful quit before escalating to forceTerminate / SIGKILL.
-    private static let gracefulTerminateDeadline: Duration = .seconds(8)
+    private static let gracefulTerminateDeadline: Duration = .seconds(6)
     private static let forceTerminateDeadline: Duration = .seconds(3)
-    private static let launchConfirmDeadline: Duration = .seconds(6)
+    private static let launchConfirmDeadline: Duration = .seconds(5)
 
     struct RelaunchPlan {
         let bundleIDs: [String]

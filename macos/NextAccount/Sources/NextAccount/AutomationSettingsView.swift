@@ -89,8 +89,8 @@ struct AutomationSettingsView: View {
                     )
                     .disabled(store.isBusyForActions)
                     Text(language.text(
-                        "Sau khi tự chuyển tài khoản, hoặc khi quota phục hồi (kể cả sau banked reset): tiếp tục các cuộc hội thoại vừa bị gián đoạn trong khoảng 10 phút gần đây.",
-                        "After auto-switch, or when quota recovers (including after a banked reset): continue conversations interrupted within about the last 10 minutes."
+                        "Sau khi tự chuyển tài khoản, hoặc khi quota phục hồi (kể cả sau banked reset): tiếp tục các cuộc hội thoại vừa bị usage-limit trong ~6 giờ (cắt giữa chừng ~45 phút).",
+                        "After auto-switch, or when quota recovers (including after a banked reset): continue usage-limit conversations within ~6 hours (mid-flight cuts ~45 minutes)."
                     ))
                     .font(RosterSecondaryChrome.caption)
                     .foregroundStyle(.secondary)

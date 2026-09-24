@@ -28,6 +28,27 @@ import Testing
     #expect(result.total == 2)
 }
 
+@Test func launchProbeRunsWhenUsableEvenWithoutPendingRecovery() {
+    #expect(
+        LaunchInterruptedResumePolicy.shouldProbeInterruptedOnLaunch(
+            autoResumeEnabled: true,
+            activeExhausted: false
+        )
+    )
+    #expect(
+        !LaunchInterruptedResumePolicy.shouldProbeInterruptedOnLaunch(
+            autoResumeEnabled: true,
+            activeExhausted: true
+        )
+    )
+    #expect(
+        !LaunchInterruptedResumePolicy.shouldProbeInterruptedOnLaunch(
+            autoResumeEnabled: false,
+            activeExhausted: false
+        )
+    )
+}
+
 @Test func desktopResumeEvidenceRequiresFreshSuccessForExactThread() {
     let since = ISO8601DateFormatter().date(from: "2026-09-23T10:00:00Z")!
     let old = "2026-09-23T09:59:59.000Z info maybe_resume_success conversationId=one"

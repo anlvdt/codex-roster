@@ -2122,9 +2122,11 @@ final class AccountStore: ObservableObject {
         }
     }
 
-    /// First launch of the recovery-pending logic: seed exhaustion baseline and
-    /// resume once if the live account is already usable with interrupted threads
-    /// (covers banked-reset redeem that happened before the flag existed).
+    /// After monitoring is ready: seed exhaustion baseline, and when the live
+    /// account already has usable quota, discover interrupted threads (usage-limit
+    /// ~6h / mid-flight ~45m) and continue them — same path as quota recovery,
+    /// without requiring another account switch or a prior pending-recovery flag.
+    /// (Pending flag still arms across relaunches while the account is exhausted.)
     private func bootstrapQuotaRecoveryResumeIfNeeded() async {
         guard autoResumeSession else {
             logSessionResume("bootstrap: skipped — auto-resume off")
@@ -2150,20 +2152,26 @@ final class AccountStore: ObservableObject {
             )
             return
         }
-        if firstRun {
-            // Initialize the key so later launches don't re-enter this path.
-            defaults.set(false, forKey: pendingQuotaRecoveryResumeKey)
-            logSessionResume("bootstrap: probing interrupted threads after upgrade")
-            await resumeInterruptedSessionsAfterQuotaRecovery()
+
+        // Usable active: always probe. CLI filters to the usage-limit / mid-flight
+        // windows and no-ops when nothing needs continue — so a normal app restart
+        // still resumes recent interrupts even when pendingQuotaRecoveryResume is false.
+        guard LaunchInterruptedResumePolicy.shouldProbeInterruptedOnLaunch(
+            autoResumeEnabled: autoResumeSession,
+            activeExhausted: exhausted
+        ) else {
+            logSessionResume("bootstrap: skip probe — policy rejected")
             return
         }
-        if pendingQuotaRecoveryResume {
-            logSessionResume("bootstrap: pending recovery with usable active — resuming")
-            pendingQuotaRecoveryResume = false
-            await resumeInterruptedSessionsAfterQuotaRecovery()
-        } else {
-            logSessionResume("bootstrap: active usable, no pending recovery")
+        let hadPendingRecovery = pendingQuotaRecoveryResume
+        pendingQuotaRecoveryResume = false
+        if firstRun {
+            defaults.set(false, forKey: pendingQuotaRecoveryResumeKey)
         }
+        logSessionResume(
+            "bootstrap: probing interrupted threads on launch pendingWas=\(hadPendingRecovery)"
+        )
+        await resumeInterruptedSessionsAfterQuotaRecovery()
     }
 
     func startQuotaMonitoring() {

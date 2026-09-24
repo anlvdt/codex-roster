@@ -29,6 +29,18 @@ enum SessionResumeBatch {
     }
 }
 
+/// Launch bootstrap: when Auto-resume is ON and the live account is usable,
+/// always probe interrupted threads (CLI applies usage-limit ~6h / mid-flight ~45m).
+/// Pending-recovery only matters while the account is still exhausted.
+enum LaunchInterruptedResumePolicy {
+    static func shouldProbeInterruptedOnLaunch(
+        autoResumeEnabled: Bool,
+        activeExhausted: Bool
+    ) -> Bool {
+        autoResumeEnabled && !activeExhausted
+    }
+}
+
 /// A navigation is confirmed only by a fresh success record for that exact thread.
 enum DesktopResumeEvidence {
     static func matches(_ line: String, threadID: String, since: Date) -> Bool {

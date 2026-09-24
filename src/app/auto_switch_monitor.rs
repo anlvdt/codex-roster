@@ -11,12 +11,12 @@ use crate::secrets::MigratingSecretStore;
 
 use super::App;
 
-pub const AUTO_SWITCH_POLL_SECONDS: u64 = 60;
+pub const AUTO_SWITCH_POLL_SECONDS: u64 = 45;
 /// Natural reset wait — keep AT probe load low while every account is empty.
-pub const AUTO_SWITCH_EXHAUSTED_BACKOFF_SECONDS: u64 = 90;
+pub const AUTO_SWITCH_EXHAUSTED_BACKOFF_SECONDS: u64 = 45;
 /// Banked-reset wait — user may redeem any moment; poll more often so
 /// same-account auto-resume fires promptly after redeem.
-pub const AUTO_SWITCH_BANKED_RESET_BACKOFF_SECONDS: u64 = 45;
+pub const AUTO_SWITCH_BANKED_RESET_BACKOFF_SECONDS: u64 = 20;
 
 static AUTO_SWITCH_RUN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static AUTO_SWITCH_CHECK_LISTENERS: OnceLock<Mutex<Vec<Sender<()>>>> = OnceLock::new();

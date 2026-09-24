@@ -1736,6 +1736,10 @@ fn switch_quota_score(usage: Option<&AccountUsageView>) -> i32 {
     }
 }
 
+/// Keep source/target out of the next auto-switch briefly to avoid thrashing,
+/// without blocking a third account or a later recovery switch for long.
+const AUTO_SWITCH_ACCOUNT_COOLDOWN: time::Duration = time::Duration::minutes(2);
+
 fn is_in_auto_switch_cooldown(
     settings: &crate::settings::AppSettings,
     candidate_id: Uuid,
@@ -1746,7 +1750,7 @@ fn is_in_auto_switch_cooldown(
     recently_used
         && settings
             .last_auto_switch_at
-            .is_some_and(|last_switch| now - last_switch < time::Duration::minutes(5))
+            .is_some_and(|last_switch| now - last_switch < AUTO_SWITCH_ACCOUNT_COOLDOWN)
 }
 
 #[cfg(test)]
@@ -2338,6 +2342,15 @@ mod tests {
         assert!(is_in_auto_switch_cooldown(&settings, from, now));
         assert!(is_in_auto_switch_cooldown(&settings, target, now));
         assert!(!is_in_auto_switch_cooldown(&settings, other, now));
+
+        let expired = crate::settings::AppSettings {
+            last_auto_switch_at: Some(now - time::Duration::minutes(2)),
+            last_auto_switch_target: Some(target),
+            last_auto_switch_from: Some(from),
+            ..crate::settings::AppSettings::default()
+        };
+        assert!(!is_in_auto_switch_cooldown(&expired, from, now));
+        assert!(!is_in_auto_switch_cooldown(&expired, target, now));
     }
 
     #[test]

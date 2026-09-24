@@ -89,8 +89,8 @@ struct AutomationSettingsView: View {
                     )
                     .disabled(store.isBusyForActions)
                     Text(language.text(
-                        "Sau khi tự chuyển tài khoản, hoặc khi quota phục hồi (kể cả sau banked reset): tiếp tục các cuộc hội thoại vừa bị gián đoạn trong khoảng 10 phút gần đây.",
-                        "After auto-switch, or when quota recovers (including after a banked reset): continue conversations interrupted within about the last 10 minutes."
+                        "Sau khi tự chuyển tài khoản, hoặc khi quota phục hồi (kể cả sau banked reset): tiếp tục các cuộc hội thoại vừa bị gián đoạn trong khoảng 10 phút gần đây. Trên Codex Desktop mới, Roster sẽ nhấn nút Play sau khi xếp hàng tin tiếp tục — cấp quyền Accessibility nếu được hỏi.",
+                        "After auto-switch, or when quota recovers (including after a banked reset): continue conversations interrupted within about the last 10 minutes. On newer Codex Desktop builds, Roster presses Play after queueing the continue turn — grant Accessibility if prompted."
                     ))
                     .font(RosterSecondaryChrome.caption)
                     .foregroundStyle(.secondary)

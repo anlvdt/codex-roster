@@ -22,8 +22,9 @@
 - Faster Auto-switch timing and clearer Auto-switch / Auto-resume chrome in the notch.
 - Notch panel: hover opens only after a deliberate ~280ms linger (drive-by horizontal sweeps abort); leave-grace before auto-collapse is 450ms.
 - Same-account auto-resume after banked-reset redeem / quota recovery: persist a recovery-pending flag across relaunches, detect usable quota on the regular usage refresh (not only the paused auto-switch poll), and skip the long cold-Desktop settle when ChatGPT is already running.
-- Auto-switch cadence: banked-reset wait 45s (was 300s), all-exhausted wait 90s; shorter warm-path resume/deep-link waits and cooldowns without skipping Desktop web-session clear.
+- Auto-switch cadence: banked-reset wait 20s (was 45s), all-exhausted wait 45s (was 90s), near-cliff poll 5s / 15s, post-switch cooldown 8s / account thrash cooldown 2m; shorter warm/cold resume settle and deep-link retries without skipping Desktop web-session clear.
 - Warm Desktop same-account resume: if deep-link delivers but writes no fresh log line (thread already focused), still queue the continue turn.
+- Auto-resume after `codex queue`: press Codex Desktop’s composer **Play** control (“Queued messages run now”) via Accessibility / Return / trailing-click fallback — newer Desktop builds no longer auto-start queued turns.
 - Auto-resume only continues threads interrupted within the last **10 minutes** (usage-limit / abort event time when available; otherwise rollout mtime) — not stale interrupted history from hours/days ago.
 - Route live UI typography and semantic colors through PrismTheme design tokens.
 

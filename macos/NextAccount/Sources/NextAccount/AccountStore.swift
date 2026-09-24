@@ -381,14 +381,14 @@ final class AccountStore: ObservableObject {
         guard let remaining = accounts.first(where: { $0.isActive && !isArchived($0) })?
             .primaryQuotaWindow?
             .remainingPercent else {
-            return .seconds(60)
+            return .seconds(45)
         }
-        // 0% must not poll every 10s — that made auto-switch close ChatGPT in a loop
-        // when decide briefly looked "ready" against a stale sibling row.
-        if remaining == 0 { return .seconds(60) }
-        if remaining <= 5 { return .seconds(10) }
-        if remaining <= 20 { return .seconds(30) }
-        return .seconds(60)
+        // 0% must not poll every few seconds — that made auto-switch close ChatGPT in a
+        // loop when decide briefly looked "ready" against a stale sibling row.
+        if remaining == 0 { return .seconds(45) }
+        if remaining <= 5 { return .seconds(5) }
+        if remaining <= 20 { return .seconds(15) }
+        return .seconds(45)
     }
 
     /// True while a user-driven roster mutation is in flight (not background quota checks).
@@ -1169,12 +1169,12 @@ final class AccountStore: ObservableObject {
                 : "Resuming session · \(label)"
         )
 
-        // Cold Desktop after web-session clear needs several seconds before
+        // Cold Desktop after web-session clear needs a short settle before
         // deep-link navigation works. Same-account recovery keeps Desktop warm.
         let warmDesktop = ChatGPTDesktop.isRunning
         await waitForDesktopResumeReady(
-            minimumSettle: warmDesktop ? .milliseconds(800) : .seconds(4),
-            maximumWait: warmDesktop ? .seconds(6) : .seconds(12)
+            minimumSettle: warmDesktop ? .milliseconds(400) : .seconds(2.5),
+            maximumWait: warmDesktop ? .seconds(4) : .seconds(8)
         )
 
         let result = await openRememberedWorkspace(cwd: hint.cwd, sessionID: hint.sessionId)
@@ -1251,8 +1251,8 @@ final class AccountStore: ObservableObject {
         )
         let warmDesktop = ChatGPTDesktop.isRunning
         await waitForDesktopResumeReady(
-            minimumSettle: warmDesktop ? .milliseconds(800) : .seconds(4),
-            maximumWait: warmDesktop ? .seconds(6) : .seconds(12)
+            minimumSettle: warmDesktop ? .milliseconds(400) : .seconds(2.5),
+            maximumWait: warmDesktop ? .seconds(4) : .seconds(8)
         )
         let result = await SessionResumeBatch.run(
             threadIDs: targets.compactMap(\.sessionId),
@@ -1386,9 +1386,9 @@ final class AccountStore: ObservableObject {
             let warmDesktop = ChatGPTDesktop.isRunning
             // Warm same-account recovery rarely writes fresh Desktop log lines
             // (thread often already focused). Confirm briefly, then fall through.
-            let confirmTimeout = warmDesktop ? 1.2 : 3.5
-            let retryGap: Duration = warmDesktop ? .milliseconds(400) : .milliseconds(1200)
-            let attempts = warmDesktop ? 2 : 6
+            let confirmTimeout = warmDesktop ? 0.9 : 2.0
+            let retryGap: Duration = warmDesktop ? .milliseconds(250) : .milliseconds(600)
+            let attempts = warmDesktop ? 2 : 4
             var anyDelivered = false
             for attempt in 1...attempts {
                 logSessionResume("thread deep-link attempt \(attempt) id=\(sessionID)")
@@ -1419,7 +1419,7 @@ final class AccountStore: ObservableObject {
                await desktopLogConfirmsThreadOpen(
                 sessionID: sessionID,
                 since: openedAt,
-                timeoutSeconds: 5.0
+                timeoutSeconds: 3.0
                ) {
                 return .openedThread
             }
@@ -1472,7 +1472,8 @@ final class AccountStore: ObservableObject {
     }
 
     /// After auto-switch, open the blocked thread then queue a user turn so Desktop
-    /// actually continues (deep-link alone only navigates). Uses `codex queue`.
+    /// actually continues (deep-link alone only navigates). Uses `codex queue`, then
+    /// presses the composer Play control required by newer Desktop builds.
     private func queueContinueMessage(threadID: String) async -> Bool {
         let message = "Continue the interrupted task after the account usage-limit switch."
         for binary in codexCLIBinaries where FileManager.default.isExecutableFile(atPath: binary) {
@@ -1485,6 +1486,10 @@ final class AccountStore: ObservableObject {
             case let .exited(status, stdout, stderr):
                 let combined = stdout + "\n" + stderr
                 if status == 0, combined.localizedCaseInsensitiveContains("Queued message") {
+                    // Newer Desktop builds park queued turns behind Play
+                    // ("Queued messages run now") — press it so resume actually starts.
+                    let played = await CodexComposerPlay.press(log: { self.logSessionResume($0) })
+                    logSessionResume("codex queue ok; composer Play pressed=\(played)")
                     return true
                 }
                 logSessionResume(
@@ -1496,7 +1501,11 @@ final class AccountStore: ObservableObject {
                 continue
             }
         }
-        return false
+        // Queue failed or unavailable — still try Play in case Desktop already
+        // shows a resume/run-now affordance on the focused interrupted thread.
+        let played = await CodexComposerPlay.press(log: { self.logSessionResume($0) })
+        logSessionResume("codex queue unavailable; composer Play pressed=\(played)")
+        return played
     }
 
     private var codexCLIBinaries: [String] {
@@ -1860,7 +1869,10 @@ final class AccountStore: ObservableObject {
                 if await ResetNotifier.isAuthorized() {
                     // Account-authenticated usage is the source of truth for
                     // personal banked credits and actual quota resets.
-                    ResetNotifier.showAccountSignals(self.accounts)
+                    ResetNotifier.showAccountSignals(
+                        self.accounts,
+                        autoSwitchEnabled: self.autoSwitchWhenExhausted
+                    )
                     ResetNotifier.showOpenAIIncidentIfNeeded(self.openAIStatus)
                     if Date.now >= nextPublicSignalCheck {
                         if let signals = try? await self.cli.decode(
@@ -2095,15 +2107,15 @@ final class AccountStore: ObservableObject {
                 await self?.checkAutoSwitchWhenExhausted()
                 // While paused, decide still runs (to spot recovery) but poll
                 // cadence depends on why we paused:
-                // - banked reset: user may redeem any moment → 45s
-                // - all exhausted (natural reset): slower → 90s (was 300s)
+                // - banked reset: user may redeem any moment → 20s
+                // - all exhausted (natural reset): slower → 45s
                 let interval: Duration
                 if self?.autoSwitchPausedAllExhausted == true {
                     interval = (self?.autoSwitchPausedForBankedReset == true)
-                        ? .seconds(45)
-                        : .seconds(90)
+                        ? .seconds(20)
+                        : .seconds(45)
                 } else {
-                    interval = self?.quotaPollInterval ?? .seconds(60)
+                    interval = self?.quotaPollInterval ?? .seconds(45)
                 }
                 try? await Task.sleep(for: interval)
             }
@@ -2162,7 +2174,7 @@ final class AccountStore: ObservableObject {
                     try? await Task.sleep(for: .milliseconds(250))
                 }
                 await self?.refreshRosterQuotaInBackground()
-                try? await Task.sleep(for: self?.quotaPollInterval ?? .seconds(60))
+                try? await Task.sleep(for: self?.quotaPollInterval ?? .seconds(45))
             }
         }
     }
@@ -2457,13 +2469,13 @@ final class AccountStore: ObservableObject {
                         )
                     }
                     autoSwitchState = .checkFailed
-                    autoSwitchCooldownUntil = Date.now.addingTimeInterval(30)
+                    autoSwitchCooldownUntil = Date.now.addingTimeInterval(15)
                     return
                 }
                 try await reloadAccountsAfterSwitch()
                 autoSwitchState = .switched(applied.candidateDisplayName ?? candidateName)
                 autoSwitchAllExhaustedNotified = false
-                autoSwitchCooldownUntil = Date.now.addingTimeInterval(15)
+                autoSwitchCooldownUntil = Date.now.addingTimeInterval(8)
                 await self.applySessionResumeIfNeeded(applied.sessionResume, continueExhausted: true)
             default:
                 autoSwitchState = .checkFailed
@@ -3008,7 +3020,7 @@ enum CodexLoginPort {
     }
 }
 
-private enum ChatGPTDesktop {
+enum ChatGPTDesktop {
     /// ChatGPT Desktop on macOS currently ships as `com.openai.codex`.
     private static let bundleIdentifiers = ["com.openai.codex", "com.openai.chat"]
     private static let knownAppPaths = [
@@ -3703,14 +3715,22 @@ private enum ResetNotifier {
         return status == .authorized || status == .provisional
     }
 
-    static func showAccountSignals(_ accounts: [SavedAccount]) {
+    static func showAccountSignals(
+        _ accounts: [SavedAccount],
+        autoSwitchEnabled: Bool = false
+    ) {
         var state = loadSignalState()
         let previousState = state
         for account in accounts where !account.archived {
             let accountKey = account.id.uuidString
             showNewBankedResets(for: account, accountKey: accountKey, state: &state)
             showDetectedQuotaReset(for: account, accountKey: accountKey, state: &state)
-            showLowQuotaWarning(for: account, accountKey: accountKey, state: &state)
+            showLowQuotaWarning(
+                for: account,
+                accountKey: accountKey,
+                autoSwitchEnabled: autoSwitchEnabled,
+                state: &state
+            )
         }
         if state != previousState {
             saveSignalState(state)
@@ -3792,6 +3812,7 @@ private enum ResetNotifier {
     private static func showLowQuotaWarning(
         for account: SavedAccount,
         accountKey: String,
+        autoSwitchEnabled: Bool,
         state: inout SignalState
     ) {
         // Active account only — avoid fan-out noise across the whole roster.
@@ -3815,14 +3836,20 @@ private enum ResetNotifier {
             }
             return AppLanguage.text("5 giờ", "5-hour")
         }()
+        let body = autoSwitchEnabled
+            ? AppLanguage.text(
+                "\(windowLabel) còn \(remaining)%. Tự chuyển sẽ đổi tài khoản khi hết quota.",
+                "\(windowLabel) at \(remaining)%. Auto-switch will change accounts when quota runs out."
+            )
+            : AppLanguage.text(
+                "\(windowLabel) còn \(remaining)%. Cân nhắc chuyển tài khoản từ notch.",
+                "\(windowLabel) at \(remaining)%. Consider switching from the notch."
+            )
         enqueue(
             identifier: "codex-roster-low-quota-\(accountKey)-\(remaining)",
             title: AppLanguage.text("Quota sắp hết", "Quota running low"),
             subtitle: account.displayName,
-            body: AppLanguage.text(
-                "\(windowLabel) còn \(remaining)%. Cân nhắc chuyển tài khoản từ notch.",
-                "\(windowLabel) at \(remaining)%. Consider switching from the notch."
-            )
+            body: body
         )
     }
 

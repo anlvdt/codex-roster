@@ -290,6 +290,9 @@ final class AccountStore: ObservableObject {
     /// True while waiting for banked-reset redeem (faster poll than natural reset).
     private var autoSwitchPausedForBankedReset = false
     private var autoSwitchCooldownUntil: Date?
+    /// One-shot poll override — set when a gate (e.g. an in-flight turn)
+    /// blocked a ready switch so the next decide runs sooner than the cadence.
+    private var autoSwitchNextPollOverride: Duration?
     /// Last account observed exhausted — account-scoped so a switch to a
     /// usable account is not misread as a same-account quota recovery.
     private var lastObservedExhaustedAccountID: UUID?
@@ -393,6 +396,15 @@ final class AccountStore: ObservableObject {
         if remaining <= 5 { return .seconds(5) }
         if remaining <= 20 { return .seconds(15) }
         return .seconds(45)
+    }
+
+    /// Auto-switch decide cadence — faster than the roster sweep when the
+    /// active account is at 0% so a recovery/candidate shows up quickly.
+    private var autoSwitchPollInterval: Duration {
+        let remaining = accounts.first(where: { $0.isActive && !isArchived($0) })?
+            .primaryQuotaWindow?
+            .remainingPercent
+        return remaining == 0 ? .seconds(10) : quotaPollInterval
     }
 
     /// True while a user-driven roster mutation is in flight (not background quota checks).
@@ -2134,12 +2146,15 @@ final class AccountStore: ObservableObject {
                 // - banked reset: user may redeem any moment → 20s
                 // - all exhausted (natural reset): slower → 45s
                 let interval: Duration
-                if self?.autoSwitchPausedAllExhausted == true {
+                if let override = self?.autoSwitchNextPollOverride {
+                    interval = override
+                    self?.autoSwitchNextPollOverride = nil
+                } else if self?.autoSwitchPausedAllExhausted == true {
                     interval = (self?.autoSwitchPausedForBankedReset == true)
                         ? .seconds(20)
                         : .seconds(45)
                 } else {
-                    interval = self?.quotaPollInterval ?? .seconds(45)
+                    interval = self?.autoSwitchPollInterval ?? .seconds(45)
                 }
                 try? await Task.sleep(for: interval)
             }
@@ -2351,7 +2366,12 @@ final class AccountStore: ObservableObject {
             // Always decide first — ChatGPT being open must not hide an exhausted active account.
             // While paused (all exhausted), still decide so recovery can clear the pause,
             // but never close Desktop / apply until a usable candidate exists.
+            let decideStart = ContinuousClock.now
             let decision: AutoSwitchOutput = try await cli.decode(AutoSwitchOutput.self, arguments: ["auto-switch"])
+            let decideMs = elapsedMs(since: decideStart)
+            if decision.status != "active_has_quota" {
+                logSessionResume("switch decide status=\(decision.status) decide=\(decideMs)ms")
+            }
             switch decision.status {
             case "active_has_quota":
                 let shouldResume =
@@ -2369,7 +2389,7 @@ final class AccountStore: ObservableObject {
                     ResetNotifier.showQuotaRecovered()
                     await self.resumeInterruptedSessionsAfterQuotaRecovery()
                 } else {
-                    logSessionResume("active_has_quota without recovery pending — skip auto-resume")
+                    logSessionResume("active_has_quota without recovery pending — skip auto-resume decide=\(decideMs)ms")
                 }
             case "waiting_for_login":
                 autoSwitchState = .waitingForLogin
@@ -2405,10 +2425,16 @@ final class AccountStore: ObservableObject {
                 guard !isBusyForActions else { return }
                 guard !CodexActivityDetector.isTurnActive() else {
                     autoSwitchState = .generationInProgress
+                    autoSwitchNextPollOverride = .seconds(5)
+                    logSessionResume("switch gate: turn active — re-poll in 5s")
                     return
                 }
                 isSwitching = true
                 defer { isSwitching = false }
+                let switchStart = ContinuousClock.now
+                func mark(_ phase: String) {
+                    logSessionResume("switch \(phase) +\(self.elapsedMs(since: switchStart))ms")
+                }
                 let previousAccountID = decision.activeAccountId
                 let candidateName = decision.candidateDisplayName
                     ?? AppLanguage.text("tài khoản khác", "another account")
@@ -2424,6 +2450,7 @@ final class AccountStore: ObservableObject {
                     ChatGPTDesktop.clearWebSessionCacheOnce(didClear: &didClearWebSession)
                     didCloseDesktop = true
                 }
+                mark("desktop quit")
                 autoSwitchState = .switchingAccount
                 var applyArguments = ["auto-switch", "--apply"]
                 if let candidateId = decision.candidateAccountId {
@@ -2443,6 +2470,7 @@ final class AccountStore: ObservableObject {
                         applied = try await cli.decode(AutoSwitchOutput.self, arguments: applyArguments)
                     }
                 }
+                mark("apply status=\(applied.status)")
                 guard applied.status == "switched" else {
                     autoSwitchState = applied.status == "waiting_for_processes" ? .waitingForProcesses : .checkFailed
                     // Still try to restore Desktop if we closed it for a failed apply.
@@ -2477,7 +2505,10 @@ final class AccountStore: ObservableObject {
                         )
                     }
                 }
+                mark("relaunch launched=\(launched)")
+                mark("acceptance=\(acceptance)")
                 guard acceptance == .accepted else {
+                    mark("rollback")
                     do {
                         try await rollbackRejectedTarget(
                             rejectedAccountID: applied.candidateAccountId,
@@ -2497,6 +2528,7 @@ final class AccountStore: ObservableObject {
                     return
                 }
                 try await reloadAccountsAfterSwitch()
+                mark("reloaded — resume begins")
                 autoSwitchState = .switched(applied.candidateDisplayName ?? candidateName)
                 autoSwitchAllExhaustedNotified = false
                 autoSwitchCooldownUntil = Date.now.addingTimeInterval(8)
@@ -2512,6 +2544,11 @@ final class AccountStore: ObservableObject {
                 autoSwitchState = .checkFailed
             }
         }
+    }
+
+    private func elapsedMs(since start: ContinuousClock.Instant) -> Int {
+        let elapsed = start.duration(to: .now)
+        return Int(elapsed.components.seconds * 1000 + elapsed.components.attoseconds / 1_000_000_000_000_000)
     }
 
     /// Background poll refresh for the whole roster: re-query the active account

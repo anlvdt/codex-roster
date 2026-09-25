@@ -1051,6 +1051,12 @@ where
             if cached_usage_is_fresh(account.cached_usage.as_ref(), now) {
                 continue;
             }
+            // Exhausted caches never count as fresh; reuse the 10-minute probe
+            // backoff so a mostly-exhausted roster does not hold AuthLock ~0.7s
+            // per account every 45s poll (that starved auto-switch decide).
+            if exhausted_cached_usage_skips_probe(account.cached_usage.as_ref(), now) {
+                continue;
+            }
             let _ = self.usage(Some(account.id));
         }
         Ok(())
@@ -2755,6 +2761,99 @@ mod tests {
         assert!(!exhausted_cached_usage_skips_probe(None, now));
         // Exhausted caches are never "fresh" — backoff is what stops the fan-out.
         assert!(!cached_usage_is_fresh(Some(&recent_exhausted), now));
+    }
+
+    #[test]
+    fn refresh_stale_saved_usage_skips_exhausted_accounts_within_backoff() {
+        let temp = tempdir().expect("tempdir");
+        let env = AppEnv {
+            kind: EnvironmentKind::Linux,
+            home_dir: temp.path().to_path_buf(),
+            codex_root: temp.path().join(".codex"),
+            app_data_dir: temp.path().join("app"),
+        };
+        std::fs::create_dir_all(&env.codex_root).expect("codex root");
+        let repo = SnapshotRepository::new(&env.app_data_dir, MemorySecretStore::default());
+        let now = OffsetDateTime::now_utc();
+        let exhausted_usage = |minutes_ago: i64| AccountUsageView {
+            source: UsageSource::SavedAccessToken,
+            fetched_at: now - time::Duration::minutes(minutes_ago),
+            five_hour: Some(UsageWindowView {
+                used_percent: 100,
+                remaining_percent: 0,
+                reset_at: now,
+            }),
+            weekly: Some(UsageWindowView {
+                used_percent: 100,
+                remaining_percent: 0,
+                reset_at: now,
+            }),
+            credits: None,
+            banked_resets: None,
+            plan_label: Some("Pro".to_owned()),
+            subscription_active_until: None,
+            luna_reserve: None,
+        };
+        let save = |email: &str, minutes_ago: i64| {
+            let identity = DisplayIdentity {
+                email: email.to_owned(),
+                subject: Some(format!("sub-{email}")),
+                name: None,
+                plan_label: Some("Pro".to_owned()),
+            };
+            let saved = repo
+                .save_snapshot(
+                    &env.kind,
+                    &identity,
+                    &SnapshotBlob {
+                        schema_version: 1,
+                        files: vec![],
+                    },
+                )
+                .expect("save")
+                .0;
+            repo.replace_snapshot_without_backup(
+                &env.kind,
+                saved.id,
+                &identity,
+                &SnapshotBlob {
+                    schema_version: 1,
+                    files: vec![],
+                },
+                Some(exhausted_usage(minutes_ago)),
+            )
+            .expect("seed exhausted usage");
+            saved.id
+        };
+        // 2-minute-old exhausted cache: inside the probe backoff → skipped.
+        let recent_id = save("recent@example.com", 2);
+        // 11-minute-old exhausted cache: past the backoff → probed, and the
+        // probe records a usage error on the empty snapshot.
+        let stale_id = save("stale@example.com", 11);
+
+        let app = App::new(env, repo);
+        app.refresh_stale_saved_usage()
+            .expect("stale sweep must not fail");
+
+        let recent = app
+            .repository
+            .get_account(&app.env.kind, recent_id)
+            .expect("load recent")
+            .expect("recent account");
+        assert!(
+            recent.cached_usage_error.is_none(),
+            "recent exhausted account must be skipped, not probed: {:?}",
+            recent.cached_usage_error
+        );
+        let stale = app
+            .repository
+            .get_account(&app.env.kind, stale_id)
+            .expect("load stale")
+            .expect("stale account");
+        assert!(
+            stale.cached_usage_error.is_some(),
+            "stale exhausted account is past the backoff and must be probed"
+        );
     }
 
     #[test]

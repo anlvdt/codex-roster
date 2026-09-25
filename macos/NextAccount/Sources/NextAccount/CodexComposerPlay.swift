@@ -10,7 +10,6 @@ enum CodexComposerPlay {
     /// Activate ChatGPT/Codex Desktop and trigger Play (or Return as fallback).
     @discardableResult
     static func press(log: (String) -> Void = { _ in }) async -> Bool {
-        requestAccessibilityIfNeeded()
         guard activateDesktop(log: log) else {
             log("composer Play: Desktop not running")
             return false
@@ -29,13 +28,6 @@ enum CodexComposerPlay {
         }
         log("composer Play: all strategies failed")
         return false
-    }
-
-    private static func requestAccessibilityIfNeeded() {
-        guard !AXIsProcessTrusted() else { return }
-        // CFString global is not Sendable under Swift 6; use the documented key literal.
-        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
     }
 
     private static func activateDesktop(log: (String) -> Void) -> Bool {

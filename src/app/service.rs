@@ -8,8 +8,9 @@ use crate::codex;
 use crate::env::AppEnv;
 use crate::model::{
     AccountUsageView, AccountView, ActivateOutput, AutoSwitchOutput, DeleteOutput, DisplayIdentity,
-    LegacyRecoveryOutput, ListOutput, RunningCodexProcess, SaveAction, SaveOutput, SnapshotBlob,
-    StatusOutput, TokenUsageSummaryOutput, UsageOutput, UsageSource,
+    LegacyRecoveryOutput, ListOutput, RunningCodexProcess, SaveAction, SaveOutput,
+    SavedAccountMetadata, SnapshotBlob, StatusOutput, TokenUsageSummaryOutput, UsageOutput,
+    UsageSource,
 };
 use crate::operation_lock::{AuthLock, AutoSwitchLock, OperationLock};
 use crate::repository::SnapshotRepository;
@@ -260,6 +261,9 @@ where
             if confirmed_paid
                 && exhausted_cached_usage_skips_probe(candidate.cached_usage.as_ref(), now)
             {
+                continue;
+            }
+            if recent_usage_error_skips_probe(candidate, now) {
                 continue;
             }
             match self.usage(Some(candidate.id)) {
@@ -1057,6 +1061,9 @@ where
             if exhausted_cached_usage_skips_probe(account.cached_usage.as_ref(), now) {
                 continue;
             }
+            if recent_usage_error_skips_probe(&account, now) {
+                continue;
+            }
             let _ = self.usage(Some(account.id));
         }
         Ok(())
@@ -1830,6 +1837,16 @@ fn exhausted_cached_usage_skips_probe(
 ) -> bool {
     usage.is_some_and(|usage| {
         !is_usable_for_switch(Some(usage)) && now - usage.fetched_at < EXHAUSTED_USAGE_PROBE_BACKOFF
+    })
+}
+
+/// A non-login usage failure (e.g. 402 deactivated workspace) recorded within
+/// the backoff is not worth another AuthLock-held network probe every sweep.
+fn recent_usage_error_skips_probe(account: &SavedAccountMetadata, now: time::OffsetDateTime) -> bool {
+    account.cached_usage_error.as_deref().is_some_and(|error| {
+        !usage_error_blocks_activation(error)
+            && !usage_error_is_deferred_access_token_refresh(error)
+            && now - account.updated_at < EXHAUSTED_USAGE_PROBE_BACKOFF
     })
 }
 
@@ -2853,6 +2870,100 @@ mod tests {
         assert!(
             stale.cached_usage_error.is_some(),
             "stale exhausted account is past the backoff and must be probed"
+        );
+    }
+
+    #[test]
+    fn refresh_stale_saved_usage_skips_recent_non_login_usage_errors() {
+        let temp = tempdir().expect("tempdir");
+        let env = AppEnv {
+            kind: EnvironmentKind::Linux,
+            home_dir: temp.path().to_path_buf(),
+            codex_root: temp.path().join(".codex"),
+            app_data_dir: temp.path().join("app"),
+        };
+        std::fs::create_dir_all(&env.codex_root).expect("codex root");
+        let repo = SnapshotRepository::new(&env.app_data_dir, MemorySecretStore::default());
+        let payment_error = "Usage unavailable: usage request failed with 402 Payment Required";
+        let save = |email: &str| {
+            let identity = DisplayIdentity {
+                email: email.to_owned(),
+                subject: Some(format!("sub-{email}")),
+                name: None,
+                plan_label: Some("Pro".to_owned()),
+            };
+            let saved = repo
+                .save_snapshot(
+                    &env.kind,
+                    &identity,
+                    &SnapshotBlob {
+                        schema_version: 1,
+                        files: vec![],
+                    },
+                )
+                .expect("save")
+                .0;
+            repo.record_usage_error(&env.kind, saved.id, payment_error.to_owned())
+                .expect("record error");
+            saved.id
+        };
+        // Error recorded just now: inside the probe backoff → skipped, error
+        // string untouched.
+        let recent_id = save("recent-402@example.com");
+        // Same error but recorded 11 minutes ago: past the backoff → probed,
+        // which re-records a snapshot-load error instead of the 402.
+        let stale_id = save("stale-402@example.com");
+        let index_path = env.app_data_dir.join("metadata.json");
+        let mut index: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&index_path).expect("read index"))
+                .expect("parse index");
+        let old_updated_at = serde_json::to_value(
+            OffsetDateTime::now_utc() - time::Duration::minutes(11),
+        )
+        .expect("serialize updated_at");
+        for account in index["accounts"]
+            .as_array_mut()
+            .expect("accounts array")
+            .iter_mut()
+        {
+            if account["id"].as_str() == Some(stale_id.to_string().as_str()) {
+                account["updated_at"] = old_updated_at.clone();
+            }
+        }
+        std::fs::write(
+            &index_path,
+            serde_json::to_string_pretty(&index).expect("serialize index"),
+        )
+        .expect("write index");
+
+        let app = App::new(env, repo);
+        app.refresh_stale_saved_usage()
+            .expect("stale sweep must not fail");
+
+        let recent = app
+            .repository
+            .get_account(&app.env.kind, recent_id)
+            .expect("load recent")
+            .expect("recent account");
+        assert_eq!(
+            recent.cached_usage_error.as_deref(),
+            Some(payment_error),
+            "recent 402 account must be skipped, not re-probed: {:?}",
+            recent.cached_usage_error
+        );
+        let stale = app
+            .repository
+            .get_account(&app.env.kind, stale_id)
+            .expect("load stale")
+            .expect("stale account");
+        assert_ne!(
+            stale.cached_usage_error.as_deref(),
+            Some(payment_error),
+            "stale 402 account is past the backoff and must be re-probed"
+        );
+        assert!(
+            stale.cached_usage_error.is_some(),
+            "re-probe records a new error on the empty snapshot"
         );
     }
 

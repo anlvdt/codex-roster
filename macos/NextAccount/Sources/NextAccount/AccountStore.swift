@@ -290,9 +290,13 @@ final class AccountStore: ObservableObject {
     /// True while waiting for banked-reset redeem (faster poll than natural reset).
     private var autoSwitchPausedForBankedReset = false
     private var autoSwitchCooldownUntil: Date?
-    /// Last observed live-account exhaustion — used to detect redeem/reset
-    /// transitions on the quota refresh path (independent of auto-switch poll).
-    private var lastObservedActiveExhausted: Bool?
+    /// Last account observed exhausted — account-scoped so a switch to a
+    /// usable account is not misread as a same-account quota recovery.
+    private var lastObservedExhaustedAccountID: UUID?
+    /// Threads that recently got a continue turn; a second trigger while that
+    /// turn still runs would re-queue the same message.
+    private var recentlyContinuedThreads: [String: Date] = [:]
+    private let continueDedupeWindow: TimeInterval = 120
 
     private var pendingQuotaRecoveryResume: Bool {
         get { UserDefaults.standard.bool(forKey: pendingQuotaRecoveryResumeKey) }
@@ -1186,6 +1190,7 @@ final class AccountStore: ObservableObject {
                 // Deep-link only selects the thread; queue a continue turn so Codex
                 // actually resumes work on the new account's quota.
                 queuedContinue = await queueContinueMessage(threadID: sessionID)
+                if queuedContinue { recentlyContinuedThreads[sessionID] = .now }
                 logSessionResume("queue continue thread=\(sessionID) ok=\(queuedContinue)")
             }
             if continueExhausted {
@@ -1246,8 +1251,26 @@ final class AccountStore: ObservableObject {
             scheduleSessionResumeCaptionClear()
             return
         }
+        let allIDs = targets.compactMap(\.sessionId)
+        let ids = SessionResumeBatch.excludingRecentlyContinued(
+            allIDs,
+            recentlyContinued: recentlyContinuedThreads,
+            now: .now,
+            window: continueDedupeWindow
+        )
+        if ids.count < allIDs.count {
+            logSessionResume("skip recently continued ids=\(allIDs.filter { !ids.contains($0) }.joined(separator: ","))")
+        }
+        guard !ids.isEmpty else {
+            sessionResumeCaption = AppLanguage.text(
+                "Đã gửi tiếp tục cho các thread này rồi",
+                "Continue already queued for these threads"
+            )
+            scheduleSessionResumeCaptionClear()
+            return
+        }
         logSessionResume(
-            "batch begin count=\(targets.count) ids=\(targets.compactMap(\.sessionId).joined(separator: ",")) desktopRunning=\(ChatGPTDesktop.isRunning)"
+            "batch begin count=\(ids.count) ids=\(ids.joined(separator: ",")) desktopRunning=\(ChatGPTDesktop.isRunning)"
         )
         let warmDesktop = ChatGPTDesktop.isRunning
         await waitForDesktopResumeReady(
@@ -1255,7 +1278,7 @@ final class AccountStore: ObservableObject {
             maximumWait: warmDesktop ? .seconds(4) : .seconds(8)
         )
         let result = await SessionResumeBatch.run(
-            threadIDs: targets.compactMap(\.sessionId),
+            threadIDs: ids,
             shouldContinue: { self.autoResumeSession },
             progress: { index, total in
                 self.sessionResumeCaption = AppLanguage.text(
@@ -1270,6 +1293,7 @@ final class AccountStore: ObservableObject {
                     return false
                 }
                 let queued = await self.queueContinueMessage(threadID: id)
+                if queued { self.recentlyContinuedThreads[id] = .now }
                 self.logSessionResume("batch continue thread=\(id) queued=\(queued)")
                 return queued
             }
@@ -1319,16 +1343,16 @@ final class AccountStore: ObservableObject {
         guard let active = accounts.first(where: { $0.isActive && !isArchived($0) }) else { return }
         let exhausted = active.isExhaustedForSwitch
         let recoveredFromPending = !exhausted && pendingQuotaRecoveryResume
-        let recoveredFromTransition = lastObservedActiveExhausted == true && !exhausted
+        let recoveredFromTransition = lastObservedExhaustedAccountID == active.id && !exhausted
         if exhausted {
             // Arm recovery so a later redeem/reset still resumes after relaunch.
             if active.bankedResetCount > 0 || autoSwitchPausedAllExhausted {
                 pendingQuotaRecoveryResume = true
             }
-            lastObservedActiveExhausted = true
+            lastObservedExhaustedAccountID = active.id
             return
         }
-        lastObservedActiveExhausted = false
+        lastObservedExhaustedAccountID = nil
         guard recoveredFromPending || recoveredFromTransition else { return }
         logSessionResume(
             "quota refresh detected recovery pending=\(recoveredFromPending) transition=\(recoveredFromTransition) — resuming"
@@ -2137,7 +2161,7 @@ final class AccountStore: ObservableObject {
             return
         }
         let exhausted = active.isExhaustedForSwitch
-        lastObservedActiveExhausted = exhausted
+        lastObservedExhaustedAccountID = exhausted ? active.id : nil
         if exhausted {
             if active.bankedResetCount > 0 {
                 pendingQuotaRecoveryResume = true

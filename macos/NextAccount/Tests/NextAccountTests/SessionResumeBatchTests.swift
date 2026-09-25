@@ -28,6 +28,30 @@ import Testing
     #expect(result.total == 2)
 }
 
+@Test @MainActor func excludingRecentlyContinuedDropsThreadsInsideWindow() {
+    let now = Date()
+    let result = SessionResumeBatch.excludingRecentlyContinued(
+        ["recent", "old", "unknown"],
+        recentlyContinued: [
+            "recent": now.addingTimeInterval(-30),
+            "old": now.addingTimeInterval(-200)
+        ],
+        now: now,
+        window: 120
+    )
+    #expect(result == ["old", "unknown"])
+}
+
+@Test @MainActor func excludingRecentlyContinuedKeepsAllWhenEmpty() {
+    let result = SessionResumeBatch.excludingRecentlyContinued(
+        ["one", "two"],
+        recentlyContinued: [:],
+        now: Date(),
+        window: 120
+    )
+    #expect(result == ["one", "two"])
+}
+
 @Test func desktopResumeEvidenceRequiresFreshSuccessForExactThread() {
     let since = ISO8601DateFormatter().date(from: "2026-09-23T10:00:00Z")!
     let old = "2026-09-23T09:59:59.000Z info maybe_resume_success conversationId=one"

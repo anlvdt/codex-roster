@@ -27,6 +27,20 @@ enum SessionResumeBatch {
         }
         return Result(total: ids.count, succeeded: succeeded)
     }
+
+    /// Drop threads that already received a continue turn within `window`
+    /// (a second trigger while that turn is still running would re-queue it).
+    static func excludingRecentlyContinued(
+        _ threadIDs: [String],
+        recentlyContinued: [String: Date],
+        now: Date,
+        window: TimeInterval
+    ) -> [String] {
+        threadIDs.filter { id in
+            guard let at = recentlyContinued[id] else { return true }
+            return now.timeIntervalSince(at) >= window
+        }
+    }
 }
 
 /// A navigation is confirmed only by a fresh success record for that exact thread.

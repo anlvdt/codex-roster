@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Notch Auto-switch caption: when decide is `active_has_quota` (no switch needed), show **Monitoring · active has quota** instead of the misleading **No usable candidate**.
 - ChatGPT Desktop showing **Sign in** after account switch: clear Electron `Partitions` (and related) web-session cache on every activate / force-switch / auto-switch relaunch.
 - Console window title stuck on Vietnamese **Bảng điều khiển** after switching the UI to English — sync `NSWindow.title` with `LanguageStore`.
 - Session longevity hardening: bind Login / Delete / Activate by account UUID; stop burning inactive refresh tokens on polls; settle and retry Desktop acceptance using live identity.

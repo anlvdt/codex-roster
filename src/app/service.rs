@@ -361,8 +361,20 @@ where
         preferred_candidate_id: Option<Uuid>,
         force: bool,
     ) -> Result<AutoSwitchOutput> {
-        // Re-probe the live account first so a mid-flight reset does not switch away.
-        let _ = self.usage(None);
+        // Decide re-probed the live account seconds ago; only re-probe when that
+        // cache is older than the decide→quit→apply hop so a mid-flight reset can
+        // still cancel the switch without paying a second network round-trip.
+        let now = time::OffsetDateTime::now_utc();
+        let live_cache_recent = self
+            .list()?
+            .accounts
+            .iter()
+            .find(|account| account.is_active)
+            .and_then(|account| account.usage.as_ref())
+            .is_some_and(|usage| now - usage.fetched_at < RECENT_LIVE_PROBE_WINDOW);
+        if !live_cache_recent {
+            let _ = self.usage(None);
+        }
         let accounts = self.list()?.accounts;
         let active = accounts.iter().find(|account| account.is_active);
         let Some(active) = active else {
@@ -388,7 +400,6 @@ where
         }
 
         let settings = load_settings(&self.env.app_data_dir)?;
-        let now = time::OffsetDateTime::now_utc();
         // Never activate from roster cache alone. A stale >0% window can hide a
         // live 0% or a plan that just became Free. Walk every cached candidate
         // until one live-validates.
@@ -1831,6 +1842,10 @@ fn cached_usage_is_fresh(
 /// all-exhausted decide from mass AT-probing the roster every 60s.
 const EXHAUSTED_USAGE_PROBE_BACKOFF: time::Duration = time::Duration::minutes(10);
 
+/// Decide already re-probed the live account; apply skips a second network
+/// probe when that cache is younger than the decide→quit→apply hop.
+const RECENT_LIVE_PROBE_WINDOW: time::Duration = time::Duration::seconds(20);
+
 fn exhausted_cached_usage_skips_probe(
     usage: Option<&AccountUsageView>,
     now: time::OffsetDateTime,
@@ -2964,6 +2979,104 @@ mod tests {
         assert!(
             stale.cached_usage_error.is_some(),
             "re-probe records a new error on the empty snapshot"
+        );
+    }
+
+    #[test]
+    fn apply_auto_switch_skips_live_probe_when_decide_cache_is_recent() {
+        let temp = tempdir().expect("tempdir");
+        let env = AppEnv {
+            kind: EnvironmentKind::Linux,
+            home_dir: temp.path().to_path_buf(),
+            codex_root: temp.path().join(".codex"),
+            app_data_dir: temp.path().join("app"),
+        };
+        std::fs::create_dir_all(&env.codex_root).expect("codex root");
+        std::fs::write(
+            env.codex_root.join("auth.json"),
+            auth_json_fixture("apply-live@example.com", "sub-apply", Some("pro")),
+        )
+        .expect("auth");
+        let repo = SnapshotRepository::new(&env.app_data_dir, MemorySecretStore::default());
+        let app = App::new(env.clone(), repo);
+        let live_id = app.save_current().expect("initial save").account.id;
+        crate::settings::save_settings(
+            &env.app_data_dir,
+            &crate::settings::AppSettings {
+                auto_switch_when_exhausted: true,
+                ..crate::settings::AppSettings::default()
+            },
+        )
+        .expect("enable auto-switch");
+
+        let identity = DisplayIdentity {
+            email: "apply-live@example.com".to_owned(),
+            subject: Some("sub-apply".to_owned()),
+            name: None,
+            plan_label: Some("Pro".to_owned()),
+        };
+        let exhausted_usage = |fetched_at: OffsetDateTime| AccountUsageView {
+            source: UsageSource::LiveAccessToken,
+            fetched_at,
+            five_hour: Some(UsageWindowView {
+                used_percent: 100,
+                remaining_percent: 0,
+                reset_at: OffsetDateTime::now_utc(),
+            }),
+            weekly: Some(UsageWindowView {
+                used_percent: 100,
+                remaining_percent: 0,
+                reset_at: OffsetDateTime::now_utc(),
+            }),
+            credits: None,
+            banked_resets: None,
+            plan_label: Some("Pro".to_owned()),
+            subscription_active_until: None,
+            luna_reserve: None,
+        };
+        let seed_usage = |fetched_at: OffsetDateTime| {
+            app.repository
+                .replace_snapshot_without_backup(
+                    &app.env.kind,
+                    live_id,
+                    &identity,
+                    &SnapshotBlob {
+                        schema_version: 1,
+                        files: vec![],
+                    },
+                    Some(exhausted_usage(fetched_at)),
+                )
+                .expect("seed usage");
+            app.repository
+                .get_account(&app.env.kind, live_id)
+                .expect("load")
+                .expect("account")
+        };
+
+        // Fresh decide cache (seconds old): apply must not re-probe — a probe
+        // would hit the network offline and record a usage error.
+        seed_usage(OffsetDateTime::now_utc());
+        let output = app.auto_switch(true).expect("apply");
+        assert_eq!(output.status, "all_accounts_exhausted");
+        assert!(
+            seed_usage(OffsetDateTime::now_utc())
+                .cached_usage_error
+                .is_none(),
+            "recent live cache must skip the second usage(None) probe"
+        );
+
+        // Cache older than the window: apply re-probes, which fails offline
+        // and records a usage error on the live account.
+        seed_usage(OffsetDateTime::now_utc() - time::Duration::seconds(30));
+        let _ = app.auto_switch(true).expect("apply");
+        assert!(
+            app.repository
+                .get_account(&app.env.kind, live_id)
+                .expect("load")
+                .expect("account")
+                .cached_usage_error
+                .is_some(),
+            "stale live cache must re-probe the live account"
         );
     }
 

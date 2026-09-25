@@ -2710,9 +2710,14 @@ final class AccountStore: ObservableObject {
                     continue
                 }
                 sawMatchingLiveIdentity = true
+                // Probe overlaps the settle wait — same AT-only check, ~0.7s sooner.
+                let probe = Task { try await self.cli.data(arguments: ["usage", "--json"]) }
                 // Settle: first match alone is weak — Desktop may still be on Sign-in.
                 try? await Task.sleep(for: .milliseconds(500))
-                guard ChatGPTDesktop.isRunning else { continue }
+                guard ChatGPTDesktop.isRunning else {
+                    probe.cancel()
+                    continue
+                }
                 let settled = try await cli.decode(StatusOutput.self, arguments: ["status"])
                 let settledEmail = settled.currentAccount?.email
                 let settledEmailMatches = settledEmail.map {
@@ -2720,12 +2725,13 @@ final class AccountStore: ObservableObject {
                 } ?? false
                 let settledIDMatches = settled.currentAccountSavedId == accountID
                 guard settledEmailMatches || settledIDMatches else {
+                    probe.cancel()
                     try? await Task.sleep(for: .milliseconds(250))
                     continue
                 }
                 do {
                     // Live usage probe (no account-id) — AT-only, no RT prove.
-                    _ = try await cli.data(arguments: ["usage", "--json"])
+                    _ = try await probe.value
                     return .accepted
                 } catch {
                     if Self.usageErrorForcesRollback(error.localizedDescription) {

@@ -1,13 +1,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use serde_json::Value;
 use time::OffsetDateTime;
 
-use super::{ProviderAdapter, ProviderAuthBundle, find_string, parse_datetime, percent_window};
+use super::{
+    ProviderAdapter, ProviderAuthBundle, SnapshotRefresh, find_string, parse_datetime,
+    percent_window,
+};
 use crate::env::AppEnv;
 use crate::model::{
     AiProvider, DisplayIdentity, ProviderCapability, ProviderUsageStatus, ProviderUsageView,
@@ -17,7 +20,7 @@ use crate::model::{
 pub struct ClaudeAdapter;
 pub static CLAUDE: ClaudeAdapter = ClaudeAdapter;
 
-const UNKNOWN_EMAIL: &str = "claude-user@unknown.local";
+pub(crate) const UNKNOWN_EMAIL: &str = "claude-user@unknown.local";
 const OAUTH_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const SHARED_CREDENTIAL_KEYS: [&str; 5] = [
     "mcpOAuth",
@@ -217,8 +220,17 @@ fn snapshot_text(snapshot: &SnapshotBlob, name: &str) -> Result<Option<String>> 
     ))
 }
 
+fn credential_text(snapshot: &SnapshotBlob) -> Result<Option<(String, String)>> {
+    for name in ["claude_keychain.txt", "claude_credentials.json"] {
+        if let Some(raw) = snapshot_text(snapshot, name)? {
+            return Ok(Some((name.to_owned(), raw)));
+        }
+    }
+    Ok(None)
+}
+
 fn access_token_from_snapshot(snapshot: &SnapshotBlob) -> Result<String> {
-    for name in ["claude_credentials.json", "claude_keychain.txt"] {
+    for name in ["claude_keychain.txt", "claude_credentials.json"] {
         if let Some(raw) = snapshot_text(snapshot, name)? {
             let value: Value = serde_json::from_str(&raw)
                 .with_context(|| format!("failed to parse {name} as Claude credentials"))?;
@@ -228,6 +240,197 @@ fn access_token_from_snapshot(snapshot: &SnapshotBlob) -> Result<String> {
         }
     }
     bail!("Claude OAuth access token not found in snapshot")
+}
+
+const OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const ACCESS_TOKEN_EXPIRY_BUFFER_MS: i64 = 5 * 60 * 1000;
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+fn snapshot_access_token_expired(snapshot: &SnapshotBlob) -> bool {
+    let Ok(Some((_name, raw))) = credential_text(snapshot) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+        return false;
+    };
+    let Some(expires_at) = value
+        .get("claudeAiOauth")
+        .and_then(|oauth| oauth.get("expiresAt"))
+        .and_then(Value::as_f64)
+    else {
+        return false;
+    };
+    now_ms() + ACCESS_TOKEN_EXPIRY_BUFFER_MS >= expires_at as i64
+}
+
+enum RefreshClass {
+    Success(Value),
+    Dead(String),
+    Transient(String),
+}
+
+fn classify_refresh_response(status: u16, body: &str) -> RefreshClass {
+    if (200..300).contains(&status) {
+        return match serde_json::from_str::<Value>(body) {
+            Ok(value) if value.get("access_token").and_then(Value::as_str).is_some() => {
+                RefreshClass::Success(value)
+            }
+            _ => RefreshClass::Transient(format!(
+                "token endpoint returned HTTP {status} with an unparseable body"
+            )),
+        };
+    }
+    if matches!(status, 400 | 401 | 403) {
+        let error = serde_json::from_str::<Value>(body).ok().and_then(|value| {
+            value
+                .get("error")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+        if error.as_deref() == Some("invalid_grant") {
+            return RefreshClass::Dead("invalid_grant".to_owned());
+        }
+        return RefreshClass::Transient(format!(
+            "token endpoint returned HTTP {status} ({})",
+            error.unwrap_or_else(|| "unparseable body".to_owned())
+        ));
+    }
+    RefreshClass::Transient(format!("token endpoint returned HTTP {status}"))
+}
+
+fn rotated_credential(raw: &str, response: &Value) -> Result<String> {
+    let mut data: Value =
+        serde_json::from_str(raw).context("stored Claude credential is not valid JSON")?;
+    let oauth = data
+        .get_mut("claudeAiOauth")
+        .and_then(Value::as_object_mut)
+        .context("stored Claude credential has no claudeAiOauth object")?;
+    let access_token = response
+        .get("access_token")
+        .cloned()
+        .context("token response has no access_token")?;
+    let expires_in = response
+        .get("expires_in")
+        .and_then(Value::as_f64)
+        .unwrap_or(3600.0);
+    oauth.insert("accessToken".to_owned(), access_token);
+    oauth.insert(
+        "expiresAt".to_owned(),
+        Value::from(now_ms() + (expires_in * 1000.0) as i64),
+    );
+    if let Some(refresh_token) = response.get("refresh_token").and_then(Value::as_str) {
+        oauth.insert("refreshToken".to_owned(), refresh_token.into());
+    }
+    if let Some(scope) = response.get("scope").and_then(Value::as_str) {
+        let scopes: Vec<&str> = scope.split_whitespace().collect();
+        oauth.insert("scopes".to_owned(), Value::from(scopes));
+    }
+    serde_json::to_string(&data).context("failed to encode rotated Claude credential")
+}
+
+fn rewrite_credential_files(snapshot: &SnapshotBlob, rotated: &str) -> SnapshotBlob {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(rotated);
+    let files = snapshot
+        .files
+        .iter()
+        .map(|file| {
+            if matches!(
+                file.name.as_str(),
+                "claude_keychain.txt" | "claude_credentials.json"
+            ) {
+                SnapshotFile {
+                    name: file.name.clone(),
+                    bytes_base64: encoded.clone(),
+                }
+            } else {
+                file.clone()
+            }
+        })
+        .collect();
+    SnapshotBlob {
+        schema_version: snapshot.schema_version,
+        files,
+    }
+}
+
+fn oauth_values_share_credential(a: &Value, b: &Value) -> bool {
+    let (Some(left), Some(right)) = (a.get("claudeAiOauth"), b.get("claudeAiOauth")) else {
+        return false;
+    };
+    ["refreshToken", "accessToken"].iter().any(|key| {
+        let a = left.get(*key).and_then(Value::as_str);
+        let b = right.get(*key).and_then(Value::as_str);
+        matches!((a, b), (Some(a), Some(b)) if !a.is_empty() && a == b)
+    })
+}
+
+fn snapshots_share_credential(a: &SnapshotBlob, b: &SnapshotBlob) -> bool {
+    let (Ok(Some((_na, raw_a))), Ok(Some((_nb, raw_b)))) = (credential_text(a), credential_text(b))
+    else {
+        return false;
+    };
+    let (Ok(va), Ok(vb)) = (
+        serde_json::from_str::<Value>(&raw_a),
+        serde_json::from_str::<Value>(&raw_b),
+    ) else {
+        return false;
+    };
+    oauth_values_share_credential(&va, &vb)
+}
+
+fn live_credential_text(env: &AppEnv, keychain_backed: bool) -> Option<String> {
+    if keychain_backed {
+        read_keychain_password().or_else(|| fs::read_to_string(credentials_path(env)).ok())
+    } else {
+        fs::read_to_string(credentials_path(env)).ok()
+    }
+}
+
+fn snapshot_shares_live_credential(env: &AppEnv, snapshot: &SnapshotBlob) -> bool {
+    let keychain_backed = cfg!(target_os = "macos")
+        && snapshot
+            .files
+            .iter()
+            .any(|file| file.name == "claude_keychain.txt");
+    let Some(live_raw) = live_credential_text(env, keychain_backed) else {
+        return true;
+    };
+    let Ok(Some((_name, snapshot_raw))) = credential_text(snapshot) else {
+        return true;
+    };
+    let (Ok(live_value), Ok(snapshot_value)) = (
+        serde_json::from_str::<Value>(&live_raw),
+        serde_json::from_str::<Value>(&snapshot_raw),
+    ) else {
+        return true;
+    };
+    oauth_values_share_credential(&live_value, &snapshot_value)
+}
+
+fn post_token_refresh(request: &Value) -> Result<(u16, String)> {
+    let payload = serde_json::to_string(request).context("failed to encode refresh payload")?;
+    let mut response = ureq::post(OAUTH_TOKEN_URL)
+        .header("Content-Type", "application/json")
+        .header("User-Agent", claude_code_user_agent())
+        .config()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .send(&payload)
+        .context("Claude token refresh request failed")?;
+    let status = response.status().as_u16();
+    let body = response
+        .body_mut()
+        .read_to_string()
+        .context("failed to read Claude token refresh response")?;
+    Ok((status, body))
 }
 
 fn usage_window(
@@ -508,6 +711,55 @@ impl ProviderAdapter for ClaudeAdapter {
         Ok(())
     }
 
+    fn snapshot_access_token_expired(&self, snapshot: &SnapshotBlob) -> bool {
+        snapshot_access_token_expired(snapshot)
+    }
+
+    fn snapshot_shares_live_credential(&self, env: &AppEnv, snapshot: &SnapshotBlob) -> bool {
+        snapshot_shares_live_credential(env, snapshot)
+    }
+
+    fn snapshots_share_credential(&self, a: &SnapshotBlob, b: &SnapshotBlob) -> bool {
+        snapshots_share_credential(a, b)
+    }
+
+    fn refresh_snapshot(&self, snapshot: &SnapshotBlob) -> SnapshotRefresh {
+        let Ok(Some((_name, raw))) = credential_text(snapshot) else {
+            return SnapshotRefresh::Transient("snapshot has no Claude credential".to_owned());
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+            return SnapshotRefresh::Transient(
+                "stored Claude credential is not valid JSON".to_owned(),
+            );
+        };
+        let Some(refresh_token) = value
+            .get("claudeAiOauth")
+            .and_then(|oauth| oauth.get("refreshToken"))
+            .and_then(Value::as_str)
+        else {
+            return SnapshotRefresh::Dead("no_refresh_token".to_owned());
+        };
+        let request = serde_json::json!({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": OAUTH_CLIENT_ID,
+        });
+        let (status, body) = match post_token_refresh(&request) {
+            Ok(pair) => pair,
+            Err(error) => return SnapshotRefresh::Transient(error.to_string()),
+        };
+        match classify_refresh_response(status, &body) {
+            RefreshClass::Success(response) => match rotated_credential(&raw, &response) {
+                Ok(rotated) => {
+                    SnapshotRefresh::Refreshed(rewrite_credential_files(snapshot, &rotated))
+                }
+                Err(error) => SnapshotRefresh::Transient(error.to_string()),
+            },
+            RefreshClass::Dead(reason) => SnapshotRefresh::Dead(reason),
+            RefreshClass::Transient(reason) => SnapshotRefresh::Transient(reason),
+        }
+    }
+
     fn fetch_usage(&self, snapshot: &SnapshotBlob) -> Result<ProviderUsageView> {
         let token = access_token_from_snapshot(snapshot)?;
         let mut response = ureq::get(OAUTH_USAGE_URL)
@@ -755,5 +1007,135 @@ mod tests {
                 .expect("parse");
         assert_eq!(written["mcpOAuth"]["token"], "live2");
         assert!(written.get("pluginSecrets").is_none());
+    }
+
+    #[test]
+    fn snapshot_access_token_expired_checks_expires_at() {
+        let expired = snapshot_with(&[(
+            "claude_credentials.json",
+            r#"{"claudeAiOauth":{"accessToken":"a","expiresAt":1}}"#,
+        )]);
+        assert!(CLAUDE.snapshot_access_token_expired(&expired));
+
+        let fresh_until = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            + 3_600_000;
+        let fresh = snapshot_with(&[(
+            "claude_credentials.json",
+            &format!(r#"{{"claudeAiOauth":{{"accessToken":"a","expiresAt":{fresh_until}}}}}"#),
+        )]);
+        assert!(!CLAUDE.snapshot_access_token_expired(&fresh));
+
+        let missing = snapshot_with(&[(
+            "claude_credentials.json",
+            r#"{"claudeAiOauth":{"accessToken":"a"}}"#,
+        )]);
+        assert!(!CLAUDE.snapshot_access_token_expired(&missing));
+    }
+
+    #[test]
+    fn refresh_missing_refresh_token_is_dead() {
+        let snapshot = snapshot_with(&[(
+            "claude_credentials.json",
+            r#"{"claudeAiOauth":{"accessToken":"a","expiresAt":1}}"#,
+        )]);
+        match CLAUDE.refresh_snapshot(&snapshot) {
+            SnapshotRefresh::Dead(reason) => assert_eq!(reason, "no_refresh_token"),
+            _ => panic!("expected Dead"),
+        }
+    }
+
+    #[test]
+    fn classify_refresh_response_distinguishes_dead_and_transient() {
+        match classify_refresh_response(400, r#"{"error":"invalid_grant"}"#) {
+            RefreshClass::Dead(reason) => assert_eq!(reason, "invalid_grant"),
+            _ => panic!("expected Dead"),
+        }
+        match classify_refresh_response(400, r#"{"error":"invalid_client"}"#) {
+            RefreshClass::Transient(_) => {}
+            _ => panic!("expected Transient"),
+        }
+        match classify_refresh_response(500, "oops") {
+            RefreshClass::Transient(_) => {}
+            _ => panic!("expected Transient"),
+        }
+    }
+
+    #[test]
+    fn refresh_success_rotates_both_credential_files() {
+        let snapshot = snapshot_with(&[
+            (
+                "claude_credentials.json",
+                r#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"rt1","expiresAt":1}}"#,
+            ),
+            (
+                "claude_keychain.txt",
+                r#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"rt1","expiresAt":1}}"#,
+            ),
+            (
+                "claude_config.json",
+                r#"{"oauthAccount":{"emailAddress":"a@x"}}"#,
+            ),
+        ]);
+        let response: Value = serde_json::from_str(
+            r#"{"access_token":"new-at","expires_in":3600,"refresh_token":"rt2","scope":"a b"}"#,
+        )
+        .expect("response");
+        let rotated =
+            rotated_credential("{\"claudeAiOauth\":{\"accessToken\":\"old\",\"refreshToken\":\"rt1\",\"expiresAt\":1}}", &response)
+                .expect("rotate");
+        let new_snapshot = rewrite_credential_files(&snapshot, &rotated);
+
+        for name in ["claude_credentials.json", "claude_keychain.txt"] {
+            let raw = snapshot_text(&new_snapshot, name)
+                .expect("text")
+                .expect("file");
+            let value: Value = serde_json::from_str(&raw).expect("parse");
+            let oauth = &value["claudeAiOauth"];
+            assert_eq!(oauth["accessToken"], "new-at");
+            assert_eq!(oauth["refreshToken"], "rt2");
+            assert_eq!(oauth["scopes"], serde_json::json!(["a", "b"]));
+            assert!(oauth["expiresAt"].as_i64().unwrap() > 1);
+        }
+        let config_raw = snapshot_text(&new_snapshot, "claude_config.json")
+            .expect("text")
+            .expect("file");
+        assert_eq!(config_raw, r#"{"oauthAccount":{"emailAddress":"a@x"}}"#);
+    }
+
+    #[test]
+    fn snapshot_shares_live_credential_compares_tokens() {
+        let (_temp, env) = test_env();
+        let dir = claude_dir(&env);
+        fs::create_dir_all(&dir).expect("claude dir");
+        fs::write(
+            credentials_path(&env),
+            r#"{"claudeAiOauth":{"accessToken":"live-at","refreshToken":"live-rt"}}"#,
+        )
+        .expect("live credentials");
+
+        let same = snapshot_with(&[(
+            "claude_credentials.json",
+            r#"{"claudeAiOauth":{"accessToken":"other-at","refreshToken":"live-rt"}}"#,
+        )]);
+        assert!(CLAUDE.snapshot_shares_live_credential(&env, &same));
+
+        let different = snapshot_with(&[(
+            "claude_credentials.json",
+            r#"{"claudeAiOauth":{"accessToken":"other-at","refreshToken":"other-rt"}}"#,
+        )]);
+        assert!(!CLAUDE.snapshot_shares_live_credential(&env, &different));
+    }
+
+    #[test]
+    fn snapshot_shares_live_credential_fails_safe_when_live_missing() {
+        let (_temp, env) = test_env();
+        let snapshot = snapshot_with(&[(
+            "claude_credentials.json",
+            r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r"}}"#,
+        )]);
+        assert!(CLAUDE.snapshot_shares_live_credential(&env, &snapshot));
     }
 }

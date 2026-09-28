@@ -15,6 +15,8 @@ use crate::secrets::SecretStore;
 
 const PROVIDER_INDEX_SCHEMA_VERSION: u32 = 1;
 
+pub(crate) const LOGIN_REQUIRED_ERROR_PREFIX: &str = "login_required";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct ProviderSavedAccount {
     pub id: Uuid,
@@ -49,6 +51,12 @@ impl ProviderSavedAccount {
             usage: self.cached_usage.clone(),
             usage_error: self.cached_usage_error.clone(),
         }
+    }
+
+    pub(crate) fn requires_login(&self) -> bool {
+        self.cached_usage_error
+            .as_deref()
+            .is_some_and(|error| error.starts_with(LOGIN_REQUIRED_ERROR_PREFIX))
     }
 }
 
@@ -143,6 +151,7 @@ where
         let (record, created) = if let Some(position) = existing {
             let account = &mut index.accounts[position];
             account.identity = identity.clone();
+            account.cached_usage_error = None;
             account.updated_at = now;
             (account.clone(), false)
         } else {
@@ -166,6 +175,29 @@ where
         self.secret_store.save(&record.secret_key, &bytes)?;
         self.save_index(&index)?;
         Ok((record, created))
+    }
+
+    pub(crate) fn save_for_record(
+        &self,
+        environment: &EnvironmentKind,
+        account_id: Uuid,
+        identity: &DisplayIdentity,
+        snapshot: &SnapshotBlob,
+    ) -> Result<ProviderSavedAccount> {
+        let mut index = self.load_index()?;
+        let account = index
+            .accounts
+            .iter_mut()
+            .find(|account| account.id == account_id && &account.environment == environment)
+            .ok_or_else(|| anyhow!("provider account {account_id} not found"))?;
+        account.identity = identity.clone();
+        account.cached_usage_error = None;
+        account.updated_at = OffsetDateTime::now_utc();
+        let record = account.clone();
+        let bytes = serde_json::to_vec(snapshot).context("failed to encode provider snapshot")?;
+        self.secret_store.save(&record.secret_key, &bytes)?;
+        self.save_index(&index)?;
+        Ok(record)
     }
 
     pub(crate) fn load_snapshot(
@@ -344,5 +376,106 @@ mod tests {
             .0;
         assert_ne!(claude.id, cursor.id);
         assert_eq!(store.list(&EnvironmentKind::Macos, None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn save_existing_clears_cached_usage_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = ProviderAccountStore::new(temp.path(), MemorySecretStore::default());
+        let snapshot = SnapshotBlob {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            files: vec![SnapshotFile {
+                name: "auth".to_owned(),
+                bytes_base64: "e30=".to_owned(),
+            }],
+        };
+        let record = store
+            .save(
+                &EnvironmentKind::Macos,
+                AiProvider::Claude,
+                &identity("user@example.com", "claude-1"),
+                &snapshot,
+            )
+            .expect("save")
+            .0;
+        store
+            .record_usage_error(
+                &EnvironmentKind::Macos,
+                record.id,
+                format!("{LOGIN_REQUIRED_ERROR_PREFIX}: test"),
+            )
+            .expect("record error");
+        let quarantined = store
+            .get(&EnvironmentKind::Macos, record.id)
+            .expect("get")
+            .expect("record");
+        assert!(quarantined.requires_login());
+
+        let (saved, created) = store
+            .save(
+                &EnvironmentKind::Macos,
+                AiProvider::Claude,
+                &identity("user@example.com", "claude-1"),
+                &snapshot,
+            )
+            .expect("re-save");
+        assert!(!created);
+        assert_eq!(saved.id, record.id);
+        assert!(!saved.requires_login());
+        assert!(saved.cached_usage_error.is_none());
+    }
+
+    #[test]
+    fn save_for_record_rewrites_identity_and_snapshot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = ProviderAccountStore::new(temp.path(), MemorySecretStore::default());
+        let snapshot = SnapshotBlob {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            files: vec![SnapshotFile {
+                name: "auth".to_owned(),
+                bytes_base64: "e30=".to_owned(),
+            }],
+        };
+        let record = store
+            .save(
+                &EnvironmentKind::Macos,
+                AiProvider::Claude,
+                &identity("old@example.com", "claude-1"),
+                &snapshot,
+            )
+            .expect("save")
+            .0;
+        store
+            .record_usage_error(
+                &EnvironmentKind::Macos,
+                record.id,
+                format!("{LOGIN_REQUIRED_ERROR_PREFIX}: test"),
+            )
+            .expect("record error");
+
+        let new_snapshot = SnapshotBlob {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            files: vec![SnapshotFile {
+                name: "auth".to_owned(),
+                bytes_base64: "eyJ4IjoxfQ==".to_owned(),
+            }],
+        };
+        let saved = store
+            .save_for_record(
+                &EnvironmentKind::Macos,
+                record.id,
+                &identity("new@example.com", "claude-2"),
+                &new_snapshot,
+            )
+            .expect("save_for_record");
+
+        assert_eq!(saved.id, record.id);
+        assert_eq!(saved.identity.email, "new@example.com");
+        assert!(saved.cached_usage_error.is_none());
+        let (_record, loaded) = store
+            .load_snapshot(&EnvironmentKind::Macos, record.id)
+            .expect("load");
+        assert_eq!(loaded, new_snapshot);
+        assert_eq!(store.list(&EnvironmentKind::Macos, None).unwrap().len(), 1);
     }
 }

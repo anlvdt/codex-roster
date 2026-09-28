@@ -6,6 +6,7 @@ use crate::model::{
 };
 
 mod claude;
+pub(crate) use claude::UNKNOWN_EMAIL;
 mod claude_keychain;
 mod claude_locks;
 mod cursor;
@@ -15,6 +16,13 @@ mod openai;
 pub struct ProviderAuthBundle {
     pub identity: DisplayIdentity,
     pub snapshot: SnapshotBlob,
+}
+
+pub enum SnapshotRefresh {
+    Unsupported,
+    Refreshed(SnapshotBlob),
+    Dead(String),
+    Transient(String),
 }
 
 pub trait ProviderAdapter: Sync {
@@ -36,6 +44,19 @@ pub trait ProviderAdapter: Sync {
         Ok(Box::new(()))
     }
 
+    fn snapshot_access_token_expired(&self, _snapshot: &SnapshotBlob) -> bool {
+        false
+    }
+    fn refresh_snapshot(&self, _snapshot: &SnapshotBlob) -> SnapshotRefresh {
+        SnapshotRefresh::Unsupported
+    }
+    fn snapshot_shares_live_credential(&self, _env: &AppEnv, _snapshot: &SnapshotBlob) -> bool {
+        false
+    }
+    fn snapshots_share_credential(&self, _a: &SnapshotBlob, _b: &SnapshotBlob) -> bool {
+        false
+    }
+
     fn requires_relaunch_after_switch(&self) -> bool {
         false
     }
@@ -52,6 +73,19 @@ pub fn adapter(provider: AiProvider) -> &'static dyn ProviderAdapter {
 
 pub fn all() -> impl Iterator<Item = &'static dyn ProviderAdapter> {
     AiProvider::ALL.into_iter().map(adapter)
+}
+
+pub(crate) fn needs_auth_view(provider: AiProvider, detail: String) -> ProviderUsageView {
+    ProviderUsageView {
+        provider,
+        fetched_at: time::OffsetDateTime::now_utc(),
+        status: crate::model::ProviderUsageStatus::NeedsAuth,
+        fidelity: crate::model::UsageFidelity::Official,
+        headline_window: None,
+        windows: Vec::new(),
+        plan_label: None,
+        detail: Some(detail),
+    }
 }
 
 pub(crate) fn percent_window(

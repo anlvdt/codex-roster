@@ -1,7 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
-use std::sync::mpsc;
-use std::thread;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -21,7 +19,13 @@ pub static CLAUDE: ClaudeAdapter = ClaudeAdapter;
 
 const UNKNOWN_EMAIL: &str = "claude-user@unknown.local";
 const OAUTH_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
-const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+const SHARED_CREDENTIAL_KEYS: [&str; 5] = [
+    "mcpOAuth",
+    "mcpOAuthClientConfig",
+    "mcpXaaIdp",
+    "mcpXaaIdpConfig",
+    "pluginSecrets",
+];
 /// Anthropic expects a `claude-code/<version>` agent on the OAuth usage API.
 const FALLBACK_CLAUDE_CODE_VERSION: &str = "2.1.0";
 const CAPABILITIES: &[ProviderCapability] = &[
@@ -39,53 +43,73 @@ fn credentials_path(env: &AppEnv) -> PathBuf {
     claude_dir(env).join(".credentials.json")
 }
 
-fn local_username() -> Option<String> {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .ok()
-        .filter(|value| !value.is_empty())
+fn config_path(env: &AppEnv) -> PathBuf {
+    env.home_dir.join(".claude.json")
 }
 
-fn read_keychain_password_blocking() -> Option<String> {
-    let username = local_username()?;
-    keyring::Entry::new(KEYCHAIN_SERVICE, &username)
-        .ok()?
-        .get_password()
-        .ok()
-}
-
-fn read_keychain_password(timeout: Duration) -> Option<String> {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let _ = tx.send(read_keychain_password_blocking());
-    });
-    rx.recv_timeout(timeout).ok().flatten()
+fn read_keychain_password() -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    super::claude_keychain::get_password(
+        super::claude_keychain::SERVICE,
+        &super::claude_keychain::account_name(),
+    )
+    .ok()
+    .flatten()
 }
 
 fn oauth_object(value: &Value) -> &Value {
     value.get("claudeAiOauth").unwrap_or(value)
 }
 
+#[cfg(test)]
 fn identity_from_json(raw: &str) -> Option<DisplayIdentity> {
     let value: Value = serde_json::from_str(raw).ok()?;
-    let oauth = oauth_object(&value);
-    let email = find_string(oauth, &["email"])
-        .or_else(|| find_string(&value, &["email"]))
+    identity_from_bundle_parts(None, Some(&value))
+}
+
+fn identity_from_bundle_parts(
+    config: Option<&Value>,
+    credentials: Option<&Value>,
+) -> Option<DisplayIdentity> {
+    if config.is_none() && credentials.is_none() {
+        return None;
+    }
+    let oauth_account = config.and_then(|value| value.get("oauthAccount"));
+    let oauth = credentials.map(oauth_object);
+    let email = oauth_account
+        .and_then(|value| find_string(value, &["emailAddress"]))
+        .or_else(|| oauth.and_then(|oauth| find_string(oauth, &["email"])))
+        .or_else(|| credentials.and_then(|value| find_string(value, &["email"])))
         .unwrap_or_else(|| UNKNOWN_EMAIL.to_owned());
-    let subject = find_string(
-        oauth,
-        &["accountUuid", "account_uuid", "userId", "user_id", "sub"],
-    )
-    .or_else(|| {
-        access_token_from_value(&value)
-            .and_then(|token| super::decode_jwt_claims(&token))
-            .and_then(|claims| find_string(&claims, &["sub"]))
-    });
-    let plan_label = find_string(oauth, &["subscriptionType", "subscription_type"])
-        .or_else(|| find_string(&value, &["subscriptionType", "subscription_type"]))
+    let subject = oauth_account
+        .and_then(|value| find_string(value, &["accountUuid"]))
+        .or_else(|| {
+            oauth.and_then(|oauth| {
+                find_string(
+                    oauth,
+                    &["accountUuid", "account_uuid", "userId", "user_id", "sub"],
+                )
+            })
+        })
+        .or_else(|| {
+            credentials
+                .and_then(access_token_from_value)
+                .and_then(|token| super::decode_jwt_claims(&token))
+                .and_then(|claims| find_string(&claims, &["sub"]))
+        });
+    let plan_label = oauth
+        .and_then(|oauth| find_string(oauth, &["subscriptionType", "subscription_type"]))
+        .or_else(|| {
+            credentials
+                .and_then(|value| find_string(value, &["subscriptionType", "subscription_type"]))
+        })
         .map(|value| normalize_plan(&value));
-    let name = find_string(oauth, &["name", "displayName"])
-        .or_else(|| find_string(&value, &["name", "displayName"]));
+    let name = oauth_account
+        .and_then(|value| find_string(value, &["organizationName"]))
+        .or_else(|| oauth.and_then(|oauth| find_string(oauth, &["name", "displayName"])))
+        .or_else(|| credentials.and_then(|value| find_string(value, &["name", "displayName"])));
     Some(DisplayIdentity {
         email,
         subject,
@@ -107,6 +131,78 @@ fn access_token_from_value(value: &Value) -> Option<String> {
     let oauth = oauth_object(value);
     find_string(oauth, &["accessToken", "access_token"])
         .or_else(|| find_string(value, &["accessToken", "access_token"]))
+}
+
+fn oauth_account_snapshot(config: &Value) -> Option<Value> {
+    let account = config.get("oauthAccount")?;
+    if !account.is_object() {
+        return None;
+    }
+    Some(serde_json::json!({"oauthAccount": account}))
+}
+
+fn read_config_value(path: &Path) -> Option<Value> {
+    let raw = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn shared_credential_fields(live: Option<&Value>) -> Option<serde_json::Map<String, Value>> {
+    let object = live?.as_object()?;
+    Some(
+        object
+            .iter()
+            .filter(|(key, _)| SHARED_CREDENTIAL_KEYS.contains(&key.as_str()))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    )
+}
+
+fn merge_shared_credential_fields(
+    target_raw: &str,
+    shared: Option<&serde_json::Map<String, Value>>,
+) -> String {
+    let Some(shared) = shared else {
+        return target_raw.to_owned();
+    };
+    let Ok(mut target) = serde_json::from_str::<Value>(target_raw) else {
+        return target_raw.to_owned();
+    };
+    let Some(object) = target.as_object_mut() else {
+        return target_raw.to_owned();
+    };
+    if !object.contains_key("claudeAiOauth") {
+        return target_raw.to_owned();
+    }
+    for key in SHARED_CREDENTIAL_KEYS {
+        object.remove(key);
+    }
+    for (key, value) in shared {
+        object.insert(key.clone(), value.clone());
+    }
+    serde_json::to_string(&target).unwrap_or_else(|_| target_raw.to_owned())
+}
+
+fn write_atomic(path: &Path, contents: &str, mode_0600: bool) -> Result<()> {
+    let name = path
+        .file_name()
+        .with_context(|| format!("{} has no file name", path.display()))?;
+    let tmp = path.with_file_name(format!(".{}.tmp", name.to_string_lossy()));
+    fs::write(&tmp, contents.as_bytes())
+        .with_context(|| format!("failed to write {}", tmp.display()))?;
+    #[cfg(unix)]
+    if mode_0600 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to chmod {}", tmp.display()))?;
+    }
+    let _ = mode_0600;
+    fs::rename(&tmp, path).with_context(|| {
+        format!(
+            "failed to move {} into place at {}",
+            tmp.display(),
+            path.display()
+        )
+    })
 }
 
 fn snapshot_text(snapshot: &SnapshotBlob, name: &str) -> Result<Option<String>> {
@@ -224,9 +320,7 @@ impl ProviderAdapter for ClaudeAdapter {
     }
 
     fn try_read_live_auth(&self, env: &AppEnv) -> Result<Option<ProviderAuthBundle>> {
-        if !credentials_path(env).exists()
-            && read_keychain_password(Duration::from_millis(800)).is_none()
-        {
+        if !credentials_path(env).exists() && read_keychain_password().is_none() {
             return Ok(None);
         }
         self.read_live_auth(env).map(Some)
@@ -234,32 +328,44 @@ impl ProviderAdapter for ClaudeAdapter {
 
     fn read_live_auth(&self, env: &AppEnv) -> Result<ProviderAuthBundle> {
         let mut files = Vec::new();
-        let mut identity = None;
+        let mut credentials_value = None;
         let path = credentials_path(env);
         if path.exists() {
             let bytes = fs::read(&path).with_context(|| {
                 format!("failed to read Claude credentials at {}", path.display())
             })?;
             if let Ok(raw) = std::str::from_utf8(&bytes) {
-                identity = identity_from_json(raw);
+                credentials_value = serde_json::from_str(raw).ok();
             }
             files.push(SnapshotFile {
                 name: "claude_credentials.json".to_owned(),
                 bytes_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
             });
         }
-        if let Some(password) = read_keychain_password(Duration::from_millis(800)) {
-            if identity.is_none() {
-                identity = identity_from_json(&password);
+        if let Some(password) = read_keychain_password() {
+            if credentials_value.is_none() {
+                credentials_value = serde_json::from_str(&password).ok();
             }
             files.push(SnapshotFile {
                 name: "claude_keychain.txt".to_owned(),
                 bytes_base64: base64::engine::general_purpose::STANDARD.encode(password.as_bytes()),
             });
         }
+        let config_oauth = read_config_value(&config_path(env))
+            .as_ref()
+            .and_then(oauth_account_snapshot);
+        if let Some(config) = &config_oauth {
+            files.push(SnapshotFile {
+                name: "claude_config.json".to_owned(),
+                bytes_base64: base64::engine::general_purpose::STANDARD
+                    .encode(config.to_string().as_bytes()),
+            });
+        }
         if files.is_empty() {
             bail!("Claude Code authentication was not found")
         }
+        let identity =
+            identity_from_bundle_parts(config_oauth.as_ref(), credentials_value.as_ref());
         Ok(ProviderAuthBundle {
             identity: identity.unwrap_or(DisplayIdentity {
                 email: UNKNOWN_EMAIL.to_owned(),
@@ -279,39 +385,125 @@ impl ProviderAdapter for ClaudeAdapter {
         env: &AppEnv,
     ) -> Result<Option<DisplayIdentity>> {
         let path = credentials_path(env);
-        if !path.exists() {
-            return Ok(None);
-        }
-        let raw = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read Claude credentials at {}", path.display()))?;
-        Ok(identity_from_json(&raw))
+        let credentials = if path.exists() {
+            let raw = fs::read_to_string(&path).with_context(|| {
+                format!("failed to read Claude credentials at {}", path.display())
+            })?;
+            serde_json::from_str::<Value>(&raw).ok()
+        } else {
+            None
+        };
+        let config = read_config_value(&config_path(env))
+            .as_ref()
+            .and_then(oauth_account_snapshot);
+        Ok(identity_from_bundle_parts(
+            config.as_ref(),
+            credentials.as_ref(),
+        ))
     }
 
     fn identity_from_snapshot(&self, snapshot: &SnapshotBlob) -> Result<DisplayIdentity> {
+        let config = snapshot_text(snapshot, "claude_config.json")?
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
         for name in ["claude_credentials.json", "claude_keychain.txt"] {
             if let Some(raw) = snapshot_text(snapshot, name)?
-                && let Some(identity) = identity_from_json(&raw)
+                && let Ok(credentials) = serde_json::from_str::<Value>(&raw)
+                && let Some(identity) =
+                    identity_from_bundle_parts(config.as_ref(), Some(&credentials))
             {
                 return Ok(identity);
             }
         }
+        if let Some(identity) = identity_from_bundle_parts(config.as_ref(), None) {
+            return Ok(identity);
+        }
         bail!("Claude snapshot does not contain readable identity data")
     }
 
+    fn acquire_switch_guard(&self, env: &AppEnv) -> Result<Box<dyn std::any::Any>> {
+        struct SwitchGuard {
+            _credentials: [super::claude_locks::LockGuard; 2],
+            _config: super::claude_locks::LockGuard,
+        }
+        let credentials = super::claude_locks::credentials_lock(env)?;
+        let config = super::claude_locks::config_lock(env)?;
+        Ok(Box::new(SwitchGuard {
+            _credentials: credentials,
+            _config: config,
+        }))
+    }
+
     fn restore_snapshot(&self, env: &AppEnv, snapshot: &SnapshotBlob) -> Result<()> {
+        let keychain_backed = cfg!(target_os = "macos")
+            && snapshot
+                .files
+                .iter()
+                .any(|file| file.name == "claude_keychain.txt");
+        let file_creds = fs::read_to_string(credentials_path(env))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+        let keychain_creds =
+            || read_keychain_password().and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+        let live_creds = if keychain_backed {
+            keychain_creds().or(file_creds)
+        } else {
+            file_creds.or_else(keychain_creds)
+        };
+        let shared = shared_credential_fields(live_creds.as_ref());
+
         if let Some(raw) = snapshot_text(snapshot, "claude_credentials.json")? {
             let dir = claude_dir(env);
             fs::create_dir_all(&dir)
                 .with_context(|| format!("failed to create {}", dir.display()))?;
+            let merged = merge_shared_credential_fields(&raw, shared.as_ref());
             let path = credentials_path(env);
-            fs::write(&path, raw.as_bytes())
+            write_atomic(&path, &merged, true)
                 .with_context(|| format!("failed to restore {}", path.display()))?;
         }
-        if let Some(password) = snapshot_text(snapshot, "claude_keychain.txt")? {
-            let username = local_username().context("could not determine local username")?;
-            keyring::Entry::new(KEYCHAIN_SERVICE, &username)?
-                .set_password(&password)
-                .context("failed to restore Claude Code credentials in the system keychain")?;
+        if cfg!(target_os = "macos")
+            && let Some(password) = snapshot_text(snapshot, "claude_keychain.txt")?
+        {
+            let merged = merge_shared_credential_fields(&password, shared.as_ref());
+            super::claude_keychain::set_password(
+                super::claude_keychain::SERVICE,
+                &super::claude_keychain::account_name(),
+                &merged,
+            )
+            .context("failed to restore Claude Code credentials in the system keychain")?;
+        }
+        if let Some(raw) = snapshot_text(snapshot, "claude_config.json")? {
+            let stored: Value = serde_json::from_str(&raw)
+                .context("claude_config.json in snapshot is not valid JSON")?;
+            let oauth_account = stored
+                .get("oauthAccount")
+                .cloned()
+                .context("claude_config.json in snapshot has no oauthAccount")?;
+            let path = config_path(env);
+            let merged = match fs::read_to_string(&path) {
+                Ok(existing_raw) => {
+                    let mut existing: Value =
+                        serde_json::from_str(&existing_raw).with_context(|| {
+                            format!(
+                                "{} is not valid JSON; refusing to overwrite it",
+                                path.display()
+                            )
+                        })?;
+                    let object = existing
+                        .as_object_mut()
+                        .with_context(|| format!("{} is not a JSON object", path.display()))?;
+                    object.insert("oauthAccount".to_owned(), oauth_account);
+                    existing
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    serde_json::json!({"oauthAccount": oauth_account})
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to read {}", path.display()));
+                }
+            };
+            write_atomic(&path, &serde_json::to_string_pretty(&merged)?, false)
+                .with_context(|| format!("failed to restore {}", path.display()))?;
         }
         Ok(())
     }
@@ -429,5 +621,139 @@ mod tests {
         .expect("usage");
         assert_eq!(usage.windows.len(), 2);
         assert_eq!(usage.windows[0].used_percent, Some(12));
+    }
+
+    fn test_env() -> (tempfile::TempDir, AppEnv) {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let env = AppEnv {
+            kind: crate::model::EnvironmentKind::Macos,
+            home_dir: temp.path().to_path_buf(),
+            codex_root: temp.path().join(".codex"),
+            app_data_dir: temp.path().join("data"),
+        };
+        (temp, env)
+    }
+
+    fn snapshot_with(files: &[(&str, &str)]) -> SnapshotBlob {
+        SnapshotBlob {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            files: files
+                .iter()
+                .map(|(name, raw)| SnapshotFile {
+                    name: (*name).to_owned(),
+                    bytes_base64: base64::engine::general_purpose::STANDARD.encode(raw),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn identity_prefers_oauth_account_email_and_uuid() {
+        let config: Value = serde_json::from_str(
+            r#"{"oauthAccount":{"emailAddress":"ada@example.com","accountUuid":"acct-9","organizationName":"Acme"}}"#,
+        )
+        .expect("config");
+        let credentials: Value = serde_json::from_str(
+            r#"{"claudeAiOauth":{"accessToken":"token","subscriptionType":"max"}}"#,
+        )
+        .expect("credentials");
+        let identity =
+            identity_from_bundle_parts(Some(&config), Some(&credentials)).expect("identity");
+        assert_eq!(identity.email, "ada@example.com");
+        assert_eq!(identity.subject.as_deref(), Some("acct-9"));
+        assert_eq!(identity.name.as_deref(), Some("Acme"));
+        assert_eq!(identity.plan_label.as_deref(), Some("Max"));
+    }
+
+    #[test]
+    fn restore_splices_oauth_account_preserving_other_keys() {
+        let (_temp, env) = test_env();
+        fs::write(
+            config_path(&env),
+            r#"{"projects":{"/a":{}},"mcpServers":{"s":{}},"oauthAccount":{"emailAddress":"old@x"}}"#,
+        )
+        .expect("config");
+        let snapshot = snapshot_with(&[
+            (
+                "claude_credentials.json",
+                r#"{"claudeAiOauth":{"accessToken":"new"}}"#,
+            ),
+            (
+                "claude_config.json",
+                r#"{"oauthAccount":{"emailAddress":"new@x","accountUuid":"u-1"}}"#,
+            ),
+        ]);
+
+        CLAUDE.restore_snapshot(&env, &snapshot).expect("restore");
+
+        let config: Value =
+            serde_json::from_str(&fs::read_to_string(config_path(&env)).expect("config"))
+                .expect("parse config");
+        assert_eq!(config["oauthAccount"]["emailAddress"], "new@x");
+        assert!(config["projects"].is_object());
+        assert!(config["mcpServers"].is_object());
+        let credentials: Value =
+            serde_json::from_str(&fs::read_to_string(credentials_path(&env)).expect("credentials"))
+                .expect("parse credentials");
+        assert_eq!(credentials["claudeAiOauth"]["accessToken"], "new");
+    }
+
+    #[test]
+    fn restore_refuses_unparseable_claude_json() {
+        let (_temp, env) = test_env();
+        fs::write(config_path(&env), "{not json").expect("config");
+        let snapshot = snapshot_with(&[(
+            "claude_config.json",
+            r#"{"oauthAccount":{"emailAddress":"new@x"}}"#,
+        )]);
+
+        assert!(CLAUDE.restore_snapshot(&env, &snapshot).is_err());
+        assert_eq!(
+            fs::read_to_string(config_path(&env)).expect("config"),
+            "{not json"
+        );
+    }
+
+    #[test]
+    fn restore_merges_live_shared_mcp_fields() {
+        let (_temp, env) = test_env();
+        let dir = claude_dir(&env);
+        fs::create_dir_all(&dir).expect("claude dir");
+        fs::write(
+            credentials_path(&env),
+            r#"{"claudeAiOauth":{"accessToken":"old"},"mcpOAuth":{"token":"live"},"pluginSecrets":null}"#,
+        )
+        .expect("live credentials");
+        // Live has mcpOAuth but no pluginSecrets rewrite check below uses a
+        // second fixture without pluginSecrets; first fixture asserts live wins.
+        let snapshot = snapshot_with(&[(
+            "claude_credentials.json",
+            r#"{"claudeAiOauth":{"accessToken":"new"},"mcpOAuth":{"token":"stale"},"pluginSecrets":{"k":"v"}}"#,
+        )]);
+
+        CLAUDE.restore_snapshot(&env, &snapshot).expect("restore");
+
+        let written: Value =
+            serde_json::from_str(&fs::read_to_string(credentials_path(&env)).expect("credentials"))
+                .expect("parse");
+        assert_eq!(written["claudeAiOauth"]["accessToken"], "new");
+        assert_eq!(written["mcpOAuth"]["token"], "live");
+
+        // Live credential without pluginSecrets drops the slot's copy.
+        fs::write(
+            credentials_path(&env),
+            r#"{"claudeAiOauth":{"accessToken":"old"},"mcpOAuth":{"token":"live2"}}"#,
+        )
+        .expect("live credentials");
+        let snapshot = snapshot_with(&[(
+            "claude_credentials.json",
+            r#"{"claudeAiOauth":{"accessToken":"new2"},"pluginSecrets":{"k":"v"}}"#,
+        )]);
+        CLAUDE.restore_snapshot(&env, &snapshot).expect("restore");
+        let written: Value =
+            serde_json::from_str(&fs::read_to_string(credentials_path(&env)).expect("credentials"))
+                .expect("parse");
+        assert_eq!(written["mcpOAuth"]["token"], "live2");
+        assert!(written.get("pluginSecrets").is_none());
     }
 }

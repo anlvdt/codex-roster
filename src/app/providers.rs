@@ -176,6 +176,8 @@ where
             )
         }
 
+        let _switch_guard = provider_adapter.acquire_switch_guard(&self.env)?;
+
         let previous_live = provider_adapter.try_read_live_auth(&self.env)?;
         let previous_account_id = previous_live
             .as_ref()

@@ -6,6 +6,8 @@ use crate::model::{
 };
 
 mod claude;
+mod claude_keychain;
+mod claude_locks;
 mod cursor;
 mod grok;
 mod openai;
@@ -29,6 +31,10 @@ pub trait ProviderAdapter: Sync {
     fn identity_from_snapshot(&self, snapshot: &SnapshotBlob) -> Result<DisplayIdentity>;
     fn restore_snapshot(&self, env: &AppEnv, snapshot: &SnapshotBlob) -> Result<()>;
     fn fetch_usage(&self, snapshot: &SnapshotBlob) -> Result<ProviderUsageView>;
+
+    fn acquire_switch_guard(&self, _env: &AppEnv) -> Result<Box<dyn std::any::Any>> {
+        Ok(Box::new(()))
+    }
 
     fn requires_relaunch_after_switch(&self) -> bool {
         false

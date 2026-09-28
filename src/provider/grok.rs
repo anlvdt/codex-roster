@@ -184,6 +184,7 @@ fn parse_usage(body: &str) -> Result<ProviderUsageView> {
                 used,
                 limit,
                 unit: Some("credits".to_owned()),
+                ..Default::default()
             });
         } else if reset_at.is_some() {
             // A validated billing period without usage fields means usage is
@@ -197,6 +198,7 @@ fn parse_usage(body: &str) -> Result<ProviderUsageView> {
                 used: None,
                 limit: None,
                 unit: Some("credits".to_owned()),
+                ..Default::default()
             });
         }
     }

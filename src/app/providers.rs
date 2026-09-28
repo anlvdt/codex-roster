@@ -535,6 +535,7 @@ fn legacy_usage_to_provider(usage: AccountUsageView) -> ProviderUsageView {
             used: None,
             limit: None,
             unit: None,
+            ..Default::default()
         });
     }
     if let Some(window) = usage.weekly {
@@ -547,6 +548,7 @@ fn legacy_usage_to_provider(usage: AccountUsageView) -> ProviderUsageView {
             used: None,
             limit: None,
             unit: None,
+            ..Default::default()
         });
     }
     ProviderUsageView {

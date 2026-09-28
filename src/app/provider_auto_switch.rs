@@ -508,6 +508,7 @@ mod tests {
                     used: None,
                     limit: None,
                     unit: None,
+                    ..Default::default()
                 },
                 crate::model::ProviderUsageWindowView {
                     key: "seven_day".to_owned(),
@@ -518,6 +519,7 @@ mod tests {
                     used: None,
                     limit: None,
                     unit: None,
+                    ..Default::default()
                 },
             ],
             plan_label: None,
@@ -537,6 +539,7 @@ mod tests {
             used: None,
             limit: None,
             unit: None,
+            ..Default::default()
         });
         assert_eq!(claude_binding_utilization(&u), Some(70));
         assert_eq!(claude_headroom(&u), Some(30));

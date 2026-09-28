@@ -12,6 +12,7 @@ mod claude_locks;
 mod cursor;
 mod grok;
 mod openai;
+mod pace;
 
 pub struct ProviderAuthBundle {
     pub identity: DisplayIdentity,
@@ -111,6 +112,7 @@ pub(crate) fn percent_window(
         used: None,
         limit: None,
         unit: None,
+        ..Default::default()
     }
 }
 

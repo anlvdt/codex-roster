@@ -1157,7 +1157,15 @@ fn append_provider_usage_summary(line: &mut String, usage: &ProviderUsageView) {
         .or_else(|| usage.windows.first())
     {
         if let Some(remaining) = window.remaining_percent {
-            line.push_str(&format!(" [{} remaining: {remaining}%]", window.label));
+            line.push_str(&format!(
+                " [{} remaining: {remaining}%{}]",
+                window.label,
+                if window.ahead_of_pace == Some(true) {
+                    " (ahead of pace)"
+                } else {
+                    ""
+                }
+            ));
         } else if window.used.is_some() || window.limit.is_some() {
             line.push_str(&format!(
                 " [{}: {} / {} {}]",
@@ -1215,6 +1223,9 @@ fn print_provider_usage_output(output: &ProviderUsageOutput) {
                 );
             }
             _ => print!("{}", window.label),
+        }
+        if window.ahead_of_pace == Some(true) {
+            print!(" (ahead of pace)");
         }
         if let Some(reset_at) = window.reset_at {
             print!(" (reset {reset_at})");

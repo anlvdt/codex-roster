@@ -518,7 +518,7 @@ pub enum UsageFidelity {
     Manual,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct ProviderUsageWindowView {
     pub key: String,
     pub label: String,
@@ -534,6 +534,14 @@ pub struct ProviderUsageWindowView {
     pub limit: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_used_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ahead_of_pace: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projected_exhaustion_at: Option<OffsetDateTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub will_last_to_reset: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

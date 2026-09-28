@@ -498,12 +498,32 @@ fn parse_usage(body: &str) -> Result<ProviderUsageView> {
                 used,
                 limit,
                 unit: Some("credits".to_owned()),
+                ..Default::default()
             });
+        }
+    }
+    let fetched_at = OffsetDateTime::now_utc();
+    for window in &mut windows {
+        if matches!(
+            window.key.as_str(),
+            "seven_day" | "seven_day_sonnet" | "seven_day_opus"
+        ) && let (Some(used_percent), Some(reset_at)) = (window.used_percent, window.reset_at)
+            && let Some(pace) = super::pace::compute_pace(
+                used_percent,
+                reset_at,
+                fetched_at,
+                super::pace::WEEKLY_PERIOD,
+            )
+        {
+            window.expected_used_percent = Some(pace.expected_percent);
+            window.ahead_of_pace = Some(pace.ahead);
+            window.projected_exhaustion_at = pace.projected_exhaustion_at;
+            window.will_last_to_reset = Some(pace.will_last_to_reset);
         }
     }
     Ok(ProviderUsageView {
         provider: AiProvider::Claude,
-        fetched_at: OffsetDateTime::now_utc(),
+        fetched_at,
         status: ProviderUsageStatus::Ok,
         fidelity: UsageFidelity::Official,
         headline_window: windows.first().map(|window| window.key.clone()),
@@ -884,6 +904,37 @@ mod tests {
         .expect("usage");
         assert_eq!(usage.windows.len(), 2);
         assert_eq!(usage.windows[0].used_percent, Some(12));
+    }
+
+    #[test]
+    fn weekly_windows_report_pace() {
+        use time::format_description::well_known::Rfc3339;
+
+        let reset = (OffsetDateTime::now_utc() + time::Duration::days(4))
+            .format(&Rfc3339)
+            .expect("format");
+        let body = format!(
+            r#"{{"five_hour":{{"utilization":50.0,"resets_at":"{reset}"}},"seven_day":{{"utilization":30.0,"resets_at":"{reset}"}}}}"#
+        );
+        let usage = parse_usage(&body).expect("usage");
+        let weekly = usage
+            .windows
+            .iter()
+            .find(|window| window.key == "seven_day")
+            .expect("weekly window");
+        assert_eq!(weekly.expected_used_percent, Some(43));
+        assert_eq!(weekly.ahead_of_pace, Some(false));
+        assert_eq!(weekly.will_last_to_reset, Some(true));
+        assert!(weekly.projected_exhaustion_at.is_some());
+        let five_hour = usage
+            .windows
+            .iter()
+            .find(|window| window.key == "five_hour")
+            .expect("five hour window");
+        assert_eq!(five_hour.expected_used_percent, None);
+        assert_eq!(five_hour.ahead_of_pace, None);
+        assert_eq!(five_hour.projected_exhaustion_at, None);
+        assert_eq!(five_hour.will_last_to_reset, None);
     }
 
     fn test_env() -> (tempfile::TempDir, AppEnv) {

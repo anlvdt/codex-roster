@@ -348,7 +348,7 @@ where
         })
     }
 
-    fn provider_store(&self) -> ProviderAccountStore<LocalSecretStore> {
+    pub(crate) fn provider_store(&self) -> ProviderAccountStore<LocalSecretStore> {
         ProviderAccountStore::new(
             &self.env.app_data_dir,
             LocalSecretStore::new(&self.env.app_data_dir.join("providers").join("snapshots")),

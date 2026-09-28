@@ -11,9 +11,9 @@ use crate::app::{App, InteractiveExit, InteractiveMode};
 use crate::env;
 use crate::model::{
     AccountUsageView, AccountView, AiProvider, AutoStartUsageWindowsRunOutput,
-    AutoStartUsageWindowsStatusOutput, ProviderAccountView, ProviderStatusOutput,
-    ProviderUsageOutput, ProviderUsageStatus, ProviderUsageView, RunningCodexProcess,
-    TokenUsageSummaryOutput, UsageOutput,
+    AutoStartUsageWindowsStatusOutput, ClaudeAutoSwitchStrategy, ProviderAccountView,
+    ProviderStatusOutput, ProviderUsageOutput, ProviderUsageStatus, ProviderUsageView,
+    RunningCodexProcess, TokenUsageSummaryOutput, UsageOutput,
 };
 use crate::openai_status::fetch_openai_status;
 use crate::process::format_process_table;
@@ -279,6 +279,29 @@ enum ProviderCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Decide or apply a Claude account auto-switch, and manage its policy.
+    AutoSwitch {
+        #[arg(value_parser = parse_ai_provider)]
+        provider: AiProvider,
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
+        #[arg(long)]
+        disable: bool,
+        #[arg(long)]
+        status: bool,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        threshold: Option<u8>,
+        #[arg(long)]
+        hysteresis: Option<u8>,
+        #[arg(long)]
+        cooldown: Option<u64>,
+        #[arg(long, value_parser = parse_claude_auto_switch_strategy)]
+        strategy: Option<ClaudeAutoSwitchStrategy>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub fn run() -> Result<()> {
@@ -401,6 +424,55 @@ pub fn run() -> Result<()> {
                         print_json(&output)?;
                     } else {
                         print_provider_usage_output(&output);
+                    }
+                }
+                ProviderCommand::AutoSwitch {
+                    provider,
+                    enable,
+                    disable,
+                    status: _,
+                    apply,
+                    threshold,
+                    hysteresis,
+                    cooldown,
+                    strategy,
+                    json,
+                } => {
+                    if provider != AiProvider::Claude {
+                        bail!("auto-switch is only supported for claude");
+                    }
+                    let configuring = enable
+                        || disable
+                        || threshold.is_some()
+                        || hysteresis.is_some()
+                        || cooldown.is_some()
+                        || strategy.is_some();
+                    let enabled = if enable {
+                        Some(true)
+                    } else if disable {
+                        Some(false)
+                    } else {
+                        None
+                    };
+                    let output = if configuring {
+                        app.set_claude_auto_switch(
+                            enabled, threshold, hysteresis, cooldown, strategy,
+                        )?
+                    } else if apply {
+                        app.claude_auto_switch_apply(None)?
+                    } else {
+                        app.claude_auto_switch_decide()?
+                    };
+                    if json {
+                        print_json(&output)?;
+                    } else {
+                        println!("Auto-switch: {}", output.status);
+                        if let Some(candidate) = &output.candidate_display_name {
+                            println!("Candidate: {candidate}");
+                        }
+                        if let Some(detail) = &output.detail {
+                            println!("Detail: {detail}");
+                        }
                     }
                 }
             }
@@ -926,6 +998,7 @@ where
 {
     crate::app::spawn_auto_start_usage_windows_worker(app.env().clone());
     crate::app::spawn_auto_switch_worker(app.env().clone());
+    crate::app::spawn_claude_auto_switch_worker(app.env().clone());
     crate::app::spawn_usage_refresh_worker(app.env().clone());
     crate::app::spawn_vibe_usage_worker(app.env().clone());
     match app.interactive(InteractiveMode::Persistent, false)? {
@@ -1009,6 +1082,18 @@ fn parse_ai_provider(value: &str) -> std::result::Result<AiProvider, String> {
         "grok" | "grok_build" | "xai" => Ok(AiProvider::Grok),
         _ => Err(format!(
             "unknown provider {value:?}; expected one of: openai, claude, cursor, grok"
+        )),
+    }
+}
+
+fn parse_claude_auto_switch_strategy(
+    value: &str,
+) -> std::result::Result<ClaudeAutoSwitchStrategy, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "best" => Ok(ClaudeAutoSwitchStrategy::Best),
+        "consume-first" | "consume_first" => Ok(ClaudeAutoSwitchStrategy::ConsumeFirst),
+        _ => Err(format!(
+            "unknown strategy {value:?}; expected best or consume-first"
         )),
     }
 }

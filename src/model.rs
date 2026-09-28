@@ -606,6 +606,35 @@ pub struct ProviderListOutput {
     pub accounts: Vec<ProviderAccountView>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClaudeAutoSwitchStrategy {
+    #[default]
+    Best,
+    ConsumeFirst,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderAutoSwitchOutput {
+    pub provider: AiProvider,
+    pub enabled: bool,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_account_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_account_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub threshold_percent: u8,
+    pub hysteresis_percent: u8,
+    pub cooldown_seconds: u64,
+    pub strategy: ClaudeAutoSwitchStrategy,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ProviderSaveOutput {
     pub account: ProviderAccountView,

@@ -1,0 +1,663 @@
+use std::time::Duration as StdDuration;
+
+use anyhow::{Result, bail};
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+use crate::model::{
+    AiProvider, ClaudeAutoSwitchStrategy, ProviderAutoSwitchOutput, ProviderUsageStatus,
+    ProviderUsageView,
+};
+use crate::operation_lock::OperationLock;
+use crate::provider::{SnapshotRefresh, adapter};
+use crate::provider_store::LOGIN_REQUIRED_ERROR_PREFIX;
+use crate::settings::{AppSettings, load_settings, save_settings};
+
+use super::App;
+use crate::secrets::SecretStore;
+
+const USAGE_FRESHNESS: time::Duration = time::Duration::minutes(15);
+const FRESHEN_WITHIN: StdDuration = StdDuration::from_secs(600);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Trigger {
+    AtLimit,
+    Proactive,
+    ConsumeFirst,
+}
+
+impl Trigger {
+    fn label(self) -> &'static str {
+        match self {
+            Trigger::AtLimit => "at_limit",
+            Trigger::Proactive => "proactive",
+            Trigger::ConsumeFirst => "consume_first",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CandidateRow {
+    pub id: Uuid,
+    pub display_name: String,
+    pub headroom: u8,
+    pub utilization: u8,
+    pub seven_day_reset_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug)]
+enum Decision {
+    BelowThreshold,
+    Cooldown {
+        trigger: Trigger,
+    },
+    NoCandidate {
+        trigger: Trigger,
+    },
+    Switch {
+        trigger: Trigger,
+        candidate: CandidateRow,
+    },
+}
+
+fn claude_binding_utilization(usage: &ProviderUsageView) -> Option<u8> {
+    if !matches!(
+        usage.status,
+        ProviderUsageStatus::Ok | ProviderUsageStatus::Stale
+    ) {
+        return None;
+    }
+    usage
+        .windows
+        .iter()
+        .filter(|window| matches!(window.key.as_str(), "five_hour" | "seven_day"))
+        .filter_map(|window| window.used_percent)
+        .max()
+}
+
+#[cfg(test)]
+fn claude_headroom(usage: &ProviderUsageView) -> Option<u8> {
+    claude_binding_utilization(usage).map(|utilization| 100u8.saturating_sub(utilization))
+}
+
+fn seven_day_reset_at(usage: &ProviderUsageView) -> Option<OffsetDateTime> {
+    usage
+        .windows
+        .iter()
+        .find(|window| window.key == "seven_day")
+        .and_then(|window| window.reset_at)
+}
+
+fn usage_is_fresh(usage: &ProviderUsageView, now: OffsetDateTime) -> bool {
+    (now - usage.fetched_at) <= USAGE_FRESHNESS
+        && usage.fetched_at <= now + time::Duration::minutes(1)
+}
+
+fn decide(
+    active_utilization: u8,
+    active_reset: Option<OffsetDateTime>,
+    candidates: &[CandidateRow],
+    settings: &AppSettings,
+    now: OffsetDateTime,
+) -> Decision {
+    let threshold = settings.claude_auto_switch_threshold_percent;
+    let hysteresis = settings.claude_auto_switch_hysteresis_percent;
+    let cooldown = time::Duration::seconds(settings.claude_auto_switch_cooldown_seconds as i64);
+    let trigger = if active_utilization >= 99 {
+        Trigger::AtLimit
+    } else if active_utilization >= threshold {
+        Trigger::Proactive
+    } else if settings.claude_auto_switch_strategy == ClaudeAutoSwitchStrategy::ConsumeFirst {
+        Trigger::ConsumeFirst
+    } else {
+        return Decision::BelowThreshold;
+    };
+    let in_cooldown = settings
+        .claude_last_auto_switch_at
+        .is_some_and(|last| now - last < cooldown);
+    if trigger != Trigger::AtLimit && in_cooldown {
+        return Decision::Cooldown { trigger };
+    }
+    let active_headroom = 100u8.saturating_sub(active_utilization);
+    let mut eligible: Vec<&CandidateRow> = candidates
+        .iter()
+        .filter(|candidate| {
+            if candidate.utilization >= threshold {
+                return false;
+            }
+            if trigger != Trigger::AtLimit
+                && in_cooldown
+                && settings.claude_last_auto_switch_from == Some(candidate.id)
+            {
+                return false;
+            }
+            match trigger {
+                Trigger::AtLimit => true,
+                Trigger::Proactive => {
+                    candidate.headroom >= active_headroom.saturating_add(hysteresis)
+                }
+                Trigger::ConsumeFirst => {
+                    candidate.utilization <= threshold.saturating_sub(hysteresis)
+                        && matches!(
+                            (candidate.seven_day_reset_at, active_reset),
+                            (Some(candidate_reset), Some(active_reset))
+                                if candidate_reset < active_reset
+                        )
+                }
+            }
+        })
+        .collect();
+    match trigger {
+        Trigger::ConsumeFirst => eligible.sort_by_key(|candidate| {
+            (
+                candidate
+                    .seven_day_reset_at
+                    .map_or(i64::MAX, |reset| reset.unix_timestamp()),
+                std::cmp::Reverse(candidate.headroom),
+            )
+        }),
+        _ => eligible.sort_by_key(|candidate| {
+            (
+                std::cmp::Reverse(candidate.headroom),
+                candidate
+                    .seven_day_reset_at
+                    .map_or(i64::MAX, |reset| reset.unix_timestamp()),
+            )
+        }),
+    }
+    match eligible.into_iter().next() {
+        Some(candidate) => Decision::Switch {
+            trigger,
+            candidate: candidate.clone(),
+        },
+        None => Decision::NoCandidate { trigger },
+    }
+}
+
+impl<S> App<S>
+where
+    S: SecretStore,
+{
+    fn claude_auto_switch_output(
+        &self,
+        settings: &AppSettings,
+        status: &str,
+        trigger: Option<Trigger>,
+        active_account_id: Option<Uuid>,
+        candidate: Option<&CandidateRow>,
+        detail: Option<String>,
+    ) -> ProviderAutoSwitchOutput {
+        ProviderAutoSwitchOutput {
+            provider: AiProvider::Claude,
+            enabled: settings.claude_auto_switch,
+            status: status.to_owned(),
+            trigger: trigger.map(Trigger::label).map(str::to_owned),
+            active_account_id,
+            candidate_account_id: candidate.map(|candidate| candidate.id),
+            candidate_display_name: candidate.map(|candidate| candidate.display_name.clone()),
+            detail,
+            threshold_percent: settings.claude_auto_switch_threshold_percent,
+            hysteresis_percent: settings.claude_auto_switch_hysteresis_percent,
+            cooldown_seconds: settings.claude_auto_switch_cooldown_seconds,
+            strategy: settings.claude_auto_switch_strategy,
+        }
+    }
+
+    pub fn claude_auto_switch_decide(&self) -> Result<ProviderAutoSwitchOutput> {
+        let settings = load_settings(&self.env.app_data_dir)?;
+        if !settings.claude_auto_switch {
+            return Ok(
+                self.claude_auto_switch_output(&settings, "disabled", None, None, None, None)
+            );
+        }
+        let provider_adapter = adapter(AiProvider::Claude);
+        let store = self.provider_store();
+        let live_identity = provider_adapter
+            .try_read_live_identity_noninteractive(&self.env)
+            .ok()
+            .flatten();
+        let Some(live_identity) = live_identity else {
+            return Ok(self.claude_auto_switch_output(
+                &settings,
+                "waiting_for_login",
+                None,
+                None,
+                None,
+                Some("no live Claude Code session".to_owned()),
+            ));
+        };
+        let Some(active) =
+            store.find_matching(&self.env.kind, AiProvider::Claude, &live_identity)?
+        else {
+            return Ok(self.claude_auto_switch_output(
+                &settings,
+                "waiting_for_login",
+                None,
+                None,
+                None,
+                Some("live Claude account is not saved".to_owned()),
+            ));
+        };
+        let active_usage = self
+            .provider_usage(AiProvider::Claude, Some(active.id))?
+            .usage;
+        let Some(active_utilization) = claude_binding_utilization(&active_usage) else {
+            return Ok(self.claude_auto_switch_output(
+                &settings,
+                "below_threshold",
+                None,
+                Some(active.id),
+                None,
+                Some(
+                    "live usage unreadable (token expired? Claude Code refreshes on next use)"
+                        .to_owned(),
+                ),
+            ));
+        };
+        let active_reset = seven_day_reset_at(&active_usage);
+        let (_active_record, active_snapshot) = store.load_snapshot(&self.env.kind, active.id)?;
+        let now = OffsetDateTime::now_utc();
+        let mut candidates = Vec::new();
+        for record in store.list(&self.env.kind, Some(AiProvider::Claude))? {
+            if record.id == active.id || record.requires_login() {
+                continue;
+            }
+            let Ok((_candidate_record, snapshot)) = store.load_snapshot(&self.env.kind, record.id)
+            else {
+                continue;
+            };
+            if provider_adapter.snapshots_share_credential(&snapshot, &active_snapshot) {
+                continue;
+            }
+            let usage = match record.cached_usage.as_ref() {
+                Some(cached) if usage_is_fresh(cached, now) => cached.clone(),
+                _ => match self.provider_usage(AiProvider::Claude, Some(record.id)) {
+                    Ok(output) => output.usage,
+                    Err(_) => continue,
+                },
+            };
+            let Some(utilization) = claude_binding_utilization(&usage) else {
+                continue;
+            };
+            candidates.push(CandidateRow {
+                id: record.id,
+                display_name: record.identity.email.clone(),
+                headroom: 100u8.saturating_sub(utilization),
+                utilization,
+                seven_day_reset_at: seven_day_reset_at(&usage),
+            });
+        }
+        let decision = decide(
+            active_utilization,
+            active_reset,
+            &candidates,
+            &settings,
+            now,
+        );
+        let output = match decision {
+            Decision::BelowThreshold => self.claude_auto_switch_output(
+                &settings,
+                "below_threshold",
+                None,
+                Some(active.id),
+                None,
+                None,
+            ),
+            Decision::Cooldown { trigger } => self.claude_auto_switch_output(
+                &settings,
+                "cooldown",
+                Some(trigger),
+                Some(active.id),
+                None,
+                None,
+            ),
+            Decision::NoCandidate { trigger } => {
+                let status = if !candidates.is_empty()
+                    && candidates
+                        .iter()
+                        .all(|candidate| candidate.utilization >= 99)
+                {
+                    "all_accounts_exhausted"
+                } else {
+                    "no_candidate"
+                };
+                self.claude_auto_switch_output(
+                    &settings,
+                    status,
+                    Some(trigger),
+                    Some(active.id),
+                    None,
+                    None,
+                )
+            }
+            Decision::Switch { trigger, candidate } => self.claude_auto_switch_output(
+                &settings,
+                "ready",
+                Some(trigger),
+                Some(active.id),
+                Some(&candidate),
+                None,
+            ),
+        };
+        Ok(output)
+    }
+
+    pub fn claude_auto_switch_apply(
+        &self,
+        _preferred: Option<Uuid>,
+    ) -> Result<ProviderAutoSwitchOutput> {
+        let output = self.claude_auto_switch_decide()?;
+        if output.status != "ready" {
+            return Ok(output);
+        }
+        let Some(candidate_id) = output.candidate_account_id else {
+            bail!("auto-switch decided ready without a candidate");
+        };
+        let store = self.provider_store();
+        let provider_adapter = adapter(AiProvider::Claude);
+        let (record, snapshot) = store.load_snapshot(&self.env.kind, candidate_id)?;
+        if provider_adapter.snapshot_access_token_expires_within(&snapshot, FRESHEN_WITHIN) {
+            match provider_adapter.refresh_snapshot(&snapshot) {
+                SnapshotRefresh::Refreshed(new_snapshot) => {
+                    let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+                    store.save(
+                        &self.env.kind,
+                        record.provider,
+                        &record.identity,
+                        &new_snapshot,
+                    )?;
+                    eprintln!("refreshed Claude token for {}", record.identity.email);
+                }
+                SnapshotRefresh::Dead(reason) => {
+                    let detail = format!(
+                        "{LOGIN_REQUIRED_ERROR_PREFIX}: refresh token rejected ({reason}); sign in with Claude Code as this account and save it again"
+                    );
+                    let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+                    store.record_usage_error(&self.env.kind, record.id, detail.clone())?;
+                    let settings = load_settings(&self.env.app_data_dir)?;
+                    return Ok(self.claude_auto_switch_output(
+                        &settings,
+                        "no_candidate",
+                        output.trigger.as_deref().map(|label| match label {
+                            "at_limit" => Trigger::AtLimit,
+                            "consume_first" => Trigger::ConsumeFirst,
+                            _ => Trigger::Proactive,
+                        }),
+                        output.active_account_id,
+                        None,
+                        Some(detail),
+                    ));
+                }
+                SnapshotRefresh::Transient(_) | SnapshotRefresh::Unsupported => {}
+            }
+        }
+        self.provider_activate(candidate_id)?;
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        let mut settings = load_settings(&self.env.app_data_dir)?;
+        settings.claude_last_auto_switch_at = Some(OffsetDateTime::now_utc());
+        settings.claude_last_auto_switch_from = output.active_account_id;
+        settings.claude_last_auto_switch_target = Some(candidate_id);
+        save_settings(&self.env.app_data_dir, &settings)?;
+        let mut output = output;
+        output.status = "switched".to_owned();
+        Ok(output)
+    }
+
+    pub fn set_claude_auto_switch(
+        &self,
+        enabled: Option<bool>,
+        threshold: Option<u8>,
+        hysteresis: Option<u8>,
+        cooldown: Option<u64>,
+        strategy: Option<ClaudeAutoSwitchStrategy>,
+    ) -> Result<ProviderAutoSwitchOutput> {
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        let mut settings = load_settings(&self.env.app_data_dir)?;
+        if let Some(threshold) = threshold {
+            if !(50..=100).contains(&threshold) {
+                bail!("claude auto-switch threshold must be between 50 and 100");
+            }
+            settings.claude_auto_switch_threshold_percent = threshold;
+        }
+        if let Some(hysteresis) = hysteresis {
+            if hysteresis > 50 {
+                bail!("claude auto-switch hysteresis must be between 0 and 50");
+            }
+            settings.claude_auto_switch_hysteresis_percent = hysteresis;
+        }
+        if let Some(cooldown) = cooldown {
+            if cooldown > 3600 {
+                bail!("claude auto-switch cooldown must be between 0 and 3600 seconds");
+            }
+            settings.claude_auto_switch_cooldown_seconds = cooldown;
+        }
+        if let Some(strategy) = strategy {
+            settings.claude_auto_switch_strategy = strategy;
+        }
+        if let Some(enabled) = enabled {
+            settings.claude_auto_switch = enabled;
+            if !enabled {
+                settings.claude_last_auto_switch_at = None;
+                settings.claude_last_auto_switch_from = None;
+                settings.claude_last_auto_switch_target = None;
+            }
+        }
+        save_settings(&self.env.app_data_dir, &settings)?;
+        Ok(self.claude_auto_switch_output(
+            &settings,
+            if settings.claude_auto_switch {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            None,
+            None,
+            None,
+            None,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings(
+        strategy: ClaudeAutoSwitchStrategy,
+        last_at: Option<OffsetDateTime>,
+        last_from: Option<Uuid>,
+    ) -> AppSettings {
+        AppSettings {
+            claude_auto_switch: true,
+            claude_auto_switch_threshold_percent: 95,
+            claude_auto_switch_hysteresis_percent: 10,
+            claude_auto_switch_cooldown_seconds: 300,
+            claude_auto_switch_strategy: strategy,
+            claude_last_auto_switch_at: last_at,
+            claude_last_auto_switch_from: last_from,
+            claude_last_auto_switch_target: None,
+            ..AppSettings::default()
+        }
+    }
+
+    fn candidate(utilization: u8, reset_secs: Option<i64>) -> CandidateRow {
+        CandidateRow {
+            id: Uuid::new_v4(),
+            display_name: "c".to_owned(),
+            headroom: 100u8.saturating_sub(utilization),
+            utilization,
+            seven_day_reset_at: reset_secs
+                .map(|secs| OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(secs)),
+        }
+    }
+
+    fn usage(status: ProviderUsageStatus, five_hour: u8, seven_day: u8) -> ProviderUsageView {
+        ProviderUsageView {
+            provider: AiProvider::Claude,
+            fetched_at: OffsetDateTime::now_utc(),
+            status,
+            fidelity: crate::model::UsageFidelity::Official,
+            headline_window: None,
+            windows: vec![
+                crate::model::ProviderUsageWindowView {
+                    key: "five_hour".to_owned(),
+                    label: "5 hour".to_owned(),
+                    used_percent: Some(five_hour),
+                    remaining_percent: Some(100 - five_hour),
+                    reset_at: None,
+                    used: None,
+                    limit: None,
+                    unit: None,
+                },
+                crate::model::ProviderUsageWindowView {
+                    key: "seven_day".to_owned(),
+                    label: "7 day".to_owned(),
+                    used_percent: Some(seven_day),
+                    remaining_percent: Some(100 - seven_day),
+                    reset_at: None,
+                    used: None,
+                    limit: None,
+                    unit: None,
+                },
+            ],
+            plan_label: None,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn binding_utilization_uses_only_five_hour_and_seven_day() {
+        let mut u = usage(ProviderUsageStatus::Ok, 40, 70);
+        u.windows.push(crate::model::ProviderUsageWindowView {
+            key: "seven_day_opus".to_owned(),
+            label: "7 day Opus".to_owned(),
+            used_percent: Some(99),
+            remaining_percent: Some(1),
+            reset_at: None,
+            used: None,
+            limit: None,
+            unit: None,
+        });
+        assert_eq!(claude_binding_utilization(&u), Some(70));
+        assert_eq!(claude_headroom(&u), Some(30));
+        u.status = ProviderUsageStatus::CredentialExpired;
+        assert_eq!(claude_binding_utilization(&u), None);
+    }
+
+    #[test]
+    fn below_threshold_when_active_under_line() {
+        let s = settings(ClaudeAutoSwitchStrategy::Best, None, None);
+        let now = OffsetDateTime::now_utc();
+        match decide(50, None, &[candidate(10, Some(100))], &s, now) {
+            Decision::BelowThreshold => {}
+            _ => panic!("expected BelowThreshold"),
+        }
+    }
+
+    #[test]
+    fn proactive_picks_max_headroom_clearing_hysteresis() {
+        let s = settings(ClaudeAutoSwitchStrategy::Best, None, None);
+        let now = OffsetDateTime::now_utc();
+        // active util 96 >= 95, headroom 4 → need candidate headroom >= 14
+        let weak = candidate(90, Some(100)); // headroom 10 < 14
+        let strong = candidate(80, Some(50)); // headroom 20
+        match decide(
+            96,
+            Some(OffsetDateTime::UNIX_EPOCH),
+            &[weak, strong],
+            &s,
+            now,
+        ) {
+            Decision::Switch { trigger, candidate } => {
+                assert_eq!(trigger, Trigger::Proactive);
+                assert_eq!(candidate.utilization, 80);
+            }
+            _ => panic!("expected Switch"),
+        }
+    }
+
+    #[test]
+    fn proactive_refuses_when_no_candidate_clears_hysteresis() {
+        let s = settings(ClaudeAutoSwitchStrategy::Best, None, None);
+        let now = OffsetDateTime::now_utc();
+        // active util 96, headroom 4; candidate headroom 10 < 14
+        match decide(96, None, &[candidate(90, Some(100))], &s, now) {
+            Decision::NoCandidate { trigger } => assert_eq!(trigger, Trigger::Proactive),
+            _ => panic!("expected NoCandidate"),
+        }
+    }
+
+    #[test]
+    fn at_limit_ignores_hysteresis_and_cooldown() {
+        let mut s = settings(ClaudeAutoSwitchStrategy::Best, None, None);
+        s.claude_last_auto_switch_at = Some(OffsetDateTime::now_utc());
+        let now = OffsetDateTime::now_utc();
+        // active util 99 → at_limit; headroom 10 fails hysteresis (needs 11) but AtLimit ignores it
+        match decide(99, None, &[candidate(90, Some(100))], &s, now) {
+            Decision::Switch { trigger, .. } => assert_eq!(trigger, Trigger::AtLimit),
+            _ => panic!("expected Switch"),
+        }
+    }
+
+    #[test]
+    fn cooldown_blocks_proactive() {
+        let mut s = settings(ClaudeAutoSwitchStrategy::Best, None, None);
+        s.claude_last_auto_switch_at = Some(OffsetDateTime::now_utc());
+        let now = OffsetDateTime::now_utc();
+        match decide(96, None, &[candidate(10, Some(100))], &s, now) {
+            Decision::Cooldown { trigger } => assert_eq!(trigger, Trigger::Proactive),
+            _ => panic!("expected Cooldown"),
+        }
+    }
+
+    #[test]
+    fn consume_first_picks_sooner_reset_with_room() {
+        let s = settings(ClaudeAutoSwitchStrategy::ConsumeFirst, None, None);
+        let now = OffsetDateTime::now_utc();
+        let sooner = candidate(50, Some(100));
+        let later = candidate(10, Some(500));
+        let active_reset = Some(OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1000));
+        match decide(50, active_reset, &[later.clone(), sooner.clone()], &s, now) {
+            Decision::Switch { trigger, candidate } => {
+                assert_eq!(trigger, Trigger::ConsumeFirst);
+                assert_eq!(candidate.id, sooner.id);
+            }
+            _ => panic!("expected Switch"),
+        }
+        // active resets sooner than every candidate → no move
+        match decide(
+            50,
+            Some(OffsetDateTime::UNIX_EPOCH),
+            &[later, sooner],
+            &s,
+            now,
+        ) {
+            Decision::NoCandidate { trigger } => assert_eq!(trigger, Trigger::ConsumeFirst),
+            _ => panic!("expected NoCandidate"),
+        }
+        // no active reset → no consume-first move at all
+        match decide(50, None, &[candidate(10, Some(50))], &s, now) {
+            Decision::NoCandidate { .. } => {}
+            _ => panic!("expected NoCandidate"),
+        }
+    }
+
+    #[test]
+    fn never_switches_to_candidate_at_or_over_threshold() {
+        let s = settings(ClaudeAutoSwitchStrategy::Best, None, None);
+        let now = OffsetDateTime::now_utc();
+        match decide(99, None, &[candidate(96, Some(100))], &s, now) {
+            Decision::NoCandidate { .. } => {}
+            _ => panic!("expected NoCandidate"),
+        }
+    }
+
+    #[test]
+    fn stale_usage_counts_as_fresh_only_within_window() {
+        let mut u = usage(ProviderUsageStatus::Stale, 10, 20);
+        let now = OffsetDateTime::now_utc();
+        assert!(usage_is_fresh(&u, now));
+        u.fetched_at = now - time::Duration::minutes(20);
+        assert!(!usage_is_fresh(&u, now));
+    }
+}

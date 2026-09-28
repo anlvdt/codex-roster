@@ -47,6 +47,13 @@ pub trait ProviderAdapter: Sync {
     fn snapshot_access_token_expired(&self, _snapshot: &SnapshotBlob) -> bool {
         false
     }
+    fn snapshot_access_token_expires_within(
+        &self,
+        _snapshot: &SnapshotBlob,
+        _within: std::time::Duration,
+    ) -> bool {
+        false
+    }
     fn refresh_snapshot(&self, _snapshot: &SnapshotBlob) -> SnapshotRefresh {
         SnapshotRefresh::Unsupported
     }

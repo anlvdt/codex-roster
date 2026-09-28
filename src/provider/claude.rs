@@ -253,7 +253,7 @@ fn now_ms() -> i64 {
         .unwrap_or_default()
 }
 
-fn snapshot_access_token_expired(snapshot: &SnapshotBlob) -> bool {
+fn snapshot_access_token_expires_within(snapshot: &SnapshotBlob, within: Duration) -> bool {
     let Ok(Some((_name, raw))) = credential_text(snapshot) else {
         return false;
     };
@@ -267,7 +267,7 @@ fn snapshot_access_token_expired(snapshot: &SnapshotBlob) -> bool {
     else {
         return false;
     };
-    now_ms() + ACCESS_TOKEN_EXPIRY_BUFFER_MS >= expires_at as i64
+    now_ms() + within.as_millis() as i64 >= expires_at as i64
 }
 
 enum RefreshClass {
@@ -712,7 +712,18 @@ impl ProviderAdapter for ClaudeAdapter {
     }
 
     fn snapshot_access_token_expired(&self, snapshot: &SnapshotBlob) -> bool {
-        snapshot_access_token_expired(snapshot)
+        snapshot_access_token_expires_within(
+            snapshot,
+            Duration::from_millis(ACCESS_TOKEN_EXPIRY_BUFFER_MS as u64),
+        )
+    }
+
+    fn snapshot_access_token_expires_within(
+        &self,
+        snapshot: &SnapshotBlob,
+        within: Duration,
+    ) -> bool {
+        snapshot_access_token_expires_within(snapshot, within)
     }
 
     fn snapshot_shares_live_credential(&self, env: &AppEnv, snapshot: &SnapshotBlob) -> bool {

@@ -94,3 +94,48 @@ fn run_auto_switch_for_env(env: AppEnv) -> Result<u64> {
     let _ = app.list().context("reload roster after auto-switch")?;
     Ok(AUTO_SWITCH_POLL_SECONDS)
 }
+
+pub const CLAUDE_AUTO_SWITCH_POLL_SECONDS: u64 = 60;
+pub const CLAUDE_AUTO_SWITCH_SWITCHED_SECONDS: u64 = 30;
+pub const CLAUDE_AUTO_SWITCH_EXHAUSTED_SECONDS: u64 = 180;
+
+pub fn spawn_claude_auto_switch_worker(env: AppEnv) {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    STARTED.get_or_init(move || {
+        let _ = thread::Builder::new()
+            .name("claude-auto-switch-monitor".to_owned())
+            .spawn(move || {
+                loop {
+                    let next_sleep = match run_claude_auto_switch_for_env(env.clone()) {
+                        Ok(seconds) => seconds,
+                        Err(error) => {
+                            eprintln!("claude auto-switch monitor failed: {error:#}");
+                            CLAUDE_AUTO_SWITCH_POLL_SECONDS
+                        }
+                    };
+                    thread::sleep(StdDuration::from_secs(next_sleep));
+                }
+            });
+    });
+}
+
+fn run_claude_auto_switch_for_env(env: AppEnv) -> Result<u64> {
+    let repository = SnapshotRepository::new(
+        &env.app_data_dir,
+        MigratingSecretStore::new(&env.app_data_dir.join("snapshots")),
+    );
+    let app = App::new(env, repository);
+    let decision = app.claude_auto_switch_decide()?;
+    match decision.status.as_str() {
+        "ready" => {
+            let applied = app.claude_auto_switch_apply(decision.candidate_account_id)?;
+            Ok(match applied.status.as_str() {
+                "switched" => CLAUDE_AUTO_SWITCH_SWITCHED_SECONDS,
+                "all_accounts_exhausted" => CLAUDE_AUTO_SWITCH_EXHAUSTED_SECONDS,
+                _ => CLAUDE_AUTO_SWITCH_POLL_SECONDS,
+            })
+        }
+        "all_accounts_exhausted" => Ok(CLAUDE_AUTO_SWITCH_EXHAUSTED_SECONDS),
+        _ => Ok(CLAUDE_AUTO_SWITCH_POLL_SECONDS),
+    }
+}

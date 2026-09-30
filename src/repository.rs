@@ -390,18 +390,93 @@ where
                 snapshot,
             });
         }
-        Ok(BackupBundle::new(accounts))
+        let mut backup = BackupBundle::new(accounts);
+        let store = self.provider_backup_store();
+        for record in store.list(environment, None)? {
+            let (_, snapshot) = store.load_snapshot(environment, record.id)?;
+            backup
+                .provider_accounts
+                .push(crate::backup::ProviderBackupAccount {
+                    provider: record.provider,
+                    identity: record.identity,
+                    custom_label: record.custom_label,
+                    snapshot,
+                });
+        }
+        Ok(backup)
+    }
+
+    fn provider_backup_store(
+        &self,
+    ) -> crate::provider_store::ProviderAccountStore<LocalSecretStore> {
+        crate::provider_store::ProviderAccountStore::new(
+            &self.data_dir,
+            LocalSecretStore::new(&self.data_dir.join("providers").join("snapshots")),
+        )
+    }
+
+    fn validate_provider_backup(
+        &self,
+        accounts: &[crate::backup::ProviderBackupAccount],
+    ) -> Result<()> {
+        for account in accounts {
+            if account.provider == AiProvider::OpenAi {
+                return Err(anyhow!(
+                    "OpenAI snapshots must use the Codex backup accounts"
+                ));
+            }
+            let identity = crate::provider::adapter(account.provider)
+                .identity_from_snapshot(&account.snapshot)?;
+            if !backup_identity_matches_snapshot(&account.identity, &identity) {
+                return Err(anyhow!(
+                    "provider backup metadata identity does not match its snapshot"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn import_provider_backup(
+        &self,
+        environment: &EnvironmentKind,
+        accounts: &[crate::backup::ProviderBackupAccount],
+    ) -> Result<(usize, usize)> {
+        let store = self.provider_backup_store();
+        let mut created = 0;
+        let mut updated = 0;
+        for account in accounts {
+            let (record, is_new) = store.save(
+                environment,
+                account.provider,
+                &account.identity,
+                &account.snapshot,
+            )?;
+            store.set_label(environment, record.id, account.custom_label.clone())?;
+            if is_new {
+                created += 1;
+            } else {
+                updated += 1;
+            }
+        }
+        Ok((created, updated))
     }
 
     pub fn import_backup(
         &self,
         environment: &EnvironmentKind,
-        backup: BackupBundle,
+        mut backup: BackupBundle,
     ) -> Result<(usize, usize)> {
+        let provider_accounts = std::mem::take(&mut backup.provider_accounts);
+        self.validate_provider_backup(&provider_accounts)?;
         let prepared = self.prepare_backup_import(environment, backup, false)?;
         self.apply_backup_import(&prepared)?;
+        let (provider_created, provider_updated) =
+            self.import_provider_backup(environment, &provider_accounts)?;
         self.maybe_write_automatic_full_backup(environment);
-        Ok((prepared.created, prepared.updated))
+        Ok((
+            prepared.created + provider_created,
+            prepared.updated + provider_updated,
+        ))
     }
 
     pub fn restore_latest_account_list_backup(&self) -> Result<usize> {
@@ -412,13 +487,16 @@ where
         let password = automatic_backup_password()?;
         // Prefer the fullest readable backup so a newer empty/shrunk backup cannot
         // destroy a larger prior roster when the user asks to restore.
-        let backup = self
+        let mut backup = self
             .best_automatic_full_backup(&password)?
             .ok_or_else(|| anyhow!("no automatic full backup is available"))?;
-        let count = backup.accounts.len();
+        let count = backup.accounts.len() + backup.provider_accounts.len();
+        let provider_accounts = std::mem::take(&mut backup.provider_accounts);
+        self.validate_provider_backup(&provider_accounts)?;
         let previous_index = self.index_store.load_index()?;
         let prepared = self.prepare_backup_import(environment, backup, true)?;
         self.apply_backup_import(&prepared)?;
+        self.import_provider_backup(environment, &provider_accounts)?;
         let retained_keys = prepared
             .index
             .accounts
@@ -463,8 +541,10 @@ where
             let replace = match &best {
                 None => true,
                 Some(current) => {
-                    bundle.accounts.len() > current.accounts.len()
-                        || (bundle.accounts.len() == current.accounts.len()
+                    bundle.accounts.len() + bundle.provider_accounts.len()
+                        > current.accounts.len() + current.provider_accounts.len()
+                        || (bundle.accounts.len() + bundle.provider_accounts.len()
+                            == current.accounts.len() + current.provider_accounts.len()
                             && bundle.exported_at > current.exported_at)
                 }
             };
@@ -623,7 +703,8 @@ where
     }
 
     pub fn create_automatic_full_backup(&self, environment: &EnvironmentKind) -> Result<usize> {
-        let count = self.list_accounts(environment)?.len();
+        let count = self.export_backup(environment)?;
+        let count = count.accounts.len() + count.provider_accounts.len();
         self.write_automatic_full_backup(environment)?;
         Ok(count)
     }
@@ -837,6 +918,62 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn external_provider_backup_round_trips_snapshot_and_label() {
+        let source = tempdir().expect("source");
+        let repo = SnapshotRepository::new(source.path(), MemorySecretStore::default());
+        let identity = DisplayIdentity {
+            email: "claude@example.com".to_owned(),
+            subject: None,
+            name: None,
+            plan_label: None,
+        };
+        let snapshot = SnapshotBlob {
+            schema_version: 1,
+            files: vec![crate::model::SnapshotFile {
+                name: "claude_config.json".to_owned(),
+                bytes_base64: base64::engine::general_purpose::STANDARD
+                    .encode(r#"{"oauthAccount":{"emailAddress":"claude@example.com"}}"#),
+            }],
+        };
+        let store = repo.provider_backup_store();
+        let (record, _) = store
+            .save(
+                &EnvironmentKind::Macos,
+                AiProvider::Claude,
+                &identity,
+                &snapshot,
+            )
+            .expect("save provider");
+        store
+            .set_label(&EnvironmentKind::Macos, record.id, Some("Work".to_owned()))
+            .expect("label");
+        let backup = repo.export_backup(&EnvironmentKind::Macos).expect("export");
+        assert_eq!(backup.provider_accounts.len(), 1);
+        let path = source.path().join("backup.codexroster");
+        write_encrypted(&path, &backup, "fixture-password").expect("encrypt");
+        let decoded = read_encrypted(&path, "fixture-password").expect("decrypt");
+        let destination = tempdir().expect("destination");
+        let restored = SnapshotRepository::new(destination.path(), MemorySecretStore::default());
+        // Keep the automatic-backup cooldown active, avoiding system key access.
+        fs::create_dir(restored.automatic_backup_dir()).expect("backup directory");
+        fs::write(restored.automatic_backup_dir().join("cooldown"), b"").expect("cooldown");
+        assert_eq!(
+            restored
+                .import_backup(&EnvironmentKind::Macos, decoded)
+                .expect("import"),
+            (1, 0)
+        );
+        let exported = restored
+            .export_backup(&EnvironmentKind::Macos)
+            .expect("re-export");
+        assert_eq!(exported.provider_accounts[0].snapshot, snapshot);
+        assert_eq!(
+            exported.provider_accounts[0].custom_label.as_deref(),
+            Some("Work")
+        );
     }
 
     fn rewrite_index(path: &Path, email: &str, updated_at: OffsetDateTime, write_generation: u64) {

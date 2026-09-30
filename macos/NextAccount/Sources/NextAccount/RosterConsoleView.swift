@@ -54,7 +54,7 @@ struct RosterConsoleView: View {
                         }
                     }
                     HStack(spacing: 6) {
-                        ForEach(Array(RosterConsoleTab.allCases.suffix(2))) { tab in
+                        ForEach(Array(RosterConsoleTab.allCases.suffix(3))) { tab in
                             tabButton(tab)
                         }
                     }
@@ -102,6 +102,10 @@ struct RosterConsoleView: View {
                 .environmentObject(language)
         case .operations:
             OperationsView()
+                .environmentObject(store)
+                .environmentObject(language)
+        case .claude:
+            ClaudeRosterView()
                 .environmentObject(store)
                 .environmentObject(language)
         case .about:

@@ -356,24 +356,6 @@ struct PrismQuickSwitchDeck: View {
             Spacer(minLength: topNotchClearance(for: geometry) + 10)
 
             VStack(spacing: 10) {
-                HStack(spacing: 5) {
-                    let statusIndicator = store.openAIStatus?.indicator ?? "none"
-                    let isOperational = statusIndicator == "none"
-                    Circle()
-                        .fill(isOperational ? PrismTheme.emerald : PrismTheme.ruby)
-                        .frame(width: 6, height: 6)
-                    Text(isOperational
-                          ? language.text("OpenAI ổn", "OpenAI OK")
-                          : language.text("Sự cố OpenAI", "OpenAI issue"))
-                        .font(PrismTheme.fontCaptionBold)
-                        .foregroundStyle(isOperational ? PrismTheme.emerald : PrismTheme.ruby)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.85)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(Capsule().fill(PrismTheme.surfaceMuted))
-
                 VStack(spacing: 0) {
                     VStack(spacing: 8) {
                         automationToggleRow(
@@ -519,6 +501,7 @@ struct PrismQuickSwitchDeck: View {
                 Label(language.text("Tiêu thụ", "Usage"), systemImage: "chart.line.uptrend.xyaxis")
                     .font(PrismTheme.fontBodyCompactBold)
                 Spacer(minLength: 4)
+                openAIStatusBadge
                 if let outlook = store.resetOutlook {
                     resetOutlookBadge(outlook)
                 }
@@ -609,6 +592,25 @@ struct PrismQuickSwitchDeck: View {
                 .fill(PrismTheme.surfacePanel)
                 .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(PrismTheme.surfaceFill, lineWidth: 0.8))
         )
+    }
+
+    private var openAIStatusBadge: some View {
+        let isOperational = (store.openAIStatus?.indicator ?? "none") == "none"
+        return HStack(spacing: 5) {
+            Circle()
+                .fill(isOperational ? PrismTheme.emerald : PrismTheme.ruby)
+                .frame(width: 6, height: 6)
+            Text(isOperational
+                ? language.text("OpenAI ổn", "OpenAI OK")
+                : language.text("Sự cố OpenAI", "OpenAI issue"))
+                .font(PrismTheme.fontCaptionBold)
+                .foregroundStyle(isOperational ? PrismTheme.emerald : PrismTheme.ruby)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Capsule().fill(PrismTheme.surfaceMuted))
+        .accessibilityElement(children: .combine)
     }
 
     private func resetOutlookBadge(_ outlook: ResetOutlook) -> some View {

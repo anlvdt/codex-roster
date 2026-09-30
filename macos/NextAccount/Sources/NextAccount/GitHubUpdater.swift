@@ -241,7 +241,8 @@ final class GitHubUpdater: ObservableObject {
     }
 
     private static func shellQuote(_ value: String) -> String {
-        "'\(value.replacingOccurrences(of: "'", with: "'\\\"'\\\"'"))'"
+        // Close the quoted string, escape the apostrophe, then reopen it.
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
     private static func isVersion(_ remote: String, newerThan current: String) -> Bool {

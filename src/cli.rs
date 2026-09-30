@@ -11,9 +11,9 @@ use crate::app::{App, InteractiveExit, InteractiveMode};
 use crate::env;
 use crate::model::{
     AccountUsageView, AccountView, AiProvider, AutoStartUsageWindowsRunOutput,
-    AutoStartUsageWindowsStatusOutput, ProviderAccountView, ProviderStatusOutput,
-    ProviderUsageOutput, ProviderUsageStatus, ProviderUsageView, RunningCodexProcess,
-    TokenUsageSummaryOutput, UsageOutput,
+    AutoStartUsageWindowsStatusOutput, ClaudeAutoSwitchStrategy, ProviderAccountView,
+    ProviderStatusOutput, ProviderUsageOutput, ProviderUsageStatus, ProviderUsageView,
+    RunningCodexProcess, TokenUsageSummaryOutput, UsageOutput,
 };
 use crate::openai_status::fetch_openai_status;
 use crate::process::format_process_table;
@@ -271,11 +271,58 @@ enum ProviderCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Delete a saved external-provider account and its stored snapshot.
+    Delete {
+        account_id: Uuid,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set or clear a saved external-provider account's custom label.
+    SetLabel {
+        account_id: Uuid,
+        label: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Refresh cached usage for all saved accounts of one provider.
+    RefreshUsage {
+        #[arg(value_parser = parse_ai_provider)]
+        provider: AiProvider,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Fetch provider usage for the live account or a saved account ID.
     Usage {
         #[arg(value_parser = parse_ai_provider)]
         provider: AiProvider,
         account_id: Option<Uuid>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Decide or apply a Claude account auto-switch, and manage its policy.
+    AutoSwitch {
+        #[arg(value_parser = parse_ai_provider)]
+        provider: AiProvider,
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
+        #[arg(long)]
+        disable: bool,
+        #[arg(long)]
+        status: bool,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        threshold: Option<u8>,
+        #[arg(long)]
+        hysteresis: Option<u8>,
+        #[arg(long)]
+        cooldown: Option<u64>,
+        #[arg(long, value_parser = parse_claude_auto_switch_strategy)]
+        strategy: Option<ClaudeAutoSwitchStrategy>,
         #[arg(long)]
         json: bool,
     },
@@ -391,6 +438,52 @@ pub fn run() -> Result<()> {
                         }
                     }
                 }
+                ProviderCommand::Delete {
+                    account_id,
+                    force,
+                    json,
+                } => {
+                    let output = app.provider_delete(account_id, force)?;
+                    if json {
+                        print_json(&output)?;
+                    } else {
+                        println!("Deleted {} ({})", output.email, output.id);
+                    }
+                }
+                ProviderCommand::SetLabel {
+                    account_id,
+                    label,
+                    json,
+                } => {
+                    let account = app.provider_set_label(account_id, label)?;
+                    if json {
+                        print_json(&serde_json::json!({
+                            "account_id": account.id,
+                            "custom_label": account.custom_label,
+                        }))?;
+                    } else {
+                        match &account.custom_label {
+                            Some(label) => {
+                                println!("Label for {} set to \"{label}\"", account.email)
+                            }
+                            None => println!("Label for {} cleared", account.email),
+                        }
+                    }
+                }
+                ProviderCommand::RefreshUsage {
+                    provider,
+                    force,
+                    json,
+                } => {
+                    let output = app.provider_refresh_usage(provider, force)?;
+                    if json {
+                        print_json(&output)?;
+                    } else {
+                        for account in &output.accounts {
+                            println!("{}", render_provider_account_summary(account));
+                        }
+                    }
+                }
                 ProviderCommand::Usage {
                     provider,
                     account_id,
@@ -401,6 +494,55 @@ pub fn run() -> Result<()> {
                         print_json(&output)?;
                     } else {
                         print_provider_usage_output(&output);
+                    }
+                }
+                ProviderCommand::AutoSwitch {
+                    provider,
+                    enable,
+                    disable,
+                    status: _,
+                    apply,
+                    threshold,
+                    hysteresis,
+                    cooldown,
+                    strategy,
+                    json,
+                } => {
+                    if provider != AiProvider::Claude {
+                        bail!("auto-switch is only supported for claude");
+                    }
+                    let configuring = enable
+                        || disable
+                        || threshold.is_some()
+                        || hysteresis.is_some()
+                        || cooldown.is_some()
+                        || strategy.is_some();
+                    let enabled = if enable {
+                        Some(true)
+                    } else if disable {
+                        Some(false)
+                    } else {
+                        None
+                    };
+                    let output = if configuring {
+                        app.set_claude_auto_switch(
+                            enabled, threshold, hysteresis, cooldown, strategy,
+                        )?
+                    } else if apply {
+                        app.claude_auto_switch_apply(None)?
+                    } else {
+                        app.claude_auto_switch_decide()?
+                    };
+                    if json {
+                        print_json(&output)?;
+                    } else {
+                        println!("Auto-switch: {}", output.status);
+                        if let Some(candidate) = &output.candidate_display_name {
+                            println!("Candidate: {candidate}");
+                        }
+                        if let Some(detail) = &output.detail {
+                            println!("Detail: {detail}");
+                        }
                     }
                 }
             }
@@ -926,6 +1068,7 @@ where
 {
     crate::app::spawn_auto_start_usage_windows_worker(app.env().clone());
     crate::app::spawn_auto_switch_worker(app.env().clone());
+    crate::app::spawn_claude_auto_switch_worker(app.env().clone());
     crate::app::spawn_usage_refresh_worker(app.env().clone());
     crate::app::spawn_vibe_usage_worker(app.env().clone());
     match app.interactive(InteractiveMode::Persistent, false)? {
@@ -1013,6 +1156,18 @@ fn parse_ai_provider(value: &str) -> std::result::Result<AiProvider, String> {
     }
 }
 
+fn parse_claude_auto_switch_strategy(
+    value: &str,
+) -> std::result::Result<ClaudeAutoSwitchStrategy, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "best" => Ok(ClaudeAutoSwitchStrategy::Best),
+        "consume-first" | "consume_first" => Ok(ClaudeAutoSwitchStrategy::ConsumeFirst),
+        _ => Err(format!(
+            "unknown strategy {value:?}; expected best or consume-first"
+        )),
+    }
+}
+
 fn print_provider_status(output: &ProviderStatusOutput) {
     println!("Environment: {}", output.environment);
     for provider in &output.providers {
@@ -1072,7 +1227,15 @@ fn append_provider_usage_summary(line: &mut String, usage: &ProviderUsageView) {
         .or_else(|| usage.windows.first())
     {
         if let Some(remaining) = window.remaining_percent {
-            line.push_str(&format!(" [{} remaining: {remaining}%]", window.label));
+            line.push_str(&format!(
+                " [{} remaining: {remaining}%{}]",
+                window.label,
+                if window.ahead_of_pace == Some(true) {
+                    " (ahead of pace)"
+                } else {
+                    ""
+                }
+            ));
         } else if window.used.is_some() || window.limit.is_some() {
             line.push_str(&format!(
                 " [{}: {} / {} {}]",
@@ -1130,6 +1293,9 @@ fn print_provider_usage_output(output: &ProviderUsageOutput) {
                 );
             }
             _ => print!("{}", window.label),
+        }
+        if window.ahead_of_pace == Some(true) {
+            print!(" (ahead of pace)");
         }
         if let Some(reset_at) = window.reset_at {
             print!(" (reset {reset_at})");

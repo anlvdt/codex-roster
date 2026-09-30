@@ -1117,15 +1117,14 @@ where
     pub fn export_backup(&self, path: &std::path::Path, password: &str) -> Result<usize> {
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         let backup = self.repository.export_backup(&self.env.kind)?;
-        let count = backup.accounts.len();
         write_encrypted(path, &backup, password)?;
-        Ok(count)
+        Ok(backup.accounts.len() + backup.provider_accounts.len())
     }
 
     pub fn import_backup(&self, path: &std::path::Path, password: &str) -> Result<(usize, usize)> {
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
-        self.repository
-            .import_backup(&self.env.kind, read_encrypted(path, password)?)
+        let bundle = read_encrypted(path, password)?;
+        self.repository.import_backup(&self.env.kind, bundle)
     }
 
     pub fn restore_latest_account_list_backup(&self) -> Result<usize> {
@@ -1857,7 +1856,10 @@ fn exhausted_cached_usage_skips_probe(
 
 /// A non-login usage failure (e.g. 402 deactivated workspace) recorded within
 /// the backoff is not worth another AuthLock-held network probe every sweep.
-fn recent_usage_error_skips_probe(account: &SavedAccountMetadata, now: time::OffsetDateTime) -> bool {
+fn recent_usage_error_skips_probe(
+    account: &SavedAccountMetadata,
+    now: time::OffsetDateTime,
+) -> bool {
     account.cached_usage_error.as_deref().is_some_and(|error| {
         !usage_error_blocks_activation(error)
             && !usage_error_is_deferred_access_token_refresh(error)
@@ -2932,10 +2934,9 @@ mod tests {
         let mut index: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&index_path).expect("read index"))
                 .expect("parse index");
-        let old_updated_at = serde_json::to_value(
-            OffsetDateTime::now_utc() - time::Duration::minutes(11),
-        )
-        .expect("serialize updated_at");
+        let old_updated_at =
+            serde_json::to_value(OffsetDateTime::now_utc() - time::Duration::minutes(11))
+                .expect("serialize updated_at");
         for account in index["accounts"]
             .as_array_mut()
             .expect("accounts array")

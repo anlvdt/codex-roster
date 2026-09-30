@@ -193,6 +193,7 @@ fn ratio_window(
         used,
         limit,
         unit: Some(unit.to_owned()),
+        ..Default::default()
     })
 }
 

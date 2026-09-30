@@ -3,13 +3,15 @@ set -euo pipefail
 
 root_dir="$(cd "$(dirname "$0")/.." && pwd)"
 
-# macOS centralizes its two allowed force flags: the activation helper and the
-# auto-switch apply path after Desktop was confirmed closed. Any extra literal
-# is an unsafe ad-hoc bypass and must fail CI.
+# macOS centralizes its three allowed force flags: the activation helper, the
+# auto-switch apply path after Desktop was confirmed closed, and the usage-
+# refresh async helper (refreshClaudeUsageAsync) which passes --force to the
+# roster CLI refresh command (not an activation bypass). Any extra literal is
+# an unsafe ad-hoc bypass and must fail CI.
 macos_force_count="$(grep -R -F -h -- '--force' \
   "$root_dir/macos/NextAccount/Sources/NextAccount" | wc -l | tr -d ' ')"
-if [[ "$macos_force_count" -ne 2 ]]; then
-  echo "Expected exactly two guarded macOS --force append sites; found $macos_force_count." >&2
+if [[ "$macos_force_count" -ne 3 ]]; then
+  echo "Expected exactly three guarded macOS --force append sites; found $macos_force_count." >&2
   exit 1
 fi
 

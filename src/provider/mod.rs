@@ -6,13 +6,24 @@ use crate::model::{
 };
 
 mod claude;
+pub(crate) use claude::UNKNOWN_EMAIL;
+mod claude_keychain;
+mod claude_locks;
 mod cursor;
 mod grok;
 mod openai;
+mod pace;
 
 pub struct ProviderAuthBundle {
     pub identity: DisplayIdentity,
     pub snapshot: SnapshotBlob,
+}
+
+pub enum SnapshotRefresh {
+    Unsupported,
+    Refreshed(SnapshotBlob),
+    Dead(String),
+    Transient(String),
 }
 
 pub trait ProviderAdapter: Sync {
@@ -29,6 +40,30 @@ pub trait ProviderAdapter: Sync {
     fn identity_from_snapshot(&self, snapshot: &SnapshotBlob) -> Result<DisplayIdentity>;
     fn restore_snapshot(&self, env: &AppEnv, snapshot: &SnapshotBlob) -> Result<()>;
     fn fetch_usage(&self, snapshot: &SnapshotBlob) -> Result<ProviderUsageView>;
+
+    fn acquire_switch_guard(&self, _env: &AppEnv) -> Result<Box<dyn std::any::Any>> {
+        Ok(Box::new(()))
+    }
+
+    fn snapshot_access_token_expired(&self, _snapshot: &SnapshotBlob) -> bool {
+        false
+    }
+    fn snapshot_access_token_expires_within(
+        &self,
+        _snapshot: &SnapshotBlob,
+        _within: std::time::Duration,
+    ) -> bool {
+        false
+    }
+    fn refresh_snapshot(&self, _snapshot: &SnapshotBlob) -> SnapshotRefresh {
+        SnapshotRefresh::Unsupported
+    }
+    fn snapshot_shares_live_credential(&self, _env: &AppEnv, _snapshot: &SnapshotBlob) -> bool {
+        false
+    }
+    fn snapshots_share_credential(&self, _a: &SnapshotBlob, _b: &SnapshotBlob) -> bool {
+        false
+    }
 
     fn requires_relaunch_after_switch(&self) -> bool {
         false
@@ -48,6 +83,19 @@ pub fn all() -> impl Iterator<Item = &'static dyn ProviderAdapter> {
     AiProvider::ALL.into_iter().map(adapter)
 }
 
+pub(crate) fn needs_auth_view(provider: AiProvider, detail: String) -> ProviderUsageView {
+    ProviderUsageView {
+        provider,
+        fetched_at: time::OffsetDateTime::now_utc(),
+        status: crate::model::ProviderUsageStatus::NeedsAuth,
+        fidelity: crate::model::UsageFidelity::Official,
+        headline_window: None,
+        windows: Vec::new(),
+        plan_label: None,
+        detail: Some(detail),
+    }
+}
+
 pub(crate) fn percent_window(
     key: impl Into<String>,
     label: impl Into<String>,
@@ -64,6 +112,7 @@ pub(crate) fn percent_window(
         used: None,
         limit: None,
         unit: None,
+        ..Default::default()
     }
 }
 

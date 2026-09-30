@@ -518,7 +518,7 @@ pub enum UsageFidelity {
     Manual,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct ProviderUsageWindowView {
     pub key: String,
     pub label: String,
@@ -534,6 +534,14 @@ pub struct ProviderUsageWindowView {
     pub limit: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_used_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ahead_of_pace: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projected_exhaustion_at: Option<OffsetDateTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub will_last_to_reset: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -596,6 +604,10 @@ pub struct ProviderAccountView {
     pub last_activated_at: Option<OffsetDateTime>,
     pub usage: Option<ProviderUsageView>,
     pub usage_error: Option<String>,
+    #[serde(default)]
+    pub can_activate: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_block_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -606,10 +618,46 @@ pub struct ProviderListOutput {
     pub accounts: Vec<ProviderAccountView>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClaudeAutoSwitchStrategy {
+    #[default]
+    Best,
+    ConsumeFirst,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderAutoSwitchOutput {
+    pub provider: AiProvider,
+    pub enabled: bool,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_account_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_account_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub threshold_percent: u8,
+    pub hysteresis_percent: u8,
+    pub cooldown_seconds: u64,
+    pub strategy: ClaudeAutoSwitchStrategy,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ProviderSaveOutput {
     pub account: ProviderAccountView,
     pub action: SaveAction,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderDeleteOutput {
+    pub id: Uuid,
+    pub email: String,
+    pub status: String,
 }
 
 #[derive(Clone, Debug, Serialize)]

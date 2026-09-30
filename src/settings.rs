@@ -7,6 +7,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::file_store::replace_file_with_recovery;
+use crate::model::ClaudeAutoSwitchStrategy;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppSettings {
@@ -25,6 +26,22 @@ pub struct AppSettings {
     pub last_auto_switch_target: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_auto_switch_from: Option<Uuid>,
+    #[serde(default)]
+    pub claude_auto_switch: bool,
+    #[serde(default = "default_claude_auto_switch_threshold")]
+    pub claude_auto_switch_threshold_percent: u8,
+    #[serde(default = "default_claude_auto_switch_hysteresis")]
+    pub claude_auto_switch_hysteresis_percent: u8,
+    #[serde(default = "default_claude_auto_switch_cooldown")]
+    pub claude_auto_switch_cooldown_seconds: u64,
+    #[serde(default)]
+    pub claude_auto_switch_strategy: ClaudeAutoSwitchStrategy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_last_auto_switch_at: Option<OffsetDateTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_last_auto_switch_from: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_last_auto_switch_target: Option<Uuid>,
 }
 
 impl Default for AppSettings {
@@ -36,8 +53,28 @@ impl Default for AppSettings {
             last_auto_switch_at: None,
             last_auto_switch_target: None,
             last_auto_switch_from: None,
+            claude_auto_switch: false,
+            claude_auto_switch_threshold_percent: default_claude_auto_switch_threshold(),
+            claude_auto_switch_hysteresis_percent: default_claude_auto_switch_hysteresis(),
+            claude_auto_switch_cooldown_seconds: default_claude_auto_switch_cooldown(),
+            claude_auto_switch_strategy: ClaudeAutoSwitchStrategy::default(),
+            claude_last_auto_switch_at: None,
+            claude_last_auto_switch_from: None,
+            claude_last_auto_switch_target: None,
         }
     }
+}
+
+fn default_claude_auto_switch_threshold() -> u8 {
+    95
+}
+
+fn default_claude_auto_switch_hysteresis() -> u8 {
+    10
+}
+
+fn default_claude_auto_switch_cooldown() -> u64 {
+    300
 }
 
 fn default_auto_resume_session() -> bool {

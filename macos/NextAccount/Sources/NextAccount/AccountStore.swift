@@ -255,6 +255,10 @@ final class AccountStore: ObservableObject {
     @Published private(set) var isLoadingResetOutlook = false
     @Published private(set) var isLoadingOpenAIStatus = false
     @Published private(set) var isLoadingProviderStatus = false
+    @Published private(set) var claudeAccounts: [ProviderAccount] = []
+    @Published private(set) var claudeAutoSwitch: ProviderAutoSwitchOutput?
+    @Published private(set) var isLoadingClaude = false
+    @Published private(set) var claudeErrorMessage: String?
     @Published private(set) var isRefreshingQuotaInBackground = false
     @Published private(set) var lastQuotaRefreshAt: Date?
     @Published private(set) var accountSortMode: AccountSortMode
@@ -317,6 +321,9 @@ final class AccountStore: ObservableObject {
     /// Never set for enroll-only adds.
     private var pendingLoginDesktopRelaunch: ChatGPTDesktop.RelaunchPlan?
     private var resetNotificationTask: Task<Void, Never>?
+    private var claudeMonitorTask: Task<Void, Never>?
+    /// Refresh cadence for the Claude tab starts only after it is first opened.
+    private var claudeTabOpened = false
     private var coreBootstrapStarted = false
     private var menuInteractionUntil: Date?
     private var isRefreshingAccountsInBackground = false
@@ -1879,6 +1886,7 @@ final class AccountStore: ObservableObject {
         startAutoSwitchMonitoring()
         startQuotaMonitoring()
         startVibeUsageMonitoring()
+        startClaudeMonitoring()
     }
 
     private func startVibeUsageMonitoring() {
@@ -2296,6 +2304,242 @@ final class AccountStore: ObservableObject {
             } catch {
                 if !silently { errorMessage = error.localizedDescription }
             }
+        }
+    }
+
+    // MARK: - Claude Code roster
+
+    func refreshClaudeRoster(silently: Bool = false) {
+        Task { await refreshClaudeRosterAsync(silently: silently) }
+    }
+
+    private func refreshClaudeRosterAsync(silently: Bool) async {
+        guard !isLoadingClaude else { return }
+        isLoadingClaude = true
+        defer { isLoadingClaude = false }
+        do {
+            let list: ProviderListOutput = try await cli.decode(
+                ProviderListOutput.self,
+                arguments: ["providers", "list", "--provider", "claude"]
+            )
+            claudeAccounts = list.accounts
+        } catch {
+            if !silently { claudeErrorMessage = error.localizedDescription }
+        }
+        if let auto = try? await cli.decode(
+            ProviderAutoSwitchOutput.self,
+            arguments: ["providers", "auto-switch", "claude", "--status"]
+        ) {
+            claudeAutoSwitch = auto
+        }
+    }
+
+    func refreshClaudeUsage(force: Bool) {
+        Task { await refreshClaudeUsageAsync(force: force) }
+    }
+
+    private func refreshClaudeUsageAsync(force: Bool) async {
+        guard !isLoadingClaude else { return }
+        isLoadingClaude = true
+        defer { isLoadingClaude = false }
+        do {
+            var arguments = ["providers", "refresh-usage", "claude"]
+            if force { arguments.append("--force") }
+            let list: ProviderListOutput = try await cli.decode(
+                ProviderListOutput.self,
+                arguments: arguments
+            )
+            claudeAccounts = list.accounts
+            claudeErrorMessage = nil
+        } catch {
+            claudeErrorMessage = error.localizedDescription
+        }
+        if let auto = try? await cli.decode(
+            ProviderAutoSwitchOutput.self,
+            arguments: ["providers", "auto-switch", "claude", "--status"]
+        ) {
+            claudeAutoSwitch = auto
+        }
+    }
+
+    func saveLiveClaudeAccount() {
+        Task {
+            do {
+                let saved: ProviderSaveOutput = try await cli.decode(
+                    ProviderSaveOutput.self,
+                    arguments: ["providers", "save", "claude"]
+                )
+                _ = saved
+                claudeErrorMessage = nil
+                await refreshClaudeUsageAsync(force: true)
+            } catch {
+                claudeErrorMessage = error.localizedDescription
+            }
+            await refreshClaudeRosterAsync(silently: true)
+        }
+    }
+
+    func activateClaudeAccount(_ id: UUID) {
+        Task {
+            let interrupted = await Task.detached(priority: .utility) {
+                ClaudeSessionContinuity.recentInterruptedSession()
+            }.value
+            do {
+                let output: ProviderActivateOutput = try await cli.decode(
+                    ProviderActivateOutput.self,
+                    arguments: ["providers", "activate", id.uuidString]
+                )
+                _ = output
+                claudeErrorMessage = nil
+                if UserDefaults.standard.object(forKey: "claude_roster_auto_resume") as? Bool != false,
+                   let interrupted {
+                    do { try ClaudeSessionContinuity.resume(interrupted) }
+                    catch { claudeErrorMessage = error.localizedDescription }
+                }
+            } catch {
+                claudeErrorMessage = error.localizedDescription
+            }
+            await refreshClaudeRosterAsync(silently: true)
+        }
+    }
+
+    func dismissClaudeError() {
+        claudeErrorMessage = nil
+    }
+
+    func deleteClaudeAccount(_ id: UUID) {
+        Task {
+            do {
+                _ = try await cli.data(
+                    arguments: ["providers", "delete", id.uuidString, "--json"]
+                )
+                claudeErrorMessage = nil
+            } catch {
+                claudeErrorMessage = error.localizedDescription
+            }
+            await refreshClaudeRosterAsync(silently: true)
+        }
+    }
+
+    func setClaudeLabel(_ id: UUID, label: String?) {
+        Task {
+            do {
+                var arguments = ["providers", "set-label", id.uuidString]
+                if let label, !label.isEmpty {
+                    arguments.append(label)
+                }
+                _ = try await cli.data(arguments: arguments + ["--json"])
+                claudeErrorMessage = nil
+            } catch {
+                claudeErrorMessage = error.localizedDescription
+            }
+            await refreshClaudeRosterAsync(silently: true)
+        }
+    }
+
+    func setClaudeAutoSwitch(
+        enabled: Bool?,
+        threshold: Int? = nil,
+        hysteresis: Int? = nil,
+        cooldown: Int? = nil,
+        strategy: String? = nil
+    ) {
+        Task {
+            var arguments = ["providers", "auto-switch", "claude"]
+            if let enabled {
+                arguments.append(enabled ? "--enable" : "--disable")
+            }
+            if let threshold {
+                arguments += ["--threshold", String(threshold)]
+            }
+            if let hysteresis {
+                arguments += ["--hysteresis", String(hysteresis)]
+            }
+            if let cooldown {
+                arguments += ["--cooldown", String(cooldown)]
+            }
+            if let strategy {
+                arguments += ["--strategy", strategy]
+            }
+            do {
+                let output: ProviderAutoSwitchOutput = try await cli.decode(
+                    ProviderAutoSwitchOutput.self,
+                    arguments: arguments
+                )
+                claudeAutoSwitch = output
+                claudeErrorMessage = nil
+            } catch {
+                claudeErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// Called when the Claude Code tab appears — refreshes the roster and
+    /// enables the periodic 5-minute roster refresh. The auto-switch monitor
+    /// itself starts at app launch in `startCoreMonitoring`.
+    func claudeTabDidAppear() {
+        claudeTabOpened = true
+        Task {
+            await refreshClaudeRosterAsync(silently: true)
+            await refreshClaudeUsageAsync(force: false)
+        }
+    }
+
+    private func startClaudeMonitoring() {
+        guard claudeMonitorTask == nil else { return }
+        claudeMonitorTask = Task { [weak self] in
+            var ticks = 0
+            while !Task.isCancelled {
+                // `enabled` lives in CLI settings — fetch status first so the
+                // loop knows it without the tab ever being opened.
+                if self?.claudeAutoSwitch == nil {
+                    if let auto = try? await self?.cli.decode(
+                        ProviderAutoSwitchOutput.self,
+                        arguments: ["providers", "auto-switch", "claude", "--status"]
+                    ) {
+                        self?.claudeAutoSwitch = auto
+                    }
+                }
+                if self?.claudeAutoSwitch?.enabled == true {
+                    await self?.claudeAutoSwitchTick()
+                }
+                ticks += 1
+                if self?.claudeTabOpened == true && ticks % 5 == 0 {
+                    await self?.refreshClaudeRosterAsync(silently: true)
+                }
+                try? await Task.sleep(for: .seconds(60))
+            }
+        }
+    }
+
+    /// `providers auto-switch claude --apply` re-decides server-side and only
+    /// switches when a candidate is ready, so a bare apply is safe to repeat.
+    private func claudeAutoSwitchTick() async {
+        guard !isBusyForActions, !isSwitching else { return }
+        let interrupted = await Task.detached(priority: .utility) {
+            ClaudeSessionContinuity.recentInterruptedSession()
+        }.value
+        do {
+            let output: ProviderAutoSwitchOutput = try await cli.decode(
+                ProviderAutoSwitchOutput.self,
+                arguments: ["providers", "auto-switch", "claude", "--apply"]
+            )
+            claudeAutoSwitch = output
+            if output.status == "switched" {
+                if output.trigger == "at_limit",
+                   UserDefaults.standard.object(forKey: "claude_roster_auto_resume") as? Bool != false,
+                   let interrupted {
+                    do { try ClaudeSessionContinuity.resume(interrupted) }
+                    catch { claudeErrorMessage = error.localizedDescription }
+                }
+                ResetNotifier.showClaudeAccountSwitched(
+                    output.candidateDisplayName
+                        ?? AppLanguage.text("tài khoản khác", "another account")
+                )
+                await refreshClaudeRosterAsync(silently: true)
+            }
+        } catch {
+            // Transient CLI failure — next tick retries.
         }
     }
 
@@ -3858,6 +4102,21 @@ private enum ResetNotifier {
             subtitle: "codex-resets.com",
             body: signal.summary,
             url: signal.url
+        )
+    }
+
+    static func showClaudeAccountSwitched(_ name: String) {
+        enqueue(
+            identifier: "codex-roster-claude-switch-\(Int(Date().timeIntervalSince1970))",
+            title: AppLanguage.text(
+                "Claude Code đã chuyển tài khoản",
+                "Claude Code switched accounts"
+            ),
+            subtitle: name,
+            body: AppLanguage.text(
+                "Quota tài khoản trước gần hết — Claude Code đang dùng tài khoản mới.",
+                "The previous account was nearly out of quota — Claude Code is on the new account."
+            )
         )
     }
 

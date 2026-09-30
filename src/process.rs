@@ -107,7 +107,13 @@ fn is_desktop_like_process(process: &RunningCodexProcess) -> bool {
 
 fn is_desktop_main_process(process: &RunningCodexProcess) -> bool {
     let exe = process.executable.to_ascii_lowercase();
-    is_codex_bin_name(&exe) && matches!(process.role.as_str(), "process" | "main")
+    // role "process" is also assigned to bare interactive `codex` CLI sessions.
+    // Those hold a live login and must NOT be force-skipped; only skip when the
+    // origin shows the process is Desktop/plugin-owned, not a user CLI session.
+    if matches!(process.origin.as_deref(), Some("desktop") | Some("plugin")) {
+        return is_codex_bin_name(&exe) && matches!(process.role.as_str(), "process" | "main");
+    }
+    is_codex_bin_name(&exe) && process.role == "main"
 }
 
 pub fn format_process_table(processes: &[RunningCodexProcess]) -> Vec<String> {
@@ -248,14 +254,7 @@ fn is_desktop_owned_command(name: &str, command: &[String], role: &str) -> bool 
     is_codex_bin_name(name)
         && matches!(
             role,
-            "renderer"
-                | "gpu-process"
-                | "utility"
-                | "zygote"
-                | "gpu"
-                | "broker"
-                | "process"
-                | "main"
+            "renderer" | "gpu-process" | "utility" | "zygote" | "gpu" | "broker"
         )
 }
 
@@ -550,6 +549,15 @@ mod tests {
             summary: None,
             origin: Some("cli".to_owned()),
         }));
+    }
+
+    #[test]
+    fn bare_interactive_codex_blocks_force_activation() {
+        let process =
+            super::format_process(sysinfo::Pid::from_u32(42), "codex", &["codex".to_owned()]);
+        assert_eq!(process.role, "process");
+        assert_eq!(process.origin.as_deref(), Some("cli"));
+        assert!(!is_force_skippable_process(&process));
     }
 
     #[test]

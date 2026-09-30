@@ -12,7 +12,7 @@ use time::{Duration, OffsetDateTime};
 
 use crate::model::{TokenUsageBreakdownOutput, TokenUsageDayOutput, TokenUsageSummaryOutput};
 
-const CACHE_VERSION: u8 = 3;
+const CACHE_VERSION: u8 = 4;
 const CACHE_FILE_NAME: &str = ".codex-roster-token-usage-v1.json";
 
 #[derive(Default, Serialize, Deserialize)]
@@ -36,6 +36,12 @@ struct CachedSession {
     by_day: BTreeMap<String, CachedTokenUsage>,
     by_model: BTreeMap<String, CachedTokenUsage>,
     by_project: BTreeMap<String, CachedTokenUsage>,
+    /// Per-day estimated cost in USD, computed using the model label active at
+    /// the time of each event rather than the session's final model.  This
+    /// avoids pricing all days at the last-seen model's rate when the session
+    /// switched models mid-session.
+    #[serde(default)]
+    by_day_cost: BTreeMap<String, f64>,
     model: String,
     project: String,
     #[serde(default)]
@@ -95,10 +101,9 @@ pub fn summarize_session_tokens(
             main_sessions += 1;
         }
 
-        for (day, day_usage) in &current.by_day {
+        for (day, day_cost) in &current.by_day_cost {
             if let Ok(timestamp) = OffsetDateTime::parse(&format!("{day}T00:00:00Z"), &Rfc3339) {
-                let cost = estimate_cost_usd(day_usage, &current.model);
-                *day_costs.entry(timestamp.date()).or_default() += cost;
+                *day_costs.entry(timestamp.date()).or_default() += day_cost;
             }
         }
 
@@ -344,6 +349,8 @@ fn refresh_cached_session(
 
         merge_usage(&mut cached.usage, &token_usage);
         let day = timestamp.to_offset(offset).date().to_string();
+        *cached.by_day_cost.entry(day.clone()).or_default() +=
+            estimate_cost_usd(&token_usage, &current_label(&cached.model, "Unknown model"));
         merge_usage(cached.by_day.entry(day).or_default(), &token_usage);
         merge_usage(
             cached
@@ -851,6 +858,39 @@ mod tests {
         assert_eq!(summary.cache_hit_percent, 25);
         assert_eq!(summary.token_events, 2);
         assert_eq!(summary.sessions_scanned, 1);
+    }
+
+    #[test]
+    fn daily_cost_uses_each_events_model_across_cache_reload() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions = temp.path().join("sessions");
+        fs::create_dir(&sessions).expect("sessions");
+        fs::write(sessions.join("rollout-model-switch.jsonl"), concat!(
+            "{\"timestamp\":\"2026-08-29T01:00:00Z\",\"payload\":{\"model\":\"gpt-5.6-sol\",\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":1000000,\"total_tokens\":1000000}}}}\n",
+            "{\"timestamp\":\"2026-08-30T01:00:00Z\",\"payload\":{\"model\":\"gpt-5.6-luna\",\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":2000000,\"total_tokens\":2000000}}}}\n"
+        )).expect("rollout");
+        let now = OffsetDateTime::parse("2026-08-30T10:00:00Z", &Rfc3339).expect("now");
+        for _ in 0..2 {
+            let summary = summarize_session_tokens(&sessions, now).expect("summary");
+            let yesterday = summary
+                .daily
+                .iter()
+                .find(|day| day.date == "2026-08-29")
+                .unwrap();
+            let sol = summary
+                .by_model
+                .iter()
+                .find(|model| model.label == "gpt-5.6-sol")
+                .unwrap();
+            assert!((yesterday.cost_usd - sol.estimated_cost_usd).abs() < 1e-9);
+            assert!((summary.last_7_days_cost_usd - summary.estimated_cost_usd).abs() < 1e-9);
+            assert!(
+                (summary.daily.iter().map(|day| day.cost_usd).sum::<f64>()
+                    - summary.estimated_cost_usd)
+                    .abs()
+                    < 1e-9
+            );
+        }
     }
 
     #[test]

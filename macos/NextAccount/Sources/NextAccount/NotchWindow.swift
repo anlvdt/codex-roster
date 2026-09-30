@@ -64,6 +64,18 @@ enum NotchExpansionState: Equatable {
     case fullyExpanded
 }
 
+private enum NotchScreen: CaseIterable {
+    case codex
+    case claude
+
+    var title: String {
+        switch self {
+        case .codex: return "Codex"
+        case .claude: return "Claude Code"
+        }
+    }
+}
+
 /// All-In-One Panoramic Floating Notch Console for Codex Roster.
 /// Drops down from the camera notch, then blooms out symmetrically to both left and right wings.
 struct NotchWindowView: View {
@@ -81,6 +93,9 @@ struct NotchWindowView: View {
     @State private var keyMonitors: [Any] = []
     @State private var isWindowExpanded = false
     @State private var geometry: NotchGeometry = .detect()
+    @State private var notchScreen: NotchScreen = .codex
+    @State private var horizontalScroll: CGFloat = 0
+    @State private var lastScreenSwipeAt: TimeInterval = 0
 
     // Sheet presentation states directly inside the Notch Console
     @State private var showingAddAccount = false
@@ -115,7 +130,10 @@ struct NotchWindowView: View {
     }
 
     private var expandedPanelHeight: CGFloat {
-        NotchRosterLayout.deckHeight(
+        if notchScreen == .claude {
+            return ClaudeRosterView.notchDeckHeight(accountCount: store.claudeAccounts.count)
+        }
+        return NotchRosterLayout.deckHeight(
             sectionCounts: rosterSectionCounts,
             expanded: isRosterExpanded,
             hasNextActionCaption: hasNextActionCaption
@@ -356,7 +374,89 @@ struct NotchWindowView: View {
 
     // MARK: - Expanded Dropdown Content
     private var expandedDropdownContent: some View {
-        MenuBarView()
+        ZStack(alignment: .top) {
+            if notchScreen == .codex {
+                MenuBarView()
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .leading).combined(with: .opacity),
+                        removal: .move(edge: .trailing).combined(with: .opacity)
+                    ))
+            } else {
+                ClaudeRosterView(notchLayout: true)
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .trailing).combined(with: .opacity),
+                        removal: .move(edge: .leading).combined(with: .opacity)
+                    ))
+            }
+            notchScreenSwitcher
+                .padding(.top, compactHeight + 4)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .clipped()
+        .animation(reduceMotion ? nil : PrismTheme.snapSpring, value: notchScreen)
+        .contentShape(Rectangle())
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 28)
+                .onEnded { gesture in
+                    let x = gesture.predictedEndTranslation.width
+                    let y = gesture.predictedEndTranslation.height
+                    guard abs(x) > 55, abs(x) > abs(y) * 1.25 else { return }
+                    switchNotchScreen(x < 0 ? .claude : .codex)
+                }
+        )
+    }
+
+    private var notchScreenSwitcher: some View {
+        HStack(spacing: 10) {
+            Button {
+                switchNotchScreen(.codex)
+            } label: {
+                Image(systemName: "chevron.left")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(notchScreen == .codex ? PrismTheme.textTertiary : PrismTheme.textBright)
+            .disabled(notchScreen == .codex)
+            .accessibilityLabel(language.text("Màn hình Codex", "Codex screen"))
+
+            Text(notchScreen.title)
+                .font(PrismTheme.fontCaptionBold)
+                .foregroundStyle(PrismTheme.textBright)
+                .frame(minWidth: 110)
+
+            Button {
+                switchNotchScreen(.claude)
+            } label: {
+                Image(systemName: "chevron.right")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(notchScreen == .claude ? PrismTheme.textTertiary : PrismTheme.textBright)
+            .disabled(notchScreen == .claude)
+            .accessibilityLabel(language.text("Màn hình Claude Code", "Claude Code screen"))
+        }
+        .frame(width: 188, height: 34)
+        .background(PrismTheme.surfacePanel.opacity(0.94), in: Capsule())
+    }
+
+    private func switchNotchScreen(_ target: NotchScreen) {
+        guard notchScreen != target else { return }
+        withAnimation(reduceMotion ? nil : PrismTheme.snapSpring) {
+            notchScreen = target
+        }
+    }
+
+    private func handleNotchScroll(_ event: NSEvent) {
+        guard isExpanded, event.momentumPhase.isEmpty else { return }
+        let x = event.scrollingDeltaX
+        let y = event.scrollingDeltaY
+        if event.phase.contains(.began) { horizontalScroll = 0 }
+        guard abs(x) > abs(y) * 1.25 else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastScreenSwipeAt > 0.55 else { return }
+        horizontalScroll += x * (event.hasPreciseScrollingDeltas ? 1 : 32)
+        guard abs(horizontalScroll) >= 35 else { return }
+        switchNotchScreen(horizontalScroll > 0 ? .claude : .codex)
+        lastScreenSwipeAt = now
+        horizontalScroll = 0
     }
 
     private var compactAccessibilityLabel: String {
@@ -469,6 +569,13 @@ struct NotchWindowView: View {
             Task { @MainActor in collapse() }
         }) {
             keyMonitors.append(global)
+        }
+        if let scroll = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel, handler: { event in
+            guard event.window?.identifier?.rawValue == "notch" else { return event }
+            Task { @MainActor in handleNotchScroll(event) }
+            return event
+        }) {
+            keyMonitors.append(scroll)
         }
     }
 

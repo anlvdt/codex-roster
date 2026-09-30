@@ -388,15 +388,27 @@ pub fn restore_snapshot_with_retry(
     create_private_directory(&temp_dir)?;
 
     if let Err(error) = stage_and_restore(&env.codex_root, &backup_dir, &temp_dir, snapshot) {
-        let _ = restore_from_backup(&env.codex_root, &backup_dir);
+        let rollback = restore_from_backup(&env.codex_root, &backup_dir);
         let _ = fs::remove_dir_all(&temp_dir);
+        if let Err(rollback_error) = rollback {
+            return Err(error).context(format!(
+                "rollback failed: {rollback_error:#}; recovery files retained at {}",
+                backup_dir.display()
+            ));
+        }
         let _ = fs::remove_dir_all(&backup_dir);
         return Err(error);
     }
 
     if let Err(error) = verify_live_snapshot_once(env, snapshot, expected_identity) {
-        let _ = restore_from_backup(&env.codex_root, &backup_dir);
+        let rollback = restore_from_backup(&env.codex_root, &backup_dir);
         let _ = fs::remove_dir_all(&temp_dir);
+        if let Err(rollback_error) = rollback {
+            return Err(error).context(format!(
+                "rollback failed: {rollback_error:#}; recovery files retained at {}",
+                backup_dir.display()
+            ));
+        }
         let _ = fs::remove_dir_all(&backup_dir);
         return Err(error);
     }
@@ -410,8 +422,14 @@ pub fn restore_snapshot_with_retry(
             stable_delay,
         )
     {
-        let _ = restore_from_backup(&env.codex_root, &backup_dir);
+        let rollback = restore_from_backup(&env.codex_root, &backup_dir);
         let _ = fs::remove_dir_all(&temp_dir);
+        if let Err(rollback_error) = rollback {
+            return Err(error).context(format!(
+                "rollback failed: {rollback_error:#}; recovery files retained at {}",
+                backup_dir.display()
+            ));
+        }
         let _ = fs::remove_dir_all(&backup_dir);
         return Err(error);
     }
@@ -500,16 +518,22 @@ fn stage_and_restore(
         let live_path = codex_root.join(file_name);
         if live_path.exists() {
             let backup_path = backup_dir.join(file_name);
-            fs::copy(&live_path, &backup_path).with_context(|| {
+            let pending_backup = backup_dir.join(format!("{file_name}.pending"));
+            fs::copy(&live_path, &pending_backup).with_context(|| {
                 format!(
                     "failed to back up {} to {}",
                     live_path.display(),
                     backup_path.display()
                 )
             })?;
-            set_private_file_permissions(&backup_path)?;
+            set_private_file_permissions(&pending_backup)?;
+            fs::rename(&pending_backup, &backup_path)
+                .with_context(|| format!("failed to commit backup {}", backup_path.display()))?;
             fs::remove_file(&live_path)
                 .with_context(|| format!("failed to remove {}", live_path.display()))?;
+        } else {
+            fs::write(backup_dir.join(format!("{file_name}.absent")), b"")
+                .with_context(|| format!("failed to record absent {}", live_path.display()))?;
         }
         let staged_path = temp_dir.join(file_name);
         fs::copy(&staged_path, &live_path).with_context(|| {
@@ -589,11 +613,11 @@ fn restore_from_backup(codex_root: &Path, backup_dir: &Path) -> Result<()> {
                     live_path.display()
                 )
             })?;
-        } else if live_path.exists() {
-            fs::remove_file(&live_path).with_context(|| {
-                format!("failed to remove newly restored {}", live_path.display())
-            })?;
+        } else if backup_dir.join(format!("{file_name}.absent")).exists() && live_path.exists() {
+            fs::remove_file(&live_path)
+                .with_context(|| format!("failed to remove {}", live_path.display()))?;
         }
+        // No backup or absence marker means staging never reached this file.
     }
     Ok(())
 }
@@ -952,6 +976,32 @@ mod tests {
             plan_label: bundle.identity.plan_label.clone(),
         };
         restore_snapshot(&env, &bundle.snapshot, &expected, false)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_leaves_untouched_files_when_staging_fails() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path().join("codex");
+        let backup = temp.path().join("backup");
+        let staged = temp.path().join("staged");
+        for dir in [&root, &backup, &staged] {
+            fs::create_dir(dir)?;
+        }
+        fs::write(root.join("auth.json"), "original-auth")?;
+        fs::write(root.join("cap_sid"), "original-cap")?;
+        fs::create_dir(staged.join("auth.json"))?;
+        let snapshot = SnapshotBlob {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            files: vec![SnapshotFile {
+                name: "auth.json".to_owned(),
+                bytes_base64: STANDARD.encode(b"new-auth"),
+            }],
+        };
+        assert!(super::stage_and_restore(&root, &backup, &staged, &snapshot).is_err());
+        super::restore_from_backup(&root, &backup)?;
+        assert_eq!(fs::read_to_string(root.join("auth.json"))?, "original-auth");
+        assert_eq!(fs::read_to_string(root.join("cap_sid"))?, "original-cap");
         Ok(())
     }
 

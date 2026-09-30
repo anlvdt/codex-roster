@@ -8,7 +8,7 @@ use crate::model::{
     AiProvider, ClaudeAutoSwitchStrategy, ProviderAutoSwitchOutput, ProviderUsageStatus,
     ProviderUsageView,
 };
-use crate::operation_lock::OperationLock;
+use crate::operation_lock::{AuthLock, AutoSwitchLock, OperationLock};
 use crate::provider::{SnapshotRefresh, adapter};
 use crate::provider_store::LOGIN_REQUIRED_ERROR_PREFIX;
 use crate::settings::{AppSettings, load_settings, save_settings};
@@ -16,7 +16,7 @@ use crate::settings::{AppSettings, load_settings, save_settings};
 use super::App;
 use crate::secrets::SecretStore;
 
-const USAGE_FRESHNESS: time::Duration = time::Duration::minutes(15);
+const USAGE_FRESHNESS: time::Duration = time::Duration::minutes(2);
 const FRESHEN_WITHIN: StdDuration = StdDuration::from_secs(600);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -61,16 +61,18 @@ enum Decision {
 }
 
 fn claude_binding_utilization(usage: &ProviderUsageView) -> Option<u8> {
-    if !matches!(
-        usage.status,
-        ProviderUsageStatus::Ok | ProviderUsageStatus::Stale
-    ) {
+    if usage.status != ProviderUsageStatus::Ok {
         return None;
     }
     usage
         .windows
         .iter()
-        .filter(|window| matches!(window.key.as_str(), "five_hour" | "seven_day"))
+        .filter(|window| {
+            matches!(
+                window.key.as_str(),
+                "five_hour" | "seven_day" | "seven_day_sonnet" | "seven_day_opus"
+            )
+        })
         .filter_map(|window| window.used_percent)
         .max()
 }
@@ -91,6 +93,11 @@ fn seven_day_reset_at(usage: &ProviderUsageView) -> Option<OffsetDateTime> {
 fn usage_is_fresh(usage: &ProviderUsageView, now: OffsetDateTime) -> bool {
     (now - usage.fetched_at) <= USAGE_FRESHNESS
         && usage.fetched_at <= now + time::Duration::minutes(1)
+        && !usage.windows.iter().any(|window| {
+            window
+                .reset_at
+                .is_some_and(|reset| usage.fetched_at < reset && reset <= now)
+        })
 }
 
 fn decide(
@@ -238,13 +245,39 @@ where
                 Some("live Claude account is not saved".to_owned()),
             ));
         };
-        let active_usage = self
-            .provider_usage(AiProvider::Claude, Some(active.id))?
-            .usage;
+        // The active snapshot can be older than Claude Code's live, rotated token.
+        let live_usage = match self.provider_usage(AiProvider::Claude, None) {
+            Ok(output) => output,
+            Err(error) => {
+                return Ok(self.claude_auto_switch_output(
+                    &settings,
+                    "usage_unavailable",
+                    None,
+                    Some(active.id),
+                    None,
+                    Some(format!("Claude usage request failed: {error}")),
+                ));
+            }
+        };
+        if !active.identity.matches(&live_usage.account) {
+            return Ok(self.claude_auto_switch_output(
+                &settings,
+                "waiting_for_login",
+                None,
+                None,
+                None,
+                Some("live Claude identity changed while checking usage".to_owned()),
+            ));
+        }
+        let active_usage = live_usage.usage;
+        if active_usage.status == ProviderUsageStatus::Ok {
+            let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+            store.record_usage(&self.env.kind, active.id, active_usage.clone())?;
+        }
         let Some(active_utilization) = claude_binding_utilization(&active_usage) else {
             return Ok(self.claude_auto_switch_output(
                 &settings,
-                "below_threshold",
+                "usage_unavailable",
                 None,
                 Some(active.id),
                 None,
@@ -266,7 +299,9 @@ where
             else {
                 continue;
             };
-            if provider_adapter.snapshots_share_credential(&snapshot, &active_snapshot) {
+            if record.activation_block_reason(Some(&snapshot)).is_some()
+                || provider_adapter.snapshots_share_credential(&snapshot, &active_snapshot)
+            {
                 continue;
             }
             let usage = match record.cached_usage.as_ref() {
@@ -344,8 +379,9 @@ where
 
     pub fn claude_auto_switch_apply(
         &self,
-        _preferred: Option<Uuid>,
+        preferred: Option<Uuid>,
     ) -> Result<ProviderAutoSwitchOutput> {
+        let _auto_switch_lock = AutoSwitchLock::acquire(&self.env.app_data_dir)?;
         let output = self.claude_auto_switch_decide()?;
         if output.status != "ready" {
             return Ok(output);
@@ -353,9 +389,58 @@ where
         let Some(candidate_id) = output.candidate_account_id else {
             bail!("auto-switch decided ready without a candidate");
         };
+        if preferred.is_some_and(|id| id != candidate_id) {
+            let settings = load_settings(&self.env.app_data_dir)?;
+            return Ok(self.claude_auto_switch_output(
+                &settings,
+                "no_candidate",
+                None,
+                output.active_account_id,
+                None,
+                Some("candidate changed during auto-switch decision".to_owned()),
+            ));
+        }
+        let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
         let store = self.provider_store();
         let provider_adapter = adapter(AiProvider::Claude);
         let (record, snapshot) = store.load_snapshot(&self.env.kind, candidate_id)?;
+        if let Some(reason) = record.activation_block_reason(Some(&snapshot)) {
+            let settings = load_settings(&self.env.app_data_dir)?;
+            return Ok(self.claude_auto_switch_output(
+                &settings,
+                "no_candidate",
+                None,
+                output.active_account_id,
+                None,
+                Some(reason),
+            ));
+        }
+        // AuthLock remains held through the expected-active check and restore.
+        {
+            let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+            let current_live_id = provider_adapter
+                .try_read_live_auth(&self.env)?
+                .and_then(|bundle| {
+                    store
+                        .find_matching(&self.env.kind, AiProvider::Claude, &bundle.identity)
+                        .ok()
+                        .flatten()
+                })
+                .map(|acc| acc.id);
+            if current_live_id != output.active_account_id {
+                let settings = load_settings(&self.env.app_data_dir)?;
+                return Ok(self.claude_auto_switch_output(
+                    &settings,
+                    "no_candidate",
+                    None,
+                    current_live_id,
+                    None,
+                    Some(
+                        "active account changed between auto-switch decision and apply".to_owned(),
+                    ),
+                ));
+            }
+        }
         if provider_adapter.snapshot_access_token_expires_within(&snapshot, FRESHEN_WITHIN) {
             match provider_adapter.refresh_snapshot(&snapshot) {
                 SnapshotRefresh::Refreshed(new_snapshot) => {
@@ -391,7 +476,7 @@ where
                 SnapshotRefresh::Transient(_) | SnapshotRefresh::Unsupported => {}
             }
         }
-        self.provider_activate(candidate_id)?;
+        self.provider_activate_with_auth_lock(candidate_id)?;
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         let mut settings = load_settings(&self.env.app_data_dir)?;
         settings.claude_last_auto_switch_at = Some(OffsetDateTime::now_utc());
@@ -528,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn binding_utilization_uses_only_five_hour_and_seven_day() {
+    fn binding_utilization_includes_model_limits_and_rejects_stale_data() {
         let mut u = usage(ProviderUsageStatus::Ok, 40, 70);
         u.windows.push(crate::model::ProviderUsageWindowView {
             key: "seven_day_opus".to_owned(),
@@ -541,8 +626,10 @@ mod tests {
             unit: None,
             ..Default::default()
         });
-        assert_eq!(claude_binding_utilization(&u), Some(70));
-        assert_eq!(claude_headroom(&u), Some(30));
+        assert_eq!(claude_binding_utilization(&u), Some(99));
+        assert_eq!(claude_headroom(&u), Some(1));
+        u.status = ProviderUsageStatus::Stale;
+        assert_eq!(claude_binding_utilization(&u), None);
         u.status = ProviderUsageStatus::CredentialExpired;
         assert_eq!(claude_binding_utilization(&u), None);
     }
@@ -656,10 +743,13 @@ mod tests {
     }
 
     #[test]
-    fn stale_usage_counts_as_fresh_only_within_window() {
-        let mut u = usage(ProviderUsageStatus::Stale, 10, 20);
+    fn cached_usage_expires_after_reset_or_freshness_window() {
+        let mut u = usage(ProviderUsageStatus::Ok, 10, 20);
         let now = OffsetDateTime::now_utc();
         assert!(usage_is_fresh(&u, now));
+        u.windows[0].reset_at = Some(now);
+        assert!(!usage_is_fresh(&u, now));
+        u.windows[0].reset_at = None;
         u.fetched_at = now - time::Duration::minutes(20);
         assert!(!usage_is_fresh(&u, now));
     }

@@ -189,14 +189,31 @@ fn write_atomic(path: &Path, contents: &str, mode_0600: bool) -> Result<()> {
     let name = path
         .file_name()
         .with_context(|| format!("{} has no file name", path.display()))?;
-    let tmp = path.with_file_name(format!(".{}.tmp", name.to_string_lossy()));
-    fs::write(&tmp, contents.as_bytes())
-        .with_context(|| format!("failed to write {}", tmp.display()))?;
+    let tmp = path.with_file_name(format!(
+        ".{}.tmp-{}",
+        name.to_string_lossy(),
+        uuid::Uuid::new_v4().simple()
+    ));
     #[cfg(unix)]
-    if mode_0600 {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("failed to chmod {}", tmp.display()))?;
+    {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        // Create privately before writing any credential bytes.
+        let effective_mode = if mode_0600 { 0o600 } else { 0o644 };
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(effective_mode)
+            .open(&tmp)
+            .with_context(|| format!("failed to write {}", tmp.display()))?;
+        f.write_all(contents.as_bytes())
+            .with_context(|| format!("failed to write {}", tmp.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(&tmp, contents.as_bytes())
+            .with_context(|| format!("failed to write {}", tmp.display()))?;
     }
     let _ = mode_0600;
     fs::rename(&tmp, path).with_context(|| {
@@ -441,13 +458,20 @@ fn usage_window(
     let value = value?;
     let used = value
         .get("utilization")
-        .and_then(Value::as_f64)
-        .or_else(|| value.get("used_percent").and_then(Value::as_f64))?;
+        .and_then(usage_number)
+        .or_else(|| value.get("used_percent").and_then(usage_number))?;
     let reset_at = value
         .get("resets_at")
         .or_else(|| value.get("reset_at"))
         .and_then(parse_datetime);
     Some(percent_window(key, label, used, reset_at))
+}
+
+fn usage_number(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|raw| raw.parse::<f64>().ok()))
+        .filter(|number| number.is_finite() && *number >= 0.0)
 }
 
 fn parse_usage(body: &str) -> Result<ProviderUsageView> {
@@ -473,12 +497,12 @@ fn parse_usage(body: &str) -> Result<ProviderUsageView> {
     if let Some(extra) = value.get("extra_usage") {
         let used = extra
             .get("used_credits")
-            .and_then(Value::as_f64)
-            .or_else(|| extra.get("used").and_then(Value::as_f64));
+            .and_then(usage_number)
+            .or_else(|| extra.get("used").and_then(usage_number));
         let limit = extra
             .get("monthly_limit")
-            .and_then(Value::as_f64)
-            .or_else(|| extra.get("limit").and_then(Value::as_f64));
+            .and_then(usage_number)
+            .or_else(|| extra.get("limit").and_then(usage_number));
         if used.is_some() || limit.is_some() {
             let used_percent = match (used, limit) {
                 (Some(used), Some(limit)) if limit > 0.0 => {
@@ -682,6 +706,18 @@ impl ProviderAdapter for ClaudeAdapter {
             let path = credentials_path(env);
             write_atomic(&path, &merged, true)
                 .with_context(|| format!("failed to restore {}", path.display()))?;
+            // The snapshot uses a credentials file; ensure no stale Keychain
+            // entry from a previous Keychain-backed account remains.  Claude
+            // Code prefers Keychain when both exist, so leaving the old entry
+            // would cause it to authenticate as the previous account.
+            #[cfg(target_os = "macos")]
+            if !keychain_backed {
+                super::claude_keychain::delete_password(
+                    super::claude_keychain::SERVICE,
+                    &super::claude_keychain::account_name(),
+                )
+                .context("failed to remove stale Claude Keychain credentials")?;
+            }
         }
         if cfg!(target_os = "macos")
             && let Some(password) = snapshot_text(snapshot, "claude_keychain.txt")?
@@ -693,6 +729,20 @@ impl ProviderAdapter for ClaudeAdapter {
                 &merged,
             )
             .context("failed to restore Claude Code credentials in the system keychain")?;
+            // The snapshot uses Keychain; ensure no stale credentials file
+            // from a previous file-backed account remains.  Claude Code reads
+            // the file when no Keychain entry exists, so leaving it around
+            // would cause reads to merge the stale file token.
+            if snapshot_text(snapshot, "claude_credentials.json")?.is_none() {
+                match fs::remove_file(credentials_path(env)) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error)
+                            .context("failed to remove stale Claude credentials file");
+                    }
+                }
+            }
         }
         if let Some(raw) = snapshot_text(snapshot, "claude_config.json")? {
             let stored: Value = serde_json::from_str(&raw)
@@ -725,7 +775,7 @@ impl ProviderAdapter for ClaudeAdapter {
                         .with_context(|| format!("failed to read {}", path.display()));
                 }
             };
-            write_atomic(&path, &serde_json::to_string_pretty(&merged)?, false)
+            write_atomic(&path, &serde_json::to_string_pretty(&merged)?, true)
                 .with_context(|| format!("failed to restore {}", path.display()))?;
         }
         Ok(())
@@ -937,6 +987,23 @@ mod tests {
         assert_eq!(five_hour.will_last_to_reset, None);
     }
 
+    #[test]
+    fn usage_accepts_numeric_strings_without_inventing_credit_balance() {
+        let usage = parse_usage(
+            r#"{"five_hour":{"utilization":"45"},"extra_usage":{"used_credits":"25","monthly_limit":"100"}}"#,
+        )
+        .expect("usage");
+        assert_eq!(usage.windows[0].used_percent, Some(45));
+        let extra = usage
+            .windows
+            .iter()
+            .find(|window| window.key == "extra_usage")
+            .unwrap();
+        assert_eq!(extra.used, Some(25.0));
+        assert_eq!(extra.limit, Some(100.0));
+        assert_eq!(extra.remaining_percent, Some(75));
+    }
+
     fn test_env() -> (tempfile::TempDir, AppEnv) {
         let temp = tempfile::tempdir().expect("temp dir");
         let env = AppEnv {
@@ -1122,6 +1189,22 @@ mod tests {
         match classify_refresh_response(500, "oops") {
             RefreshClass::Transient(_) => {}
             _ => panic!("expected Transient"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_creates_private_credentials_and_config() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().expect("tempdir");
+        for name in [".credentials.json", ".claude.json"] {
+            let path = temp.path().join(name);
+            write_atomic(&path, "fixture-secret", true).expect("write");
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(fs::read_to_string(path).unwrap(), "fixture-secret");
         }
     }
 

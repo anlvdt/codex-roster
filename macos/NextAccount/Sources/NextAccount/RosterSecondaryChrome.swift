@@ -95,6 +95,7 @@ struct LanguagePreferencePicker: View {
 enum RosterConsoleTab: String, CaseIterable, Identifiable {
     case settings
     case operations
+    case claude
     case about
     case exportBackup
     case importBackup
@@ -110,6 +111,8 @@ enum RosterConsoleTab: String, CaseIterable, Identifiable {
             language.text("Cài đặt", "Settings")
         case .operations:
             language.text("Vận hành", "Operations")
+        case .claude:
+            language.text("Claude Code", "Claude Code")
         case .about:
             language.text("Giới thiệu", "About")
         case .exportBackup:
@@ -123,6 +126,7 @@ enum RosterConsoleTab: String, CaseIterable, Identifiable {
         switch self {
         case .settings: "gearshape"
         case .operations: "wrench.and.screwdriver"
+        case .claude: "brain.head.profile"
         case .about: "info.circle"
         case .exportBackup: "square.and.arrow.up"
         case .importBackup: "square.and.arrow.down"

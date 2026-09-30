@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use uuid::Uuid;
 
 use crate::model::{
@@ -118,7 +118,14 @@ where
             let is_active = live_identity
                 .as_ref()
                 .is_some_and(|identity| account.identity.matches(identity));
-            accounts.push(account.view(is_active));
+            let snapshot = store
+                .load_snapshot(&self.env.kind, account.id)
+                .ok()
+                .map(|(_, snapshot)| snapshot);
+            let mut view = account.view(is_active);
+            view.activation_block_reason = account.activation_block_reason(snapshot.as_ref());
+            view.can_activate = view.activation_block_reason.is_none();
+            accounts.push(view);
         }
         accounts.sort_by_key(|account| std::cmp::Reverse(account.updated_at));
         Ok(ProviderListOutput {
@@ -192,11 +199,21 @@ where
         }
 
         let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
+        self.provider_activate_with_auth_lock(account_id)
+    }
+
+    pub(crate) fn provider_activate_with_auth_lock(
+        &self,
+        account_id: Uuid,
+    ) -> Result<ProviderActivateOutput> {
         let store = self.provider_store();
-        let (target, snapshot) = store.load_snapshot(&self.env.kind, account_id)?;
+        let (target, mut snapshot) = store.load_snapshot(&self.env.kind, account_id)?;
         let provider = target.provider;
         let provider_adapter = adapter(provider);
         let snapshot_identity = provider_adapter.identity_from_snapshot(&snapshot)?;
+        if let Some(reason) = target.activation_block_reason(Some(&snapshot)) {
+            bail!("cannot activate {}: {reason}", target.identity.email);
+        }
         if !target.identity.matches(&snapshot_identity) {
             bail!(
                 "saved {provider} snapshot identity does not match account {}",
@@ -216,11 +233,13 @@ where
                     .flatten()
             })
             .map(|account| account.id);
-        if let Some(live) = &previous_live
-            && !live.identity.matches(&target.identity)
-        {
+        if let Some(live) = &previous_live {
+            // Preserve rotated live tokens, including same-account activation.
             let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
             store.save(&self.env.kind, provider, &live.identity, &live.snapshot)?;
+            if live.identity.matches(&target.identity) {
+                snapshot = live.snapshot.clone();
+            }
         }
 
         if let Err(error) = provider_adapter.restore_snapshot(&self.env, &snapshot) {
@@ -348,6 +367,136 @@ where
         })
     }
 
+    pub fn provider_delete(
+        &self,
+        account_id: Uuid,
+        force: bool,
+    ) -> Result<crate::model::ProviderDeleteOutput> {
+        if self
+            .repository
+            .get_account(&self.env.kind, account_id)?
+            .is_some()
+        {
+            bail!("use `delete` for Codex/OpenAI accounts");
+        }
+        let store = self.provider_store();
+        let record = store
+            .get(&self.env.kind, account_id)?
+            .ok_or_else(|| anyhow!("provider account {account_id} not found"))?;
+        if !force {
+            let live = adapter(record.provider)
+                .try_read_live_identity_noninteractive(&self.env)
+                .ok()
+                .flatten();
+            if live
+                .as_ref()
+                .is_some_and(|identity| record.identity.matches(identity))
+            {
+                bail!(
+                    "account {} is currently signed in to {}; re-run with --force to delete it",
+                    record.identity.email,
+                    record.provider
+                );
+            }
+        }
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        let removed = store.remove(&self.env.kind, account_id)?;
+        Ok(crate::model::ProviderDeleteOutput {
+            id: removed.id,
+            email: removed.identity.email,
+            status: "deleted".to_owned(),
+        })
+    }
+
+    pub fn provider_set_label(
+        &self,
+        account_id: Uuid,
+        label: Option<String>,
+    ) -> Result<ProviderAccountView> {
+        if self
+            .repository
+            .get_account(&self.env.kind, account_id)?
+            .is_some()
+        {
+            bail!("use `set-label` for Codex/OpenAI accounts");
+        }
+        let store = self.provider_store();
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        let record = store.set_label(&self.env.kind, account_id, label)?;
+        let is_active = adapter(record.provider)
+            .try_read_live_identity_noninteractive(&self.env)
+            .ok()
+            .flatten()
+            .is_some_and(|identity| record.identity.matches(&identity));
+        Ok(record.view(is_active))
+    }
+
+    pub fn provider_refresh_usage(
+        &self,
+        provider: AiProvider,
+        force: bool,
+    ) -> Result<ProviderListOutput> {
+        if provider == AiProvider::OpenAi {
+            bail!("refresh-usage is only supported for external providers");
+        }
+        let store = self.provider_store();
+        let records = store.list(&self.env.kind, Some(provider))?;
+        let live_identity = if provider == AiProvider::Claude {
+            adapter(provider)
+                .try_read_live_identity_noninteractive(&self.env)
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        for record in records {
+            let is_live = live_identity
+                .as_ref()
+                .is_some_and(|identity| record.identity.matches(identity));
+            if record.requires_login() && !force && !is_live {
+                continue;
+            }
+            let stale = force
+                || record.cached_usage.as_ref().is_none_or(|usage| {
+                    let now = time::OffsetDateTime::now_utc();
+                    now - usage.fetched_at > time::Duration::minutes(15)
+                        || usage.windows.iter().any(|window| {
+                            window
+                                .reset_at
+                                .is_some_and(|reset| usage.fetched_at < reset && reset <= now)
+                        })
+                });
+            if !stale {
+                continue;
+            }
+            if is_live {
+                let live_usage = self.provider_usage(provider, None);
+                let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+                match live_usage {
+                    Ok(output)
+                        if record.identity.matches(&output.account)
+                            && output.usage.status == ProviderUsageStatus::Ok =>
+                    {
+                        store.record_usage(&self.env.kind, record.id, output.usage)?;
+                    }
+                    _ => {
+                        store.record_usage_error(
+                            &self.env.kind,
+                            record.id,
+                            "live_token_waiting: Claude Code will refresh its active session on next use".to_owned(),
+                        )?;
+                    }
+                }
+                continue;
+            }
+            if let Err(error) = self.provider_usage(provider, Some(record.id)) {
+                let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+                let _ = store.record_usage_error(&self.env.kind, record.id, error.to_string());
+            }
+        }
+        self.provider_list(Some(provider))
+    }
+
     pub(crate) fn provider_store(&self) -> ProviderAccountStore<LocalSecretStore> {
         ProviderAccountStore::new(
             &self.env.app_data_dir,
@@ -401,7 +550,21 @@ where
         record: &ProviderSavedAccount,
         snapshot: &SnapshotBlob,
     ) -> Result<RefreshStep> {
-        match provider_adapter.refresh_snapshot(snapshot) {
+        // Serialize read → token exchange → save across Roster processes.
+        let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
+        let (current_record, current_snapshot) = store.load_snapshot(&self.env.kind, record.id)?;
+        if current_snapshot != *snapshot {
+            return Ok(RefreshStep::Rotated(current_snapshot));
+        }
+        let live = provider_adapter.try_read_live_identity_noninteractive(&self.env)?;
+        if !should_attempt_refresh(
+            &current_record,
+            live.as_ref(),
+            provider_adapter.snapshot_shares_live_credential(&self.env, &current_snapshot),
+        ) {
+            return Ok(RefreshStep::Skipped);
+        }
+        match provider_adapter.refresh_snapshot(&current_snapshot) {
             SnapshotRefresh::Refreshed(new) => {
                 let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
                 store.save(&self.env.kind, record.provider, &record.identity, &new)?;
@@ -520,6 +683,8 @@ fn openai_account_view(account: AccountView) -> ProviderAccountView {
         last_activated_at: account.last_activated_at,
         usage: account.usage.map(legacy_usage_to_provider),
         usage_error: account.usage_error,
+        can_activate: true,
+        activation_block_reason: None,
     }
 }
 
@@ -612,8 +777,10 @@ mod tests {
             created_at: time::OffsetDateTime::UNIX_EPOCH,
             updated_at: time::OffsetDateTime::UNIX_EPOCH,
             last_activated_at: None,
+            custom_label: None,
             cached_usage: Some(cached.clone()),
             cached_usage_error: None,
+            consecutive_auth_failures: 0,
         };
 
         let result = stale_or_status(
@@ -641,8 +808,10 @@ mod tests {
             created_at: time::OffsetDateTime::UNIX_EPOCH,
             updated_at: time::OffsetDateTime::UNIX_EPOCH,
             last_activated_at: None,
+            custom_label: None,
             cached_usage: None,
             cached_usage_error: error.map(str::to_owned),
+            consecutive_auth_failures: 0,
         }
     }
 

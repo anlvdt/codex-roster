@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::model::{DisplayIdentity, SnapshotBlob};
+use crate::model::{AiProvider, DisplayIdentity, SnapshotBlob};
 
 const BACKUP_SCHEMA_VERSION: u32 = 1;
 const AUTOMATIC_BACKUP_KEY_SERVICE: &str = "com.codexroster.app";
@@ -25,6 +25,10 @@ pub struct BackupBundle {
     pub schema_version: u32,
     pub exported_at: OffsetDateTime,
     pub accounts: Vec<BackupAccount>,
+    /// External provider accounts (Claude, Cursor, Grok).  Absent in bundles
+    /// created by older versions of Roster; treated as an empty list on import.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_accounts: Vec<ProviderBackupAccount>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -35,12 +39,22 @@ pub struct BackupAccount {
     pub snapshot: SnapshotBlob,
 }
 
+/// An external provider account (Claude, Cursor, or Grok) included in a backup.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProviderBackupAccount {
+    pub provider: AiProvider,
+    pub identity: DisplayIdentity,
+    pub custom_label: Option<String>,
+    pub snapshot: SnapshotBlob,
+}
+
 impl BackupBundle {
     pub fn new(accounts: Vec<BackupAccount>) -> Self {
         Self {
             schema_version: BACKUP_SCHEMA_VERSION,
             exported_at: OffsetDateTime::now_utc(),
             accounts,
+            provider_accounts: Vec::new(),
         }
     }
 }
@@ -98,7 +112,7 @@ pub fn read_encrypted(path: &Path, password: &str) -> Result<BackupBundle> {
             bundle.schema_version
         ));
     }
-    if bundle.accounts.len() > MAX_BACKUP_ACCOUNTS {
+    if bundle.accounts.len() + bundle.provider_accounts.len() > MAX_BACKUP_ACCOUNTS {
         return Err(anyhow!("backup contains too many accounts"));
     }
     Ok(bundle)

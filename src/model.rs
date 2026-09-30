@@ -604,6 +604,10 @@ pub struct ProviderAccountView {
     pub last_activated_at: Option<OffsetDateTime>,
     pub usage: Option<ProviderUsageView>,
     pub usage_error: Option<String>,
+    #[serde(default)]
+    pub can_activate: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_block_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -647,6 +651,13 @@ pub struct ProviderAutoSwitchOutput {
 pub struct ProviderSaveOutput {
     pub account: ProviderAccountView,
     pub action: SaveAction,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderDeleteOutput {
+    pub id: Uuid,
+    pub email: String,
+    pub status: String,
 }
 
 #[derive(Clone, Debug, Serialize)]

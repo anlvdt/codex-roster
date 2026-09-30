@@ -271,6 +271,30 @@ enum ProviderCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Delete a saved external-provider account and its stored snapshot.
+    Delete {
+        account_id: Uuid,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set or clear a saved external-provider account's custom label.
+    SetLabel {
+        account_id: Uuid,
+        label: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Refresh cached usage for all saved accounts of one provider.
+    RefreshUsage {
+        #[arg(value_parser = parse_ai_provider)]
+        provider: AiProvider,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Fetch provider usage for the live account or a saved account ID.
     Usage {
         #[arg(value_parser = parse_ai_provider)]
@@ -411,6 +435,52 @@ pub fn run() -> Result<()> {
                             println!(
                                 "Relaunch the provider app for the new session to take effect."
                             );
+                        }
+                    }
+                }
+                ProviderCommand::Delete {
+                    account_id,
+                    force,
+                    json,
+                } => {
+                    let output = app.provider_delete(account_id, force)?;
+                    if json {
+                        print_json(&output)?;
+                    } else {
+                        println!("Deleted {} ({})", output.email, output.id);
+                    }
+                }
+                ProviderCommand::SetLabel {
+                    account_id,
+                    label,
+                    json,
+                } => {
+                    let account = app.provider_set_label(account_id, label)?;
+                    if json {
+                        print_json(&serde_json::json!({
+                            "account_id": account.id,
+                            "custom_label": account.custom_label,
+                        }))?;
+                    } else {
+                        match &account.custom_label {
+                            Some(label) => {
+                                println!("Label for {} set to \"{label}\"", account.email)
+                            }
+                            None => println!("Label for {} cleared", account.email),
+                        }
+                    }
+                }
+                ProviderCommand::RefreshUsage {
+                    provider,
+                    force,
+                    json,
+                } => {
+                    let output = app.provider_refresh_usage(provider, force)?;
+                    if json {
+                        print_json(&output)?;
+                    } else {
+                        for account in &output.accounts {
+                            println!("{}", render_provider_account_summary(account));
                         }
                     }
                 }

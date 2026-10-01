@@ -856,6 +856,14 @@ impl ProviderAdapter for ClaudeAdapter {
             .call()
             .context("Claude usage request failed")?;
         let status = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(300)
+            .min(86_400);
         let body = response
             .body_mut()
             .read_to_string()
@@ -867,7 +875,11 @@ impl ProviderAdapter for ClaudeAdapter {
             return Ok(status_view(ProviderUsageStatus::AccessDenied, status));
         }
         if status == 429 {
-            return Ok(status_view(ProviderUsageStatus::RateLimited, status));
+            let mut usage = status_view(ProviderUsageStatus::RateLimited, status);
+            usage.detail = Some(format!(
+                "Claude usage endpoint returned HTTP 429; retry after {retry_after} seconds"
+            ));
+            return Ok(usage);
         }
         if !(200..300).contains(&status) {
             bail!("Claude usage endpoint returned HTTP {status}")

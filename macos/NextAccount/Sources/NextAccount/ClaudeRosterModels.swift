@@ -38,7 +38,7 @@ struct ProviderAccount: Identifiable, Decodable {
     var requiresResave: Bool { !canActivate }
 
     var hasFreshUsage: Bool {
-        guard let usage, usage.status == "ok" else { return false }
+        guard usageError == nil, let usage, usage.status == "ok" else { return false }
         let now = Date()
         guard now.timeIntervalSince(usage.fetchedAt.value) < 15 * 60,
               usage.fetchedAt.value <= now.addingTimeInterval(60) else { return false }
@@ -132,4 +132,9 @@ struct ProviderActivateOutput: Decodable {
     let account: ProviderAccount
     let previousAccountId: UUID?
     let requiresRelaunch: Bool
+}
+
+struct ClaudeDesktopLoginStatus: Decodable {
+    let saved: Bool
+    let liveAccountMatches: Bool
 }

@@ -1,5 +1,6 @@
 mod auto_start;
 mod auto_switch_monitor;
+mod claude_desktop;
 mod provider_auto_switch;
 mod providers;
 mod service;

@@ -212,10 +212,11 @@ fn write_atomic(path: &Path, contents: &str, mode_0600: bool) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
+        // File modes do not apply here; the parameter is only meaningful on Unix.
+        let _ = mode_0600;
         fs::write(&tmp, contents.as_bytes())
             .with_context(|| format!("failed to write {}", tmp.display()))?;
     }
-    let _ = mode_0600;
     fs::rename(&tmp, path).with_context(|| {
         format!(
             "failed to move {} into place at {}",

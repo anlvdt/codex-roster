@@ -13,6 +13,7 @@
 ### Fixed
 
 - Notch Auto-switch caption: when decide is `active_has_quota` (no switch needed), show **Monitoring · active has quota** instead of the misleading **No usable candidate**.
+- Auto-resume after **app restart**: when Auto-resume is ON and the live account has usable quota, launch bootstrap always discovers interrupted threads and continues them (same `continue-interrupted` path as quota recovery) — no longer requires a pending-recovery flag or another account switch.
 - ChatGPT Desktop showing **Sign in** after account switch: clear Electron `Partitions` (and related) web-session cache on every activate / force-switch / auto-switch relaunch.
 - Console window title stuck on Vietnamese **Bảng điều khiển** after switching the UI to English — sync `NSWindow.title` with `LanguageStore`.
 - Session longevity hardening: bind Login / Delete / Activate by account UUID; stop burning inactive refresh tokens on polls; settle and retry Desktop acceptance using live identity.

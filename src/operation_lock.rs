@@ -41,6 +41,10 @@ impl AutoSwitchLock {
     }
 }
 
+// The lock files carry no data: exclusion comes from the kernel's advisory
+// `flock`, which is released automatically when the holder exits or crashes.
+// There is nothing to `fsync`, and an empty lock file is its normal state, so
+// a crash can never leave one "corrupt".
 fn acquire_named_lock(app_data_dir: &Path, file_name: &str, operation: &str) -> Result<File> {
     fs::create_dir_all(app_data_dir)
         .with_context(|| format!("failed to create {}", app_data_dir.display()))?;

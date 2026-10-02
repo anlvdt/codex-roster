@@ -173,6 +173,10 @@ final class GitHubUpdater: ObservableObject {
         guard !release.draft, !release.prerelease else {
             throw UpdaterError(AppLanguage.text("Bản phát hành GitHub mới nhất không phải bản ổn định.", "The latest GitHub release is not a stable release."))
         }
+        // A tag like `v1.3.0-rc1` is a prerelease even if GitHub's flag is unset.
+        if let version = SemanticVersion(release.tagName), version.isPrerelease {
+            throw UpdaterError(AppLanguage.text("Bản phát hành GitHub mới nhất không phải bản ổn định.", "The latest GitHub release is not a stable release."))
+        }
         guard let asset = release.assets.first(where: { $0.name.hasSuffix("-macos.zip") }) else {
             throw UpdaterError(AppLanguage.text("Bản phát hành GitHub mới nhất không có file ZIP macOS.", "The latest GitHub release does not include a macOS ZIP."))
         }
@@ -315,24 +319,70 @@ final class GitHubUpdater: ObservableObject {
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
-    private static func isVersion(_ remote: String, newerThan current: String) -> Bool {
-        let remoteParts = versionParts(remote)
-        let currentParts = versionParts(current)
-        guard !remoteParts.isEmpty, !currentParts.isEmpty else { return false }
-        for index in 0..<max(remoteParts.count, currentParts.count) {
-            let remotePart = index < remoteParts.count ? remoteParts[index] : 0
-            let currentPart = index < currentParts.count ? currentParts[index] : 0
-            if remotePart != currentPart { return remotePart > currentPart }
+    /// Semantic-version ordering: numeric core first, then a release outranks
+    /// any of its own prereleases (`1.2.0 > 1.2.0-rc1`), and prerelease
+    /// identifiers compare per semver (numeric < alphanumeric, shorter < longer).
+    /// Build metadata (`+...`) is ignored. Unparseable input is never "newer".
+    nonisolated static func isVersion(_ remote: String, newerThan current: String) -> Bool {
+        guard let remote = SemanticVersion(remote), let current = SemanticVersion(current) else {
+            return false
         }
-        return false
+        return remote > current
     }
 
-    private static func versionParts(_ version: String) -> [Int] {
-        let parts = version
-            .trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
-            .split(separator: ".")
-        guard !parts.isEmpty else { return [] }
-        return parts.allSatisfy { Int($0) != nil } ? parts.map { Int($0)! } : []
+    struct SemanticVersion: Comparable {
+        let core: [Int]
+        let prerelease: [String]
+
+        var isPrerelease: Bool { !prerelease.isEmpty }
+
+        init?(_ value: String) {
+            let trimmed = value.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+            let withoutBuild = trimmed.split(separator: "+", maxSplits: 1, omittingEmptySubsequences: false)[0]
+            let pieces = withoutBuild.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+            let numbers = pieces[0].split(separator: ".", omittingEmptySubsequences: false)
+            guard !numbers.isEmpty,
+                  numbers.allSatisfy({ !$0.isEmpty && $0.allSatisfy { $0.isASCII && $0.isNumber } }) else { return nil }
+            core = numbers.compactMap { Int($0) }
+            guard core.count == numbers.count else { return nil }
+            if pieces.count == 2 {
+                let identifiers = pieces[1].split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+                guard !identifiers.isEmpty, identifiers.allSatisfy({ !$0.isEmpty }) else { return nil }
+                prerelease = identifiers
+            } else {
+                prerelease = []
+            }
+        }
+
+        static func < (lhs: SemanticVersion, rhs: SemanticVersion) -> Bool {
+            for index in 0..<max(lhs.core.count, rhs.core.count) {
+                let left = index < lhs.core.count ? lhs.core[index] : 0
+                let right = index < rhs.core.count ? rhs.core[index] : 0
+                if left != right { return left < right }
+            }
+            switch (lhs.prerelease.isEmpty, rhs.prerelease.isEmpty) {
+            case (true, true): return false
+            case (false, true): return true
+            case (true, false): return false
+            case (false, false): break
+            }
+            for index in 0..<min(lhs.prerelease.count, rhs.prerelease.count) {
+                let left = lhs.prerelease[index]
+                let right = rhs.prerelease[index]
+                if left == right { continue }
+                switch (Int(left), Int(right)) {
+                case let (leftNumber?, rightNumber?): return leftNumber < rightNumber
+                case (_?, nil): return true
+                case (nil, _?): return false
+                case (nil, nil): return left < right
+                }
+            }
+            return lhs.prerelease.count < rhs.prerelease.count
+        }
+
+        static func == (lhs: SemanticVersion, rhs: SemanticVersion) -> Bool {
+            !(lhs < rhs) && !(rhs < lhs)
+        }
     }
 }
 

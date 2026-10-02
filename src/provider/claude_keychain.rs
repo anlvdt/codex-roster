@@ -12,15 +12,28 @@ const NOT_FOUND_RC: i32 = 44;
 const TIMEOUT: Duration = Duration::from_secs(5);
 const STDIN_LINE_LIMIT: usize = 4096 - 64;
 
+/// Keychain account/service names are interpolated into a `security -i`
+/// command line, so only a conservative charset is accepted: letters, digits,
+/// and `. _ @ -` plus interior spaces (the Claude service name contains one).
+/// Anything else, notably quotes, backslashes, `$`, backticks, `;`, `!` and
+/// control characters such as newlines, is rejected rather than escaped.
+fn is_safe_keychain_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && !value.starts_with(' ')
+        && !value.ends_with(' ')
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | '-' | ' '))
+}
+
 pub(crate) fn account_name() -> String {
-    std::env::var("USER")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            std::env::var("USERNAME")
-                .ok()
-                .filter(|value| !value.is_empty())
-        })
+    // `USER` is attacker-influenceable (sudo env, subshells); an invalid value
+    // is ignored exactly like an unset one.
+    ["USER", "USERNAME"]
+        .into_iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .find(|value| is_safe_keychain_name(value))
         .unwrap_or_else(|| "claude-code-user".to_owned())
 }
 
@@ -107,6 +120,13 @@ pub(crate) fn get_password(service: &str, account: &str) -> Result<Option<String
 }
 
 pub(crate) fn set_password(service: &str, account: &str, value: &str) -> Result<()> {
+    // Keep `security -i` (the secret stays off argv and out of `ps`) but never
+    // let an unvalidated name reach its tokenizer.
+    if !is_safe_keychain_name(service) || !is_safe_keychain_name(account) {
+        bail!(
+            "refusing to write the Keychain item: unsupported characters in the service or account name"
+        );
+    }
     let hex = hex_encode(value);
     let line = format!(
         "add-generic-password -U -a {} -s {} -X {hex}\n",
@@ -182,6 +202,25 @@ mod tests {
     fn quote_escapes_backslash_and_quote() {
         assert_eq!(quote("a\"b\\c"), "\"a\\\"b\\\\c\"");
         assert_eq!(quote("plain"), "\"plain\"");
+    }
+
+    #[test]
+    fn keychain_names_reject_metacharacters_and_control_chars() {
+        assert!(is_safe_keychain_name("Claude Code-credentials"));
+        assert!(is_safe_keychain_name("jane.doe_1@corp-example"));
+        for bad in [
+            "", " lead", "trail ", "a\"b", "a\\b", "$USER", "`id`", "a;b", "a!b", "a\nb", "a\rb",
+            "a\0b", "tên",
+        ] {
+            assert!(!is_safe_keychain_name(bad), "{bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn set_password_rejects_injection_before_spawning() {
+        let err = set_password("svc", "x\nadd-generic-password -a evil", "secret")
+            .expect_err("must reject");
+        assert!(err.to_string().contains("unsupported characters"));
     }
 
     #[test]

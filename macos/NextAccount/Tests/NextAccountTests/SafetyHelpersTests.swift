@@ -64,6 +64,8 @@ import Testing
         "https://x.com/other/status/2090964822422949999",
         "https://x.com/thsottiaux/status/not-a-tweet",
         "https://x.com/thsottiaux/status/2090964822422949999?redirect=1",
+        "https://x.com/thsottiaux/status/123",
+        "https://x.com/thsottiaux/status/２０９０９６４８２２４２２９４９９９",
     ] {
         #expect(trustedResetSourceURL(value) == nil)
     }

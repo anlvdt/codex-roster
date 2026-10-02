@@ -616,7 +616,7 @@ struct PrismQuickSwitchDeck: View {
     private func resetOutlookBadge(_ outlook: ResetOutlook) -> some View {
         Button {
             PrismTheme.triggerHaptic()
-            if let url = outlook.sourceUrl.flatMap(URL.init) {
+            if let url = trustedResetSourceURL(outlook.sourceUrl) {
                 openURL(url)
             } else {
                 openURL(URL(string: "https://codex-resets.com")!)

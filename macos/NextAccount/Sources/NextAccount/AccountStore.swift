@@ -3961,8 +3961,8 @@ func trustedResetSourceURL(_ value: String?) -> URL? {
     guard path.count == 3,
           path[0].lowercased() == "thsottiaux",
           path[1].lowercased() == "status",
-          !path[2].isEmpty,
-          path[2].allSatisfy(\.isNumber) else { return nil }
+          (15...25).contains(path[2].count),
+          path[2].allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
     return components.url
 }
 

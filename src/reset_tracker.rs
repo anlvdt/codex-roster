@@ -198,21 +198,50 @@ fn source_url_from(source: Option<&ResetsSource>, id: Option<&str>) -> String {
         .unwrap_or_else(|| SITE_HOME.to_owned())
 }
 
-fn trusted_status_post_url(id: &str) -> Option<String> {
-    let digits = id.strip_prefix("observed-").unwrap_or(id);
-    (!digits.is_empty() && digits.chars().all(|character| character.is_ascii_digit()))
-        .then(|| format!("https://x.com/thsottiaux/status/{digits}"))
+/// X status IDs are 64-bit snowflakes: 15–25 ASCII digits is a deliberately
+/// generous bound that still rejects empty, huge or non-numeric input.
+fn is_status_id(value: &str) -> bool {
+    (15..=25).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+fn trusted_status_post_url(id: &str) -> Option<String> {
+    let digits = id.strip_prefix("observed-").unwrap_or(id);
+    is_status_id(digits).then(|| format!("https://x.com/thsottiaux/status/{digits}"))
+}
+
+/// Accept only URLs the Codex Resets feed may legitimately point at: a status
+/// post by the tracked account on x.com, or a page on codex-resets.com. The
+/// feed is third-party content, so everything else (other hosts, userinfo,
+/// ports, queries, fragments, backslashes, non-ASCII or control characters)
+/// is rejected rather than shown or opened.
 fn trusted_https_url(value: &str) -> Option<&str> {
-    let lower = value.to_ascii_lowercase();
-    if !(lower.starts_with("https://x.com/") || lower.starts_with("https://codex-resets.com/")) {
+    let rest = value.strip_prefix("https://")?;
+    if !rest
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"/._~-".contains(&byte))
+    {
         return None;
     }
-    if value.contains([' ', '\n', '\r', '\t']) {
-        return None;
+    let (host, path) = match rest.find('/') {
+        Some(index) => rest.split_at(index),
+        None => (rest, ""),
+    };
+    match host.to_ascii_lowercase().as_str() {
+        "codex-resets.com" => Some(value),
+        "x.com" => {
+            let mut segments = path.trim_start_matches('/').split('/');
+            let trusted = segments
+                .next()
+                .is_some_and(|handle| handle.eq_ignore_ascii_case("thsottiaux"))
+                && segments
+                    .next()
+                    .is_some_and(|word| word.eq_ignore_ascii_case("status"))
+                && segments.next().is_some_and(is_status_id)
+                && segments.next().is_none();
+            trusted.then_some(value)
+        }
+        _ => None,
     }
-    Some(value)
 }
 
 fn fetch_resets_status() -> Result<ResetsStatusResponse> {
@@ -722,10 +751,46 @@ mod tests {
             "confirmed_global_reset"
         );
         assert!(trusted_status_post_url("../escape").is_none());
+        assert!(trusted_status_post_url("123").is_none());
+        assert!(trusted_status_post_url("1234567890123456789012345678").is_none());
+        assert!(trusted_status_post_url("observed-").is_none());
+        assert!(trusted_status_post_url("２０９０９６４８２２４２２９４９９９").is_none());
         assert_eq!(
             trusted_status_post_url("2090964822422949999").as_deref(),
             Some("https://x.com/thsottiaux/status/2090964822422949999")
         );
+    }
+
+    #[test]
+    fn trusted_https_url_accepts_only_expected_targets() {
+        for good in [
+            "https://codex-resets.com/",
+            "https://codex-resets.com",
+            "https://codex-resets.com/resets/abc-123",
+            "https://x.com/thsottiaux/status/2090964822422949999",
+            "https://X.com/ThSottiaux/status/2090964822422949999",
+        ] {
+            assert_eq!(trusted_https_url(good), Some(good), "{good}");
+        }
+        for bad in [
+            "http://x.com/thsottiaux/status/2090964822422949999",
+            "https://x.com/someoneelse/status/2090964822422949999",
+            "https://x.com/thsottiaux/status/123",
+            "https://x.com/thsottiaux/status/2090964822422949999/extra",
+            "https://x.com/thsottiaux",
+            "https://x.com@evil.example/thsottiaux/status/2090964822422949999",
+            "https://x.com.evil.example/thsottiaux/status/2090964822422949999",
+            "https://x.com:444/thsottiaux/status/2090964822422949999",
+            "https://x.com/thsottiaux/status/2090964822422949999?x=1",
+            "https://x.com/thsottiaux/status/2090964822422949999#f",
+            "https://codex-resets.com\\@evil.example/",
+            "https://codex-resets.com/\u{202e}evil",
+            "https://codex-resets.com/a b",
+            "https://evil.example/",
+            "javascript:alert(1)",
+        ] {
+            assert_eq!(trusted_https_url(bad), None, "{bad}");
+        }
     }
 
     #[test]

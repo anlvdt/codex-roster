@@ -99,7 +99,7 @@ macOS only. Codex Roster is a native macOS app; the crate builds and ships for m
 
 ### CLI
 
-The app bundles `codex-roster`. For development, set `CODEX_ROSTER_CLI_PATH` to another build.
+The app bundles `codex-roster` and always uses it. For unbundled development runs (e.g. `swift run`), set `CODEX_ROSTER_CLI_PATH` to an absolute path to another build; it is ignored when the bundled binary exists.
 
 The existing top-level commands continue to manage the OpenAI / Codex roster. Multi-provider commands live under `providers` and currently support `open_ai`/`openai`/`codex`, `claude`/`anthropic`, `cursor`, and `grok`/`xai` aliases. Claude Code and Cursor expose official usage windows when their local credentials are available. Grok Build reads its own local auth and reports Build credits separately from xAI API/team billing. Account switching is scoped to the selected provider; cross-provider automatic routing is not enabled.
 

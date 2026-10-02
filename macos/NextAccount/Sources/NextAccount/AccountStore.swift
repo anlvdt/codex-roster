@@ -3113,6 +3113,32 @@ enum AutoSwitchState: Equatable {
     case generationInProgress
 }
 
+enum CLILocator {
+    /// Pick the CLI binary. The executable bundled in the app always wins: an
+    /// environment variable must not be able to substitute the binary that
+    /// reads and writes keychain entries and `~/.codex`. `CODEX_ROSTER_CLI_PATH`
+    /// is honored only for unbundled development runs (e.g. `swift run`), and
+    /// only when it names an absolute path to an executable regular file.
+    static func invocation(
+        bundled: URL?,
+        environment: [String: String]
+    ) -> (executable: URL, prefixArguments: [String]) {
+        if let bundled {
+            return (bundled, [])
+        }
+        if let path = environment["CODEX_ROSTER_CLI_PATH"], path.hasPrefix("/") {
+            let url = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+               !isDirectory.boolValue,
+               FileManager.default.isExecutableFile(atPath: url.path) {
+                return (url, [])
+            }
+        }
+        return (URL(fileURLWithPath: "/usr/bin/env"), ["codex-roster"])
+    }
+}
+
 private struct AccountHubCLI {
     func decode<T: Decodable>(_ type: T.Type, arguments: [String]) async throws -> T {
         // Idempotent: callers must not pass `--json` themselves, but tolerate it
@@ -3154,22 +3180,12 @@ private struct AccountHubCLI {
         process.standardError = error
         process.standardInput = input
 
-        if let path = ProcessInfo.processInfo.environment["CODEX_ROSTER_CLI_PATH"], !path.isEmpty {
-            process.executableURL = URL(fileURLWithPath: path)
-            process.arguments = arguments
-        } else if let path = ProcessInfo.processInfo.environment["ACCOUNT_HUB_CLI_PATH"], !path.isEmpty {
-            process.executableURL = URL(fileURLWithPath: path)
-            process.arguments = arguments
-        } else if let path = ProcessInfo.processInfo.environment["NEXT_ACCOUNT_CLI_PATH"], !path.isEmpty {
-            process.executableURL = URL(fileURLWithPath: path)
-            process.arguments = arguments
-        } else if let bundled = Bundle.main.url(forAuxiliaryExecutable: "codex-roster") {
-            process.executableURL = bundled
-            process.arguments = arguments
-        } else {
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = ["codex-roster"] + arguments
-        }
+        let invocation = CLILocator.invocation(
+            bundled: Bundle.main.url(forAuxiliaryExecutable: "codex-roster"),
+            environment: ProcessInfo.processInfo.environment
+        )
+        process.executableURL = invocation.executable
+        process.arguments = invocation.prefixArguments + arguments
 
         process.terminationHandler = { _ in completed.signal() }
         try process.run()

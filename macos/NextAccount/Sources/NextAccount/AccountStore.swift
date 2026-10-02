@@ -4,6 +4,31 @@ import Foundation
 import ServiceManagement
 import SwiftUI
 import UserNotifications
+import os
+
+/// Failures of best-effort operations are non-fatal, but swallowing them
+/// silently makes "it just stopped working" reports undiagnosable. Record
+/// them to the unified log (`log show --predicate 'subsystem == "com.codexroster.app"'`).
+/// Error details are logged as private data; only the operation name is public.
+enum Diagnostics {
+    static let logger = Logger(subsystem: "com.codexroster.app", category: "account-store")
+
+    static func logFailure(_ operation: String, _ error: Error) {
+        logger.error("\(operation, privacy: .public) failed: \(error.localizedDescription, privacy: .private)")
+    }
+
+    /// Remove a file or directory, logging only genuine failures. A missing
+    /// item is the normal case when clearing known cache names, so it is silent.
+    static func removeIfPresent(_ url: URL, operation: String) {
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError {
+            return
+        } catch {
+            logFailure(operation, error)
+        }
+    }
+}
 
 /// Priority buckets for the triage board, ordered by how urgently the user must
 /// act. `rawValue` order is the display order (most urgent first).
@@ -527,7 +552,8 @@ final class AccountStore: ObservableObject {
                 try self.ensureNotDuplicateNewAccount(liveIdentity)
             } catch {
                 if self.isAddAccountSession {
-                    _ = try? await self.cli.data(arguments: ["cancel-add-account", "--json"])
+                    do { _ = try await self.cli.data(arguments: ["cancel-add-account", "--json"]) }
+                    catch { Diagnostics.logFailure("cancel-add-account", error) }
                 }
                 self.clearPendingLoginFlags()
                 throw error
@@ -630,7 +656,8 @@ final class AccountStore: ObservableObject {
         } catch {
             if began {
                 CodexLoginLauncher.stop()
-                _ = try? await cli.data(arguments: ["cancel-add-account", "--json"])
+                do { _ = try await cli.data(arguments: ["cancel-add-account", "--json"]) }
+                catch { Diagnostics.logFailure("cancel-add-account", error) }
                 clearPendingLoginFlags()
                 newAccountLoginState = .idle
             } else {
@@ -694,7 +721,8 @@ final class AccountStore: ObservableObject {
         // Free the fixed login port before reopening the browser sign-in,
         // but only quit Desktop when the Codex login ports are actually busy.
         if CodexLoginPort.isBusy {
-            try? await preserveLiveSessionBeforeDesktopQuit()
+            do { try await preserveLiveSessionBeforeDesktopQuit() }
+            catch { Diagnostics.logFailure("preserve live session before Desktop quit", error) }
             await closeDesktopForLogin()
         }
         try CodexLoginLauncher.start(codexHome: nil)
@@ -796,7 +824,8 @@ final class AccountStore: ObservableObject {
         if isEnrollOnlyLogin {
             removeEnrollOnlyHome()
         } else if isAddAccountSession {
-            _ = try? await cli.data(arguments: ["cancel-add-account", "--json"])
+            do { _ = try await cli.data(arguments: ["cancel-add-account", "--json"]) }
+            catch { Diagnostics.logFailure("cancel-add-account", error) }
         }
         clearPendingLoginFlags()
         let email = identity.email
@@ -886,7 +915,7 @@ final class AccountStore: ObservableObject {
     private func removeEnrollOnlyHome() {
         guard let home = enrollOnlyCodexHome else { return }
         enrollOnlyCodexHome = nil
-        try? FileManager.default.removeItem(at: home)
+        Diagnostics.removeIfPresent(home, operation: "remove enroll-only Codex home")
     }
 
     /// Parse email/subject from a Codex auth.json without touching live `~/.codex`.
@@ -1068,7 +1097,8 @@ final class AccountStore: ObservableObject {
                         previousAccountID: activated.previousAccountId,
                         fallbackRelaunch: relaunch
                     )
-                    try? await self.reloadAccountsAfterSwitch()
+                    do { try await self.reloadAccountsAfterSwitch() }
+                    catch { Diagnostics.logFailure("reload accounts after switch", error) }
                 } catch {
                     throw CLIError(AppLanguage.text(
                         "ChatGPT không chấp nhận tài khoản đích và không thể tự khôi phục phiên trước: \(error.localizedDescription)",
@@ -1919,7 +1949,15 @@ final class AccountStore: ObservableObject {
         vibeUsageTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                if (try? await self.cli.data(arguments: ["vibe-usage", "sync"])) != nil,
+                let syncSucceeded: Bool
+                do {
+                    _ = try await self.cli.data(arguments: ["vibe-usage", "sync"])
+                    syncSucceeded = true
+                } catch {
+                    Diagnostics.logFailure("vibe-usage sync", error)
+                    syncSucceeded = false
+                }
+                if syncSucceeded,
                    let refreshed = try? await self.cli.decode(StatusOutput.self, arguments: ["status"]) {
                     self.status = refreshed
                 }
@@ -2027,7 +2065,8 @@ final class AccountStore: ObservableObject {
                 }
             }
             for account in targets {
-                _ = try? await self.cli.data(arguments: ["usage", account.id.uuidString, "--json"])
+                do { _ = try await self.cli.data(arguments: ["usage", account.id.uuidString, "--json"]) }
+                catch { Diagnostics.logFailure("usage refresh", error) }
             }
             try await self.load()
             self.lastQuotaRefreshAt = .now
@@ -2036,7 +2075,8 @@ final class AccountStore: ObservableObject {
 
     func refreshUsage(for account: SavedAccount) {
         run {
-            _ = try? await self.cli.data(arguments: ["usage", account.id.uuidString, "--json"])
+            do { _ = try await self.cli.data(arguments: ["usage", account.id.uuidString, "--json"]) }
+            catch { Diagnostics.logFailure("usage refresh", error) }
             try await self.load()
             if account.isActive {
                 self.lastQuotaRefreshAt = .now
@@ -2158,7 +2198,8 @@ final class AccountStore: ObservableObject {
 
     func ensureAutomaticFullBackup() {
         Task {
-            _ = try? await cli.data(arguments: ["create-automatic-full-backup", "--json"])
+            do { _ = try await cli.data(arguments: ["create-automatic-full-backup", "--json"]) }
+            catch { Diagnostics.logFailure("automatic full backup", error) }
         }
     }
 
@@ -2597,7 +2638,8 @@ final class AccountStore: ObservableObject {
         let pendingLegacyArchives = legacyArchivedAccountIDs.intersection(Set(loadedAccounts.accounts.map(\.id)))
         if !pendingLegacyArchives.isEmpty {
             for accountID in pendingLegacyArchives {
-                _ = try? await cli.data(arguments: ["archive", accountID.uuidString, "--json"])
+                do { _ = try await cli.data(arguments: ["archive", accountID.uuidString, "--json"]) }
+                catch { Diagnostics.logFailure("archive legacy account", error) }
             }
             legacyArchivedAccountIDs.subtract(pendingLegacyArchives)
             for key in archivedAccountsMigrationKeys {
@@ -2784,7 +2826,8 @@ final class AccountStore: ObservableObject {
                             previousAccountID: applied.activeAccountId ?? previousAccountID,
                             fallbackRelaunch: relaunch
                         )
-                        try? await reloadAccountsAfterSwitch()
+                        do { try await reloadAccountsAfterSwitch() }
+                        catch { Diagnostics.logFailure("reload accounts after switch", error) }
                         errorMessage = Self.desktopAcceptanceFailureMessage(acceptance)
                     } catch {
                         errorMessage = AppLanguage.text(
@@ -3592,23 +3635,23 @@ enum ChatGPTDesktop {
         ]
         for profile in profileDirs where fm.fileExists(atPath: profile.path) {
             for name in fileNames {
-                try? fm.removeItem(at: profile.appendingPathComponent(name))
+                Diagnostics.removeIfPresent(profile.appendingPathComponent(name), operation: "clear Codex web session data")
             }
             for name in directoryNames {
-                try? fm.removeItem(at: profile.appendingPathComponent(name, isDirectory: true))
+                Diagnostics.removeIfPresent(profile.appendingPathComponent(name, isDirectory: true), operation: "clear Codex web session data")
             }
             // Newer Chromium profiles store cookies under Network/.
             let network = profile.appendingPathComponent("Network", isDirectory: true)
             if fm.fileExists(atPath: network.path) {
                 for name in fileNames {
-                    try? fm.removeItem(at: network.appendingPathComponent(name))
+                    Diagnostics.removeIfPresent(network.appendingPathComponent(name), operation: "clear Codex web session data")
                 }
             }
         }
         // Stale singleton locks can make the next launch attach to a half-dead
         // profile and keep showing the sign-in screen.
         for name in ["SingletonLock", "SingletonCookie", "SingletonSocket"] {
-            try? fm.removeItem(at: supportRoot.appendingPathComponent(name))
+            Diagnostics.removeIfPresent(supportRoot.appendingPathComponent(name), operation: "remove stale Codex singleton lock")
         }
     }
 

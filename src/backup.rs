@@ -220,28 +220,118 @@ fn read_key_file(account: &str) -> Option<String> {
     let contents = std::fs::read_to_string(&path).ok()?;
     let trimmed = contents.trim();
     if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
+        return None;
     }
+    // Key files written by older versions were chmod'ed after creation and
+    // never excluded from backups; bring them up to the current protection.
+    let _ = protect_key_file(&path);
+    Some(trimmed.to_owned())
 }
 
 fn write_key_file(account: &str, password: &str) -> Result<()> {
     let Some(path) = key_file_path(account) else {
         return Ok(());
     };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
+    write_key_file_at(&path, password)
+}
+
+/// Store the key privately and keep it out of backups.
+///
+/// Tradeoff: the key file is deliberately *not* carried by Time Machine or
+/// other backup tools that honor the exclusion marker, so a backup of the
+/// encrypted snapshots does not also contain the key that opens them. After a
+/// restore onto a new machine the file is absent and the key is recovered from
+/// the Keychain copy (`keyring_password` migrates it back to a file).
+fn write_key_file_at(path: &Path, password: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("key file path {} has no parent", path.display()))?;
+    create_private_key_directory(parent)?;
+    let temp = parent.join(format!(
+        ".{}.tmp-{}",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("key"),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let result = write_private_new_file(&temp, password.as_bytes())
+        .and_then(|()| {
+            std::fs::rename(&temp, path)
+                .with_context(|| format!("failed to store the key file {}", path.display()))
+        })
+        .and_then(|()| protect_key_file(path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
     }
-    std::fs::write(&path, password)
-        .with_context(|| format!("failed to store the key file {}", path.display()))?;
+    result
+}
+
+fn create_private_key_directory(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("failed to create {}", dir.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("failed to protect {}", dir.display()))?;
     }
+    exclude_from_backup(dir);
     Ok(())
+}
+
+/// Create `path` exclusively with mode 0600 from the start (no window where
+/// it exists with umask-derived permissions).
+fn write_private_new_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("failed to store the key file {}", path.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("failed to store the key file {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to store the key file {}", path.display()))
+}
+
+fn protect_key_file(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to protect {}", path.display()))?;
+    }
+    exclude_from_backup(path);
+    Ok(())
+}
+
+/// Binary plist for the string "com.apple.backupd": the value Time Machine
+/// reads from `com.apple.metadata:com_apple_backup_excludeItem` (the same
+/// marker `NSURLIsExcludedFromBackupKey` sets).
+#[cfg(target_os = "macos")]
+const BACKUP_EXCLUDE_XATTR_HEX: &str = "62706c69737430305f1011636f6d2e6170706c652e6261636b75706408000000000000010100000000000000010000000000000000000000000000001c";
+
+/// Best-effort: failing to set the marker must not block key storage.
+fn exclude_from_backup(path: &Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("/usr/bin/xattr")
+            .args([
+                "-wx",
+                "com.apple.metadata:com_apple_backup_excludeItem",
+                BACKUP_EXCLUDE_XATTR_HEX,
+            ])
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = path;
 }
 
 pub fn newest_automatic_backup(directory: &Path) -> Result<std::path::PathBuf> {
@@ -268,6 +358,44 @@ pub fn newest_automatic_backup(directory: &Path) -> Result<std::path::PathBuf> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn key_file_is_private_atomic_and_leaves_no_temp_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("keys").join("acct.key");
+        write_key_file_at(&path, "first").expect("write");
+        write_key_file_at(&path, "second").expect("overwrite");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "second");
+        let file_mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+        assert_eq!(file_mode & 0o777, 0o600);
+        let dir_mode = std::fs::metadata(path.parent().expect("parent"))
+            .expect("meta")
+            .permissions()
+            .mode();
+        assert_eq!(dir_mode & 0o777, 0o700);
+        let entries = std::fs::read_dir(path.parent().expect("parent"))
+            .expect("read_dir")
+            .count();
+        assert_eq!(entries, 1, "temp file must not remain");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn key_file_is_marked_excluded_from_backup() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("keys").join("acct.key");
+        write_key_file_at(&path, "secret").expect("write");
+        let output = std::process::Command::new("/usr/bin/xattr")
+            .arg(&path)
+            .output()
+            .expect("xattr");
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("com.apple.metadata:com_apple_backup_excludeItem")
+        );
+    }
 
     #[test]
     fn encrypted_backup_round_trips() {

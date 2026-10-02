@@ -1,6 +1,7 @@
 import AppKit
 import CryptoKit
 import Foundation
+import Security
 
 @MainActor
 final class GitHubUpdater: ObservableObject {
@@ -93,6 +94,12 @@ final class GitHubUpdater: ObservableObject {
         let updateBundle = installDirectory
             .appendingPathComponent(".Codex Roster.update-\(UUID().uuidString).app")
         try FileManager.default.copyItem(at: extractedApp, to: updateBundle)
+        do {
+            try Self.verifyCodeSignature(of: updateBundle, matching: installedApp)
+        } catch {
+            try? FileManager.default.removeItem(at: updateBundle)
+            throw error
+        }
 
         let stagingDirectory = extractedApp.deletingLastPathComponent()
         let helper = stagingDirectory.appendingPathComponent("install-update.sh")
@@ -195,9 +202,7 @@ final class GitHubUpdater: ObservableObject {
             throw UpdaterError(AppLanguage.text("Bản cập nhật tải về không khớp mã SHA-256 của GitHub.", "The downloaded update did not match GitHub's SHA-256 digest."))
         }
 
-        let stagingDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-roster-update-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
+        let stagingDirectory = try makePrivateStagingDirectory()
         let archive = stagingDirectory.appendingPathComponent("update.zip")
         try FileManager.default.copyItem(at: temporaryArchive, to: archive)
         try runTool("/usr/bin/ditto", arguments: ["-x", "-k", archive.path, stagingDirectory.path])
@@ -216,7 +221,72 @@ final class GitHubUpdater: ObservableObject {
               installedVersion == update.version else {
             throw UpdaterError(AppLanguage.text("Phiên bản trong ZIP cập nhật không khớp bản phát hành GitHub.", "The update ZIP version does not match the GitHub release."))
         }
+        try verifyCodeSignature(of: app, matching: Bundle.main.bundleURL)
         return app
+    }
+
+    /// The helper script is executed from here, so it must not live in a
+    /// location other processes can write to: `$TMPDIR` is replaced by a
+    /// 0700 directory under Application Support.
+    private static func makePrivateStagingDirectory() throws -> URL {
+        let support = try FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let updates = support
+            .appendingPathComponent("com.codexroster.codex-roster", isDirectory: true)
+            .appendingPathComponent("updates", isDirectory: true)
+        let staging = updates.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: updates,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: updates.path)
+        try FileManager.default.createDirectory(
+            at: staging,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        return staging
+    }
+
+    /// Require the downloaded bundle to carry a valid, untampered signature,
+    /// and, when the running app has a real signing identity, to satisfy that
+    /// app's designated requirement (same team/identity). Ad-hoc signed
+    /// installs have no stable identity to pin, so only validity is enforced.
+    static func verifyCodeSignature(of candidate: URL, matching installed: URL) throws {
+        let failure = UpdaterError(AppLanguage.text(
+            "Chữ ký mã của bản cập nhật không hợp lệ hoặc không khớp bản đang cài.",
+            "The update's code signature is invalid or does not match the installed app."
+        ))
+        var candidateCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(candidate as CFURL, [], &candidateCode) == errSecSuccess,
+              let candidateCode else { throw failure }
+
+        let flags = SecCSFlags(rawValue:
+            kSecCSCheckAllArchitectures | kSecCSStrictValidate | kSecCSCheckNestedCode)
+        let installedRequirement = installedDesignatedRequirement(installed)
+        guard SecStaticCodeCheckValidityWithErrors(candidateCode, flags, installedRequirement, nil) == errSecSuccess else {
+            throw failure
+        }
+    }
+
+    /// Designated requirement of the installed app, or nil when it is ad-hoc
+    /// signed (or unsigned) and therefore has no identity to match against.
+    private static func installedDesignatedRequirement(_ installed: URL) -> SecRequirement? {
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(installed as CFURL, [], &code) == errSecSuccess,
+              let code else { return nil }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let dict = info as? [String: Any],
+              dict[kSecCodeInfoTeamIdentifier as String] != nil else { return nil }
+        var requirement: SecRequirement?
+        guard SecCodeCopyDesignatedRequirement(code, [], &requirement) == errSecSuccess else { return nil }
+        return requirement
     }
 
     private static func sha256(of file: URL) throws -> String {

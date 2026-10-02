@@ -10,7 +10,9 @@ use uuid::Uuid;
 
 pub use auto_start::spawn_auto_start_usage_windows_worker;
 pub use auto_switch_monitor::{spawn_auto_switch_worker, spawn_claude_auto_switch_worker};
-pub use usage_refresh::{spawn_usage_refresh_worker, spawn_vibe_usage_worker};
+pub use usage_refresh::{
+    spawn_usage_refresh_worker, spawn_vibe_usage_worker, stop_vibe_usage_worker,
+};
 
 use crate::env::AppEnv;
 use crate::model::{

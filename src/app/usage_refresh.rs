@@ -1,5 +1,5 @@
 use std::sync::mpsc::Sender;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration as StdDuration;
 
@@ -37,28 +37,86 @@ pub fn spawn_usage_refresh_worker(env: AppEnv) {
     });
 }
 
+/// One-shot stop flag whose waiters sleep on a condvar, so a stop request
+/// interrupts a long poll sleep immediately instead of after the full interval.
+struct StopSignal {
+    stopped: Mutex<bool>,
+    wake: Condvar,
+}
+
+impl StopSignal {
+    const fn new() -> Self {
+        Self {
+            stopped: Mutex::new(false),
+            wake: Condvar::new(),
+        }
+    }
+
+    fn stop(&self) {
+        if let Ok(mut stopped) = self.stopped.lock() {
+            *stopped = true;
+        }
+        self.wake.notify_all();
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.stopped.lock().map(|stopped| *stopped).unwrap_or(true)
+    }
+
+    /// Sleep up to `duration`; returns `true` if the signal was (or becomes) stopped.
+    fn sleep(&self, duration: StdDuration) -> bool {
+        let Ok(guard) = self.stopped.lock() else {
+            return true;
+        };
+        match self
+            .wake
+            .wait_timeout_while(guard, duration, |stopped| !*stopped)
+        {
+            Ok((stopped, _)) => *stopped,
+            Err(_) => true,
+        }
+    }
+}
+
+static VIBE_USAGE_STOP: StopSignal = StopSignal::new();
+
+/// Ask the VibeCafe sync worker to exit. It stops at its next checkpoint: right
+/// away if sleeping, or once an in-flight sync finishes.
+pub fn stop_vibe_usage_worker() {
+    VIBE_USAGE_STOP.stop();
+}
+
 /// Periodically sync local Codex usage to VibeCafe when the user has configured
 /// the optional collector. A missing Node.js/package is intentionally silent.
+/// The worker exits when `stop_vibe_usage_worker` is called.
 pub fn spawn_vibe_usage_worker(env: AppEnv) {
     static STARTED: OnceLock<()> = OnceLock::new();
     STARTED.get_or_init(|| {
         let _ = thread::Builder::new()
             .name("vibe-usage".to_owned())
             .spawn(move || {
-                loop {
+                let poll = StdDuration::from_secs(VIBE_USAGE_SYNC_POLL_SECONDS);
+                while !VIBE_USAGE_STOP.is_stopped() {
                     if !crate::vibe_usage::is_configured(&env.home_dir) {
-                        thread::sleep(StdDuration::from_secs(VIBE_USAGE_SYNC_POLL_SECONDS));
+                        if VIBE_USAGE_STOP.sleep(poll) {
+                            break;
+                        }
                         continue;
                     }
                     let sync_ok = std::process::Command::new("npx")
                         .args(["--yes", crate::vibe_usage::VIBE_USAGE_NPM_SPEC, "sync"])
                         .status()
                         .is_ok_and(|status| status.success());
+                    if VIBE_USAGE_STOP.is_stopped() {
+                        break;
+                    }
                     if sync_ok {
                         let _ =
                             crate::vibe_usage::fetch_and_cache(&env.home_dir, &env.app_data_dir);
                     }
-                    thread::sleep(StdDuration::from_secs(VIBE_USAGE_SYNC_POLL_SECONDS));
+                    if VIBE_USAGE_STOP.sleep(poll) {
+                        break;
+                    }
                 }
             });
     });
@@ -101,5 +159,34 @@ mod tests {
         receiver
             .recv_timeout(StdDuration::from_secs(1))
             .expect("listener should receive usage-refresh notification");
+    }
+}
+
+#[cfg(test)]
+mod stop_signal_tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn stop_signal_times_out_when_not_stopped() {
+        let signal = StopSignal::new();
+        assert!(!signal.sleep(StdDuration::from_millis(20)));
+        assert!(!signal.is_stopped());
+    }
+
+    #[test]
+    fn stop_signal_interrupts_a_long_sleep() {
+        static SIGNAL: StopSignal = StopSignal::new();
+        let waiter = thread::spawn(|| {
+            let started = Instant::now();
+            let stopped = SIGNAL.sleep(StdDuration::from_secs(60));
+            (stopped, started.elapsed())
+        });
+        thread::sleep(StdDuration::from_millis(50));
+        SIGNAL.stop();
+        let (stopped, elapsed) = waiter.join().expect("join");
+        assert!(stopped);
+        assert!(elapsed < StdDuration::from_secs(5), "took {elapsed:?}");
+        assert!(SIGNAL.sleep(StdDuration::from_secs(60)), "stays stopped");
     }
 }

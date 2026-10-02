@@ -1701,6 +1701,26 @@ final class AccountStore: ObservableObject {
         try? handle.write(contentsOf: data)
     }
 
+    /// Block until `process` exits or `timeoutSeconds` elapse, without polling.
+    /// `signal` must be signalled from the process's `terminationHandler`. On
+    /// timeout the process is terminated (then killed if it ignores SIGTERM)
+    /// and `false` is returned.
+    nonisolated static func waitForExit(
+        _ process: Process,
+        signal exited: DispatchSemaphore,
+        timeoutSeconds: Double
+    ) -> Bool {
+        if exited.wait(timeout: .now() + timeoutSeconds) == .success {
+            return true
+        }
+        process.terminate()
+        if exited.wait(timeout: .now() + 5) == .timedOut, process.isRunning {
+            kill(process.processIdentifier, SIGKILL)
+            _ = exited.wait(timeout: .now() + 1)
+        }
+        return false
+    }
+
     private enum ProcessRunOutcome {
         case exited(Int32)
         case stillRunning
@@ -1725,23 +1745,18 @@ final class AccountStore: ObservableObject {
                 process.arguments = arguments
                 process.standardOutput = FileHandle.nullDevice
                 process.standardError = FileHandle.nullDevice
+                let exited = DispatchSemaphore(value: 0)
+                process.terminationHandler = { _ in exited.signal() }
                 do {
                     try process.run()
                 } catch {
                     continuation.resume(returning: .failedToStart)
                     return
                 }
-                let deadline = Date().addingTimeInterval(timeoutSeconds)
-                while process.isRunning, Date() < deadline {
-                    Thread.sleep(forTimeInterval: 0.05)
-                }
-                if process.isRunning {
-                    process.terminate()
-                    process.waitUntilExit()
+                if !Self.waitForExit(process, signal: exited, timeoutSeconds: timeoutSeconds) {
                     continuation.resume(returning: .stillRunning)
                     return
                 }
-                process.waitUntilExit()
                 continuation.resume(returning: .exited(process.terminationStatus))
             }
         }
@@ -1761,23 +1776,18 @@ final class AccountStore: ObservableObject {
                 let stderrPipe = Pipe()
                 process.standardOutput = stdoutPipe
                 process.standardError = stderrPipe
+                let exited = DispatchSemaphore(value: 0)
+                process.terminationHandler = { _ in exited.signal() }
                 do {
                     try process.run()
                 } catch {
                     continuation.resume(returning: .failedToStart)
                     return
                 }
-                let deadline = Date().addingTimeInterval(timeoutSeconds)
-                while process.isRunning, Date() < deadline {
-                    Thread.sleep(forTimeInterval: 0.05)
-                }
-                if process.isRunning {
-                    process.terminate()
-                    process.waitUntilExit()
+                if !Self.waitForExit(process, signal: exited, timeoutSeconds: timeoutSeconds) {
                     continuation.resume(returning: .stillRunning)
                     return
                 }
-                process.waitUntilExit()
                 let stdout = String(
                     data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(),
                     encoding: .utf8

@@ -1071,7 +1071,9 @@ where
     crate::app::spawn_claude_auto_switch_worker(app.env().clone());
     crate::app::spawn_usage_refresh_worker(app.env().clone());
     crate::app::spawn_vibe_usage_worker(app.env().clone());
-    match app.interactive(InteractiveMode::Persistent, false)? {
+    let result = app.interactive(InteractiveMode::Persistent, false);
+    crate::app::stop_vibe_usage_worker();
+    match result? {
         InteractiveExit::Quit => Ok(()),
     }
 }

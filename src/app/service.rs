@@ -838,7 +838,7 @@ where
     ) -> Result<ActivateOutput> {
         let started = Instant::now();
         let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
-        let initial_warnings = activation_process_warnings(force_running);
+        let initial_warnings = activation_process_warnings(force_running, &self.env.codex_root);
         ensure_activation_processes_stopped(&initial_warnings)?;
         let previous_account_id = self.refresh_current_saved_account_before_activation()?;
         // Remember outgoing Codex rollout metadata (session id + cwd) before we
@@ -853,7 +853,7 @@ where
         let refreshed_current_at = Instant::now();
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         let acquired_lock_at = Instant::now();
-        let warnings = activation_process_warnings(force_running);
+        let warnings = activation_process_warnings(force_running, &self.env.codex_root);
         ensure_activation_processes_stopped(&warnings)?;
         let scanned_processes_at = Instant::now();
         if let Some(expected_active_id) = expected_active_id {
@@ -995,7 +995,7 @@ where
     }
 
     pub fn activation_blocking_warnings(&self, allow_desktop: bool) -> Vec<RunningCodexProcess> {
-        crate::process::processes_blocking_activation(allow_desktop)
+        crate::process::processes_blocking_activation(allow_desktop, &self.env.codex_root)
     }
 
     pub fn refresh_saved_usage_cache(&self) -> Result<()> {
@@ -1448,12 +1448,18 @@ fn ensure_activation_processes_stopped(warnings: &[RunningCodexProcess]) -> Resu
 }
 
 #[cfg(not(test))]
-fn activation_process_warnings(allow_desktop: bool) -> Vec<RunningCodexProcess> {
-    crate::process::processes_blocking_activation(allow_desktop)
+fn activation_process_warnings(
+    allow_desktop: bool,
+    codex_root: &std::path::Path,
+) -> Vec<RunningCodexProcess> {
+    crate::process::processes_blocking_activation(allow_desktop, codex_root)
 }
 
 #[cfg(test)]
-fn activation_process_warnings(_allow_desktop: bool) -> Vec<RunningCodexProcess> {
+fn activation_process_warnings(
+    _allow_desktop: bool,
+    _codex_root: &std::path::Path,
+) -> Vec<RunningCodexProcess> {
     Vec::new()
 }
 

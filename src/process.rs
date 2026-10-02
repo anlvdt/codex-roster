@@ -1,6 +1,10 @@
+use std::collections::HashSet;
+use std::path::Path;
+use std::process::{Command, Stdio};
+
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
-use crate::model::RunningCodexProcess;
+use crate::model::{AUTH_FILES, RunningCodexProcess};
 
 const SUMMARY_LIMIT: usize = 72;
 const EXECUTABLE_WIDTH: usize = 12;
@@ -59,10 +63,69 @@ pub fn codex_desktop_likely_running() -> bool {
 /// `allow_desktop` is `--force` / GUI-after-quit: leftover ChatGPT/Codex.app
 /// helpers are ignored. A live `codex` CLI session still blocks — forcing
 /// through it can invalidate a single-use refresh token.
-pub fn processes_blocking_activation(allow_desktop: bool) -> Vec<RunningCodexProcess> {
-    detect_running_codex_processes()
+///
+/// Even a process `--force` would normally skip keeps blocking while it has an
+/// auth file open under `codex_root`: replacing a file out from under an open
+/// handle leaves that process on stale credentials.
+pub fn processes_blocking_activation(
+    allow_desktop: bool,
+    codex_root: &Path,
+) -> Vec<RunningCodexProcess> {
+    let processes = detect_running_codex_processes();
+    if !allow_desktop {
+        return processes;
+    }
+    let skippable = processes
+        .iter()
+        .any(is_force_skippable_process);
+    let holders = if skippable {
+        pids_holding_auth_files(codex_root)
+    } else {
+        HashSet::new()
+    };
+    filter_blocking(processes, &holders)
+}
+
+fn filter_blocking(
+    processes: Vec<RunningCodexProcess>,
+    auth_file_holders: &HashSet<u32>,
+) -> Vec<RunningCodexProcess> {
+    processes
         .into_iter()
-        .filter(|process| !(allow_desktop && is_force_skippable_process(process)))
+        .filter(|process| {
+            !is_force_skippable_process(process) || auth_file_holders.contains(&process.pid)
+        })
+        .collect()
+}
+
+/// PIDs with any managed auth file open, via `lsof -t`. Returns an empty set
+/// when `lsof` is unavailable or fails, falling back to role-based skipping.
+fn pids_holding_auth_files(codex_root: &Path) -> HashSet<u32> {
+    let paths = AUTH_FILES
+        .iter()
+        .map(|name| codex_root.join(name))
+        .filter(|path| path.exists())
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        return HashSet::new();
+    }
+    let output = Command::new("/usr/sbin/lsof")
+        .arg("-t")
+        .arg("--")
+        .args(&paths)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+    match output {
+        Ok(output) => parse_lsof_pids(&String::from_utf8_lossy(&output.stdout)),
+        Err(_) => HashSet::new(),
+    }
+}
+
+fn parse_lsof_pids(stdout: &str) -> HashSet<u32> {
+    stdout
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
         .collect()
 }
 
@@ -549,6 +612,31 @@ mod tests {
             summary: None,
             origin: Some("cli".to_owned()),
         }));
+    }
+
+    #[test]
+    fn skippable_process_holding_auth_file_still_blocks() {
+        let daemon = RunningCodexProcess {
+            pid: 100,
+            executable: "codex".to_owned(),
+            role: "app-server".to_owned(),
+            summary: None,
+            origin: Some("desktop".to_owned()),
+        };
+        let other = RunningCodexProcess {
+            pid: 101,
+            ..daemon.clone()
+        };
+        let holders = std::collections::HashSet::from([100]);
+        let blocking = super::filter_blocking(vec![daemon, other], &holders);
+        assert_eq!(blocking.len(), 1);
+        assert_eq!(blocking[0].pid, 100);
+    }
+
+    #[test]
+    fn parse_lsof_pids_ignores_noise() {
+        let pids = super::parse_lsof_pids("123\n  456 \nlsof: warning\n\n");
+        assert_eq!(pids, std::collections::HashSet::from([123, 456]));
     }
 
     #[test]

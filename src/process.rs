@@ -75,9 +75,7 @@ pub fn processes_blocking_activation(
     if !allow_desktop {
         return processes;
     }
-    let skippable = processes
-        .iter()
-        .any(is_force_skippable_process);
+    let skippable = processes.iter().any(is_force_skippable_process);
     let holders = if skippable {
         pids_holding_auth_files(codex_root)
     } else {

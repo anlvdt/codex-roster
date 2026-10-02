@@ -265,8 +265,7 @@ fn write_key_file_at(path: &Path, password: &str) -> Result<()> {
 }
 
 fn create_private_key_directory(dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("failed to create {}", dir.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

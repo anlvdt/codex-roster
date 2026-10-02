@@ -178,7 +178,7 @@ struct ClaudeRosterView: View {
                     HStack(spacing: 5) {
                         // Long org names ("…'s Organization") wrap to a second
                         // line instead of truncating into "Organi…".
-                        Text(active?.displayName ?? "Claude Code")
+                        Text(active?.shortDisplayName ?? "Claude Code")
                             .font(PrismTheme.fontHeadline)
                             .lineLimit(2)
                             .truncationMode(.tail)
@@ -369,7 +369,7 @@ struct ClaudeRosterView: View {
                 .background(Circle().fill(PrismTheme.surfaceStrong))
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 5) {
-                    Text(account.displayName)
+                    Text(account.shortDisplayName)
                         .font(PrismTheme.fontBodyBold)
                         .lineLimit(1)
                     if account.isActive {
@@ -511,7 +511,7 @@ struct ClaudeRosterView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(language.text("Đăng nhập CLI đã lưu", "Saved CLI login"))
                     .font(RosterSecondaryChrome.section)
-                Text(active?.displayName ?? language.text("Chưa lưu", "Not saved"))
+                Text(active?.shortDisplayName ?? language.text("Chưa lưu", "Not saved"))
                     .font(RosterSecondaryChrome.body.weight(.semibold))
                 if let active {
                     Text(active.email)
@@ -743,7 +743,7 @@ struct ClaudeRosterView: View {
         case "usage_unavailable":
             output.detail?.contains("HTTP 429") == true
                 ? language.text("API quota giới hạn yêu cầu (429); tự thử lại sau.", "Quota API rate limited (429); retrying later.")
-                : language.text("Chưa đọc được quota trực tiếp; xem chi tiết tài khoản.", "Live quota unavailable; check account details.")
+                : language.text("Chưa đọc được quota trực tiếp.", "Live quota unavailable.")
         case "cooldown":
             language.text("Đang trong thời gian nghỉ giữa các lần chuyển.", "Cooling down between switches.")
         case "no_candidate":

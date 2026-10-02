@@ -30,6 +30,16 @@ struct ProviderAccount: Identifiable, Decodable {
         return email
     }
 
+    /// Claude reports personal orgs as `"<email>'s Organization"` — when the
+    /// email is already rendered next to the name, strip the redundant prefix
+    /// so the org name fits instead of truncating to "…'s Organ…".
+    var shortDisplayName: String {
+        let prefix = email + "'s "
+        let name = displayName
+        guard name.hasPrefix(prefix), name.count > prefix.count else { return name }
+        return String(name.dropFirst(prefix.count))
+    }
+
     /// Mirrors `LOGIN_REQUIRED_ERROR_PREFIX` in `src/provider_store.rs`.
     var requiresLogin: Bool {
         usageError?.hasPrefix("login_required") == true

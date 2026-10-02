@@ -46,8 +46,21 @@ fn credentials_path(env: &AppEnv) -> PathBuf {
     claude_dir(env).join(".credentials.json")
 }
 
+fn claude_config_paths(env: &AppEnv) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from) {
+        paths.push(dir.join(".claude.json"));
+    }
+    paths.push(env.home_dir.join(".claude.json"));
+    paths.push(claude_dir(env).join(".claude.json"));
+    paths
+}
+
 fn config_path(env: &AppEnv) -> PathBuf {
-    env.home_dir.join(".claude.json")
+    claude_config_paths(env)
+        .into_iter()
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| env.home_dir.join(".claude.json"))
 }
 
 fn read_keychain_password() -> Option<String> {

@@ -5,6 +5,10 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+/// Pinned npx package spec: `npx --yes` must never resolve to an unreviewed
+/// release. Bump deliberately after reviewing the new version.
+pub const VIBE_USAGE_NPM_SPEC: &str = "@vibe-cafe/vibe-usage@0.13.2";
+
 const CACHE_FILE: &str = "vibe-usage-summary.json";
 
 #[derive(Debug, Deserialize)]

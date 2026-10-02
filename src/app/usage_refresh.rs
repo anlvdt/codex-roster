@@ -51,7 +51,7 @@ pub fn spawn_vibe_usage_worker(env: AppEnv) {
                         continue;
                     }
                     let sync_ok = std::process::Command::new("npx")
-                        .args(["--yes", "@vibe-cafe/vibe-usage", "sync"])
+                        .args(["--yes", crate::vibe_usage::VIBE_USAGE_NPM_SPEC, "sync"])
                         .status()
                         .is_ok_and(|status| status.success());
                     if sync_ok {

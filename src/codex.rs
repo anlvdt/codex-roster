@@ -249,7 +249,7 @@ pub fn cancel_add_account_session(env: &AppEnv) -> Result<()> {
     let backup_auth = env.codex_root.join(ADD_ACCOUNT_AUTH_BACKUP);
     let backup_sid = env.codex_root.join(ADD_ACCOUNT_CAP_BACKUP);
     if backup_auth.exists() {
-        fs::copy(&backup_auth, &auth).with_context(|| {
+        copy_atomic(&backup_auth, &auth).with_context(|| {
             format!(
                 "failed to restore {} from {}",
                 auth.display(),
@@ -257,7 +257,7 @@ pub fn cancel_add_account_session(env: &AppEnv) -> Result<()> {
             )
         })?;
         if backup_sid.exists() {
-            fs::copy(&backup_sid, &cap_sid).with_context(|| {
+            copy_atomic(&backup_sid, &cap_sid).with_context(|| {
                 format!(
                     "failed to restore {} from {}",
                     cap_sid.display(),
@@ -529,20 +529,39 @@ fn stage_and_restore(
             set_private_file_permissions(&pending_backup)?;
             fs::rename(&pending_backup, &backup_path)
                 .with_context(|| format!("failed to commit backup {}", backup_path.display()))?;
-            fs::remove_file(&live_path)
-                .with_context(|| format!("failed to remove {}", live_path.display()))?;
         } else {
             fs::write(backup_dir.join(format!("{file_name}.absent")), b"")
                 .with_context(|| format!("failed to record absent {}", live_path.display()))?;
         }
         let staged_path = temp_dir.join(file_name);
-        fs::copy(&staged_path, &live_path).with_context(|| {
+        // rename(2) atomically replaces `live_path` (including a symlink, without
+        // following it); the staging dir lives under `codex_root`, so it is the
+        // same filesystem. Readers never observe a missing or partial file.
+        fs::rename(&staged_path, &live_path).with_context(|| {
             format!(
                 "failed to restore {} from {}",
                 live_path.display(),
                 staged_path.display()
             )
         })?;
+    }
+    Ok(())
+}
+
+/// Copy `src` over `dest` atomically: write a private sibling temp file, then
+/// rename it into place. Unlike `fs::copy`, never writes through a symlink at
+/// `dest` and never leaves `dest` missing or truncated.
+fn copy_atomic(src: &Path, dest: &Path) -> Result<()> {
+    let bytes = fs::read(src).with_context(|| format!("failed to read {}", src.display()))?;
+    let file_name = dest
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = dest.with_file_name(format!(".{file_name}.cas-tmp-{}", Uuid::new_v4()));
+    write_private_staged_file(&tmp, &bytes)?;
+    if let Err(error) = fs::rename(&tmp, dest) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error).with_context(|| format!("failed to replace {}", dest.display()));
     }
     Ok(())
 }
@@ -602,11 +621,7 @@ fn restore_from_backup(codex_root: &Path, backup_dir: &Path) -> Result<()> {
         let backup_path = backup_dir.join(file_name);
         let live_path = codex_root.join(file_name);
         if backup_path.exists() {
-            if live_path.exists() {
-                fs::remove_file(&live_path)
-                    .with_context(|| format!("failed to remove {}", live_path.display()))?;
-            }
-            fs::copy(&backup_path, &live_path).with_context(|| {
+            copy_atomic(&backup_path, &live_path).with_context(|| {
                 format!(
                     "failed to restore backup {} to {}",
                     backup_path.display(),
@@ -976,6 +991,23 @@ mod tests {
             plan_label: bundle.identity.plan_label.clone(),
         };
         restore_snapshot(&env, &bundle.snapshot, &expected, false)?;
+        Ok(())
+    }
+
+    #[test]
+    fn copy_atomic_replaces_symlink_instead_of_writing_through() -> Result<()> {
+        let temp = tempdir()?;
+        let victim = temp.path().join("victim");
+        let src = temp.path().join("src");
+        let dest = temp.path().join("auth.json");
+        fs::write(&victim, "untouched")?;
+        fs::write(&src, "secret")?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&victim, &dest)?;
+        super::copy_atomic(&src, &dest)?;
+        assert_eq!(fs::read_to_string(&victim)?, "untouched");
+        assert_eq!(fs::read_to_string(&dest)?, "secret");
+        assert!(!fs::symlink_metadata(&dest)?.file_type().is_symlink());
         Ok(())
     }
 

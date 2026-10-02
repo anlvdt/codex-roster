@@ -1376,7 +1376,7 @@ fn print_token_usage_summary(output: &TokenUsageSummaryOutput) {
 }
 
 fn run_vibe_usage(command: VibeUsageCommand) -> Result<()> {
-    let mut args = vec!["--yes".to_owned(), "@vibe-cafe/vibe-usage".to_owned()];
+    let mut args = vec!["--yes".to_owned(), crate::vibe_usage::VIBE_USAGE_NPM_SPEC.to_owned()];
     match command {
         VibeUsageCommand::Init => args.push("init".to_owned()),
         VibeUsageCommand::Sync => args.push("sync".to_owned()),

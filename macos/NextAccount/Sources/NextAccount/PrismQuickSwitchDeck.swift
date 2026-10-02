@@ -83,7 +83,7 @@ struct PrismQuickSwitchDeck: View {
             // usable quota or a redeemable banked reset (not exhausted-only).
             let canSwitch = account.isUsableForSwitch || account.restingHasBankedReset
             if !account.isActive && canSwitch && !account.requiresLogin && !account.usageErrorBlocksActivation {
-                if nextShortcut <= 6 {
+                if nextShortcut <= 9 {
                     map[account.id] = nextShortcut
                     nextShortcut += 1
                 }
@@ -480,7 +480,7 @@ struct PrismQuickSwitchDeck: View {
             return language.text("Lỗi — thử lại", "Failed — retry")
         case .none:
             if let next = readyCandidates.first {
-                return language.text("Sẵn sàng → \(next.displayName)", "Ready → \(next.displayName)")
+                return language.text("Sẵn sàng (quota) → \(next.displayName)", "Ready (quota) → \(next.displayName)")
             }
             return language.text("Chưa có ứng viên sẵn sàng", "No usable candidate")
         }
@@ -1110,9 +1110,11 @@ private struct PrismCompactAccountCard: View {
                 } else if canOfferSwitch {
                     if let shortcutIndex {
                         switchButton(targetID: targetID)
+                            .help(manualSwitchHelp)
                             .keyboardShortcut(KeyEquivalent(Character("\(shortcutIndex)")), modifiers: [])
                     } else {
                         switchButton(targetID: targetID)
+                            .help(manualSwitchHelp)
                     }
                 }
             }
@@ -1130,11 +1132,13 @@ private struct PrismCompactAccountCard: View {
                 }
         )
         .contextMenu {
-            Button {
-                guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
-                store.activate(target, force: true)
-            } label: {
-                Label(language.text("Kích hoạt", "Activate"), systemImage: "bolt.fill")
+            if canOfferSwitch && !account.requiresLogin {
+                Button {
+                    guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
+                    store.activate(target, force: true)
+                } label: {
+                    Label(language.text("Kích hoạt", "Activate"), systemImage: "bolt.fill")
+                }
             }
             Button {
                 PrismTheme.triggerHaptic()
@@ -1260,6 +1264,22 @@ private struct PrismCompactAccountCard: View {
         .fixedSize()
     }
 
+    private var manualSwitchHelp: String {
+        if account.hasDeferredAccessTokenRefresh {
+            return language.text(
+                "Quota chưa xác minh nhưng phiên vẫn chuyển được thủ công. Chỉ Login khi thật sự cần đăng nhập lại.",
+                "Quota is unverified, but you can still switch this session manually. Use Login only when sign-in is required."
+            )
+        }
+        if !account.isUsableForSwitch {
+            return language.text(
+                "Chuyển thủ công — không cần quota usable (khác Ready/tự chuyển).",
+                "Manual switch — usable quota not required (unlike Ready / auto-switch)."
+            )
+        }
+        return language.text("Chuyển sang tài khoản này", "Switch to this account")
+    }
+
     /// Explicit row state so users don't infer from 0% bars alone.
     private var rowStatus: (text: String, tint: Color)? {
         if account.isActive { return nil }
@@ -1280,7 +1300,10 @@ private struct PrismCompactAccountCard: View {
             return exhaustedStatus
         }
         if account.hasDeferredAccessTokenRefresh {
-            return (language.text("Chưa xác minh", "Unverified"), PrismTheme.textSecondary)
+            return (
+                language.text("Chưa xác minh · vẫn Đổi", "Unverified · still switchable"),
+                PrismTheme.textSecondary
+            )
         }
         return nil
     }

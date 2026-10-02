@@ -146,6 +146,13 @@ where
         let live = adapter(provider)
             .read_live_auth(&self.env)
             .with_context(|| format!("no live {provider} authentication found"))?;
+        if provider == AiProvider::Claude
+            && !crate::provider::claude::has_oauth_token(&live.snapshot)
+        {
+            bail!(
+                "Claude CLI is not signed in. Use Add account → Sign in; a Desktop identity alone cannot be saved as a CLI login."
+            );
+        }
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         let store = self.provider_store();
         let provider_adapter = adapter(provider);
@@ -317,8 +324,41 @@ where
                 (live.identity, live.snapshot, record)
             }
         };
+        let local_cooldown = if provider == AiProvider::Claude {
+            saved_record
+                .as_ref()
+                .map(|record| {
+                    preserve_claude_api_cooldown(
+                        &self.env.home_dir,
+                        record,
+                        time::OffsetDateTime::now_utc(),
+                    )
+                })
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
+        if provider == AiProvider::Claude
+            && crate::claude_quota_bridge::covers_known_limits(
+                saved_record
+                    .as_ref()
+                    .and_then(|record| record.cached_usage.as_ref()),
+            )
+            && let Some(usage) = crate::claude_quota_bridge::read_usage(
+                &crate::claude_quota_bridge::config_dir(&self.env.home_dir),
+                &identity,
+                time::OffsetDateTime::now_utc(),
+            )
+        {
+            return Ok(ProviderUsageOutput {
+                environment: self.env.kind.clone(),
+                account: identity,
+                usage,
+            });
+        }
         if let Some(record) = &saved_record
-            && let Some(wait) = claude_rate_limit_wait(record, time::OffsetDateTime::now_utc())
+            && let Some(wait) = local_cooldown
         {
             let mut usage = record.cached_usage.clone().unwrap_or(ProviderUsageView {
                 provider,
@@ -490,8 +530,29 @@ where
             None
         };
         for record in records {
+            let local_cooldown = if provider == AiProvider::Claude {
+                preserve_claude_api_cooldown(
+                    &self.env.home_dir,
+                    &record,
+                    time::OffsetDateTime::now_utc(),
+                )?
+            } else {
+                None
+            };
+            if provider == AiProvider::Claude
+                && crate::claude_quota_bridge::covers_known_limits(record.cached_usage.as_ref())
+                && let Some(usage) = crate::claude_quota_bridge::read_usage(
+                    &crate::claude_quota_bridge::config_dir(&self.env.home_dir),
+                    &record.identity,
+                    time::OffsetDateTime::now_utc(),
+                )
+            {
+                let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+                store.record_usage(&self.env.kind, record.id, usage)?;
+                continue;
+            }
             // A forced UI refresh also respects the server's rate-limit cooldown.
-            if claude_rate_limit_wait(&record, time::OffsetDateTime::now_utc()).is_some() {
+            if local_cooldown.is_some() {
                 continue;
             }
             let is_live = live_identity
@@ -640,6 +701,20 @@ where
 
 /// Persist cooldown via the last recorded error so restarts and CLI callers
 /// cannot repeatedly hit a throttled account. Quota exhaustion is unrelated.
+fn preserve_claude_api_cooldown(
+    home: &std::path::Path,
+    record: &ProviderSavedAccount,
+    now: time::OffsetDateTime,
+) -> Result<Option<time::Duration>> {
+    let dir = crate::claude_quota_bridge::config_dir(home);
+    if let Some(wait) = claude_rate_limit_wait(record, now) {
+        crate::claude_quota_bridge::remember_api_cooldown(&dir, record.id, now + wait)?;
+    }
+    Ok(crate::claude_quota_bridge::api_cooldown(
+        &dir, record.id, now,
+    ))
+}
+
 fn claude_rate_limit_wait(
     record: &ProviderSavedAccount,
     now: time::OffsetDateTime,

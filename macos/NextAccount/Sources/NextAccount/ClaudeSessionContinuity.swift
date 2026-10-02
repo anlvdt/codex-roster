@@ -107,10 +107,16 @@ enum ClaudeSessionContinuity {
                 read -r '?Press Enter to close.'
                 exit 1
             fi
+            if [[ -n "$ANTHROPIC_BASE_URL" || "$CLAUDE_CODE_USE_BEDROCK" == 1 || "$CLAUDE_CODE_USE_VERTEX" == 1 || "$CLAUDE_CODE_USE_FOUNDRY" == 1 ]]; then
+                print -r -- 'A provider or gateway override is active. Remove it before resuming with the selected Claude account.'
+                read -r '?Press Enter to close.'
+                exit 1
+            fi
             auth_json="$(claude auth status)"
             auth_result=$?
             actual_email="$(print -r -- "$auth_json" | /usr/bin/plutil -extract email raw -o - - 2>/dev/null)"
-            if (( auth_result != 0 )) || [[ "${(L)actual_email}" != "${(L)expected_email}" ]]; then
+            logged_in="$(print -r -- "$auth_json" | /usr/bin/plutil -extract loggedIn raw -o - - 2>/dev/null)"
+            if (( auth_result != 0 )) || [[ "$logged_in" != true || "${(L)actual_email}" != "${(L)expected_email}" ]]; then
                 print -r -- 'Claude CLI did not confirm the selected account. The conversation has not been resumed. Check claude auth status and retry.'
                 read -r '?Press Enter to close.'
                 exit 1

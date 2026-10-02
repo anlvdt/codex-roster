@@ -76,7 +76,7 @@ private enum NotchScreen: CaseIterable {
     }
 }
 
-/// All-In-One Panoramic Floating Notch Console for Codex Roster.
+/// All-In-One Panoramic Floating Notch Console for AgentDock.
 /// Drops down from the camera notch, then blooms out symmetrically to both left and right wings.
 struct NotchWindowView: View {
     @EnvironmentObject private var store: AccountStore
@@ -89,6 +89,8 @@ struct NotchWindowView: View {
     @State private var expansionState: NotchExpansionState = .collapsed
     @State private var hoverTask: Task<Void, Never>?
     @State private var collapseTask: Task<Void, Never>?
+    @State private var isClaudeQuotaGuidePresented = false
+    @State private var isClaudeInteractionPresented = false
     @State private var windowShrinkTask: Task<Void, Never>?
     @State private var keyMonitors: [Any] = []
     @State private var isWindowExpanded = false
@@ -131,7 +133,10 @@ struct NotchWindowView: View {
 
     private var expandedPanelHeight: CGFloat {
         if notchScreen == .claude {
-            return ClaudeRosterView.notchDeckHeight(accountCount: store.claudeAccounts.count)
+            return ClaudeRosterView.notchDeckHeight(
+                accountCount: store.claudeAccounts.count,
+                hasQuotaCaption: ClaudeRosterView.notchShowsQuotaCaption(account: store.claudeAccounts.first(where: \.isActive)),
+                hasMessage: store.claudeSwitchMessage != nil)
         }
         return NotchRosterLayout.deckHeight(
             sectionCounts: rosterSectionCounts,
@@ -142,26 +147,6 @@ struct NotchWindowView: View {
 
     private var compactHeight: CGFloat {
         notchInset > 0 ? notchInset : 32
-    }
-
-    private var currentWidth: CGFloat {
-        switch expansionState {
-        case .collapsed:
-            return compactWidth
-        case .droppingDown:
-            return 280
-        case .fullyExpanded:
-            return maxExpandedWidth
-        }
-    }
-
-    private var currentHeight: CGFloat {
-        switch expansionState {
-        case .collapsed:
-            return compactHeight
-        case .droppingDown, .fullyExpanded:
-            return expandedPanelHeight
-        }
     }
 
     private var isExpanded: Bool {
@@ -181,49 +166,48 @@ struct NotchWindowView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            // Symmetrically expanding Liquid Quartz capsule
-            VStack(spacing: 0) {
-                if expansionState == .fullyExpanded {
-                    expandedDropdownContent
-                        .transition(.asymmetric(
-                            insertion: .opacity.combined(with: .move(edge: .top)),
-                            removal: .opacity
-                        ))
-                } else if expansionState == .droppingDown {
-                    Color.clear
-                        .frame(height: expandedPanelHeight)
-                } else {
-                    compactBar
-                        .transition(.opacity)
-                }
+            // Keep content through the closing fade, then release the hidden roster.
+            // Only opacity and translation animate; AppKit resizes once.
+            if isWindowExpanded {
+                expandedDropdownContent
+                    .frame(width: maxExpandedWidth, height: expandedPanelHeight)
+                    .opacity(isExpanded ? 1 : 0)
+                    .offset(y: isExpanded || reduceMotion ? 0 : -6)
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isExpanded)
+                    .allowsHitTesting(isExpanded)
+                    .disabled(!isExpanded)
+                    .accessibilityHidden(!isExpanded)
             }
-            .frame(width: currentWidth, height: currentHeight)
-            .background {
-                if isExpanded {
-                    // Prefer a denser shell over ultra-thin frost so roster text
-                    // stays readable while keeping the camera-notch tint.
-                    notchShape
-                        .fill(.regularMaterial)
-                        .overlay {
-                            notchShape.fill(PrismTheme.notchShell.opacity(0.88))
-                        }
-                }
-            }
-            .overlay {
-                if isExpanded {
-                    notchShape
-                        .strokeBorder(PrismTheme.rimStroke, lineWidth: 1)
-                }
-            }
-            .clipShape(notchShape)
-            .contentShape(notchShape)
-            .onHover(perform: handleHover)
+
+            compactBar
+                .frame(width: compactWidth, height: compactHeight)
+                .opacity(isExpanded ? 0 : 1)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isExpanded)
+                .allowsHitTesting(!isExpanded)
+                .accessibilityHidden(isExpanded)
         }
         .frame(
             width: isWindowExpanded ? maxExpandedWidth : compactWidth,
             height: isWindowExpanded ? expandedPanelHeight : compactHeight,
             alignment: .top
         )
+        .background {
+            if isWindowExpanded {
+                notchShape.fill(PrismTheme.notchShell)
+                    .opacity(isExpanded ? 1 : 0)
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isExpanded)
+            }
+        }
+        .overlay {
+            if isWindowExpanded {
+                notchShape.strokeBorder(PrismTheme.rimStroke, lineWidth: 1)
+                    .opacity(isExpanded ? 1 : 0)
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isExpanded)
+            }
+        }
+        .clipShape(notchShape)
+        .contentShape(notchShape)
+        .onHover(perform: handleHover)
         .preferredColorScheme(.dark)
         .rosterConsoleOpenBridge()
         .background {
@@ -329,9 +313,10 @@ struct NotchWindowView: View {
         .onDisappear {
             hoverTask?.cancel()
             collapseTask?.cancel()
+            windowShrinkTask?.cancel()
             removeKeyMonitors()
         }
-        .alert("Codex Roster", isPresented: Binding(
+        .alert("AgentDock", isPresented: Binding(
             get: { store.errorMessage != nil },
             set: { if !$0 { store.errorMessage = nil } }
         )) {
@@ -355,7 +340,7 @@ struct NotchWindowView: View {
             }
         } label: {
             PrismFilamentView(
-                account: activeAccount,
+                quota: compactQuota,
                 diameter: miniDiameter,
                 compact: true,
                 notchWidth: hasNotch ? notchWidth : 0,
@@ -375,25 +360,36 @@ struct NotchWindowView: View {
     // MARK: - Expanded Dropdown Content
     private var expandedDropdownContent: some View {
         ZStack(alignment: .top) {
-            if notchScreen == .codex {
-                MenuBarView()
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .leading).combined(with: .opacity),
-                        removal: .move(edge: .trailing).combined(with: .opacity)
-                    ))
-            } else {
-                ClaudeRosterView(notchLayout: true)
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .trailing).combined(with: .opacity),
-                        removal: .move(edge: .leading).combined(with: .opacity)
-                    ))
+            ZStack(alignment: .top) {
+                if notchScreen == .codex {
+                    MenuBarView()
+                        .transition(.asymmetric(
+                            insertion: .offset(x: -18).combined(with: .opacity),
+                            removal: .opacity
+                        ))
+                } else {
+                    ClaudeRosterView(notchLayout: true, onQuotaGuidePresentationChanged: { shown in
+                        isClaudeQuotaGuidePresented = shown
+                        collapseTask?.cancel()
+                    }, onInteractionPresentationChanged: { shown in
+                        isClaudeInteractionPresented = shown
+                        collapseTask?.cancel()
+                        if shown && !isExpanded { expand() }
+                    })
+                        .transition(.asymmetric(
+                            insertion: .offset(x: 18).combined(with: .opacity),
+                            removal: .opacity
+                        ))
+                }
             }
+            // Only page opacity/translation animate. Native window sizing and
+            // navigation chrome use the destination layout immediately.
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: notchScreen)
             notchScreenSwitcher
-                .padding(.top, compactHeight + 4)
+                .padding(.top, compactHeight + NotchRosterLayout.screenSwitcherTopInset)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .clipped()
-        .animation(reduceMotion ? nil : PrismTheme.snapSpring, value: notchScreen)
         .contentShape(Rectangle())
         .simultaneousGesture(
             DragGesture(minimumDistance: 28)
@@ -407,11 +403,13 @@ struct NotchWindowView: View {
     }
 
     private var notchScreenSwitcher: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             Button {
                 switchNotchScreen(.codex)
             } label: {
                 Image(systemName: "chevron.left")
+                    .frame(width: 28, height: NotchRosterLayout.screenSwitcherHeight)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .foregroundStyle(notchScreen == .codex ? PrismTheme.textTertiary : PrismTheme.textBright)
@@ -421,27 +419,28 @@ struct NotchWindowView: View {
             Text(notchScreen.title)
                 .font(PrismTheme.fontCaptionBold)
                 .foregroundStyle(PrismTheme.textBright)
-                .frame(minWidth: 110)
+                .frame(maxWidth: .infinity)
 
             Button {
                 switchNotchScreen(.claude)
             } label: {
                 Image(systemName: "chevron.right")
+                    .frame(width: 28, height: NotchRosterLayout.screenSwitcherHeight)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .foregroundStyle(notchScreen == .claude ? PrismTheme.textTertiary : PrismTheme.textBright)
             .disabled(notchScreen == .claude)
             .accessibilityLabel(language.text("Màn hình Claude Code", "Claude Code screen"))
         }
-        .frame(width: 188, height: 34)
+        .frame(width: 156, height: NotchRosterLayout.screenSwitcherHeight)
         .background(PrismTheme.surfacePanel.opacity(0.94), in: Capsule())
     }
 
     private func switchNotchScreen(_ target: NotchScreen) {
         guard notchScreen != target else { return }
-        withAnimation(reduceMotion ? nil : PrismTheme.snapSpring) {
-            notchScreen = target
-        }
+        // Do not animate the entire window/grid height when changing providers.
+        notchScreen = target
     }
 
     private func handleNotchScroll(_ event: NSEvent) {
@@ -459,18 +458,26 @@ struct NotchWindowView: View {
         horizontalScroll = 0
     }
 
+    private var compactQuota: NotchQuotaSnapshot {
+        switch notchScreen {
+        case .codex: return NotchQuotaSnapshot(codex: activeAccount)
+        case .claude: return NotchQuotaSnapshot(claude: store.claudeAccounts.first(where: \.isActive))
+        }
+    }
+
     private var compactAccessibilityLabel: String {
-        let five = activeAccount?.usage?.fiveHour?.displayRemainingPercent
-        let week = activeAccount?.usage?.weekly?.displayRemainingPercent
-        let banked = activeAccount?.bankedResetCount ?? 0
+        let quota = compactQuota
+        let five = quota.fivePercent
+        let week = quota.weekPercent
+        let banked = quota.bankedCount
         let fiveText = five.map { "\($0)%" } ?? language.text("chưa có", "no data")
         let weekText = week.map { "\($0)%" } ?? language.text("chưa có", "no data")
         let bankedText = banked > 0
             ? language.text(", \(banked) lượt banked reset", ", \(banked) banked resets available")
             : ""
         return language.text(
-            "5 giờ còn \(fiveText), tuần còn \(weekText)\(bankedText). Mở Codex Roster.",
-            "5-hour \(fiveText), weekly \(weekText)\(bankedText). Open Codex Roster."
+            "\(quota.providerName): 5 giờ còn \(fiveText), tuần còn \(weekText)\(bankedText). Mở AgentDock.",
+            "\(quota.providerName): 5-hour \(fiveText), weekly \(weekText)\(bankedText). Open AgentDock."
         )
     }
     /// Leave-grace before auto-collapse. Long enough to cross shape edges /
@@ -504,10 +511,10 @@ struct NotchWindowView: View {
                 }
             }
         } else if isExpanded {
-            guard !isPinnedLive else { return }
+            guard !isPinnedLive, !isClaudeQuotaGuidePresented, !isClaudeInteractionPresented else { return }
             collapseTask = Task { @MainActor in
                 try? await Task.sleep(for: Self.hoverCollapseGrace)
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, !isClaudeQuotaGuidePresented, !isClaudeInteractionPresented else { return }
                 collapse()
             }
         }
@@ -521,18 +528,12 @@ struct NotchWindowView: View {
         installKeyMonitors()
         isWindowExpanded = true
 
-        guard !reduceMotion else {
-            expansionState = .fullyExpanded
-            return
-        }
-
-        // One interruptible, critically damped transition; no delayed bloom.
-        withAnimation(.spring(response: 0.22, dampingFraction: 1)) {
-            expansionState = .fullyExpanded
-        }
+        // Native bounds change once, without an interpolated layout pass.
+        expansionState = .fullyExpanded
     }
 
     private func collapse() {
+        guard !isClaudeQuotaGuidePresented, !isClaudeInteractionPresented else { return }
         hoverTask?.cancel()
         collapseTask?.cancel()
         windowShrinkTask?.cancel()
@@ -544,12 +545,10 @@ struct NotchWindowView: View {
             return
         }
 
-        withAnimation(.easeOut(duration: 0.16)) {
-            expansionState = .collapsed
-        }
+        expansionState = .collapsed
 
         windowShrinkTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(170))
+            try? await Task.sleep(for: .milliseconds(130))
             guard !Task.isCancelled, expansionState == .collapsed else { return }
             isWindowExpanded = false
         }
@@ -558,14 +557,14 @@ struct NotchWindowView: View {
     private func installKeyMonitors() {
         guard keyMonitors.isEmpty else { return }
         if let local = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { event in
-            guard event.keyCode == 53 else { return event }
+            guard event.keyCode == 53, !isClaudeQuotaGuidePresented, !isClaudeInteractionPresented else { return event }
             Task { @MainActor in collapse() }
             return nil
         }) {
             keyMonitors.append(local)
         }
         if let global = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: { event in
-            guard event.keyCode == 53 else { return }
+            guard event.keyCode == 53, !isClaudeQuotaGuidePresented, !isClaudeInteractionPresented else { return }
             Task { @MainActor in collapse() }
         }) {
             keyMonitors.append(global)
@@ -597,12 +596,19 @@ private struct NotchWindowConfigurator: NSViewRepresentable {
     let panelEnabled: Bool
     @Binding var geometry: NotchGeometry
 
+    final class Coordinator {
+        weak var configuredWindow: NSWindow?
+        var configurationGeneration = 0
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeNSView(context: Context) -> NotchHitTestView {
         let view = NotchHitTestView()
         view.isExpanded = isExpanded
         view.compactWidth = compactWidth
         view.compactHeight = compactHeight
-        configureWindow(attachedTo: view)
+        configureWindow(attachedTo: view, coordinator: context.coordinator)
         return view
     }
 
@@ -610,29 +616,38 @@ private struct NotchWindowConfigurator: NSViewRepresentable {
         view.isExpanded = isExpanded
         view.compactWidth = compactWidth
         view.compactHeight = compactHeight
-        configureWindow(attachedTo: view)
+        configureWindow(attachedTo: view, coordinator: context.coordinator)
     }
 
-    private func configureWindow(attachedTo view: NSView) {
+    private func configureWindow(attachedTo view: NSView, coordinator: Coordinator) {
+        coordinator.configurationGeneration += 1
+        let generation = coordinator.configurationGeneration
         DispatchQueue.main.async {
-            guard let window = view.window else { return }
+            // SwiftUI may queue several updates in the same run-loop turn.
+            // Apply only the newest bounds, including a rapid close/reopen.
+            guard generation == coordinator.configurationGeneration,
+                  let window = view.window else { return }
             guard panelEnabled else {
                 window.orderOut(nil)
                 return
             }
-            window.identifier = NSUserInterfaceItemIdentifier("notch")
-            window.styleMask = [.borderless, .fullSizeContentView]
-            window.titleVisibility = .hidden
-            window.titlebarAppearsTransparent = true
-            window.isOpaque = false
-            window.backgroundColor = .clear
-            window.hasShadow = false
-            window.isMovable = false
-            window.hidesOnDeactivate = false
-            window.level = .statusBar
-            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-            window.isExcludedFromWindowsMenu = true
-            window.ignoresMouseEvents = false
+            let needsPresentation = coordinator.configuredWindow !== window || !window.isVisible
+            if coordinator.configuredWindow !== window {
+                window.identifier = NSUserInterfaceItemIdentifier("notch")
+                window.styleMask = [.borderless, .fullSizeContentView]
+                window.titleVisibility = .hidden
+                window.titlebarAppearsTransparent = true
+                window.isOpaque = false
+                window.backgroundColor = .clear
+                window.hasShadow = false
+                window.isMovable = false
+                window.hidesOnDeactivate = false
+                window.level = .statusBar
+                window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+                window.isExcludedFromWindowsMenu = true
+                window.ignoresMouseEvents = false
+                coordinator.configuredWindow = window
+            }
 
             let measured = NotchGeometry.detect(fallbackScreen: window.screen)
             if geometry != measured {
@@ -647,21 +662,12 @@ private struct NotchWindowConfigurator: NSViewRepresentable {
             let targetHeight = isExpanded ? expandedHeight : compactHeight
             let targetFrame = measured.windowFrame(width: targetWidth, height: targetHeight)
             if window.frame != targetFrame {
-                // Expanded→expanded resizes (roster filter / caption changes) get a
-                // gentle ease so the panel doesn't snap. Compact↔expanded stays
-                // instant so the capsule never lags the click that opened it.
-                if isExpanded && window.frame.height > compactHeight && targetHeight > compactHeight {
-                    NSAnimationContext.runAnimationGroup { ctx in
-                        ctx.duration = 0.2
-                        ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                        ctx.allowsImplicitAnimation = true
-                        window.animator().setFrame(targetFrame, display: true)
-                    }
-                } else {
-                    window.setFrame(targetFrame, display: true, animate: false)
-                }
+                // Match SwiftUI's bounds once. A second AppKit resize animation
+                // would force the full roster through repeated layout passes.
+                window.setFrame(targetFrame, display: true, animate: false)
             }
-            window.orderFrontRegardless()
+            // Quota publications must not reorder an already-visible window.
+            if needsPresentation { window.orderFrontRegardless() }
         }
     }
 }

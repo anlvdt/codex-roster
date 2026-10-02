@@ -37,10 +37,6 @@ const LOOKBACK_DAYS: i64 = 14;
 const MAX_META_LINES: usize = 8;
 /// Tolerate small clock skew between activate timestamp and rollout mtime.
 const ACTIVATED_GRACE: Duration = Duration::from_secs(5);
-/// Mid-flight cuts (`task_started` with no usage-limit event): use rollout
-/// mtime against this short window so an abandoned in-progress turn is not
-/// resumed hours later.
-const MID_FLIGHT_RESUME_WINDOW: Duration = Duration::from_secs(45 * 60);
 /// Usage-limit / abort interrupts: must cover OpenAI’s ~5-hour quota window
 /// plus banked-reset redeem and Desktop relaunch slack. 45m was too short —
 /// natural 5H resets (and slow redeem after failed deep-links) left threads
@@ -377,9 +373,9 @@ fn offset_to_system(ts: OffsetDateTime) -> SystemTime {
 /// Reading only the tail bounds memory for long conversations. Unknown states
 /// are excluded instead of accidentally restarting completed work.
 ///
-/// Eligibility: [`USAGE_LIMIT_RESUME_WINDOW`] for usage-limit / abort event
-/// timestamps; [`MID_FLIGHT_RESUME_WINDOW`] via rollout mtime for bare
-/// `task_started` cuts.
+/// Eligibility requires an explicit usage-limit error within
+/// [`USAGE_LIMIT_RESUME_WINDOW`]. A bare `task_started` is an active turn,
+/// not evidence of interruption, even when its rollout mtime is recent.
 fn discover_interrupted_sessions(codex_root: &Path) -> Result<Vec<DiscoveredSession>> {
     let mut candidates = Vec::new();
     let mut db_available = false;
@@ -419,9 +415,6 @@ fn discover_interrupted_sessions(codex_root: &Path) -> Result<Vec<DiscoveredSess
     let usage_limit_floor = now
         .checked_sub(USAGE_LIMIT_RESUME_WINDOW)
         .unwrap_or(SystemTime::UNIX_EPOCH);
-    let mid_flight_floor = now
-        .checked_sub(MID_FLIGHT_RESUME_WINDOW)
-        .unwrap_or(SystemTime::UNIX_EPOCH);
     let mut sessions = Vec::new();
     for path in candidates {
         let Ok(modified) = fs::metadata(&path).and_then(|meta| meta.modified()) else {
@@ -430,23 +423,12 @@ fn discover_interrupted_sessions(codex_root: &Path) -> Result<Vec<DiscoveredSess
         let Ok(Some(state)) = rollout_continuation_state(&path) else {
             continue;
         };
-        if !state.needs_continue {
+        if !state.needs_continue || !state.from_interrupt_event {
             continue;
         }
-        // Usage-limit / abort: trust the event clock. In-progress turns keep
-        // a `task_started` timestamp from turn start (often older than the
-        // window) — use mtime so a mid-flight cut still resumes.
-        let interrupt_at = if state.from_interrupt_event {
-            state.event_at.unwrap_or(modified)
-        } else {
-            modified
-        };
-        let floor = if state.from_interrupt_event {
-            usage_limit_floor
-        } else {
-            mid_flight_floor
-        };
-        if interrupt_at < floor {
+        // Fresh writes must not revive an old usage-limit error.
+        let interrupt_at = state.event_at.unwrap_or(modified);
+        if interrupt_at < usage_limit_floor {
             continue;
         }
         if let Ok(Some(mut session)) = parse_user_session_meta(&path, modified) {
@@ -523,8 +505,10 @@ fn continuation_state(line: &str) -> Option<ContinuationState> {
         .and_then(parse_event_timestamp);
     let payload = &value["payload"];
     match payload["type"].as_str()? {
+        // A start cancels any older interruption evidence. Missing completion
+        // can mean the task is still running; never infer a crash from mtime.
         "task_started" => Some(ContinuationState {
-            needs_continue: true,
+            needs_continue: false,
             from_interrupt_event: false,
             event_at,
         }),
@@ -906,7 +890,7 @@ mod tests {
         );
         append_event(
             &day_dir.join("rollout-hit-limit.jsonl"),
-            serde_json::json!({"type":"task_started"}),
+            serde_json::json!({"type":"task_complete", "error":{"codex_error_info":"usage_limit_exceeded"}}),
         );
         let from = Uuid::new_v4();
         capture_pending_continue(&app_data, &codex_root, from).expect("pending");
@@ -974,11 +958,14 @@ mod tests {
         let duplicate = dir.join("rollout-duplicate.jsonl");
         write_rollout(
             &duplicate,
-            "active-a",
+            "blocked-b",
             temp.path().to_str().unwrap(),
             "user",
         );
-        append_event(&duplicate, serde_json::json!({"type":"task_started"}));
+        append_event(
+            &duplicate,
+            serde_json::json!({"type":"error", "code":"usage_limit_reached"}),
+        );
         capture_pending_continue(&app, &root, Uuid::new_v4()).unwrap();
         let hint = take_pending_continue_hint(&app, true).unwrap().unwrap();
         let mut ids = vec![hint.session_id.unwrap()];
@@ -988,7 +975,7 @@ mod tests {
                 .map(|hint| hint.session_id.unwrap()),
         );
         ids.sort();
-        assert_eq!(ids, vec!["active-a", "blocked-b"]);
+        assert_eq!(ids, vec!["blocked-b"]);
         assert!(take_pending_continue_hint(&app, true).unwrap().is_none());
     }
 
@@ -1085,7 +1072,10 @@ mod tests {
         let app = temp.path().join("app");
         let path = day_dir(&root).join("rollout-active.jsonl");
         write_rollout(&path, "active", temp.path().to_str().unwrap(), "user");
-        append_event(&path, serde_json::json!({"type":"task_started"}));
+        append_event(
+            &path,
+            serde_json::json!({"type":"task_complete", "error":{"codex_error_info":"usage_limit_exceeded"}}),
+        );
         let account = Uuid::new_v4();
         capture_pending_continue(&app, &root, account).unwrap();
         assert!(take_pending_continue_hint(&app, false).unwrap().is_none());
@@ -1108,7 +1098,10 @@ mod tests {
         for (id, archived) in [("one", 0), ("two", 0), ("archived", 1)] {
             let path = day_dir(&root).join(format!("rollout-{id}.jsonl"));
             write_rollout(&path, id, temp.path().to_str().unwrap(), "user");
-            append_event(&path, serde_json::json!({"type":"task_started"}));
+            append_event(
+                &path,
+                serde_json::json!({"type":"task_complete", "error":{"codex_error_info":"usage_limit_exceeded"}}),
+            );
             conn.execute(
                 "INSERT INTO threads VALUES (?1, ?2, 'user', 1, 1)",
                 rusqlite::params![path.to_str().unwrap(), archived],
@@ -1132,9 +1125,38 @@ mod tests {
                 serde_json::json!({"type":"token_count", "padding":"x".repeat(1024)}),
             );
         }
+        assert!(!rollout_needs_continue(&path).unwrap());
+        append_event(
+            &path,
+            serde_json::json!({"type":"task_complete", "error":{"codex_error_info":"usage_limit_exceeded"}}),
+        );
         assert!(rollout_needs_continue(&path).unwrap());
+        // Manual/native continuation supersedes the older quota error.
+        append_event(&path, serde_json::json!({"type":"task_started"}));
+        assert!(!rollout_needs_continue(&path).unwrap());
         append_event(&path, serde_json::json!({"type":"task_complete"}));
         assert!(!rollout_needs_continue(&path).unwrap());
+    }
+
+    #[test]
+    fn active_turn_after_quota_failure_is_not_rediscovered() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("codex");
+        let path = day_dir(&root).join("rollout-recovered.jsonl");
+        write_rollout(&path, "recovered", temp.path().to_str().unwrap(), "user");
+        append_event(
+            &path,
+            serde_json::json!({"type":"task_complete", "error":{"codex_error_info":"usage_limit_exceeded"}}),
+        );
+        assert_eq!(discover_interrupted_sessions(&root).unwrap().len(), 1);
+        append_event(&path, serde_json::json!({"type":"task_started"}));
+        for _ in 0..600 {
+            append_event(
+                &path,
+                serde_json::json!({"type":"token_count", "padding":"x".repeat(1024)}),
+            );
+        }
+        assert!(discover_interrupted_sessions(&root).unwrap().is_empty());
     }
 
     #[test]

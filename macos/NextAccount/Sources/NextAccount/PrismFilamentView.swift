@@ -10,7 +10,7 @@ struct PrismFilamentView: View {
     @EnvironmentObject private var language: LanguageStore
     @Environment(\.colorScheme) private var colorScheme
 
-    let account: SavedAccount?
+    let quota: NotchQuotaSnapshot
     var diameter: CGFloat = 20
     var compact: Bool = true
     var notchWidth: CGFloat = 185
@@ -18,27 +18,27 @@ struct PrismFilamentView: View {
     var compactHeight: CGFloat = 32
 
     private var fivePercent: Int? {
-        account?.usage?.fiveHour?.displayRemainingPercent
+        quota.fivePercent
     }
 
     private var weekPercent: Int? {
-        account?.usage?.weekly?.displayRemainingPercent
+        quota.weekPercent
     }
 
     private var bankedCount: Int {
-        account?.bankedResetCount ?? 0
+        quota.bankedCount
     }
 
     private var fiveResetDate: Date? {
-        account?.usage?.fiveHour?.resetAt.value
+        quota.fiveResetDate
     }
 
     private var weeklyResetDate: Date? {
-        account?.usage?.weekly?.resetAt.value
+        quota.weeklyResetDate
     }
 
     private var isRunning: Bool {
-        store.hasRunningCodexProcesses
+        quota.providerName == "Codex" && store.hasRunningCodexProcesses
     }
 
     private var fiveTint: Color {
@@ -214,8 +214,8 @@ struct PrismFilamentView: View {
                         .lineLimit(1)
                         .fixedSize()
                 }
-                .help(account?.usage?.fiveHour?.resetDescription(in: language.language) ?? "")
-            } else if let plan = account?.planLabel, !plan.isEmpty {
+                .help(quota.fiveResetDate?.formatted(date: .abbreviated, time: .shortened) ?? "")
+            } else if let plan = quota.planLabel, !plan.isEmpty {
                 Text(plan.uppercased())
                     .font(PrismTheme.fontChip)
                     .foregroundStyle(fiveTint.opacity(0.85))
@@ -229,7 +229,7 @@ struct PrismFilamentView: View {
         .frame(width: earWidth, height: compactHeight, alignment: .center)
         .background(leftEarBackground)
         .overlay(leftEarBorder)
-        .help(account?.displayName ?? language.text("Chưa có phiên", "No session"))
+        .help("\(quota.providerName): \(quota.displayName ?? language.text("Chưa có phiên", "No session"))")
     }
 
     // MARK: - Right Ear Wing (Flanking Right of Camera Notch)
@@ -283,7 +283,7 @@ struct PrismFilamentView: View {
                         .lineLimit(1)
                         .fixedSize()
                 }
-                .help(account?.usage?.weekly?.resetDescription(in: language.language) ?? "")
+                .help(quota.weeklyResetDate?.formatted(date: .abbreviated, time: .shortened) ?? "")
             }
         }
         .padding(.leading, 12)

@@ -39,7 +39,7 @@ const CAPABILITIES: &[ProviderCapability] = &[
 ];
 
 fn claude_dir(env: &AppEnv) -> PathBuf {
-    env.home_dir.join(".claude")
+    crate::claude_quota_bridge::config_dir(&env.home_dir)
 }
 
 fn credentials_path(env: &AppEnv) -> PathBuf {
@@ -63,12 +63,38 @@ fn config_path(env: &AppEnv) -> PathBuf {
         .unwrap_or_else(|| env.home_dir.join(".claude.json"))
 }
 
+fn keychain_service_for_dir(dir: Option<&Path>) -> String {
+    use sha2::{Digest, Sha256};
+    match dir {
+        Some(dir) => format!(
+            "{}-{:08x}",
+            super::claude_keychain::SERVICE,
+            // Claude Code isolates explicit config directories with the first
+            // eight hex characters of SHA-256 of the directory string.
+            u32::from_be_bytes(
+                Sha256::digest(dir.to_string_lossy().as_bytes())[..4]
+                    .try_into()
+                    .unwrap()
+            )
+        ),
+        None => super::claude_keychain::SERVICE.to_owned(),
+    }
+}
+
+fn keychain_service() -> String {
+    keychain_service_for_dir(
+        std::env::var_os("CLAUDE_CONFIG_DIR")
+            .as_deref()
+            .map(Path::new),
+    )
+}
+
 fn read_keychain_password() -> Option<String> {
     if !cfg!(target_os = "macos") {
         return None;
     }
     super::claude_keychain::get_password(
-        super::claude_keychain::SERVICE,
+        &keychain_service(),
         &super::claude_keychain::account_name(),
     )
     .ok()
@@ -271,6 +297,10 @@ fn access_token_from_snapshot(snapshot: &SnapshotBlob) -> Result<String> {
         }
     }
     bail!("Claude OAuth access token not found in snapshot")
+}
+
+pub(crate) fn has_oauth_token(snapshot: &SnapshotBlob) -> bool {
+    access_token_from_snapshot(snapshot).is_ok_and(|token| !token.is_empty())
 }
 
 const OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
@@ -727,7 +757,7 @@ impl ProviderAdapter for ClaudeAdapter {
             #[cfg(target_os = "macos")]
             if !keychain_backed {
                 super::claude_keychain::delete_password(
-                    super::claude_keychain::SERVICE,
+                    &keychain_service(),
                     &super::claude_keychain::account_name(),
                 )
                 .context("failed to remove stale Claude Keychain credentials")?;
@@ -738,7 +768,7 @@ impl ProviderAdapter for ClaudeAdapter {
         {
             let merged = merge_shared_credential_fields(&password, shared.as_ref());
             super::claude_keychain::set_password(
-                super::claude_keychain::SERVICE,
+                &keychain_service(),
                 &super::claude_keychain::account_name(),
                 &merged,
             )
@@ -856,6 +886,26 @@ impl ProviderAdapter for ClaudeAdapter {
     }
 
     fn fetch_usage(&self, snapshot: &SnapshotBlob) -> Result<ProviderUsageView> {
+        // A config-only snapshot is an identity, not a signed-in CLI session.
+        // Preserve a distinct auth status rather than presenting old quota as
+        // a transient request failure. Desktop authentication is separate.
+        let has_token = ["claude_keychain.txt", "claude_credentials.json"]
+            .into_iter()
+            .filter_map(|name| snapshot_text(snapshot, name).ok().flatten())
+            .filter_map(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .any(|value| access_token_from_value(&value).is_some());
+        if !has_token {
+            return Ok(ProviderUsageView {
+                provider: AiProvider::Claude,
+                fetched_at: OffsetDateTime::now_utc(),
+                status: ProviderUsageStatus::NeedsAuth,
+                fidelity: UsageFidelity::Official,
+                headline_window: None,
+                windows: Vec::new(),
+                plan_label: None,
+                detail: Some("claude_cli_auth_missing: Run claude auth login in Terminal, then save the account again. Claude Desktop login is separate.".into()),
+            });
+        }
         let token = access_token_from_snapshot(snapshot)?;
         let mut response = ureq::get(OAUTH_USAGE_URL)
             .header("Authorization", &format!("Bearer {token}"))
@@ -963,6 +1013,41 @@ fn status_view(status: ProviderUsageStatus, http_status: u16) -> ProviderUsageVi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_config_dir_has_its_own_keychain_service() {
+        assert_eq!(keychain_service_for_dir(None), "Claude Code-credentials");
+        assert_eq!(
+            keychain_service_for_dir(Some(Path::new("/Users/anle/.claude"))),
+            "Claude Code-credentials-f7a953a8"
+        );
+        assert_ne!(
+            keychain_service_for_dir(Some(Path::new("/tmp/claude-a"))),
+            keychain_service_for_dir(Some(Path::new("/tmp/claude-b")))
+        );
+    }
+
+    #[test]
+    fn config_only_snapshot_requires_cli_auth_without_network() {
+        let snapshot = SnapshotBlob {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            files: vec![SnapshotFile {
+                name: "claude_config.json".into(),
+                bytes_base64: base64::engine::general_purpose::STANDARD.encode(
+                    br#"{"oauthAccount":{"emailAddress":"a@example.com","accountUuid":"a"}}"#,
+                ),
+            }],
+        };
+        let usage = CLAUDE.fetch_usage(&snapshot).unwrap();
+        assert_eq!(usage.status, ProviderUsageStatus::NeedsAuth);
+        assert!(usage.windows.is_empty());
+        assert!(
+            usage
+                .detail
+                .unwrap()
+                .starts_with("claude_cli_auth_missing:")
+        );
+    }
 
     #[test]
     fn parses_claude_identity_and_usage_windows() {

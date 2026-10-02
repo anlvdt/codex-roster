@@ -89,8 +89,8 @@ struct AutomationSettingsView: View {
                     )
                     .disabled(store.isBusyForActions)
                     Text(language.text(
-                        "Sau khi tự chuyển tài khoản, hoặc khi quota phục hồi (kể cả sau banked reset): tiếp tục các cuộc hội thoại vừa bị usage-limit trong ~6 giờ (cắt giữa chừng ~45 phút). Trên Codex Desktop mới, Roster sẽ nhấn nút Play sau khi xếp hàng tin tiếp tục — cấp quyền Accessibility nếu được hỏi.",
-                        "After auto-switch, or when quota recovers (including after a banked reset): continue usage-limit conversations within ~6 hours (mid-flight cuts ~45 minutes). On newer Codex Desktop builds, Roster presses Play after queueing the continue turn — grant Accessibility if prompted."
+                        "Sau khi tự chuyển tài khoản hoặc quota phục hồi: chỉ tiếp tục cuộc hội thoại có lỗi usage-limit đã xác nhận trong ~6 giờ. Bỏ qua phiên đang chạy, đã hoàn tất hoặc dừng thủ công. Mở lại Roster bình thường không tự gửi tin. Nếu hàng đợi đang tạm dừng, dùng Resume trong Codex; Roster chỉ tự nhấn khi xác định được đúng thread và có quyền Accessibility.",
+                        "After auto-switch or quota recovery: continue only confirmed usage-limit conversations within ~6 hours. Skip running, completed and manually stopped sessions. An ordinary Roster relaunch does not send messages. Use native Resume for a paused queue; Roster presses it only for a verified thread with Accessibility available."
                     ))
                     .font(RosterSecondaryChrome.caption)
                     .foregroundStyle(.secondary)
@@ -102,8 +102,8 @@ struct AutomationSettingsView: View {
                 ) {
                     Toggle(
                         language.text(
-                            "Mở Codex Roster khi đăng nhập macOS",
-                            "Open Codex Roster at login"
+                            "Mở AgentDock khi đăng nhập macOS",
+                            "Open AgentDock at login"
                         ),
                         isOn: Binding(
                             get: { store.launchAtLoginEnabled },

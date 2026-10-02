@@ -79,6 +79,11 @@ where
         let mut recovered_accounts = 0;
         let mut imported_accounts = 0;
         let mut skipped_accounts = 0;
+        // Secrets are written before the index so a crash can only leave an
+        // unreferenced secret, never an index entry pointing at nothing. The
+        // undo log (key, previous value) lets a failure roll those writes back
+        // so they do not linger as orphans or silently replace a live snapshot.
+        let mut undo: Vec<(String, Option<Vec<u8>>)> = Vec::new();
 
         for legacy in legacy_index
             .accounts
@@ -102,8 +107,19 @@ where
                 continue;
             }
 
-            self.secret_store
-                .save(&legacy.secret_key, &encoded_snapshot)?;
+            let previous = match self.secret_store.load(&legacy.secret_key) {
+                Ok(previous) => previous,
+                Err(error) => {
+                    return Err(self.roll_back_recovered_secrets(&undo, error));
+                }
+            };
+            undo.push((legacy.secret_key.clone(), previous));
+            if let Err(error) = self
+                .secret_store
+                .save(&legacy.secret_key, &encoded_snapshot)
+            {
+                return Err(self.roll_back_recovered_secrets(&undo, error));
+            }
             if let Some(position) = current_index
                 .accounts
                 .iter()
@@ -128,10 +144,39 @@ where
             }
         }
 
-        if recovered_accounts > 0 || imported_accounts > 0 {
-            self.index_store.save_index(&current_index)?;
+        if (recovered_accounts > 0 || imported_accounts > 0)
+            && let Err(error) = self.index_store.save_index(&current_index)
+        {
+            return Err(self.roll_back_recovered_secrets(&undo, error));
         }
         Ok((recovered_accounts, imported_accounts, skipped_accounts))
+    }
+
+    /// Undo secret writes made by `recover_legacy_snapshots`, newest first, and
+    /// return `cause` annotated with any rollback problem.
+    fn roll_back_recovered_secrets(
+        &self,
+        undo: &[(String, Option<Vec<u8>>)],
+        cause: anyhow::Error,
+    ) -> anyhow::Error {
+        let mut failures = Vec::new();
+        for (key, previous) in undo.iter().rev() {
+            let result = match previous {
+                Some(value) => self.secret_store.save(key, value),
+                None => self.secret_store.delete(key),
+            };
+            if let Err(error) = result {
+                failures.push(format!("{key}: {error:#}"));
+            }
+        }
+        if failures.is_empty() {
+            cause.context("legacy snapshot recovery failed; imported snapshots were rolled back")
+        } else {
+            cause.context(format!(
+                "legacy snapshot recovery failed and rollback was incomplete ({})",
+                failures.join("; ")
+            ))
+        }
     }
 
     pub fn get_account(
@@ -1150,6 +1195,55 @@ mod tests {
         assert!(rendered.contains("delete failed"));
         let restored = repo.get_account(&env, saved.id).expect("get account");
         assert!(restored.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_recovery_rolls_back_secrets_when_the_index_cannot_be_saved() {
+        use std::os::unix::fs::PermissionsExt;
+        let env = EnvironmentKind::Windows;
+        let snapshot = SnapshotBlob {
+            schema_version: 1,
+            files: vec![],
+        };
+
+        let legacy_dir = tempdir().expect("legacy tempdir");
+        let legacy_repo = SnapshotRepository::new(
+            legacy_dir.path(),
+            LocalSecretStore::new(&legacy_dir.path().join("snapshots")),
+        );
+        legacy_repo
+            .save_snapshot(
+                &env,
+                &identity("legacy@example.com", "sub-legacy"),
+                &snapshot,
+            )
+            .expect("legacy save");
+
+        let current_dir = tempdir().expect("current tempdir");
+        let secrets = MemorySecretStore::default();
+        let repo = SnapshotRepository::new(current_dir.path(), secrets.clone());
+        // Make the roster index unwritable while secrets remain writable.
+        fs::set_permissions(current_dir.path(), fs::Permissions::from_mode(0o500)).expect("chmod");
+
+        let result = repo.recover_legacy_snapshots(&env, legacy_dir.path());
+
+        fs::set_permissions(current_dir.path(), fs::Permissions::from_mode(0o700))
+            .expect("restore chmod");
+        let error = result.expect_err("index save must fail");
+        assert!(format!("{error:#}").contains("rolled back"), "{error:#}");
+        let legacy_accounts = MetadataIndexStore::new(legacy_dir.path())
+            .load_index()
+            .expect("legacy index")
+            .accounts;
+        assert_eq!(legacy_accounts.len(), 1);
+        assert!(
+            secrets
+                .load(&legacy_accounts[0].secret_key)
+                .expect("load")
+                .is_none(),
+            "imported secrets must not remain as orphans"
+        );
     }
 
     #[test]

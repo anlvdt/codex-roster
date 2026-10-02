@@ -1067,7 +1067,7 @@ private struct PrismCompactAccountCard: View {
 
             VStack(alignment: .trailing, spacing: 5) {
                 quotaLabel("5h", percent: quota)
-                quotaLabel(language.text("Tuần", "Week"), percent: week)
+                quotaLabel("7d", percent: week)
             }
             .fixedSize()
 
@@ -1078,6 +1078,7 @@ private struct PrismCompactAccountCard: View {
                     .frame(width: 28, height: 32)
                     .contentShape(Rectangle())
             }
+            .accessibilityLabel(language.text("Chi tiết \(account.displayName)", "Details for \(account.displayName)"))
             .buttonStyle(.plain)
             .help(language.text("Chi tiết tài khoản", "Account details"))
             .accessibilityLabel(language.text("Chi tiết \(account.displayName)", "Details for \(account.displayName)"))

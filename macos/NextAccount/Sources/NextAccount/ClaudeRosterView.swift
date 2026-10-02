@@ -176,28 +176,43 @@ struct ClaudeRosterView: View {
                     .background(Circle().fill(PrismTheme.chipFill(PrismTheme.emerald)))
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 5) {
+                        // Long org names ("…'s Organization") wrap to a second
+                        // line instead of truncating into "Organi…".
                         Text(active?.displayName ?? "Claude Code")
                             .font(PrismTheme.fontHeadline)
-                            .lineLimit(1)
+                            .lineLimit(2)
+                            .truncationMode(.tail)
+                            .minimumScaleFactor(0.85)
+                            .fixedSize(horizontal: false, vertical: true)
                         if let plan = active?.planLabel, !plan.isEmpty {
                             chip(plan, tint: PrismTheme.accent)
                         }
                     }
-                    Text(active?.email ?? liveState?.identity?.email ?? language.text("Chưa đăng nhập", "Not signed in"))
-                        .font(PrismTheme.fontCaption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    if let email = active?.email ?? liveState?.identity?.email {
+                        Text(email)
+                            .font(PrismTheme.fontCaption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    } else {
+                        Text(language.text("Chưa đăng nhập", "Not signed in"))
+                            .font(PrismTheme.fontCaption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
                 Spacer(minLength: 0)
                 chip(language.text("Đang dùng", "Live"), tint: PrismTheme.emerald)
             }
             if let active {
-                if let window = active.window("five_hour") { summaryQuota(window) }
-                if let window = active.window("seven_day") { summaryQuota(window) }
+                if let window = active.window("five_hour") { summaryQuota(window, label: "5h") }
+                if let window = active.window("seven_day") { summaryQuota(window, label: "7d") }
                 if !active.hasFreshUsage {
+                    // Demoted to a quiet caption — this is informational, not a
+                    // banner that deserves the amber spotlight.
                     Text(quotaWarning(active))
-                        .font(PrismTheme.fontCaption)
-                        .foregroundStyle(PrismTheme.amber)
+                        .font(PrismTheme.fontMicro)
+                        .foregroundStyle(.secondary)
                 }
             } else {
                 Text(language.text("Lưu phiên Claude Code để theo dõi quota.", "Save the Claude Code session to track quota."))
@@ -215,11 +230,19 @@ struct ClaudeRosterView: View {
         VStack(alignment: .leading, spacing: 7) {
             Label(language.text("Tự động", "Automation"), systemImage: "arrow.triangle.2.circlepath")
                 .font(PrismTheme.fontBodyCompactBold)
-            Toggle(language.text("Tự chuyển khi gần hết quota", "Auto-switch near quota limit"), isOn: Binding(
+            Toggle(language.text("Tự chuyển gần hết quota", "Auto-switch near quota"), isOn: Binding(
                 get: { store.claudeAutoSwitch?.enabled == true },
                 set: { store.setClaudeAutoSwitch(enabled: $0) }
             ))
+            .help(language.text(
+                "Tự động chuyển sang tài khoản khác trước khi hạn mức cạn kiệt.",
+                "Automatically switch to another account before the quota runs out."
+            ))
             Toggle(language.text("Tiếp tục phiên sau khi chuyển", "Resume session after switching"), isOn: $autoResume)
+                .help(language.text(
+                    "Mở lại hội thoại đang chạy với tài khoản mới sau khi chuyển.",
+                    "Reopen the running conversation with the new account after switching."
+                ))
             if let auto = store.claudeAutoSwitch {
                 Text(autoSwitchStatusText(auto))
                     .font(PrismTheme.fontCaption)
@@ -280,15 +303,19 @@ struct ClaudeRosterView: View {
                     Image(systemName: "square.and.arrow.down")
                 }
                 .help(language.text("Lưu tài khoản đang đăng nhập", "Save signed-in account"))
+                .accessibilityLabel(language.text("Lưu tài khoản đang đăng nhập", "Save signed-in account"))
                 Button { showAddGuide = true } label: { Image(systemName: "plus") }
                     .help(language.text("Thêm tài khoản", "Add account"))
+                    .accessibilityLabel(language.text("Thêm tài khoản", "Add account"))
                 Button { store.refreshClaudeUsage(force: true) } label: {
                     Image(systemName: "arrow.clockwise")
                 }
                 .disabled(store.isLoadingClaude)
                 .help(language.text("Làm mới quota", "Refresh quota"))
+                .accessibilityLabel(language.text("Làm mới quota", "Refresh quota"))
                 Button { showNotchAutoSettings = true } label: { Image(systemName: "ellipsis") }
                     .help(language.text("Tùy chọn tự chuyển", "Auto-switch options"))
+                    .accessibilityLabel(language.text("Tùy chọn tự chuyển", "Auto-switch options"))
                     .popover(isPresented: $showNotchAutoSettings, arrowEdge: .bottom) {
                         autoSwitchCard
                             .frame(width: 400)
@@ -357,7 +384,7 @@ struct ClaudeRosterView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             VStack(alignment: .trailing, spacing: 3) {
                 notchQuotaLabel(account, key: "five_hour", title: "5h")
-                notchQuotaLabel(account, key: "seven_day", title: language.text("Tuần", "Week"))
+                notchQuotaLabel(account, key: "seven_day", title: "7d")
             }
             .frame(width: 76, alignment: .trailing)
             Button { detailsTarget = account } label: {
@@ -368,6 +395,7 @@ struct ClaudeRosterView: View {
             }
             .buttonStyle(.plain)
             .help(language.text("Chi tiết tài khoản và quota", "Account and quota details"))
+            .accessibilityLabel(language.text("Chi tiết \(account.displayName)", "Details for \(account.displayName)"))
             if account.isActive {
                 chip(language.text("Đang dùng", "Active"), tint: PrismTheme.emerald)
                     .frame(width: 65)
@@ -490,15 +518,15 @@ struct ClaudeRosterView: View {
                         .font(RosterSecondaryChrome.footnote)
                         .foregroundStyle(.secondary)
                     if let window = active.window("five_hour") {
-                        summaryQuota(window)
+                        summaryQuota(window, label: "5h")
                     }
                     if let window = active.window("seven_day") {
-                        summaryQuota(window)
+                        summaryQuota(window, label: "7d")
                     }
                     if !active.hasFreshUsage {
                         Text(quotaWarning(active))
                             .font(RosterSecondaryChrome.micro)
-                            .foregroundStyle(PrismTheme.amber)
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -531,9 +559,9 @@ struct ClaudeRosterView: View {
         return language.text("Quota đã lưu · chưa xác minh trực tiếp", "Saved quota · not verified live")
     }
 
-    private func summaryQuota(_ window: ProviderUsageWindow) -> some View {
-        HStack {
-            Text(window.label)
+    private func summaryQuota(_ window: ProviderUsageWindow, label: String? = nil) -> some View {
+        HStack(spacing: 4) {
+            Text(label ?? window.label)
             Spacer()
             Text("\(window.remainingPercent ?? max(0, 100 - (window.usedPercent ?? 0)))% "
                 + language.text("còn", "left"))

@@ -647,7 +647,19 @@ private struct NotchWindowConfigurator: NSViewRepresentable {
             let targetHeight = isExpanded ? expandedHeight : compactHeight
             let targetFrame = measured.windowFrame(width: targetWidth, height: targetHeight)
             if window.frame != targetFrame {
-                window.setFrame(targetFrame, display: true, animate: false)
+                // Expanded→expanded resizes (roster filter / caption changes) get a
+                // gentle ease so the panel doesn't snap. Compact↔expanded stays
+                // instant so the capsule never lags the click that opened it.
+                if isExpanded && window.frame.height > compactHeight && targetHeight > compactHeight {
+                    NSAnimationContext.runAnimationGroup { ctx in
+                        ctx.duration = 0.2
+                        ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                        ctx.allowsImplicitAnimation = true
+                        window.animator().setFrame(targetFrame, display: true)
+                    }
+                } else {
+                    window.setFrame(targetFrame, display: true, animate: false)
+                }
             }
             window.orderFrontRegardless()
         }

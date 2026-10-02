@@ -281,10 +281,10 @@ where
                 None,
                 Some(active.id),
                 None,
-                Some(
-                    "live usage unreadable (token expired? Claude Code refreshes on next use)"
-                        .to_owned(),
-                ),
+                active_usage
+                    .detail
+                    .clone()
+                    .or_else(|| Some("Claude quota is unavailable; retry later".to_owned())),
             ));
         };
         let active_reset = seven_day_reset_at(&active_usage);
@@ -305,7 +305,11 @@ where
                 continue;
             }
             let usage = match record.cached_usage.as_ref() {
-                Some(cached) if usage_is_fresh(cached, now) => cached.clone(),
+                Some(cached)
+                    if record.cached_usage_error.is_none() && usage_is_fresh(cached, now) =>
+                {
+                    cached.clone()
+                }
                 _ => match self.provider_usage(AiProvider::Claude, Some(record.id)) {
                     Ok(output) => output.usage,
                     Err(_) => continue,

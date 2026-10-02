@@ -246,6 +246,16 @@ enum VibeUsageCommand {
 
 #[derive(Subcommand)]
 enum ProviderCommand {
+    /// Save or restore a matching Claude Desktop login while Desktop is closed.
+    ClaudeDesktop {
+        account_id: Uuid,
+        #[arg(long, conflicts_with = "restore")]
+        save: bool,
+        #[arg(long)]
+        restore: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Show live availability, identity, capabilities, and saved-account counts.
     Status {
         #[arg(long)]
@@ -384,6 +394,29 @@ pub fn run() -> Result<()> {
         }
         Some(Command::Providers { command }) => {
             match command.unwrap_or(ProviderCommand::Status { json: false }) {
+                ProviderCommand::ClaudeDesktop {
+                    account_id,
+                    save,
+                    restore,
+                    json,
+                } => {
+                    let action = if save {
+                        "save"
+                    } else if restore {
+                        "restore"
+                    } else {
+                        "status"
+                    };
+                    let output = app.claude_desktop_login(account_id, action)?;
+                    if json {
+                        print_json(&output)?;
+                    } else {
+                        println!(
+                            "Desktop login saved: {}; current account matches: {}",
+                            output.saved, output.live_account_matches
+                        );
+                    }
+                }
                 ProviderCommand::Status { json } => {
                     let output = app.providers_status()?;
                     if json {

@@ -284,6 +284,8 @@ final class AccountStore: ObservableObject {
     @Published private(set) var claudeAutoSwitch: ProviderAutoSwitchOutput?
     @Published private(set) var isLoadingClaude = false
     @Published private(set) var claudeErrorMessage: String?
+    @Published private(set) var claudeSwitchMessage: String?
+    @Published private(set) var isSwitchingClaude = false
     @Published private(set) var isRefreshingQuotaInBackground = false
     @Published private(set) var lastQuotaRefreshAt: Date?
     @Published private(set) var accountSortMode: AccountSortMode
@@ -2458,25 +2460,123 @@ final class AccountStore: ObservableObject {
 
     func activateClaudeAccount(_ id: UUID) {
         Task {
+            guard !isSwitchingClaude, !isBusyForActions, !isSwitching else { return }
+            isSwitchingClaude = true
+            defer { isSwitchingClaude = false }
             let interrupted = await Task.detached(priority: .utility) {
-                ClaudeSessionContinuity.recentInterruptedSession()
+                ClaudeSessionContinuity.recentInterruptedSession(requireRateLimit: false)
             }.value
             do {
+                if usesClaudeDesktop { _ = try await requireClaudeDesktopLogin(id) }
                 let output: ProviderActivateOutput = try await cli.decode(
                     ProviderActivateOutput.self,
                     arguments: ["providers", "activate", id.uuidString]
                 )
-                _ = output
                 claudeErrorMessage = nil
-                if UserDefaults.standard.object(forKey: "claude_roster_auto_resume") as? Bool != false,
-                   let interrupted {
-                    do { try ClaudeSessionContinuity.resume(interrupted) }
-                    catch { claudeErrorMessage = error.localizedDescription }
+                claudeSwitchMessage = AppLanguage.text(
+                    "Đã đổi đăng nhập CLI sang \(output.account.email). Đóng phiên CLI cũ; kiểm tra /status trong phiên mới. Desktop cần đăng nhập riêng.",
+                    "CLI login changed to \(output.account.email). Close the old CLI session; check /status in the new one. Desktop needs a separate sign-in."
+                )
+                do { _ = try await switchClaudeDesktopIfNeeded(id, email: output.account.email) }
+                catch { claudeErrorMessage = error.localizedDescription }
+                if !usesClaudeDesktop,
+                   UserDefaults.standard.object(forKey: "claude_roster_auto_resume") as? Bool != false {
+                    do {
+                        if let interrupted {
+                            try await ClaudeSessionContinuity.resume(interrupted, automaticallyContinue: false,
+                                                                     expectedEmail: output.account.email)
+                        } else {
+                            try await ClaudeSessionContinuity.openResumePicker(expectedEmail: output.account.email)
+                        }
+                    } catch { claudeErrorMessage = error.localizedDescription }
                 }
             } catch {
                 claudeErrorMessage = error.localizedDescription
             }
             await refreshClaudeRosterAsync(silently: true)
+        }
+    }
+
+    private var usesClaudeDesktop: Bool {
+        UserDefaults.standard.object(forKey: "claude_roster_switch_desktop") as? Bool != false
+    }
+
+    private func requireClaudeDesktopLogin(_ id: UUID) async throws -> ClaudeDesktopLoginStatus {
+        let status: ClaudeDesktopLoginStatus = try await cli.decode(ClaudeDesktopLoginStatus.self,
+            arguments: ["providers", "claude-desktop", id.uuidString, "--json"])
+        guard status.saved || status.liveAccountMatches else {
+            try await ClaudeDesktop.open()
+            let email = claudeAccounts.first(where: { $0.id == id })?.email ?? id.uuidString
+            throw NSError(domain: "ClaudeDesktop", code: 1, userInfo: [NSLocalizedDescriptionKey:
+                AppLanguage.text("Đã mở Desktop. Đăng nhập \(email), rồi chọn Lưu đăng nhập Desktop ở menu tài khoản này. Chưa chuyển tài khoản vì chưa có đăng nhập Desktop đã lưu.",
+                    "Desktop opened. Sign in as \(email), then choose Save Desktop login in this account's menu. The account has not switched because its Desktop login is not saved yet.")])
+        }
+        return status
+    }
+
+    /// Desktop credentials are saved independently; never infer its login from CLI.
+    private func switchClaudeDesktopIfNeeded(_ id: UUID, email: String?) async throws -> Bool {
+        guard usesClaudeDesktop else { return false }
+        let status = try await requireClaudeDesktopLogin(id)
+        let session = await Task.detached(priority: .utility) { ClaudeDesktop.recentCodeSession() }.value
+        let url = try await ClaudeDesktop.prepareForSwitch()
+        do {
+            let _: ClaudeDesktopLoginStatus = try await cli.decode(ClaudeDesktopLoginStatus.self,
+                arguments: ["providers", "claude-desktop", id.uuidString, status.saved ? "--restore" : "--save", "--json"])
+        } catch {
+            try? await ClaudeDesktop.relaunch(at: url)
+            throw error
+        }
+        try await ClaudeDesktop.relaunch(at: url)
+        claudeSwitchMessage = AppLanguage.text(
+            "Đã khôi phục đăng nhập Desktop và mở lại app. Kiểm tra tài khoản trong Desktop; nếu đăng nhập hết hạn, đăng nhập lại rồi lưu lại.",
+            "Desktop login restored and app reopened. Check the account in Desktop; if the login expired, sign in and save it again.")
+        if UserDefaults.standard.object(forKey: "claude_roster_auto_resume") as? Bool != false, let session {
+            try await ClaudeSessionContinuity.resume(session, automaticallyContinue: false, expectedEmail: email, inDesktop: true)
+        }
+        return true
+    }
+
+    func saveClaudeDesktopLogin(_ id: UUID) {
+        Task {
+            guard !isSwitchingClaude else { return }
+            isSwitchingClaude = true
+            defer { isSwitchingClaude = false }
+            var reopen: URL?
+            do {
+                reopen = try await ClaudeDesktop.prepareForSwitch()
+                let _: ClaudeDesktopLoginStatus = try await cli.decode(ClaudeDesktopLoginStatus.self,
+                    arguments: ["providers", "claude-desktop", id.uuidString, "--save", "--json"])
+                claudeErrorMessage = nil
+                claudeSwitchMessage = AppLanguage.text("Đã lưu đăng nhập Desktop riêng cho tài khoản này.",
+                    "Saved this account's separate Desktop login.")
+            } catch { claudeErrorMessage = error.localizedDescription }
+            if let reopen {
+                do { try await ClaudeDesktop.relaunch(at: reopen) }
+                catch { claudeErrorMessage = error.localizedDescription }
+            }
+        }
+    }
+
+    func reopenClaudeCLI() {
+        Task {
+            do {
+                try await ClaudeSessionContinuity.openResumePicker(
+                    expectedEmail: claudeAccounts.first(where: \.isActive)?.email
+                )
+            } catch { claudeErrorMessage = error.localizedDescription }
+        }
+    }
+
+    func restartClaudeDesktop() {
+        Task {
+            do {
+                try await ClaudeDesktop.restart()
+                claudeSwitchMessage = AppLanguage.text(
+                    "Đã mở lại Claude Desktop. Đăng xuất rồi đăng nhập tài khoản đã chọn trong app; đăng nhập CLI không đổi tài khoản Desktop. Chat cũ vẫn thuộc tài khoản cũ.",
+                    "Claude Desktop reopened. Sign out and sign in to the selected account in the app; CLI login does not switch Desktop. Existing chats belong to their original account."
+                )
+            } catch { claudeErrorMessage = error.localizedDescription }
         }
     }
 
@@ -2582,7 +2682,7 @@ final class AccountStore: ObservableObject {
                 }
                 ticks += 1
                 if self?.claudeTabOpened == true && ticks % 5 == 0 {
-                    await self?.refreshClaudeRosterAsync(silently: true)
+                    await self?.refreshClaudeUsageAsync(force: false)
                 }
                 try? await Task.sleep(for: .seconds(60))
             }
@@ -2592,21 +2692,50 @@ final class AccountStore: ObservableObject {
     /// `providers auto-switch claude --apply` re-decides server-side and only
     /// switches when a candidate is ready, so a bare apply is safe to repeat.
     private func claudeAutoSwitchTick() async {
-        guard !isBusyForActions, !isSwitching else { return }
+        guard !isBusyForActions, !isSwitching, !isSwitchingClaude else { return }
+        isSwitchingClaude = true
+        defer { isSwitchingClaude = false }
         let interrupted = await Task.detached(priority: .utility) {
             ClaudeSessionContinuity.recentInterruptedSession()
         }.value
         do {
+            if usesClaudeDesktop {
+                let decision: ProviderAutoSwitchOutput = try await cli.decode(ProviderAutoSwitchOutput.self,
+                    arguments: ["providers", "auto-switch", "claude"])
+                claudeAutoSwitch = decision
+                guard decision.status == "ready", let candidate = decision.candidateAccountId else { return }
+                // Background monitoring never opens a sign-in window for an unenrolled account.
+                let status: ClaudeDesktopLoginStatus = try await cli.decode(ClaudeDesktopLoginStatus.self,
+                    arguments: ["providers", "claude-desktop", candidate.uuidString, "--json"])
+                guard status.saved || status.liveAccountMatches else {
+                    claudeSwitchMessage = AppLanguage.text(
+                        "Tự chuyển đang chờ: cần lưu đăng nhập Desktop cho tài khoản thay thế.",
+                        "Auto-switch is waiting: save the replacement account's Desktop login first.")
+                    return
+                }
+            }
             let output: ProviderAutoSwitchOutput = try await cli.decode(
                 ProviderAutoSwitchOutput.self,
                 arguments: ["providers", "auto-switch", "claude", "--apply"]
             )
             claudeAutoSwitch = output
             if output.status == "switched" {
-                if output.trigger == "at_limit",
+                claudeSwitchMessage = AppLanguage.text(
+                    "Đã đổi đăng nhập CLI đã lưu. Phiên đang mở chưa được xác minh: kiểm tra /status, hoặc đóng và mở lại bằng claude --resume. Desktop cần đăng nhập riêng.",
+                    "Saved CLI login changed. Running sessions are unverified: check /status, or close and reopen with claude --resume. Desktop needs a separate sign-in."
+                )
+                if let id = output.candidateAccountId {
+                    do { _ = try await switchClaudeDesktopIfNeeded(id,
+                        email: claudeAccounts.first(where: { $0.id == id })?.email) }
+                    catch { claudeErrorMessage = error.localizedDescription; return }
+                }
+                if !usesClaudeDesktop, output.trigger == "at_limit",
                    UserDefaults.standard.object(forKey: "claude_roster_auto_resume") as? Bool != false,
                    let interrupted {
-                    do { try ClaudeSessionContinuity.resume(interrupted) }
+                    do {
+                        try await ClaudeSessionContinuity.resume(interrupted,
+                            expectedEmail: claudeAccounts.first(where: { $0.id == output.candidateAccountId })?.email)
+                    }
                     catch { claudeErrorMessage = error.localizedDescription }
                 }
                 ResetNotifier.showClaudeAccountSwitched(
@@ -4204,13 +4333,13 @@ private enum ResetNotifier {
         enqueue(
             identifier: "codex-roster-claude-switch-\(Int(Date().timeIntervalSince1970))",
             title: AppLanguage.text(
-                "Claude Code đã chuyển tài khoản",
-                "Claude Code switched accounts"
+                "Đã đổi đăng nhập Claude CLI đã lưu",
+                "Saved Claude CLI login changed"
             ),
             subtitle: name,
             body: AppLanguage.text(
-                "Quota tài khoản trước gần hết — Claude Code đang dùng tài khoản mới.",
-                "The previous account was nearly out of quota — Claude Code is on the new account."
+                "Kiểm tra /status trong CLI; mở lại bằng claude --resume nếu cần. Claude Desktop cần đăng nhập riêng.",
+                "Check /status in the CLI; reopen with claude --resume if needed. Claude Desktop needs a separate sign-in."
             )
         )
     }

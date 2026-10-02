@@ -292,6 +292,7 @@ where
         }
 
         let store = self.provider_store();
+        let is_live_request = account_id.is_none();
         let (mut identity, mut snapshot, saved_record) = match account_id {
             Some(account_id) => {
                 let (record, snapshot) = store.load_snapshot(&self.env.kind, account_id)?;
@@ -305,11 +306,48 @@ where
             }
             None => {
                 let live = adapter(provider).read_live_auth(&self.env)?;
-                (live.identity, live.snapshot, None)
+                let record = if provider == AiProvider::Claude {
+                    store
+                        .list(&self.env.kind, Some(provider))?
+                        .into_iter()
+                        .find(|record| record.identity.matches(&live.identity))
+                } else {
+                    None
+                };
+                (live.identity, live.snapshot, record)
             }
         };
+        if let Some(record) = &saved_record
+            && let Some(wait) = claude_rate_limit_wait(record, time::OffsetDateTime::now_utc())
+        {
+            let mut usage = record.cached_usage.clone().unwrap_or(ProviderUsageView {
+                provider,
+                fetched_at: record.updated_at,
+                status: ProviderUsageStatus::RateLimited,
+                fidelity: crate::model::UsageFidelity::Official,
+                headline_window: None,
+                windows: Vec::new(),
+                plan_label: None,
+                detail: None,
+            });
+            usage.status = if usage.windows.is_empty() {
+                ProviderUsageStatus::RateLimited
+            } else {
+                ProviderUsageStatus::Stale
+            };
+            usage.detail = Some(format!(
+                "Claude usage endpoint returned HTTP 429; retry in {} seconds",
+                wait.whole_seconds().max(1)
+            ));
+            return Ok(ProviderUsageOutput {
+                environment: self.env.kind.clone(),
+                account: identity,
+                usage,
+            });
+        }
         let provider_adapter = adapter(provider);
         let mut fetched = match &saved_record {
+            _ if is_live_request => provider_adapter.fetch_usage(&snapshot),
             Some(record) => match self.fetch_saved_usage_with_refresh(
                 &store,
                 provider_adapter,
@@ -324,7 +362,7 @@ where
             },
             None => provider_adapter.fetch_usage(&snapshot),
         };
-        if saved_record.is_none()
+        if is_live_request
             && fetched
                 .as_ref()
                 .is_ok_and(|usage| should_retry_live_credentials(usage.status))
@@ -400,6 +438,8 @@ where
             }
         }
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        LocalSecretStore::new(&self.env.app_data_dir.join("claude-desktop-logins"))
+            .delete(&account_id.to_string())?;
         let removed = store.remove(&self.env.kind, account_id)?;
         Ok(crate::model::ProviderDeleteOutput {
             id: removed.id,
@@ -450,6 +490,10 @@ where
             None
         };
         for record in records {
+            // A forced UI refresh also respects the server's rate-limit cooldown.
+            if claude_rate_limit_wait(&record, time::OffsetDateTime::now_utc()).is_some() {
+                continue;
+            }
             let is_live = live_identity
                 .as_ref()
                 .is_some_and(|identity| record.identity.matches(identity));
@@ -479,12 +523,19 @@ where
                     {
                         store.record_usage(&self.env.kind, record.id, output.usage)?;
                     }
-                    _ => {
-                        store.record_usage_error(
-                            &self.env.kind,
-                            record.id,
-                            "live_token_waiting: Claude Code will refresh its active session on next use".to_owned(),
-                        )?;
+                    Ok(output) => {
+                        let detail = if !record.identity.matches(&output.account) {
+                            "Claude account changed while fetching quota; refresh the roster"
+                                .to_owned()
+                        } else {
+                            output.usage.detail.unwrap_or_else(|| {
+                                "Claude quota is unavailable; retry later".to_owned()
+                            })
+                        };
+                        store.record_usage_error(&self.env.kind, record.id, detail)?;
+                    }
+                    Err(error) => {
+                        store.record_usage_error(&self.env.kind, record.id, error.to_string())?;
                     }
                 }
                 continue;
@@ -585,6 +636,31 @@ where
             }
         }
     }
+}
+
+/// Persist cooldown via the last recorded error so restarts and CLI callers
+/// cannot repeatedly hit a throttled account. Quota exhaustion is unrelated.
+fn claude_rate_limit_wait(
+    record: &ProviderSavedAccount,
+    now: time::OffsetDateTime,
+) -> Option<time::Duration> {
+    if record.provider != AiProvider::Claude {
+        return None;
+    }
+    let error = record.cached_usage_error.as_deref()?;
+    if !error.contains("HTTP 429") {
+        return None;
+    }
+    let seconds = error
+        .split_once("retry after ")
+        .and_then(|(_, text)| text.split_whitespace().next())
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(300)
+        .min(86_400);
+    let elapsed = (now - record.updated_at).max(time::Duration::ZERO);
+    let remaining = time::Duration::seconds(seconds) - elapsed;
+    (remaining > time::Duration::ZERO).then_some(remaining)
 }
 
 enum RefreshStep {
@@ -860,5 +936,41 @@ mod tests {
         let quarantined = usage(ProviderUsageStatus::NeedsAuth, Some("login_required: x"));
         let result = stale_or_status(Some(&record), quarantined);
         assert_eq!(result.status, ProviderUsageStatus::NeedsAuth);
+    }
+    #[test]
+    fn quota_rate_limit_cooldown_survives_cached_usage_and_expires() {
+        let mut throttled = record(Some("Claude usage endpoint returned HTTP 429"));
+        let now = time::OffsetDateTime::now_utc();
+        throttled.updated_at = now;
+        throttled.cached_usage = Some(usage(ProviderUsageStatus::Ok, None));
+        assert_eq!(
+            claude_rate_limit_wait(&throttled, now),
+            Some(time::Duration::seconds(300))
+        );
+        assert_eq!(
+            claude_rate_limit_wait(&throttled, now + time::Duration::seconds(299)),
+            Some(time::Duration::seconds(1))
+        );
+        assert!(claude_rate_limit_wait(&throttled, now + time::Duration::seconds(300)).is_none());
+        assert_eq!(
+            throttled.cached_usage.as_ref().unwrap().status,
+            ProviderUsageStatus::Ok
+        );
+        assert!(claude_rate_limit_wait(&record(Some("HTTP 401")), now).is_none());
+    }
+
+    #[test]
+    fn quota_rate_limit_cooldown_respects_retry_after_and_provider() {
+        let mut throttled = record(Some(
+            "Claude usage endpoint returned HTTP 429; retry after 900 seconds",
+        ));
+        let now = time::OffsetDateTime::now_utc();
+        throttled.updated_at = now;
+        assert_eq!(
+            claude_rate_limit_wait(&throttled, now + time::Duration::seconds(300)),
+            Some(time::Duration::seconds(600))
+        );
+        throttled.provider = AiProvider::Cursor;
+        assert!(claude_rate_limit_wait(&throttled, now).is_none());
     }
 }

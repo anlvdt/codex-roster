@@ -58,11 +58,30 @@ pub fn is_configured(home_dir: &Path) -> bool {
     config_path(home_dir).is_file()
 }
 
+/// The config holds a bearer `api_key` written by the vibe-usage tool, often
+/// with default (0644) permissions. Drop group/other access so other local
+/// users cannot read it. Best-effort and a no-op on non-Unix platforms.
+fn restrict_config_permissions(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = fs::metadata(path)
+            && metadata.is_file()
+            && metadata.permissions().mode() & 0o077 != 0
+        {
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
 pub fn fetch_and_cache(home_dir: &Path, app_data_dir: &Path) -> Result<VibeUsageSummary> {
-    let config: Config = serde_json::from_slice(
-        &fs::read(config_path(home_dir)).context("failed to read VibeCafe config")?,
-    )
-    .context("failed to decode VibeCafe config")?;
+    let config_file = config_path(home_dir);
+    restrict_config_permissions(&config_file);
+    let config: Config =
+        serde_json::from_slice(&fs::read(&config_file).context("failed to read VibeCafe config")?)
+            .context("failed to decode VibeCafe config")?;
     let url = format!("{}/api/usage?days=7", config.api_url.trim_end_matches('/'));
     let mut response = ureq::get(&url)
         .header("Authorization", &format!("Bearer {}", config.api_key))
@@ -131,6 +150,19 @@ fn default_api_url() -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn config_permissions_are_tightened_to_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("config.json");
+        fs::write(&path, r#"{"apiKey":"k"}"#).expect("write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod");
+        restrict_config_permissions(&path);
+        let mode = fs::metadata(&path).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 
     #[test]
     fn summarizes_official_usage_response_fields() {

@@ -90,13 +90,36 @@ pub fn auth_debug(env: &AppEnv, line: &str) {
         return;
     }
     let path = env.app_data_dir.join("auth-debug.log");
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
+    append_private_log(&path, &format!("{stamp} {line}"), AUTH_DEBUG_LOG_MAX_BYTES);
+}
+
+const AUTH_DEBUG_LOG_MAX_BYTES: u64 = 1024 * 1024;
+
+/// Append one line to a diagnostics log that is created 0600, never written
+/// through a symlink, and rotated to `<name>.1` once it passes `max_bytes`
+/// (a single previous generation is kept).
+fn append_private_log(path: &Path, line: &str, max_bytes: u64) {
+    use std::io::Write;
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if !metadata.file_type().is_file() {
+            return;
+        }
+        if metadata.len() >= max_bytes {
+            let mut rotated = path.as_os_str().to_owned();
+            rotated.push(".1");
+            let _ = fs::rename(path, std::path::PathBuf::from(rotated));
+        }
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
     {
-        use std::io::Write;
-        let _ = writeln!(file, "{stamp} {line}");
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    if let Ok(mut file) = options.open(path) {
+        let _ = writeln!(file, "{line}");
+        let _ = set_private_file_permissions(path);
     }
 }
 
@@ -1008,6 +1031,33 @@ mod tests {
         assert_eq!(fs::read_to_string(&victim)?, "untouched");
         assert_eq!(fs::read_to_string(&dest)?, "secret");
         assert!(!fs::symlink_metadata(&dest)?.file_type().is_symlink());
+        Ok(())
+    }
+
+    #[test]
+    fn private_log_is_0600_rotated_and_never_follows_symlinks() -> Result<()> {
+        let temp = tempdir()?;
+        let log = temp.path().join("auth-debug.log");
+        super::append_private_log(&log, "first line", 32);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&log)?.permissions().mode() & 0o777, 0o600);
+        }
+        super::append_private_log(&log, "a second, longer line", 32);
+        super::append_private_log(&log, "third", 32);
+        assert!(temp.path().join("auth-debug.log.1").exists());
+        assert!(fs::read_to_string(&log)?.contains("third"));
+
+        #[cfg(unix)]
+        {
+            let victim = temp.path().join("victim");
+            let link = temp.path().join("linked.log");
+            fs::write(&victim, "untouched")?;
+            std::os::unix::fs::symlink(&victim, &link)?;
+            super::append_private_log(&link, "secret", 32);
+            assert_eq!(fs::read_to_string(&victim)?, "untouched");
+        }
         Ok(())
     }
 

@@ -1673,17 +1673,32 @@ final class AccountStore: ObservableObject {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent("session-resume.log")
         let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(message)\n"
-        if let data = line.data(using: .utf8) {
-            if FileManager.default.fileExists(atPath: url.path) {
-                if let handle = try? FileHandle(forWritingTo: url) {
-                    defer { try? handle.close() }
-                    try? handle.seekToEnd()
-                    try? handle.write(contentsOf: data)
-                }
-            } else {
-                try? data.write(to: url)
+        guard let data = line.data(using: .utf8) else { return }
+        Self.appendPrivateLog(data, to: url, maxBytes: 1_048_576)
+    }
+
+    /// Append to a diagnostics log that is created 0600, never written through
+    /// a symlink, and rotated to `<name>.1` once it passes `maxBytes`.
+    nonisolated static func appendPrivateLog(_ data: Data, to url: URL, maxBytes: Int) {
+        let fileManager = FileManager.default
+        if let attributes = try? fileManager.attributesOfItem(atPath: url.path) {
+            guard attributes[.type] as? FileAttributeType == .typeRegular else { return }
+            if let size = attributes[.size] as? NSNumber, size.intValue >= maxBytes {
+                let rotated = URL(fileURLWithPath: url.path + ".1")
+                try? fileManager.removeItem(at: rotated)
+                try? fileManager.moveItem(at: url, to: rotated)
             }
         }
+        if !fileManager.fileExists(atPath: url.path) {
+            fileManager.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        } else {
+            // Logs written by older versions used default permissions.
+            try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: data)
     }
 
     private enum ProcessRunOutcome {

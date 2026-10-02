@@ -1944,22 +1944,33 @@ final class AccountStore: ObservableObject {
         startClaudeMonitoring()
     }
 
+    /// Mirrors the Rust worker's `vibe_usage::is_configured`.
+    nonisolated static func isVibeUsageConfigured(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {
+        var isDirectory: ObjCBool = false
+        let path = home.appendingPathComponent(".vibe-usage/config.json").path
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && !isDirectory.boolValue
+    }
+
     private func startVibeUsageMonitoring() {
         guard vibeUsageTask == nil else { return }
         vibeUsageTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                let syncSucceeded: Bool
-                do {
-                    _ = try await self.cli.data(arguments: ["vibe-usage", "sync"])
-                    syncSucceeded = true
-                } catch {
-                    Diagnostics.logFailure("vibe-usage sync", error)
-                    syncSucceeded = false
-                }
-                if syncSucceeded,
-                   let refreshed = try? await self.cli.decode(StatusOutput.self, arguments: ["status"]) {
-                    self.status = refreshed
+                // The collector is optional. Without its config there is nothing
+                // to sync, so don't spawn npx (or log a failure) every cycle.
+                if Self.isVibeUsageConfigured() {
+                    let syncSucceeded: Bool
+                    do {
+                        _ = try await self.cli.data(arguments: ["vibe-usage", "sync"])
+                        syncSucceeded = true
+                    } catch {
+                        Diagnostics.logFailure("vibe-usage sync", error)
+                        syncSucceeded = false
+                    }
+                    if syncSucceeded,
+                       let refreshed = try? await self.cli.decode(StatusOutput.self, arguments: ["status"]) {
+                        self.status = refreshed
+                    }
                 }
                 try? await Task.sleep(for: .seconds(1800))
             }

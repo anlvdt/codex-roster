@@ -5,7 +5,7 @@ use crate::model::{
     AiProvider, DisplayIdentity, ProviderCapability, ProviderUsageView, SnapshotBlob,
 };
 
-mod claude;
+pub(crate) mod claude;
 pub(crate) use claude::UNKNOWN_EMAIL;
 mod claude_keychain;
 mod claude_locks;

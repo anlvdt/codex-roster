@@ -157,3 +157,28 @@ import Testing
     let caption = NotchRosterLayout.deckHeight(sectionCounts: [3, 2], expanded: true, hasNextActionCaption: true)
     #expect(caption - plain == NotchRosterLayout.nextActionCaptionHeight + NotchRosterLayout.deckSectionSpacing)
 }
+
+@Test func centerAutomationClearsProviderNavigationOnEveryScreen() {
+    for inset: CGFloat in [0, 24, 32, 37, 48] {
+        let compactHeight: CGFloat = inset > 0 ? inset : 32
+        let navigationBottom = compactHeight + NotchRosterLayout.screenSwitcherTopInset
+            + NotchRosterLayout.screenSwitcherHeight
+        let automationTop = NotchRosterLayout.deckTopInset
+            + NotchRosterLayout.centerControlsTopInset(notchInset: inset)
+        #expect(automationTop >= navigationBottom + NotchRosterLayout.screenSwitcherGap)
+    }
+}
+
+@Test func deckChromeReservesNavigationAutomationAndToolbar() {
+    for inset: CGFloat in [0, 24, 32, 37, 48] {
+        #expect(NotchRosterLayout.upperDeckHeight(for: inset)
+            >= NotchRosterLayout.centerControlsTopInset(notchInset: inset)
+                + NotchRosterLayout.centerAutomationHeight)
+    }
+    let chrome = NotchRosterLayout.upperDeckHeight(for: NotchGeometry.detect().inset)
+        + NotchRosterLayout.deckTopInset + NotchRosterLayout.deckBottomInset
+        + NotchRosterLayout.deckSectionSpacing + NotchRosterLayout.switchboardHeaderHeight
+        + NotchRosterLayout.switchboardTopInset + NotchRosterLayout.switchboardBottomInset
+        + NotchRosterLayout.switchboardContentSpacing
+    #expect(NotchRosterLayout.collapsedDeckHeight - NotchRosterLayout.collapsedRosterHeight == chrome)
+}

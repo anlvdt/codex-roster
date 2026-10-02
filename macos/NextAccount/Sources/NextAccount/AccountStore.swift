@@ -283,6 +283,7 @@ final class AccountStore: ObservableObject {
     @Published private(set) var claudeAccounts: [ProviderAccount] = []
     @Published private(set) var claudeAutoSwitch: ProviderAutoSwitchOutput?
     @Published private(set) var isLoadingClaude = false
+    @Published private(set) var isSavingClaude = false
     @Published private(set) var claudeErrorMessage: String?
     @Published private(set) var claudeSwitchMessage: String?
     @Published private(set) var isSwitchingClaude = false
@@ -351,6 +352,8 @@ final class AccountStore: ObservableObject {
     private var claudeMonitorTask: Task<Void, Never>?
     /// Refresh cadence for the Claude tab starts only after it is first opened.
     private var claudeTabOpened = false
+    private var claudeTabRefreshGate = PassiveRefreshGate(interval: 60)
+    private var providerStatusRefreshGate = PassiveRefreshGate(interval: 60)
     private var coreBootstrapStarted = false
     private var menuInteractionUntil: Date?
     private var isRefreshingAccountsInBackground = false
@@ -1546,41 +1549,52 @@ final class AccountStore: ObservableObject {
         return await openCodexURL("codex://threads/\(encoded)")
     }
 
-    /// After auto-switch, open the blocked thread then queue a user turn so Desktop
-    /// actually continues (deep-link alone only navigates). Uses `codex queue`, then
-    /// presses the composer Play control required by newer Desktop builds.
+    /// Queue acceptance and native Resume are separate outcomes. Never send keys or guess coordinates.
     private func queueContinueMessage(threadID: String) async -> Bool {
-        let message = "Continue the interrupted task after the account usage-limit switch."
+        // Revalidate after navigation: the user/native client may already have
+        // continued, completed or stopped the thread since the original capture.
+        guard autoResumeSession, !Task.isCancelled,
+              let fresh = try? await cli.decode(SessionResumeHint.self,
+                arguments: ["auto-resume-session", "--continue-interrupted", "--json"]),
+              fresh.enabled,
+              ([fresh] + fresh.additionalSessions).contains(where: { $0.sessionId == threadID }) else {
+            logSessionResume("continue skipped: thread no longer has a confirmed usage-limit interruption")
+            return false
+        }
+        switch CodexResumePolicy.readQueue(threadID: threadID) {
+        case .owned:
+            _ = await CodexComposerPlay.press(threadID: threadID, log: { self.logSessionResume($0) })
+            logSessionResume("existing Roster continuation retained; no duplicate queued")
+            return true
+        case .blocked, .unavailable:
+            logSessionResume("auto-resume skipped: existing user queue or unreadable native queue; use native Resume")
+            return false
+        case .empty: break
+        }
         for binary in codexCLIBinaries where FileManager.default.isExecutableFile(atPath: binary) {
             let outcome = await runProcessCapturingOutput(
                 executable: binary,
-                arguments: ["queue", "--thread", threadID, "--message", message],
+                arguments: ["queue", "--thread", threadID, "--message", CodexResumePolicy.message(threadID)],
                 timeoutSeconds: 20
             )
             switch outcome {
             case let .exited(status, stdout, stderr):
-                let combined = stdout + "\n" + stderr
-                if status == 0, combined.localizedCaseInsensitiveContains("Queued message") {
-                    // Newer Desktop builds park queued turns behind Play
-                    // ("Queued messages run now") — press it so resume actually starts.
-                    let played = await CodexComposerPlay.press(log: { self.logSessionResume($0) })
-                    logSessionResume("codex queue ok; composer Play pressed=\(played)")
+                if status == 0, (stdout + stderr).localizedCaseInsensitiveContains("Queued message") {
+                    let requested = await CodexComposerPlay.press(threadID: threadID, log: { self.logSessionResume($0) })
+                    logSessionResume("continuation queued; native Resume requested=\(requested); turn start not confirmed")
                     return true
                 }
-                logSessionResume(
-                    "codex queue exit=\(status) via=\(binary) out=\(String(combined.prefix(240)))"
-                )
+                // An unsuccessful response can still follow acceptance. Do not enqueue twice.
+                logSessionResume("codex queue exit=\(status); no automatic retry")
+                return CodexResumePolicy.readQueue(threadID: threadID) == .owned
             case .stillRunning:
-                logSessionResume("codex queue still running via=\(binary)")
-            case .failedToStart:
-                continue
+                logSessionResume("codex queue outcome unknown; no retry to prevent duplicates")
+                return CodexResumePolicy.readQueue(threadID: threadID) == .owned
+            case .failedToStart: continue
             }
         }
-        // Queue failed or unavailable — still try Play in case Desktop already
-        // shows a resume/run-now affordance on the focused interrupted thread.
-        let played = await CodexComposerPlay.press(log: { self.logSessionResume($0) })
-        logSessionResume("codex queue unavailable; composer Play pressed=\(played)")
-        return played
+        logSessionResume("codex queue unavailable; use native Resume")
+        return false
     }
 
     private var codexCLIBinaries: [String] {
@@ -2248,11 +2262,8 @@ final class AccountStore: ObservableObject {
         }
     }
 
-    /// After monitoring is ready: seed exhaustion baseline, and when the live
-    /// account already has usable quota, discover interrupted threads (usage-limit
-    /// ~6h / mid-flight ~45m) and continue them — same path as quota recovery,
-    /// without requiring another account switch or a prior pending-recovery flag.
-    /// (Pending flag still arms across relaunches while the account is exhausted.)
+    /// Seed exhaustion baseline. Relaunch only resumes an observed pending
+    /// quota recovery; a normal launch must not enqueue turns on active work.
     private func bootstrapQuotaRecoveryResumeIfNeeded() async {
         guard autoResumeSession else {
             logSessionResume("bootstrap: skipped — auto-resume off")
@@ -2279,12 +2290,10 @@ final class AccountStore: ObservableObject {
             return
         }
 
-        // Usable active: always probe. CLI filters to the usage-limit / mid-flight
-        // windows and no-ops when nothing needs continue — so a normal app restart
-        // still resumes recent interrupts even when pendingQuotaRecoveryResume is false.
         guard LaunchInterruptedResumePolicy.shouldProbeInterruptedOnLaunch(
             autoResumeEnabled: autoResumeSession,
-            activeExhausted: exhausted
+            activeExhausted: exhausted,
+            hasPendingRecovery: pendingQuotaRecoveryResume
         ) else {
             logSessionResume("bootstrap: skip probe — policy rejected")
             return
@@ -2382,6 +2391,7 @@ final class AccountStore: ObservableObject {
 
     func refreshProviderStatus(silently: Bool = false) {
         guard !isLoadingProviderStatus else { return }
+        if silently && !providerStatusRefreshGate.request() { return }
         isLoadingProviderStatus = true
         Task {
             defer { isLoadingProviderStatus = false }
@@ -2450,13 +2460,17 @@ final class AccountStore: ObservableObject {
     }
 
     func saveLiveClaudeAccount() {
+        guard !isSavingClaude else { return }
+        isSavingClaude = true
         Task {
+            defer { isSavingClaude = false }
             do {
                 let saved: ProviderSaveOutput = try await cli.decode(
                     ProviderSaveOutput.self,
                     arguments: ["providers", "save", "claude"]
                 )
                 _ = saved
+                claudeSwitchMessage = AppLanguage.text("Đã lưu tài khoản CLI đang đăng nhập.", "Signed-in CLI account saved.")
                 claudeErrorMessage = nil
                 await refreshClaudeUsageAsync(force: true)
             } catch {
@@ -2506,7 +2520,7 @@ final class AccountStore: ObservableObject {
     }
 
     private var usesClaudeDesktop: Bool {
-        UserDefaults.standard.object(forKey: "claude_roster_switch_desktop") as? Bool != false
+        UserDefaults.standard.object(forKey: "claude_roster_switch_desktop") as? Bool == true
     }
 
     private func requireClaudeDesktopLogin(_ id: UUID) async throws -> ClaudeDesktopLoginStatus {
@@ -2664,6 +2678,7 @@ final class AccountStore: ObservableObject {
     /// itself starts at app launch in `startCoreMonitoring`.
     func claudeTabDidAppear() {
         claudeTabOpened = true
+        guard claudeTabRefreshGate.request() else { return }
         Task {
             await refreshClaudeRosterAsync(silently: true)
             await refreshClaudeUsageAsync(force: false)
@@ -3368,8 +3383,8 @@ private struct AccountHubCLI {
         } catch {
             let command = arguments.first ?? "requested"
             throw CLIError(AppLanguage.text(
-                "Không thể đọc dữ liệu cho \(command). Hãy làm mới Codex Roster rồi thử lại.",
-                "Could not decode data for \(command). Refresh Codex Roster and try again."
+                "Không thể đọc dữ liệu cho \(command). Hãy làm mới AgentDock rồi thử lại.",
+                "Could not decode data for \(command). Refresh AgentDock and try again."
             ))
         }
     }
@@ -3432,8 +3447,8 @@ private struct AccountHubCLI {
             error.fileHandleForReading.closeFile()
             _ = captures.wait(timeout: .now() + 2)
             throw CLIError(AppLanguage.text(
-                "Codex Roster không kịp hoàn tất trong hai phút.",
-                "Codex Roster did not finish within two minutes."
+                "AgentDock không kịp hoàn tất trong hai phút.",
+                "AgentDock did not finish within two minutes."
             ))
         }
         captures.wait()
@@ -3442,8 +3457,8 @@ private struct AccountHubCLI {
             let errorData = errorCapture.data
             let detail = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
             throw CLIError(detail?.isEmpty == false ? detail! : AppLanguage.text(
-                "Lệnh Codex Roster thất bại.",
-                "The Codex Roster command failed."
+                "Lệnh AgentDock thất bại.",
+                "The AgentDock command failed."
             ))
         }
         return outputData
@@ -4285,6 +4300,7 @@ private enum ResetNotifier {
         guard let status else { return }
         var state = loadSignalState()
         let previous = state.lastOpenAIIndicator
+        guard previous != status.indicator else { return }
         state.lastOpenAIIndicator = status.indicator
         defer { saveSignalState(state) }
         guard status.indicator != "none" else { return }
@@ -5061,7 +5077,12 @@ enum NotchRosterLayout {
     /// Expanded panoramic width (keep in sync with `NotchWindowView.maxExpandedWidth`
     /// and `PrismQuickSwitchDeck` frame).
     static let deckWidth: CGFloat = 1020
-    static let collapsedDeckHeight: CGFloat = 498
+    static var collapsedDeckHeight: CGFloat {
+        collapsedRosterHeight + upperDeckHeight(for: NotchGeometry.detect().inset)
+            + deckTopInset + deckBottomInset + deckSectionSpacing
+            + switchboardHeaderHeight + switchboardTopInset + switchboardBottomInset
+            + switchboardContentSpacing
+    }
     static let collapsedRosterHeight: CGFloat = 280
     /// Compact next-action caption between upper wings and roster.
     static let nextActionCaptionHeight: CGFloat = 30
@@ -5069,12 +5090,34 @@ enum NotchRosterLayout {
     static let deckHorizontalInset: CGFloat = 12
     static let deckTopInset: CGFloat = deckHorizontalInset
     static let deckBottomInset: CGFloat = deckHorizontalInset
+    /// Shared by the overlay navigation and the center automation column.
+    static let screenSwitcherHeight: CGFloat = 28
+    static let screenSwitcherTopInset: CGFloat = 4
+    static let screenSwitcherGap: CGFloat = 8
+    static let switchboardHeaderHeight: CGFloat = 28
+    static let switchboardTopInset: CGFloat = 6
+    static let switchboardBottomInset: CGFloat = 4
+    static let switchboardContentSpacing: CGFloat = 5
+    /// Two toggles plus a two-line status caption, including the card padding.
+    static let centerAutomationHeight: CGFloat = 96
+
+    static func upperDeckHeight(for notchInset: CGFloat) -> CGFloat {
+        max(156, centerControlsTopInset(notchInset: notchInset) + centerAutomationHeight)
+    }
+
+
+    static func centerControlsTopInset(notchInset: CGFloat) -> CGFloat {
+        let compactHeight = notchInset > 0 ? notchInset : 32
+        return compactHeight + screenSwitcherTopInset + screenSwitcherHeight
+            + screenSwitcherGap - deckTopInset
+    }
+
     /// Inner padding of the lower switchboard chrome (keep in sync with deck).
     static let switchboardHorizontalInset: CGFloat = 10
     /// Spacing between upper wings / caption / roster.
     static let deckSectionSpacing: CGFloat = deckHorizontalInset
     /// Comfortable roster cell: identity, text quotas, details, and action.
-    static let rowHeight: CGFloat = 68
+    static let rowHeight: CGFloat = 84
     /// Plan-band header row — shorter than account cards (avoid empty void).
     static let sectionHeaderHeight: CGFloat = 18
     /// Extra top padding on non-first plan headers in the grid.

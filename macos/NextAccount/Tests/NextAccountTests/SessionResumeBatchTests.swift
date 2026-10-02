@@ -53,24 +53,15 @@ import Testing
 }
 
 @Test func launchProbeRunsWhenUsableEvenWithoutPendingRecovery() {
-    #expect(
-        LaunchInterruptedResumePolicy.shouldProbeInterruptedOnLaunch(
-            autoResumeEnabled: true,
-            activeExhausted: false
-        )
-    )
-    #expect(
-        !LaunchInterruptedResumePolicy.shouldProbeInterruptedOnLaunch(
-            autoResumeEnabled: true,
-            activeExhausted: true
-        )
-    )
-    #expect(
-        !LaunchInterruptedResumePolicy.shouldProbeInterruptedOnLaunch(
-            autoResumeEnabled: false,
-            activeExhausted: false
-        )
-    )
+    for enabled in [false, true] {
+        for exhausted in [false, true] {
+            for pending in [false, true] {
+                #expect(LaunchInterruptedResumePolicy.shouldProbeInterruptedOnLaunch(
+                    autoResumeEnabled: enabled, activeExhausted: exhausted,
+                    hasPendingRecovery: pending) == (enabled && !exhausted && pending))
+            }
+        }
+    }
 }
 
 @Test func desktopResumeEvidenceRequiresFreshSuccessForExactThread() {

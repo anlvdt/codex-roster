@@ -105,7 +105,7 @@ pub(crate) fn acquire(
 }
 
 pub(crate) fn credentials_lock(env: &AppEnv) -> Result<[LockGuard; 2]> {
-    let claude_dir = env.home_dir.join(".claude");
+    let claude_dir = crate::claude_quota_bridge::config_dir(&env.home_dir);
     let refresh = acquire(
         &claude_dir.join(".oauth_refresh.lock"),
         DEFAULT_TIMEOUT,
@@ -120,11 +120,10 @@ pub(crate) fn credentials_lock(env: &AppEnv) -> Result<[LockGuard; 2]> {
 }
 
 pub(crate) fn config_lock(env: &AppEnv) -> Result<LockGuard> {
-    acquire(
-        &env.home_dir.join(".claude.json.lock"),
-        DEFAULT_TIMEOUT,
-        CONFIG_STALENESS,
-    )
+    let path = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(|dir| std::path::PathBuf::from(dir).join(".claude.json.lock"))
+        .unwrap_or_else(|| env.home_dir.join(".claude.json.lock"));
+    acquire(&path, DEFAULT_TIMEOUT, CONFIG_STALENESS)
 }
 
 #[cfg(test)]

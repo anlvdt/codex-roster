@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root_dir="$(cd "$(dirname "$0")/.." && pwd)"
-app_root="$root_dir/build/Codex Roster.app"
+app_root="$root_dir/build/AgentDock.app"
 target_dir="$root_dir/build/cargo-target"
 swift_package="$root_dir/macos/NextAccount"
 mkdir -p "$root_dir/build"
@@ -18,6 +18,7 @@ mkdir -p "$app_root/Contents/MacOS" "$app_root/Contents/Resources"
 cp "$swift_package/Resources/Info.plist" "$app_root/Contents/Info.plist"
 cp "$swift_package/.build/release/CodexRoster" "$app_root/Contents/MacOS/CodexRoster"
 cp "$target_dir/release/codex-roster" "$app_root/Contents/MacOS/codex-roster"
+cp "$target_dir/release/claude-quota-bridge" "$app_root/Contents/MacOS/claude-quota-bridge"
 
 swift "$root_dir/scripts/generate-macos-icon.swift" "$root_dir/assets/codex-roster.png"
 mkdir -p "$iconset"
@@ -59,7 +60,7 @@ if ! codesign --verify --deep --strict "$app_root"; then
 fi
 
 if [[ -n "${NOTARYTOOL_PROFILE-}" ]]; then
-    archive="$root_dir/build/Codex-Roster-notarization.zip"
+    archive="$root_dir/build/AgentDock-notarization.zip"
     ditto -c -k --sequesterRsrc --keepParent "$app_root" "$archive"
     xcrun notarytool submit "$archive" --keychain-profile "$NOTARYTOOL_PROFILE" --wait
     xcrun stapler staple "$app_root"

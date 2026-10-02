@@ -140,7 +140,7 @@ struct CodexRosterApp: App {
     }
 
     var body: some Scene {
-        Window("Codex Roster Notch", id: "notch") {
+        Window("AgentDock Notch", id: "notch") {
             NotchWindowView()
                 .ignoresSafeArea()
                 .environmentObject(store)
@@ -1449,10 +1449,10 @@ struct AddAccountSheet: View {
             Label(language.text(
                 selectedMode == .enrollOnly
                     ? "Đã lưu \(identity.email) vào roster. Phiên đang dùng không đổi."
-                    : "Đã lưu \(identity.email) vào Codex Roster.",
+                    : "Đã lưu \(identity.email) vào AgentDock.",
                 selectedMode == .enrollOnly
                     ? "Saved \(identity.email) to the roster. The live session is unchanged."
-                    : "Saved \(identity.email) to Codex Roster."
+                    : "Saved \(identity.email) to AgentDock."
             ), systemImage: "checkmark.circle.fill")
             .foregroundStyle(.green)
         } else if case let .failed(message) = store.newAccountLoginState {
@@ -1878,7 +1878,7 @@ struct AboutView: View {
                         .frame(width: 64, height: 64)
                         .clipShape(RoundedRectangle(cornerRadius: 15))
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Codex Roster")
+                        Text("AgentDock")
                             .font(RosterSecondaryChrome.title)
                             .lineLimit(1)
                         Text(language.text("Quản lý tài khoản ChatGPT dùng với Codex", "ChatGPT account manager for Codex"))
@@ -1934,8 +1934,8 @@ struct AboutView: View {
                     AboutBullet(
                         icon: "terminal",
                         text: language.text(
-                            "Khi tự build hoặc chạy cargo test, hộp thoại có thể hiện tên kiểu codex_roster-<hash>; đó vẫn là helper của Codex Roster.",
-                            "When you build locally or run cargo test, the dialog may show a name like codex_roster-<hash>; that is still the Codex Roster helper."
+                            "Khi tự build hoặc chạy cargo test, hộp thoại có thể hiện tên kiểu codex_roster-<hash>; đó vẫn là helper của AgentDock.",
+                            "When you build locally or run cargo test, the dialog may show a name like codex_roster-<hash>; that is still the AgentDock helper."
                         )
                     )
                 }
@@ -1960,7 +1960,7 @@ struct AboutView: View {
                     }
                     AboutFeatureGroup(title: language.text("Trải nghiệm hệ thống", "System experience")) {
                         AboutBullet(icon: "macbook", text: language.text("Notch là bảng điều khiển chính: quota, chuyển nhanh, tự chuyển, trạng thái dịch vụ, refresh, cài đặt và thoát. Bật/tắt trong Cài đặt, mở bằng ⌃⌥R, đóng bằng Esc.", "The notch is the main control surface: quota, quick switching, auto-switch, service state, refresh, settings, and quit. Toggle it in Settings, open with ⌃⌥R, close with Esc."))
-                        AboutBullet(icon: "power", text: language.text("Tùy chọn mở Codex Roster khi đăng nhập macOS; hỗ trợ phím tắt, Dark Mode và song ngữ Việt–Anh (mặc định theo hệ thống).", "Optionally launch at macOS sign-in; supports keyboard shortcuts, Dark Mode, and Vietnamese–English (defaults to system language)."))
+                        AboutBullet(icon: "power", text: language.text("Tùy chọn mở AgentDock khi đăng nhập macOS; hỗ trợ phím tắt, Dark Mode và song ngữ Việt–Anh (mặc định theo hệ thống).", "Optionally launch at macOS sign-in; supports keyboard shortcuts, Dark Mode, and Vietnamese–English (defaults to system language)."))
                         AboutBullet(icon: "desktopcomputer", text: language.text("macOS là nền tảng duy nhất đang được phát triển và phát hành; app Windows và Linux hiện tạm dừng, mã nguồn được giữ lại để bảo trì trong tương lai.", "macOS is the only actively developed and released platform; Windows and Linux apps are paused, with source retained for future maintenance."))
                     }
                 }
@@ -1985,8 +1985,8 @@ struct AboutView: View {
 
                 AboutPanel(title: language.text("Độc lập & nhãn hiệu", "Independence & trademarks"), icon: "checkmark.seal") {
                     Text(language.text(
-                        "Codex Roster là ứng dụng macOS độc lập được xây dựng cho cộng đồng Codex; không liên kết, được bảo trợ hay được OpenAI đánh giá.",
-                        "Codex Roster is an independent macOS app built for the Codex community; it is not affiliated with, endorsed by, or reviewed by OpenAI."
+                        "AgentDock là ứng dụng macOS độc lập quản lý tài khoản và quota cho Codex và Claude; không liên kết hay được OpenAI hoặc Anthropic bảo trợ.",
+                        "AgentDock is an independent macOS app for managing Codex and Claude accounts and quota; it is not affiliated with or endorsed by OpenAI or Anthropic."
                     ))
                     Text(language.text(
                         "“Codex”, “ChatGPT”, “OpenAI” và các nhãn hiệu liên quan thuộc về OpenAI; các tên này chỉ được dùng để mô tả khả năng tương thích của ứng dụng.",
@@ -2010,7 +2010,7 @@ struct AboutView: View {
                         .foregroundStyle(.secondary)
                         ReferenceLink(
                             title: "Pimpmuckl / codex-account-switcher",
-                            detail: language.text("Nền tảng CLI gốc của Jonathan Liebig; Codex Roster là bản phát triển lại cho macOS.", "Original CLI foundation by Jonathan Liebig; Codex Roster is a macOS product rework."),
+                            detail: language.text("Nền tảng CLI gốc của Jonathan Liebig; AgentDock là bản phát triển lại cho macOS.", "Original CLI foundation by Jonathan Liebig; AgentDock is a macOS product rework."),
                             badge: "MIT · foundation",
                             url: foundationURL
                         )
@@ -2058,7 +2058,7 @@ struct AboutView: View {
                         )
                         ReferenceLink(
                             title: "VibeCafe / @vibe-cafe/vibe-usage",
-                            detail: language.text("Nguồn collector và API usage tùy chọn cho thống kê VibeCafe 7 ngày; Codex Roster tích hợp theo endpoint/format công khai và không nhập mã nguồn upstream.", "Optional collector and usage API source for VibeCafe 7-day statistics; Codex Roster integrates against the public endpoint/format without importing upstream source code."),
+                            detail: language.text("Nguồn collector và API usage tùy chọn cho thống kê VibeCafe 7 ngày; AgentDock tích hợp theo endpoint/format công khai và không nhập mã nguồn upstream.", "Optional collector and usage API source for VibeCafe 7-day statistics; AgentDock integrates against the public endpoint/format without importing upstream source code."),
                             badge: "MIT · usage integration",
                             url: vibeUsageURL
                         )
@@ -2068,7 +2068,7 @@ struct AboutView: View {
                             badge: "Public API · attribution required",
                             url: codexResetsURL
                         )
-                        Text(language.text("Ngoại trừ nền tảng MIT được ghi rõ, Codex Roster không đưa mã nguồn, tài sản, credential hay state của các dự án tham khảo vào ứng dụng. Chi tiết đầy đủ: CREDITS.md.", "Except for the credited MIT foundation, Codex Roster does not incorporate source code, assets, credentials, or state from the reference projects. Full detail: CREDITS.md."))
+                        Text(language.text("Ngoại trừ nền tảng MIT được ghi rõ, AgentDock không đưa mã nguồn, tài sản, credential hay state của các dự án tham khảo vào ứng dụng. Chi tiết đầy đủ: CREDITS.md.", "Except for the credited MIT foundation, AgentDock does not incorporate source code, assets, credentials, or state from the reference projects. Full detail: CREDITS.md."))
                             .font(RosterSecondaryChrome.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -2078,7 +2078,7 @@ struct AboutView: View {
             .rosterSecondaryPadding()
         }
         .rosterSecondaryContent()
-        .navigationTitle(language.text("Giới thiệu Codex Roster", "About Codex Roster"))
+        .navigationTitle(language.text("Giới thiệu AgentDock", "About AgentDock"))
     }
 }
 

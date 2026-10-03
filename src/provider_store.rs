@@ -12,7 +12,7 @@ use crate::model::{
     AiProvider, DisplayIdentity, EnvironmentKind, ProviderAccountView, ProviderUsageStatus,
     ProviderUsageView, SnapshotBlob,
 };
-use crate::provider::UNKNOWN_EMAIL;
+use crate::provider::claude::UNKNOWN_EMAIL;
 use crate::secrets::SecretStore;
 
 const PROVIDER_INDEX_SCHEMA_VERSION: u32 = 1;

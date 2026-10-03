@@ -752,7 +752,7 @@ fn should_attempt_refresh(
     if record.requires_login() {
         return false;
     }
-    if record.identity.email == crate::provider::UNKNOWN_EMAIL {
+    if record.identity.email == crate::provider::claude::UNKNOWN_EMAIL {
         return false;
     }
     match live {
@@ -971,7 +971,7 @@ mod tests {
         let quarantined = record(Some("login_required: refresh token rejected"));
         let normal = record(None);
         let mut placeholder = record(None);
-        placeholder.identity.email = crate::provider::UNKNOWN_EMAIL.to_owned();
+        placeholder.identity.email = crate::provider::claude::UNKNOWN_EMAIL.to_owned();
         let live_matching = DisplayIdentity {
             email: "claude@example.com".to_owned(),
             subject: Some("sub-1".to_owned()),

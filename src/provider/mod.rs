@@ -6,7 +6,6 @@ use crate::model::{
 };
 
 pub(crate) mod claude;
-pub(crate) use claude::UNKNOWN_EMAIL;
 mod claude_keychain;
 mod claude_locks;
 mod cursor;
@@ -103,10 +102,7 @@ pub(crate) struct FileRestoreGuard {
 impl FileRestoreGuard {
     /// Snapshot the current bytes of each `target` (or record it absent) into a
     /// private backup dir created under `parent`.
-    pub fn stage(
-        parent: &std::path::Path,
-        targets: &[std::path::PathBuf],
-    ) -> Result<Self> {
+    pub fn stage(parent: &std::path::Path, targets: &[std::path::PathBuf]) -> Result<Self> {
         let backup_dir = parent.join(format!(".roster-restore-{}", uuid::Uuid::new_v4().simple()));
         #[cfg(unix)]
         {
@@ -149,15 +145,15 @@ impl FileRestoreGuard {
                 match std::fs::remove_file(target) {
                     Ok(()) => Ok(()),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                    Err(error) => Err(error)
-                        .with_context(|| format!("failed to remove {}", target.display())),
+                    Err(error) => {
+                        Err(error).with_context(|| format!("failed to remove {}", target.display()))
+                    }
                 }
             } else {
                 match std::fs::read(&slot) {
                     Ok(bytes) => write_atomic_bytes(target, &bytes),
-                    Err(error) => Err(error).with_context(|| {
-                        format!("failed to read backup for {}", target.display())
-                    }),
+                    Err(error) => Err(error)
+                        .with_context(|| format!("failed to read backup for {}", target.display())),
                 }
             };
             if let Err(error) = result
@@ -209,8 +205,7 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
             .with_context(|| format!("failed to write {}", path.display()))?;
     }
     #[cfg(not(unix))]
-    std::fs::write(path, bytes)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    std::fs::write(path, bytes).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
 
@@ -348,11 +343,8 @@ mod tests {
         fs::write(&existing, "old-bytes").expect("seed");
 
         {
-            let guard = FileRestoreGuard::stage(
-                temp.path(),
-                &[existing.clone(), created.clone()],
-            )
-            .expect("stage");
+            let guard = FileRestoreGuard::stage(temp.path(), &[existing.clone(), created.clone()])
+                .expect("stage");
             write_atomic_bytes(&existing, b"new-bytes").expect("write");
             write_atomic_bytes(&created, b"created").expect("write");
             drop(guard); // no commit -> rollback
@@ -397,7 +389,10 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let target = temp.path().join("secret.json");
         write_atomic_bytes(&target, b"{\"token\":1}").expect("write");
-        let mode = fs::metadata(&target).expect("metadata").permissions().mode();
+        let mode = fs::metadata(&target)
+            .expect("metadata")
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600);
         assert_eq!(fs::read_to_string(&target).expect("read"), "{\"token\":1}");
     }

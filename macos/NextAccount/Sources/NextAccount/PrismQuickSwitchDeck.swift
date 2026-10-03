@@ -23,7 +23,6 @@ struct PrismQuickSwitchDeck: View {
     var openAbout: () -> Void = {}
 
     @State private var rosterFilter: RosterListFilter = .all
-    @State private var rosterSearch: String = ""
     @State private var justSwitchedID: UUID? = nil
 
     private var activeAccount: SavedAccount? {
@@ -31,15 +30,7 @@ struct PrismQuickSwitchDeck: View {
     }
 
     private var filteredAccounts: [SavedAccount] {
-        let matching = store.accounts.filter { account in
-            let matchesFilter = rosterFilter.matches(account)
-            let matchesSearch: Bool = {
-                guard !rosterSearch.isEmpty else { return true }
-                return account.displayName.localizedCaseInsensitiveContains(rosterSearch)
-                    || account.email.localizedCaseInsensitiveContains(rosterSearch)
-            }()
-            return matchesFilter && matchesSearch
-        }
+        let matching = store.accounts.filter { rosterFilter.matches($0) }
         return store.sortedAccounts(matching)
     }
 
@@ -137,10 +128,10 @@ struct PrismQuickSwitchDeck: View {
             maxHeight: deckHeight,
             alignment: .top
         )
-        .animation(PrismTheme.snapSpring, value: isRosterExpanded)
-        .animation(PrismTheme.snapSpring, value: filteredAccounts.count)
-        .animation(PrismTheme.snapSpring, value: hasNextActionCaption)
-        .animation(PrismTheme.snapSpring, value: rosterColumnCount)
+        .animation(reduceMotion ? nil : PrismTheme.snapSpring, value: isRosterExpanded)
+        .animation(reduceMotion ? nil : PrismTheme.snapSpring, value: filteredAccounts.count)
+        .animation(reduceMotion ? nil : PrismTheme.snapSpring, value: hasNextActionCaption)
+        .animation(reduceMotion ? nil : PrismTheme.snapSpring, value: rosterColumnCount)
     }
 
     /// Compact “what to do next” line — omitted when all-clear (no mid-deck gap;
@@ -186,7 +177,7 @@ struct PrismQuickSwitchDeck: View {
             upperRightWing
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .fixedSize(horizontal: false, vertical: true)
+        .frame(height: NotchRosterLayout.upperDeckHeight(for: geometry.inset))
     }
 
     // MARK: - Upper Left Wing (Active identity + compact dual quota)
@@ -353,7 +344,7 @@ struct PrismQuickSwitchDeck: View {
         VStack(spacing: 0) {
             // Keep the cluster clear of the camera while letting it sit on the
             // same bottom edge as the left/right cards.
-            Spacer(minLength: topNotchClearance(for: geometry) + 10)
+            Spacer(minLength: NotchRosterLayout.centerControlsTopInset(notchInset: geometry.inset))
 
             VStack(spacing: 10) {
                 VStack(spacing: 0) {
@@ -376,8 +367,8 @@ struct PrismQuickSwitchDeck: View {
                             isOn: store.autoResumeSession,
                             activeColor: PrismTheme.accent,
                             help: language.text(
-                                "Sau đổi tài khoản hoặc khi quota phục hồi (kể cả banked reset): tiếp tục thread vừa bị usage-limit (~6 giờ; mid-flight ~45 phút)",
-                                "After account switch or quota recovery (including banked reset): continue usage-limit threads within ~6 hours (mid-flight cuts ~45 minutes)"
+                                "Sau đổi tài khoản hoặc quota phục hồi: chỉ tiếp tục thread có lỗi usage-limit đã xác nhận trong ~6 giờ; bỏ qua thread đang chạy.",
+                                "After account switch or quota recovery: continue only confirmed usage-limit threads within ~6 hours; skip running threads."
                             ),
                             disabled: store.isBusyForActions
                         ) { store.setAutoResumeSession($0) }
@@ -748,12 +739,12 @@ struct PrismQuickSwitchDeck: View {
 
     // MARK: - Lower Deck: Flexible Full-Width Account Switchboard
     private var lowerSwitchboardDeck: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: NotchRosterLayout.switchboardContentSpacing) {
             HStack(spacing: 8) {
                 Text(language.text("Danh bạ", "Roster"))
                     .font(PrismTheme.fontSection)
 
-                Text("\(filteredAccounts.count)/\(store.accounts.filter { !$0.archived }.count)")
+                Text("\(filteredAccounts.count)/\(store.accounts.count)")
                     .font(PrismTheme.fontMono)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 6)
@@ -768,7 +759,7 @@ struct PrismQuickSwitchDeck: View {
                     filterTab(label: language.text("Chưa XM", "Unverified"), filter: .deferredUnverified)
                 }
                 if store.accounts.contains(where: { $0.triage == .needsAction }) {
-                    filterTab(label: language.text("Login", "Action"), filter: .triage(.needsAction))
+                    filterTab(label: language.text("Cần xử lý", "Needs action"), filter: .triage(.needsAction))
                 }
 
                 toolbarIconButton(
@@ -815,6 +806,7 @@ struct PrismQuickSwitchDeck: View {
                 ) {
                     openAddAccountFlow()
                 }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
 
                 toolbarIconButton(
                     systemName: "arrow.clockwise",
@@ -870,53 +862,77 @@ struct PrismQuickSwitchDeck: View {
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .pointingHandCursor()
+                .help(language.text("Thao tác khác", "More actions"))
+                .accessibilityLabel(language.text("Thao tác khác", "More actions"))
             }
+            .frame(height: NotchRosterLayout.switchboardHeaderHeight)
 
-            ScrollView {
-                let accounts = orderedRosterAccounts
-                let ranges = NotchRosterLayout.columnRanges(accountCount: accounts.count, columns: rosterColumnCount)
-                let showHeaders = rosterSectionCounts.count > 1
-                let shortcuts = switchableShortcutMap
-
-                HStack(alignment: .top, spacing: NotchRosterLayout.columnSpacing) {
-                    ForEach(ranges.indices, id: \.self) { column in
-                        let range = ranges[column]
-                        VStack(alignment: .leading, spacing: NotchRosterLayout.rowSpacing) {
-                            ForEach(Array(accounts[range])) { account in
-                                let index = accounts.firstIndex(where: { $0.id == account.id }) ?? range.lowerBound
-                                let startsGroup = index == range.lowerBound || accounts[index - 1].planGroupKey != account.planGroupKey
-                                if showHeaders && startsGroup {
-                                    let continued = index > 0 && accounts[index - 1].planGroupKey == account.planGroupKey
-                                    let count = accounts.filter { $0.planGroupKey == account.planGroupKey }.count
-                                    Text("\(planGroupTitle(account.planGroupKey)) · \(count)" + (continued ? language.text(" · tiếp", " · continued") : ""))
-                                        .font(PrismTheme.fontChip)
-                                        .foregroundStyle(PrismTheme.textSecondary)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .frame(height: NotchRosterLayout.sectionHeaderHeight)
-                                        .padding(.top, index == range.lowerBound ? 0 : NotchRosterLayout.sectionHeaderTopGap)
-                                }
-                                PrismCompactAccountCard(
-                                    account: account,
-                                    shortcutIndex: shortcuts[account.id],
-                                    justSwitchedID: $justSwitchedID,
-                                    openEditAccount: openEditAccount,
-                                    openReloginFlow: openReloginFlow
-                                )
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
+            if filteredAccounts.isEmpty {
+                RosterEmptyState(
+                    title: store.accounts.isEmpty
+                        ? language.text("Chưa có tài khoản", "No saved accounts")
+                        : language.text("Không có tài khoản phù hợp", "No matching accounts"),
+                    detail: store.accounts.isEmpty
+                        ? language.text("Thêm tài khoản để theo dõi quota và chuyển phiên.", "Add an account to track quota and switch sessions.")
+                        : language.text("Không có tài khoản trong trạng thái này. Xem lại tất cả tài khoản.", "No accounts in this state. View all saved accounts."),
+                    actionTitle: store.accounts.isEmpty
+                        ? language.text("Thêm tài khoản", "Add account")
+                        : language.text("Xem tất cả", "Show all")
+                ) {
+                    if store.accounts.isEmpty {
+                        openAddAccountFlow()
+                    } else {
+                        rosterFilter = .all
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .top)
-                .padding(.vertical, NotchRosterLayout.gridVerticalPadding / 2)
+                .frame(height: rosterGridHeight, alignment: .top)
+            } else {
+                ScrollView {
+                    let accounts = orderedRosterAccounts
+                    let ranges = NotchRosterLayout.columnRanges(accountCount: accounts.count, columns: rosterColumnCount)
+                    let showHeaders = rosterSectionCounts.count > 1
+                    let shortcuts = switchableShortcutMap
+
+                    HStack(alignment: .top, spacing: NotchRosterLayout.columnSpacing) {
+                        ForEach(ranges.indices, id: \.self) { column in
+                            let range = ranges[column]
+                            VStack(alignment: .leading, spacing: NotchRosterLayout.rowSpacing) {
+                                ForEach(Array(accounts[range])) { account in
+                                    let index = accounts.firstIndex(where: { $0.id == account.id }) ?? range.lowerBound
+                                    let startsGroup = index == range.lowerBound || accounts[index - 1].planGroupKey != account.planGroupKey
+                                    if showHeaders && startsGroup {
+                                        let continued = index > 0 && accounts[index - 1].planGroupKey == account.planGroupKey
+                                        let count = accounts.filter { $0.planGroupKey == account.planGroupKey }.count
+                                        Text("\(planGroupTitle(account.planGroupKey)) · \(count)" + (continued ? language.text(" · tiếp", " · continued") : ""))
+                                            .font(PrismTheme.fontChip)
+                                            .foregroundStyle(PrismTheme.textSecondary)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .frame(height: NotchRosterLayout.sectionHeaderHeight)
+                                            .padding(.top, index == range.lowerBound ? 0 : NotchRosterLayout.sectionHeaderTopGap)
+                                    }
+                                    PrismCompactAccountCard(
+                                        account: account,
+                                        shortcutIndex: shortcuts[account.id],
+                                        justSwitchedID: $justSwitchedID,
+                                        openEditAccount: openEditAccount,
+                                        openReloginFlow: openReloginFlow
+                                    )
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .top)
+                    .padding(.vertical, NotchRosterLayout.gridVerticalPadding / 2)
+                }
+                .scrollDisabled(!rosterNeedsScroll)
+                .frame(maxWidth: .infinity)
+                .frame(height: rosterGridHeight)
             }
-            .scrollDisabled(!rosterNeedsScroll)
-            .frame(maxWidth: .infinity)
-            .frame(height: rosterGridHeight)
         }
         .padding(.horizontal, NotchRosterLayout.switchboardHorizontalInset)
-        .padding(.top, 6)
-        .padding(.bottom, 4)
+        .padding(.top, NotchRosterLayout.switchboardTopInset)
+        .padding(.bottom, NotchRosterLayout.switchboardBottomInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -973,6 +989,7 @@ struct PrismQuickSwitchDeck: View {
         .help(help)
         .disabled(disabled || busy)
         .accessibilityLabel(help)
+        .accessibilityAddTraits(active ? .isSelected : [])
     }
 
     private func filterTab(label: String, filter: RosterListFilter) -> some View {
@@ -996,6 +1013,8 @@ struct PrismQuickSwitchDeck: View {
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 
@@ -1021,117 +1040,121 @@ private struct PrismCompactAccountCard: View {
         let week = account.usage?.weekly?.displayRemainingPercent
         let isJustSwitched = justSwitchedID == account.id
 
-        return HStack(alignment: .center, spacing: 10) {
-            if let shortcutIndex {
-                Text("\(shortcutIndex)")
-                    .font(PrismTheme.fontMonoBold)
-                    .foregroundStyle(PrismTheme.textPrimary)
-                    .frame(width: 18, height: 18)
-                    .background(
-                        RoundedRectangle(cornerRadius: 3.5, style: .continuous)
-                            .fill(PrismTheme.surfaceStrong)
-                            .overlay(RoundedRectangle(cornerRadius: 3.5, style: .continuous).strokeBorder(PrismTheme.borderStrong, lineWidth: 0.8))
-                    )
-            } else {
-                Text(String(account.displayName.prefix(1)).uppercased())
-                    .font(PrismTheme.fontChip)
-                    .foregroundStyle(PrismTheme.quotaTint(percent: quota))
-                    .frame(width: 18, height: 18)
-                    .background(Circle().fill(PrismTheme.quotaTint(percent: quota).opacity(0.15)))
-            }
-
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 5) {
-                    Text(account.displayName)
-                        .font(.system(size: 14, weight: .semibold))
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 10) {
+                if let shortcutIndex {
+                    Text("\(shortcutIndex)")
+                        .font(PrismTheme.fontMonoBold)
                         .foregroundStyle(PrismTheme.textPrimary)
-                        .lineLimit(1)
-                    if account.bankedResetCount > 0 {
-                        PrismBankedResetCountBadge(
-                            count: account.bankedResetCount,
-                            style: .card,
-                            helpText: language.text(
-                                "\(account.displayName): \(account.bankedResetCount) lượt reset dự phòng",
-                                "\(account.displayName): \(account.bankedResetCount) banked resets"
-                            )
+                        .frame(width: 26, height: 26)
+                        .background(
+                            RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+                                .fill(PrismTheme.surfaceStrong)
+                                .overlay(RoundedRectangle(cornerRadius: 3.5, style: .continuous).strokeBorder(PrismTheme.borderStrong, lineWidth: 0.8))
                         )
+                } else {
+                    Text(String(account.displayName.prefix(1)).uppercased())
+                        .font(PrismTheme.fontChip)
+                        .foregroundStyle(PrismTheme.quotaTint(percent: quota))
+                        .frame(width: 26, height: 26)
+                        .background(Circle().fill(PrismTheme.quotaTint(percent: quota).opacity(0.15)))
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 5) {
+                        Text(account.displayName)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(PrismTheme.textPrimary)
+                            .lineLimit(1)
+                        if account.bankedResetCount > 0 {
+                            PrismBankedResetCountBadge(
+                                count: account.bankedResetCount,
+                                style: .card,
+                                helpText: language.text(
+                                    "\(account.displayName): \(account.bankedResetCount) lượt reset dự phòng",
+                                    "\(account.displayName): \(account.bankedResetCount) banked resets"
+                                )
+                            )
+                        }
+                    }
+                    Text(account.email)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            }
+            HStack(spacing: 16) {
+                HStack(spacing: 16) {
+                    quotaLabel("5h", percent: quota)
+                    quotaLabel("7d", percent: week)
+                }
+                .frame(maxWidth: .infinity)
+
+                Button { showsDetails.toggle() } label: {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 32)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel(language.text("Chi tiết \(account.displayName)", "Details for \(account.displayName)"))
+                .buttonStyle(.plain)
+                .help(language.text("Chi tiết tài khoản", "Account details"))
+                .accessibilityLabel(language.text("Chi tiết \(account.displayName)", "Details for \(account.displayName)"))
+                .popover(isPresented: $showsDetails) { accountDetails }
+
+                Group {
+                    if account.isActive {
+                        HStack(spacing: 2) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(PrismTheme.fontChipIcon)
+                            Text(language.text("Đang dùng", "Active"))
+                                .font(PrismTheme.fontCaptionBold)
+                        }
+                        .foregroundStyle(PrismTheme.emerald)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3.5)
+                        .background(Capsule().fill(PrismTheme.emerald.opacity(0.16)))
+                    } else if account.requiresLogin {
+                        Button {
+                            guard accountForContextMenuAction(in: store.accounts, capturedID: targetID) != nil else { return }
+                            openReloginFlow(targetID)
+                        } label: {
+                            Text(language.text("Login", "Login"))
+                                .font(PrismTheme.fontCaptionBold)
+                                .foregroundStyle(PrismTheme.amber)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3.5)
+                                .background(Capsule().fill(PrismTheme.amber.opacity(0.18)))
+                        }
+                        .buttonStyle(.plain)
+                        .pointingHandCursor()
+                    } else if canOfferSwitch {
+                        if let shortcutIndex {
+                            switchButton(targetID: targetID)
+                                .help(manualSwitchHelp)
+                                .keyboardShortcut(KeyEquivalent(Character("\(shortcutIndex)")), modifiers: [])
+                        } else {
+                            switchButton(targetID: targetID)
+                                .help(manualSwitchHelp)
+                        }
                     }
                 }
-                Text(account.email)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                .fixedSize()
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            VStack(alignment: .trailing, spacing: 5) {
-                quotaLabel("5h", percent: quota)
-                quotaLabel("7d", percent: week)
-            }
-            .fixedSize()
-
-            Button { showsDetails.toggle() } label: {
-                Image(systemName: "info.circle")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 28, height: 32)
-                    .contentShape(Rectangle())
-            }
-            .accessibilityLabel(language.text("Chi tiết \(account.displayName)", "Details for \(account.displayName)"))
-            .buttonStyle(.plain)
-            .help(language.text("Chi tiết tài khoản", "Account details"))
-            .accessibilityLabel(language.text("Chi tiết \(account.displayName)", "Details for \(account.displayName)"))
-            .popover(isPresented: $showsDetails) { accountDetails }
-
-            Group {
-                if account.isActive {
-                    HStack(spacing: 2) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(PrismTheme.fontChipIcon)
-                        Text(language.text("Đang dùng", "Active"))
-                            .font(PrismTheme.fontCaptionBold)
-                    }
-                    .foregroundStyle(PrismTheme.emerald)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3.5)
-                    .background(Capsule().fill(PrismTheme.emerald.opacity(0.16)))
-                } else if account.requiresLogin {
-                    Button {
-                        guard accountForContextMenuAction(in: store.accounts, capturedID: targetID) != nil else { return }
-                        openReloginFlow(targetID)
-                    } label: {
-                        Text(language.text("Login", "Login"))
-                            .font(PrismTheme.fontCaptionBold)
-                            .foregroundStyle(PrismTheme.amber)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3.5)
-                            .background(Capsule().fill(PrismTheme.amber.opacity(0.18)))
-                    }
-                    .buttonStyle(.plain)
-                    .pointingHandCursor()
-                } else if canOfferSwitch {
-                    if let shortcutIndex {
-                        switchButton(targetID: targetID)
-                            .help(manualSwitchHelp)
-                            .keyboardShortcut(KeyEquivalent(Character("\(shortcutIndex)")), modifiers: [])
-                    } else {
-                        switchButton(targetID: targetID)
-                            .help(manualSwitchHelp)
-                    }
-                }
-            }
-            .fixedSize()
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 4)
         .frame(height: NotchRosterLayout.rowHeight, alignment: .center)
         .background(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(isJustSwitched ? PrismTheme.chipFill(PrismTheme.accent) : (account.isActive ? PrismTheme.surfaceSoft : PrismTheme.surfaceFaint))
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(isJustSwitched ? PrismTheme.chipFill(PrismTheme.accent) : (account.isActive ? PrismTheme.emerald.opacity(0.06) : PrismTheme.surfaceSoft))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .strokeBorder(account.isActive ? PrismTheme.emerald.opacity(0.55) : .clear, lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(account.isActive ? PrismTheme.emerald.opacity(0.65) : PrismTheme.borderSoft, lineWidth: 1)
                 }
         )
         .contextMenu {
@@ -1191,14 +1214,11 @@ private struct PrismCompactAccountCard: View {
     }
 
     private func quotaLabel(_ title: String, percent: Int?) -> some View {
-        HStack(spacing: 6) {
-            Text(title).foregroundStyle(.secondary)
-            Text(percent.map { "\($0)%" } ?? "—")
-                .foregroundStyle(PrismTheme.quotaTint(percent: percent))
-                .monospacedDigit()
-                .frame(minWidth: 36, alignment: .trailing)
-        }
-        .font(.system(size: 12, weight: .medium))
+        RosterQuotaMeter(
+            title: title,
+            remaining: percent,
+            remainingLabel: language.text("Quota còn lại", "Remaining quota")
+        )
     }
 
     private var accountDetails: some View {
@@ -1257,7 +1277,7 @@ private struct PrismCompactAccountCard: View {
                 .padding(.vertical, 7)
                 .background(
                     Capsule()
-                        .fill(PrismTheme.surfaceStrong)
+                        .fill(PrismTheme.accent)
                 )
         }
         .buttonStyle(.plain)

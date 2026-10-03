@@ -3,10 +3,28 @@ import SwiftUI
 /// Claude Code account deck shared by the notch and Roster Console.
 struct ClaudeRosterView: View {
     var notchLayout = false
+    var onQuotaGuidePresentationChanged: (Bool) -> Void = { _ in }
+    var onInteractionPresentationChanged: (Bool) -> Void = { _ in }
 
-    static func notchDeckHeight(accountCount: Int) -> CGFloat {
+    static let notchStatusLineHeight: CGFloat = 16
+    static let notchStatusRowHeight: CGFloat = notchStatusLineHeight + 7
+
+    static func notchShowsQuotaCaption(account: ProviderAccount?) -> Bool {
+        guard let account else { return false }
+        return !account.hasFreshUsage || account.usage?.detail?.hasPrefix("Claude Code statusline") == true
+    }
+
+    static func notchDeckHeight(accountCount: Int, hasQuotaCaption: Bool = false, hasMessage: Bool = false) -> CGFloat {
         let rows = max(1, (accountCount + 1) / 2)
-        return min(NotchRosterLayout.collapsedDeckHeight, CGFloat(320 + (rows - 1) * 76))
+        // Match the wings, toolbar and insets; reserve no empty space below cards.
+        let statusHeight = CGFloat((hasQuotaCaption ? 1 : 0) + (hasMessage ? 1 : 0)) * notchStatusRowHeight
+        let chrome: CGFloat = 150 + statusHeight + NotchRosterLayout.deckTopInset
+            + NotchRosterLayout.deckBottomInset + NotchRosterLayout.deckSectionSpacing
+            + NotchRosterLayout.switchboardHeaderHeight + 7
+            + NotchRosterLayout.switchboardTopInset + NotchRosterLayout.switchboardBottomInset
+        let rosterHeight = CGFloat(rows) * NotchRosterLayout.rowHeight
+            + CGFloat(rows - 1) * NotchRosterLayout.rowSpacing
+        return min(NotchRosterLayout.collapsedDeckHeight, chrome + rosterHeight)
     }
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
@@ -16,13 +34,25 @@ struct ClaudeRosterView: View {
     @State private var labelTarget: ProviderAccount?
     @State private var detailsTarget: ProviderAccount?
     @State private var labelDraft = ""
-    @State private var accountSearch = ""
     @State private var accountFilter: AccountFilter = .all
     @State private var showAutoSwitchOptions = false
     @State private var showNotchAutoSettings = false
     @State private var showAddGuide = false
+    @State private var showQuotaGuide = false
+    @State private var quotaBridgeMessage: String?
+    @State private var loginEmail = ""
+    @State private var loginTask: Task<Void, Never>?
+    @State private var loginInProgress = false
+    @State private var loginMessage: String?
+    @State private var loginSucceeded = false
     @AppStorage("claude_roster_auto_resume") private var autoResume = true
-    @AppStorage("claude_roster_switch_desktop") private var switchDesktop = true
+    @AppStorage("claude_roster_switch_desktop") private var switchDesktop = false
+
+    private var hasPresentedInteraction: Bool {
+        switchTarget != nil || deleteTarget != nil || labelTarget != nil
+            || detailsTarget != nil || showAddGuide || showNotchAutoSettings
+            || showAutoSwitchOptions || store.claudeErrorMessage != nil
+    }
 
     private enum AccountFilter: String, CaseIterable {
         case all, ready, action
@@ -34,9 +64,6 @@ struct ClaudeRosterView: View {
 
     private var sortedAccounts: [ProviderAccount] {
         store.claudeAccounts.filter { account in
-            let matchesSearch = accountSearch.isEmpty
-                || account.displayName.localizedCaseInsensitiveContains(accountSearch)
-                || account.email.localizedCaseInsensitiveContains(accountSearch)
             let matchesFilter: Bool
             switch accountFilter {
             case .all: matchesFilter = true
@@ -45,9 +72,9 @@ struct ClaudeRosterView: View {
                 && (account.bindingUtilization ?? 100) < (store.claudeAutoSwitch?.thresholdPercent ?? 95)
             case .action: matchesFilter = account.requiresResave
                 || account.requiresLogin || account.usageError != nil
-                || account.usage?.status != "ok"
+                || account.usage?.status != "ok" || !account.hasFreshUsage
             }
-            return matchesSearch && matchesFilter
+            return matchesFilter
         }.sorted { lhs, rhs in
             if lhs.isActive != rhs.isActive { return lhs.isActive }
             if lhs.requiresLogin != rhs.requiresLogin { return !lhs.requiresLogin }
@@ -76,6 +103,9 @@ struct ClaudeRosterView: View {
         .onAppear {
             store.claudeTabDidAppear()
             store.refreshProviderStatus(silently: true)
+        }
+        .onChange(of: hasPresentedInteraction) { _, shown in
+            onInteractionPresentationChanged(shown)
         }
         .alert(
             language.text("Claude cần xử lý", "Claude needs attention"),
@@ -138,6 +168,10 @@ struct ClaudeRosterView: View {
         }
         .sheet(isPresented: $showAddGuide) {
             addAccountGuide
+                .preferredColorScheme(.dark)
+        }
+        .onChange(of: showAddGuide) { _, shown in
+            if !shown { loginTask?.cancel() }
         }
     }
 
@@ -152,7 +186,8 @@ struct ClaudeRosterView: View {
                         ? NotchGeometry.detect().cameraWidth : 156)
                 notchAutomationWing.frame(maxWidth: .infinity, alignment: .topLeading)
             }
-            .frame(height: 120, alignment: .top)
+            .frame(height: 150 + (Self.notchShowsQuotaCaption(account: store.claudeAccounts.first(where: \.isActive))
+                ? Self.notchStatusRowHeight : 0), alignment: .top)
 
             notchSwitchboard
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -161,7 +196,10 @@ struct ClaudeRosterView: View {
         .padding(.top, NotchRosterLayout.deckTopInset)
         .padding(.bottom, NotchRosterLayout.deckBottomInset)
         .frame(width: NotchRosterLayout.deckWidth,
-               height: Self.notchDeckHeight(accountCount: store.claudeAccounts.count),
+               height: Self.notchDeckHeight(
+                accountCount: store.claudeAccounts.count,
+                hasQuotaCaption: Self.notchShowsQuotaCaption(account: store.claudeAccounts.first(where: \.isActive)),
+                hasMessage: store.claudeSwitchMessage != nil),
                alignment: .top)
     }
 
@@ -213,6 +251,15 @@ struct ClaudeRosterView: View {
                     Text(quotaWarning(active))
                         .font(PrismTheme.fontMicro)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .frame(height: Self.notchStatusLineHeight, alignment: .leading)
+                        .help(quotaWarning(active))
+                } else if active.usage?.detail?.hasPrefix("Claude Code statusline") == true {
+                    Text(language.text("Quota từ CLI · quan sát cục bộ", "CLI quota · local observation"))
+                        .font(PrismTheme.fontMicro)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .frame(height: Self.notchStatusLineHeight, alignment: .leading)
                 }
             } else {
                 Text(language.text("Lưu phiên Claude Code để theo dõi quota.", "Save the Claude Code session to track quota."))
@@ -227,36 +274,115 @@ struct ClaudeRosterView: View {
     }
 
     private var notchAutomationWing: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Label(language.text("Tự động", "Automation"), systemImage: "arrow.triangle.2.circlepath")
-                .font(PrismTheme.fontBodyCompactBold)
-            Toggle(language.text("Tự chuyển gần hết quota", "Auto-switch near quota"), isOn: Binding(
-                get: { store.claudeAutoSwitch?.enabled == true },
-                set: { store.setClaudeAutoSwitch(enabled: $0) }
-            ))
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label(language.text("Tự động", "Automation"), systemImage: "arrow.triangle.2.circlepath")
+                    .font(PrismTheme.fontBodyCompactBold)
+                Spacer(minLength: 4)
+                Button("CLI quota") { showQuotaGuide = true }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(PrismTheme.accent)
+                    .help(language.text("Đọc quota trực tiếp từ Claude Code", "Read quota directly from Claude Code"))
+                    .popover(isPresented: $showQuotaGuide) {
+                        quotaGuide.background(PrismTheme.notchShell).preferredColorScheme(.dark)
+                    }
+                    .onChange(of: showQuotaGuide) { _, shown in
+                        onQuotaGuidePresentationChanged(shown)
+                    }
+            }
+            notchAutomationToggle(
+                title: language.text("Tự chuyển", "Auto-switch"),
+                detail: language.text("Trước khi hết quota", "Before quota runs out"),
+                accessibilityTitle: language.text("Tự chuyển gần hết quota", "Auto-switch near quota"),
+                isOn: Binding(
+                    get: { store.claudeAutoSwitch?.enabled == true },
+                    set: { store.setClaudeAutoSwitch(enabled: $0) }
+                )
+            )
             .help(language.text(
                 "Tự động chuyển sang tài khoản khác trước khi hạn mức cạn kiệt.",
                 "Automatically switch to another account before the quota runs out."
             ))
-            Toggle(language.text("Tiếp tục phiên sau khi chuyển", "Resume session after switching"), isOn: $autoResume)
-                .help(language.text(
-                    "Mở lại hội thoại đang chạy với tài khoản mới sau khi chuyển.",
-                    "Reopen the running conversation with the new account after switching."
-                ))
+            notchAutomationToggle(
+                title: language.text("Tự tiếp tục", "Auto-resume"),
+                detail: language.text("Tiếp tục phiên sau khi chuyển", "Continue after switching"),
+                accessibilityTitle: language.text("Tiếp tục phiên sau khi chuyển", "Resume session after switching"),
+                isOn: $autoResume
+            )
+            .help(language.text(
+                "Mở lại hội thoại đang chạy với tài khoản mới sau khi chuyển.",
+                "Reopen the running conversation with the new account after switching."
+            ))
+            Spacer(minLength: 0)
             if let auto = store.claudeAutoSwitch {
                 Text(autoSwitchStatusText(auto))
                     .font(PrismTheme.fontCaption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .help(autoSwitchStatusText(auto))
             }
-            Spacer(minLength: 0)
         }
         .toggleStyle(.switch)
         .controlSize(.mini)
         .font(PrismTheme.fontCaption)
-        .padding(8)
+        .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(notchWingShape)
+    }
+
+    private func notchAutomationToggle(
+        title: String, detail: String, accessibilityTitle: String, isOn: Binding<Bool>
+    ) -> some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(PrismTheme.fontBodyCompactBold)
+                Text(detail)
+                    .font(PrismTheme.fontCaption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            Toggle(accessibilityTitle, isOn: isOn)
+                .labelsHidden()
+                .accessibilityLabel(accessibilityTitle)
+        }
+        .frame(minHeight: 30)
+    }
+
+    private var quotaGuide: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(language.text("Quota & giữ hội thoại", "Quota & session continuity"))
+                .font(PrismTheme.fontSection)
+            Text(language.text(
+                "Cần đăng nhập Claude Code trong Terminal bằng cùng tài khoản. Đăng nhập Claude Desktop riêng không kết nối quota CLI. Sau khi đăng nhập, bấm Lưu tài khoản rồi làm mới quota.",
+                "Sign in to Claude Code in Terminal with the same account. Claude Desktop login alone does not connect CLI quota. After signing in, save the account and refresh quota."))
+            Text("claude auth login")
+                .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
+            Text(language.text(
+                "Đọc quota 5 giờ/7 ngày từ status line chính thức của CLI, không gọi API liên tục. Giữ nguyên status line hiện có. Dữ liệu chỉ được xác minh khi còn mới và khớp tài khoản.",
+                "Read 5-hour/7-day quota from the CLI's official status line without repeated API calls. Your existing status line is preserved. Data is verified only while fresh and matched to the account."))
+            Button(language.text("Kết nối quota CLI", "Connect CLI quota")) {
+                Task { @MainActor in
+                    do {
+                        try await ClaudeQuotaBridgeInstaller.install()
+                        quotaBridgeMessage = language.text(
+                            "Đã kết nối. Mở phiên CLI mới hoặc resume trong tiến trình mới; quota xuất hiện sau phản hồi đầu tiên.",
+                            "Connected. Start a fresh CLI process or resume in one; quota appears after the first response.")
+                    } catch { quotaBridgeMessage = error.localizedDescription }
+                }
+            }
+            if let quotaBridgeMessage { Text(quotaBridgeMessage).foregroundStyle(.secondary) }
+            Text(language.text(
+                "Sau khi chuyển: đóng CLI cũ, mở đúng hội thoại bằng --resume và --fork-session. Lịch sử và kết quả tool đã lưu được giữ lại; tool đang chạy và các cờ cấu hình riêng có thể cần mở lại. Đăng nhập Desktop được quản lý riêng.",
+                "After switching: close the old CLI and reopen the exact conversation with --resume and --fork-session. Saved history and tool results remain; running tools and custom launch flags may need to be restored. Desktop login is managed separately."))
+            Link(language.text("Tài liệu Claude Code", "Claude Code documentation"),
+                 destination: URL(string: "https://code.claude.com/docs/en/statusline")!)
+        }
+        .font(PrismTheme.fontBodyCompact)
+        .padding(16)
+        .frame(width: 380)
     }
 
     private var notchWingShape: some View {
@@ -272,7 +398,8 @@ struct ClaudeRosterView: View {
                 Text(message)
                     .font(PrismTheme.fontCaption)
                     .foregroundStyle(PrismTheme.amber)
-                    .lineLimit(2)
+                    .lineLimit(1)
+                    .frame(height: Self.notchStatusLineHeight, alignment: .leading)
                     .help(message)
             }
             HStack(spacing: 8) {
@@ -286,57 +413,63 @@ struct ClaudeRosterView: View {
                     .background(Capsule().fill(PrismTheme.surfaceSoft))
                 Spacer(minLength: 4)
                 ForEach(AccountFilter.allCases, id: \.self) { filter in
-                    Button(filterTitle(filter)) { accountFilter = filter }
-                        .buttonStyle(.plain)
-                        .font(PrismTheme.fontChip)
-                        .foregroundStyle(accountFilter == filter ? PrismTheme.textPrimary : PrismTheme.textSecondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(Capsule().fill(accountFilter == filter ? PrismTheme.surfaceStrong : PrismTheme.surfaceQuiet))
-                        .accessibilityAddTraits(accountFilter == filter ? .isSelected : [])
+                    Button {
+                        accountFilter = filter
+                    } label: {
+                        Text(filterTitle(filter))
+                            .font(PrismTheme.fontChip)
+                            .foregroundStyle(accountFilter == filter ? PrismTheme.textPrimary : PrismTheme.textBright)
+                            .padding(.horizontal, 8)
+                            .frame(minHeight: 28)
+                            .background(Capsule().fill(accountFilter == filter ? PrismTheme.surfaceStrong : PrismTheme.surfaceQuiet))
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                    .accessibilityAddTraits(accountFilter == filter ? .isSelected : [])
                 }
-                TextField(language.text("Tìm tên hoặc email", "Search name or email"), text: $accountSearch)
-                    .textFieldStyle(.roundedBorder)
-                    .font(PrismTheme.fontCaption)
-                    .frame(width: 164)
                 Button { store.saveLiveClaudeAccount() } label: {
-                    Image(systemName: "square.and.arrow.down")
+                    Group {
+                        if store.isSavingClaude { ProgressView().controlSize(.small) }
+                        else { Image(systemName: "square.and.arrow.down") }
+                    }.frame(width: 28, height: 28).contentShape(Rectangle())
                 }
+                .disabled(store.isSavingClaude)
                 .help(language.text("Lưu tài khoản đang đăng nhập", "Save signed-in account"))
                 .accessibilityLabel(language.text("Lưu tài khoản đang đăng nhập", "Save signed-in account"))
-                Button { showAddGuide = true } label: { Image(systemName: "plus") }
+                Button { showAddGuide = true } label: {
+                    Image(systemName: "plus").frame(width: 28, height: 28).contentShape(Rectangle())
+                }
                     .help(language.text("Thêm tài khoản", "Add account"))
                     .accessibilityLabel(language.text("Thêm tài khoản", "Add account"))
                 Button { store.refreshClaudeUsage(force: true) } label: {
-                    Image(systemName: "arrow.clockwise")
+                    Group {
+                        if store.isLoadingClaude { ProgressView().controlSize(.small) }
+                        else { Image(systemName: "arrow.clockwise") }
+                    }.frame(width: 28, height: 28).contentShape(Rectangle())
                 }
                 .disabled(store.isLoadingClaude)
                 .help(language.text("Làm mới quota", "Refresh quota"))
                 .accessibilityLabel(language.text("Làm mới quota", "Refresh quota"))
-                Button { showNotchAutoSettings = true } label: { Image(systemName: "ellipsis") }
+                Button { showNotchAutoSettings = true } label: {
+                    Image(systemName: "ellipsis").frame(width: 28, height: 28).contentShape(Rectangle())
+                }
                     .help(language.text("Tùy chọn tự chuyển", "Auto-switch options"))
                     .accessibilityLabel(language.text("Tùy chọn tự chuyển", "Auto-switch options"))
                     .popover(isPresented: $showNotchAutoSettings, arrowEdge: .bottom) {
                         autoSwitchCard
                             .frame(width: 400)
                             .padding(8)
+                            .background(PrismTheme.notchShell)
+                            .preferredColorScheme(.dark)
                     }
             }
             .buttonStyle(.plain)
             .font(PrismTheme.fontBodyCompactBold)
 
             ScrollView {
-                if store.claudeAccounts.isEmpty {
-                    Text(language.text("Đăng nhập Claude Code rồi lưu tài khoản để bắt đầu.", "Sign in to Claude Code and save the account to begin."))
-                        .font(PrismTheme.fontCaption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(12)
-                } else if sortedAccounts.isEmpty {
-                    Text(language.text("Không có tài khoản phù hợp.", "No matching accounts."))
-                        .font(PrismTheme.fontCaption)
-                        .foregroundStyle(.secondary)
-                        .padding(12)
+                if sortedAccounts.isEmpty {
+                    emptyAccountsState
                 } else {
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: NotchRosterLayout.columnSpacing),
                                         GridItem(.flexible(), spacing: NotchRosterLayout.columnSpacing)],
@@ -357,74 +490,74 @@ struct ClaudeRosterView: View {
             accountRow(account)
                 .frame(width: 440)
                 .padding(8)
+                .background(PrismTheme.notchShell)
+                .foregroundStyle(PrismTheme.textPrimary)
+                .preferredColorScheme(.dark)
         }
     }
 
     private func notchAccountCard(_ account: ProviderAccount) -> some View {
-        HStack(spacing: 8) {
-            Text(String(account.displayName.prefix(1)).uppercased())
-                .font(PrismTheme.fontAvatar)
-                .foregroundStyle(account.isActive ? PrismTheme.emerald : PrismTheme.titanium)
-                .frame(width: 24, height: 24)
-                .background(Circle().fill(PrismTheme.surfaceStrong))
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 5) {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Text(String(account.displayName.prefix(1)).uppercased())
+                    .font(PrismTheme.fontAvatar)
+                    .foregroundStyle(account.isActive ? PrismTheme.emerald : PrismTheme.titanium)
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(PrismTheme.surfaceStrong))
+                VStack(alignment: .leading, spacing: 3) {
                     Text(account.shortDisplayName)
-                        .font(PrismTheme.fontBodyBold)
+                        .font(.system(size: 14, weight: .semibold))
                         .lineLimit(1)
-                    if account.isActive {
-                        chip(language.text("Đang dùng", "Live"), tint: PrismTheme.emerald)
-                    }
+                    Text(account.email)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
-                Text(account.email)
-                    .font(PrismTheme.fontCaption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if account.isActive {
+                    Label(language.text("Đang dùng", "Active"), systemImage: "checkmark.circle.fill")
+                        .font(PrismTheme.fontCaptionBold)
+                        .foregroundStyle(PrismTheme.emerald)
+                }
+                Button { detailsTarget = account } label: {
+                    Image(systemName: account.requiresResave || account.requiresLogin ? "exclamationmark.circle" : "info.circle")
+                        .font(.system(size: 14))
+                        .foregroundStyle(account.requiresResave || account.requiresLogin ? PrismTheme.amber : PrismTheme.textBright)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(language.text("Chi tiết tài khoản và quota", "Account and quota details"))
+                .accessibilityLabel(language.text("Chi tiết \(account.displayName)", "Details for \(account.displayName)"))
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            VStack(alignment: .trailing, spacing: 3) {
+            HStack(spacing: 16) {
                 notchQuotaLabel(account, key: "five_hour", title: "5h")
                 notchQuotaLabel(account, key: "seven_day", title: "7d")
-            }
-            .frame(width: 76, alignment: .trailing)
-            Button { detailsTarget = account } label: {
-                Image(systemName: account.requiresResave || account.requiresLogin ? "exclamationmark.circle" : "info.circle")
-                    .font(PrismTheme.fontBodyCompact)
-                    .foregroundStyle(account.requiresResave || account.requiresLogin ? PrismTheme.amber : PrismTheme.textSecondary)
-                    .frame(width: 24, height: 24)
-            }
-            .buttonStyle(.plain)
-            .help(language.text("Chi tiết tài khoản và quota", "Account and quota details"))
-            .accessibilityLabel(language.text("Chi tiết \(account.displayName)", "Details for \(account.displayName)"))
-            if account.isActive {
-                chip(language.text("Đang dùng", "Active"), tint: PrismTheme.emerald)
-                    .frame(width: 65)
-            } else {
-                Button(language.text("Chuyển", "Switch")) { switchTarget = account }
-                    .disabled(!account.canActivate)
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .frame(width: 65)
+                if !account.isActive {
+                    Button(language.text("Chuyển", "Switch")) { switchTarget = account }
+                        .disabled(!account.canActivate)
+                        .buttonStyle(.borderedProminent)
+                        .tint(PrismTheme.accent)
+                        .controlSize(.small)
+                }
             }
         }
-        .padding(.horizontal, 10)
-        .frame(height: 68)
-        .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
-            .fill(PrismTheme.surfacePanel)
-            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .strokeBorder(account.isActive ? PrismTheme.emerald.opacity(0.65) : PrismTheme.borderSubtle,
-                              lineWidth: 0.8)))
+        .padding(.horizontal, 12)
+        .frame(height: NotchRosterLayout.rowHeight)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(account.isActive ? PrismTheme.emerald.opacity(0.06) : PrismTheme.surfaceSoft)
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(account.isActive ? PrismTheme.emerald.opacity(0.65) : PrismTheme.borderSoft,
+                              lineWidth: 1)))
     }
 
     private func notchQuotaLabel(_ account: ProviderAccount, key: String, title: String) -> some View {
-        let remaining = account.window(key)?.remainingPercent
-        return HStack(spacing: 3) {
-            Text(title).foregroundStyle(.secondary)
-            Spacer(minLength: 0)
-            Text(remaining.map { "\($0)%" } ?? "—")
-                .foregroundStyle(PrismTheme.quotaTint(percent: remaining))
-        }
-        .font(PrismTheme.fontCaptionBold)
+        RosterQuotaMeter(
+            title: title,
+            remaining: account.window(key)?.remainingPercent,
+            remainingLabel: language.text("Quota còn lại", "Remaining quota")
+        )
     }
 
     // MARK: - Header
@@ -552,6 +685,11 @@ struct ClaudeRosterView: View {
     }
 
     private func quotaWarning(_ account: ProviderAccount) -> String {
+        if account.usageError?.contains("claude_cli_auth_missing:") == true
+            || account.usageError?.contains("OAuth access token not found") == true {
+            return language.text("CLI chưa đăng nhập · chạy claude auth login rồi lưu lại tài khoản",
+                "CLI not signed in · run claude auth login, then save the account again")
+        }
         if account.usageError?.contains("HTTP 429") == true {
             return language.text("API quota giới hạn yêu cầu (429) · đang chờ thử lại",
                 "Quota API rate limited (429) · waiting to retry")
@@ -560,48 +698,71 @@ struct ClaudeRosterView: View {
     }
 
     private func summaryQuota(_ window: ProviderUsageWindow, label: String? = nil) -> some View {
-        HStack(spacing: 4) {
-            Text(label ?? window.label)
-            Spacer()
-            Text("\(window.remainingPercent ?? max(0, 100 - (window.usedPercent ?? 0)))% "
-                + language.text("còn", "left"))
-                .fontWeight(.semibold)
+        VStack(alignment: .leading, spacing: 3) {
+            RosterQuotaMeter(
+                title: label ?? window.label,
+                remaining: window.remainingPercent ?? window.usedPercent.map { max(0, 100 - $0) },
+                remainingLabel: language.text("Quota còn lại", "Remaining quota")
+            )
             if let reset = window.resetDescription(in: language.language) {
-                Text("· " + reset).foregroundStyle(.secondary)
+                Text(reset)
+                    .font(PrismTheme.fontCaption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
         }
-        .font(RosterSecondaryChrome.footnote)
     }
 
     private var addAccountGuide: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(language.text("Thêm tài khoản Claude Code", "Add Claude Code account"))
                 .font(RosterSecondaryChrome.title)
-            Text(language.text(
-                "1. Mở Claude Code trong Terminal và gõ /login để đăng nhập tài khoản mới. Không cần /logout trước.",
-                "1. Open Claude Code in Terminal and run /login for the new account. No /logout needed."
-            ))
-            Text(language.text(
-                "2. Quay lại đây, bấm Lưu tài khoản đang đăng nhập. App sẽ giữ tài khoản trước để chuyển lại.",
-                "2. Return here and click Save signed-in account. The previous account stays in the roster."
-            ))
-            Text(language.text(
-                "3. Dùng nút Chuyển ở thẻ tài khoản và kiểm tra /status trong Claude Code.",
-                "3. Use Switch on an account card, then check /status in Claude Code."
-            ))
+            Text(language.text("Đăng nhập trong trình duyệt. App tự xác minh và lưu từng tài khoản; tài khoản đang dùng được giữ nguyên.",
+                "Sign in in your browser. The app verifies and saves each account while keeping your current account."))
+            TextField(language.text("Email tài khoản (không bắt buộc)", "Account email (optional)"), text: $loginEmail)
+                .textFieldStyle(.roundedBorder)
+                .disabled(loginInProgress)
+            if loginInProgress {
+                HStack { ProgressView().controlSize(.small)
+                    Text(language.text("Hoàn tất đăng nhập trong trình duyệt…", "Complete sign-in in your browser…")) }
+            }
+            if let loginMessage {
+                Text(loginMessage).foregroundStyle(loginSucceeded ? PrismTheme.emerald : PrismTheme.amber)
+                    .textSelection(.enabled)
+            }
             HStack {
-                Spacer()
-                Button(language.text("Đóng", "Close")) { showAddGuide = false }
-                Button(language.text("Đã đăng nhập — Lưu", "Signed in — Save")) {
+                Button(language.text("Lưu CLI đang đăng nhập", "Save current CLI login")) { store.saveLiveClaudeAccount() }
+                    .disabled(loginInProgress)
+                Spacer(minLength: 8)
+                Button(language.text(loginInProgress ? "Hủy" : "Đóng", loginInProgress ? "Cancel" : "Close")) {
+                    loginTask?.cancel()
                     showAddGuide = false
-                    store.saveLiveClaudeAccount()
                 }
+                Button(language.text(loginSucceeded ? "Thêm tài khoản khác" : "Đăng nhập", loginSucceeded ? "Add another account" : "Sign in")) {
+                    loginInProgress = true
+                    loginSucceeded = false
+                    loginMessage = nil
+                    let email = loginEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+                    loginTask = Task { @MainActor in
+                        defer { loginInProgress = false }
+                        do {
+                            let savedEmail = try await ClaudeCLIEnrollment.login(email: email)
+                            loginSucceeded = true
+                            loginEmail = ""
+                            loginMessage = language.text("Đã lưu \(savedEmail). Bạn có thể thêm tài khoản khác hoặc chọn Chuyển trong danh sách.",
+                                "Saved \(savedEmail). Add another account or choose Switch in the roster.")
+                            store.refreshClaudeRoster(silently: true)
+                        } catch is CancellationError { }
+                        catch { loginMessage = error.localizedDescription }
+                    }
+                }
+                .disabled(loginInProgress)
                 .keyboardShortcut(.defaultAction)
             }
         }
         .font(RosterSecondaryChrome.caption)
         .padding(20)
-        .frame(width: 480)
+        .frame(width: 520)
     }
 
     // MARK: - Auto-switch card
@@ -741,7 +902,11 @@ struct ClaudeRosterView: View {
         case "below_threshold":
             language.text("Quota còn an toàn.", "Quota is still comfortable.")
         case "usage_unavailable":
-            output.detail?.contains("HTTP 429") == true
+            (output.detail?.contains("claude_cli_auth_missing:") == true
+                || output.detail?.contains("OAuth access token not found") == true)
+                ? language.text("CLI chưa đăng nhập. Chạy claude auth login trong Terminal.",
+                    "CLI not signed in. Run claude auth login in Terminal.")
+                : output.detail?.contains("HTTP 429") == true
                 ? language.text("API quota giới hạn yêu cầu (429); tự thử lại sau.", "Quota API rate limited (429); retrying later.")
                 : language.text("Chưa đọc được quota trực tiếp.", "Live quota unavailable.")
         case "cooldown":
@@ -784,25 +949,11 @@ struct ClaudeRosterView: View {
                     }
                     .buttonStyle(.bordered)
                     .tint(accountFilter == filter ? .accentColor : .gray)
+                    .accessibilityAddTraits(accountFilter == filter ? .isSelected : [])
                 }
             }
-            TextField(language.text("Tìm tên hoặc email", "Search name or email"), text: $accountSearch)
-                .textFieldStyle(.roundedBorder)
-
-            if store.claudeAccounts.isEmpty {
-                Text(language.text(
-                    "Đăng nhập Claude Code rồi bấm Lưu để thêm tài khoản vào đây.",
-                    "Sign in with Claude Code, then Save to add an account here."
-                ))
-                .font(RosterSecondaryChrome.caption)
-                .foregroundStyle(.secondary)
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(RosterSecondaryChrome.cardFill, in: RoundedRectangle(cornerRadius: RosterSecondaryChrome.cardRadius))
-            } else if sortedAccounts.isEmpty {
-                Text(language.text("Không có tài khoản phù hợp.", "No matching accounts."))
-                    .foregroundStyle(.secondary)
-                    .padding(14)
+            if sortedAccounts.isEmpty {
+                emptyAccountsState
             } else {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 390), spacing: 10)], spacing: 10) {
                     ForEach(sortedAccounts) { account in
@@ -818,6 +969,26 @@ struct ClaudeRosterView: View {
         case .all: language.text("Tất cả", "All")
         case .ready: language.text("Sẵn sàng", "Ready")
         case .action: language.text("Cần xử lý", "Action")
+        }
+    }
+
+    private var emptyAccountsState: some View {
+        RosterEmptyState(
+            title: store.claudeAccounts.isEmpty
+                ? language.text("Chưa có tài khoản Claude", "No saved Claude accounts")
+                : language.text("Không có tài khoản phù hợp", "No matching accounts"),
+            detail: store.claudeAccounts.isEmpty
+                ? language.text("Đăng nhập Claude Code, rồi lưu tài khoản để theo dõi quota.", "Sign in to Claude Code, then save the account to track quota.")
+                : language.text("Không có tài khoản trong trạng thái này. Xem lại tất cả tài khoản.", "No accounts in this state. View all saved accounts."),
+            actionTitle: store.claudeAccounts.isEmpty
+                ? language.text("Hướng dẫn thêm", "Add account guide")
+                : language.text("Xem tất cả", "Show all")
+        ) {
+            if store.claudeAccounts.isEmpty {
+                showAddGuide = true
+            } else {
+                accountFilter = .all
+            }
         }
     }
 
@@ -921,6 +1092,10 @@ struct ClaudeRosterView: View {
     }
 
     private func statusChip(_ account: ProviderAccount) -> AnyView? {
+        if account.usageError?.contains("claude_cli_auth_missing:") == true
+            || account.usageError?.contains("OAuth access token not found") == true {
+            return AnyView(chip(language.text("CLI chưa đăng nhập", "CLI not signed in"), tint: PrismTheme.amber))
+        }
         if account.usageError?.contains("HTTP 429") == true {
             return AnyView(chip(language.text("API quota giới hạn (429)", "Quota API limited (429)"), tint: PrismTheme.amber))
         }

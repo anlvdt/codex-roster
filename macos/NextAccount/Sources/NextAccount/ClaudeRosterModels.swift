@@ -50,7 +50,8 @@ struct ProviderAccount: Identifiable, Decodable {
     var hasFreshUsage: Bool {
         guard usageError == nil, let usage, usage.status == "ok" else { return false }
         let now = Date()
-        guard now.timeIntervalSince(usage.fetchedAt.value) < 15 * 60,
+        let maximumAge: TimeInterval = usage.detail?.hasPrefix("Claude Code statusline") == true ? 2 * 60 : 15 * 60
+        guard now.timeIntervalSince(usage.fetchedAt.value) < maximumAge,
               usage.fetchedAt.value <= now.addingTimeInterval(60) else { return false }
         return !usage.windows.contains { window in
             guard let reset = window.resetAt?.value else { return false }
@@ -112,9 +113,14 @@ struct ProviderUsageWindow: Identifiable, Decodable {
         formatter.unitsStyle = .abbreviated
         formatter.locale = language.locale
         let relative = formatter.localizedString(for: resetAt.value, relativeTo: Date())
+        let clock = DateFormatter()
+        clock.locale = language.locale
+        clock.timeZone = .current
+        clock.dateFormat = "HH:mm dd/MM"
+        let exact = clock.string(from: resetAt.value)
         return language == .vietnamese
-            ? "đặt lại \(relative)"
-            : "resets \(relative)"
+            ? "đặt lại \(relative) · \(exact)"
+            : "resets \(relative) · \(exact)"
     }
 }
 

@@ -43,15 +43,15 @@ enum SessionResumeBatch {
     }
 }
 
-/// Launch bootstrap: when Auto-resume is ON and the live account is usable,
-/// always probe interrupted threads (CLI applies usage-limit ~6h / mid-flight ~45m).
-/// Pending-recovery only matters while the account is still exhausted.
+/// An ordinary Roster relaunch is not a quota-recovery event.
+/// Only a persisted, observed exhaustion can authorize a launch recovery probe.
 enum LaunchInterruptedResumePolicy {
     static func shouldProbeInterruptedOnLaunch(
         autoResumeEnabled: Bool,
-        activeExhausted: Bool
+        activeExhausted: Bool,
+        hasPendingRecovery: Bool
     ) -> Bool {
-        autoResumeEnabled && !activeExhausted
+        autoResumeEnabled && !activeExhausted && hasPendingRecovery
     }
 }
 

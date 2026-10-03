@@ -3,6 +3,7 @@ pub const CLI_NAME: &str = "codex-roster";
 
 pub mod app;
 pub mod backup;
+pub mod claude_quota_bridge;
 pub mod cli;
 pub mod codex;
 pub mod env;

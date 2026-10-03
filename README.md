@@ -1,10 +1,12 @@
-# Codex Roster
+# AgentDock
+
+Formerly **Codex Roster**. AgentDock manages Codex and Claude accounts, quota and session continuity from the macOS menu bar/notch. Existing storage, Keychain and CLI identifiers are retained.
 
 Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex.
 
 [English](#english) · [Tiếng Việt](#tiếng-việt)
 
-> Codex Roster is a local-first, independent macOS app built for the Codex community. It is not affiliated with, endorsed by, or reviewed by OpenAI.
+> AgentDock is a local-first, independent macOS app for managing Codex and Claude accounts and quota. It is not affiliated with, endorsed by, or reviewed by OpenAI.
 
 > “Codex”, “ChatGPT”, “OpenAI”, and related marks belong to OpenAI and are used only to describe compatibility. See the [OpenAI brand guidelines](https://openai.com/brand/).
 
@@ -29,7 +31,7 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
 
 ### Quota and automatic switching
 
-`GPT Free`, `GPT Plus`, and `GPT Pro` identify the ChatGPT plan. They do not imply a fixed Codex quota. Codex Roster displays the quota/reset windows returned for the signed-in account.
+`GPT Free`, `GPT Plus`, and `GPT Pro` identify the ChatGPT plan. They do not imply a fixed Codex quota. AgentDock displays the quota/reset windows returned for the signed-in account.
 
 Codex exposes two independent usage windows: `primary_window` is the rolling **5-hour** allowance and `secondary_window` is the **weekly** allowance. Roster labels and displays both instead of collapsing them into one percentage. An account is immediately usable only while every reported window still has quota; a healthy 5-hour window does not override an exhausted weekly limit, and vice versa.
 
@@ -59,13 +61,13 @@ The sidebar signals, the Overview banner, and the account board all read from th
 
 macOS may show a dialog such as:
 
-> `codex-roster` / `Codex Roster` / `codex_roster-<hash>` wants to use your confidential information stored in **"com.codexroster.app"** in your keychain.
+> `codex-roster` / `AgentDock` / `codex_roster-<hash>` wants to use your confidential information stored in **"com.codexroster.app"** in your keychain.
 
-That is expected. Codex Roster keeps only a local encryption key for saved snapshots and automatic backups in the Keychain item `com.codexroster.app`. The helper CLI inside the app (and local `cargo test` / `cargo run` binaries, which may appear as `codex_roster-<hash>`) must read that item to decrypt sessions on this Mac. The dialog is from macOS, not a third-party login page.
+That is expected. AgentDock keeps only a local encryption key for saved snapshots and automatic backups in the Keychain item `com.codexroster.app`. The helper CLI inside the app (and local `cargo test` / `cargo run` binaries, which may appear as `codex_roster-<hash>`) must read that item to decrypt sessions on this Mac. The dialog is from macOS, not a third-party login page.
 
 - Choose **Allow** or **Always Allow** after confirming the Keychain item name is `com.codexroster.app`.
 - **Deny** leaves saved sessions/backups encrypted and unreadable until access is granted.
-- Codex Roster never asks for your OpenAI password through this dialog; enter your Mac login Keychain password only if macOS requests it.
+- AgentDock never asks for your OpenAI password through this dialog; enter your Mac login Keychain password only if macOS requests it.
 
 Never share a snapshot file, password, browser cookie, access token, or refresh token.
 
@@ -82,7 +84,7 @@ Never share a snapshot file, password, browser cookie, access token, or refresh 
 
 ### Install and run
 
-Download the latest macOS ZIP from [Releases](https://github.com/anlvdt/codex-roster/releases), unzip it, and move **Codex Roster.app** to Applications. macOS may require you to approve the first launch because the application is independently distributed.
+Download the latest macOS ZIP from [Releases](https://github.com/anlvdt/codex-roster/releases), unzip it, and move **AgentDock.app** to Applications. macOS may require you to approve the first launch because the application is independently distributed.
 
 The notch panel checks stable GitHub Releases at launch and every six hours. When an update is available, select **Update** there; the ZIP's GitHub SHA-256 digest is verified before the app replaces itself and reopens.
 
@@ -90,12 +92,12 @@ Build locally:
 
 ```sh
 zsh scripts/build-macos-app.sh
-open "build/Codex Roster.app"
+open "build/AgentDock.app"
 ```
 
 ### Platform
 
-macOS only. Codex Roster is a native macOS app; the crate builds and ships for macOS (Apple Silicon and Intel). Windows and Linux support has been removed.
+macOS only. AgentDock is a native macOS app; the crate builds and ships for macOS (Apple Silicon and Intel). Windows and Linux support has been removed.
 
 ### CLI
 
@@ -141,7 +143,7 @@ codex-roster providers usage PROVIDER [ACCOUNT_ID] [--json]
 
 Saved account data remains on this Mac. OpenAI Status and Codex Reset outlook requests (codex-resets.com / codex-reset.com) never include account credentials, identifiers, saved sessions, or quota data. The 24h/48h values are public-signal forecast scores, not statistical probabilities. Public reset posts are advisory; authenticated per-account quota returned by Codex remains the source of truth. Read [OpenAI's current ChatGPT and Codex pricing documentation](https://learn.chatgpt.com/docs/pricing) for plan and usage policy.
 
-Codex Roster is MIT licensed. It is maintained by [LE AN (@anlvdt)](https://github.com/anlvdt). See [AUTHORS.md](AUTHORS.md) and [CREDITS.md](CREDITS.md) for original-foundation, research, and license attribution.
+AgentDock is MIT licensed. It is maintained by [LE AN (@anlvdt)](https://github.com/anlvdt). See [AUTHORS.md](AUTHORS.md) and [CREDITS.md](CREDITS.md) for original-foundation, research, and license attribution.
 
 ### Validation
 
@@ -170,7 +172,7 @@ swift build --package-path macos/NextAccount
 
 ### Quota và tự động chuyển
 
-`GPT Free`, `GPT Plus`, `GPT Pro` là nhãn gói ChatGPT, không phải quota Codex cố định. Codex Roster hiển thị quota/thời điểm reset thực tế được trả về cho tài khoản đang đăng nhập.
+`GPT Free`, `GPT Plus`, `GPT Pro` là nhãn gói ChatGPT, không phải quota Codex cố định. AgentDock hiển thị quota/thời điểm reset thực tế được trả về cho tài khoản đang đăng nhập.
 
 Codex trả về hai cửa sổ sử dụng độc lập: `primary_window` là quota cuốn chiếu **5 giờ**, còn `secondary_window` là quota **tuần**. Roster hiển thị và gắn nhãn riêng cho cả hai thay vì gộp thành một phần trăm. Tài khoản chỉ dùng được ngay khi mọi cửa sổ được trả về đều còn quota; quota 5 giờ còn không thể bù cho quota tuần đã hết và ngược lại.
 
@@ -200,13 +202,13 @@ Tín hiệu ở sidebar, thanh gợi ý và bảng trạng thái đều đọc t
 
 macOS có thể hiện hộp thoại kiểu:
 
-> `codex-roster` / `Codex Roster` / `codex_roster-<hash>` muốn dùng thông tin bảo mật trong **"com.codexroster.app"** trên keychain của bạn.
+> `codex-roster` / `AgentDock` / `codex_roster-<hash>` muốn dùng thông tin bảo mật trong **"com.codexroster.app"** trên keychain của bạn.
 
-Đây là hành vi bình thường. Codex Roster chỉ lưu khóa mã hóa cục bộ cho snapshot và bản sao lưu tự động trong mục Keychain `com.codexroster.app`. CLI đi kèm app (và binary `cargo test` / `cargo run` khi phát triển, đôi khi hiện tên `codex_roster-<hash>`) cần đọc mục đó để giải mã phiên trên chính máy này. Hộp thoại do macOS hiện, không phải trang đăng nhập bên thứ ba.
+Đây là hành vi bình thường. AgentDock chỉ lưu khóa mã hóa cục bộ cho snapshot và bản sao lưu tự động trong mục Keychain `com.codexroster.app`. CLI đi kèm app (và binary `cargo test` / `cargo run` khi phát triển, đôi khi hiện tên `codex_roster-<hash>`) cần đọc mục đó để giải mã phiên trên chính máy này. Hộp thoại do macOS hiện, không phải trang đăng nhập bên thứ ba.
 
 - Chọn **Allow** hoặc **Always Allow** sau khi xác nhận tên mục Keychain là `com.codexroster.app`.
 - **Deny** sẽ khiến phiên/bản sao lưu đã mã hóa không đọc được cho đến khi được cấp quyền.
-- Codex Roster không hỏi mật khẩu OpenAI qua hộp thoại này; chỉ nhập mật khẩu Keychain đăng nhập của Mac nếu macOS yêu cầu.
+- AgentDock không hỏi mật khẩu OpenAI qua hộp thoại này; chỉ nhập mật khẩu Keychain đăng nhập của Mac nếu macOS yêu cầu.
 
 Không gửi file snapshot, mật khẩu backup, cookie trình duyệt, access token hay refresh token cho bất kỳ ai.
 
@@ -223,7 +225,7 @@ Không gửi file snapshot, mật khẩu backup, cookie trình duyệt, access t
 
 ### Cài đặt và chạy
 
-Tải ZIP macOS mới nhất từ [Releases](https://github.com/anlvdt/codex-roster/releases), giải nén rồi kéo **Codex Roster.app** vào Applications. Lần mở đầu, macOS có thể yêu cầu bạn cho phép vì ứng dụng được phát hành độc lập.
+Tải ZIP macOS mới nhất từ [Releases](https://github.com/anlvdt/codex-roster/releases), giải nén rồi kéo **AgentDock.app** vào Applications. Lần mở đầu, macOS có thể yêu cầu bạn cho phép vì ứng dụng được phát hành độc lập.
 
 Bảng notch tự kiểm tra GitHub Releases ổn định khi khởi động và mỗi sáu giờ. Khi có bản mới, chọn **Cập nhật** tại đó; ứng dụng xác thực SHA-256 do GitHub công bố trước khi tự thay thế và mở lại.
 
@@ -231,12 +233,12 @@ Tự build:
 
 ```sh
 zsh scripts/build-macos-app.sh
-open "build/Codex Roster.app"
+open "build/AgentDock.app"
 ```
 
 ### Nền tảng
 
-Chỉ macOS. Codex Roster là ứng dụng macOS native; crate build và phát hành cho macOS (Apple Silicon và Intel). Hỗ trợ Windows và Linux đã được gỡ bỏ.
+Chỉ macOS. AgentDock là ứng dụng macOS native; crate build và phát hành cho macOS (Apple Silicon và Intel). Hỗ trợ Windows và Linux đã được gỡ bỏ.
 
 ### CLI đa provider
 
@@ -262,4 +264,4 @@ codex-roster providers usage PROVIDER [ACCOUNT_ID] [--json]
 
 Dữ liệu tài khoản lưu trên máy Mac. Kiểm tra OpenAI Status và Codex Reset outlook (codex-resets.com / codex-reset.com) không gửi credential, định danh tài khoản, phiên đã lưu hay dữ liệu quota. Giá trị 24h/48h là điểm dự báo từ tín hiệu công khai, không phải xác suất thống kê. Bài đăng reset công khai chỉ là tín hiệu tham khảo; quota có xác thực do Codex trả về cho từng tài khoản vẫn là nguồn xác nhận cuối cùng. Xem [tài liệu pricing và usage chính thức của ChatGPT/Codex](https://learn.chatgpt.com/docs/pricing) để biết chính sách gói và quota mới nhất.
 
-Codex Roster dùng giấy phép MIT, được duy trì bởi [LE AN (@anlvdt)](https://github.com/anlvdt). Xem [AUTHORS.md](AUTHORS.md) và [CREDITS.md](CREDITS.md) để biết ghi nhận tác giả, nguồn tham khảo và ranh giới giấy phép.
+AgentDock dùng giấy phép MIT, được duy trì bởi [LE AN (@anlvdt)](https://github.com/anlvdt). Xem [AUTHORS.md](AUTHORS.md) và [CREDITS.md](CREDITS.md) để biết ghi nhận tác giả, nguồn tham khảo và ranh giới giấy phép.

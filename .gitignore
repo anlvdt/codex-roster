@@ -11,3 +11,7 @@ __pycache__/
 findings.md
 progress.md
 task_plan.md
+
+# Agent tooling state
+.pi/
+.freebuff/

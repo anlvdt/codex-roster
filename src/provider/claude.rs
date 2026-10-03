@@ -224,6 +224,47 @@ fn merge_shared_credential_fields(
     serde_json::to_string(&target).unwrap_or_else(|_| target_raw.to_owned())
 }
 
+/// Best-effort rollback of the macOS Keychain slot to its pre-restore value.
+/// Stage the old password before any mutation; on drop without commit the
+/// previous entry is restored (or the new one deleted). Mirrors
+/// `FileRestoreGuard` for the non-file Keychain target.
+#[cfg(target_os = "macos")]
+struct KeychainRestoreGuard {
+    previous: Option<String>,
+    committed: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl KeychainRestoreGuard {
+    fn stage() -> Self {
+        Self {
+            previous: read_keychain_password(),
+            committed: false,
+        }
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for KeychainRestoreGuard {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let account = super::claude_keychain::account_name();
+        let service = keychain_service();
+        let _ = match &self.previous {
+            Some(value) => {
+                super::claude_keychain::set_password(&service, &account, value)
+            }
+            None => super::claude_keychain::delete_password(&service, &account),
+        };
+    }
+}
+
 fn write_atomic(path: &Path, contents: &str, mode_0600: bool) -> Result<()> {
     let name = path
         .file_name()
@@ -725,103 +766,41 @@ impl ProviderAdapter for ClaudeAdapter {
     }
 
     fn restore_snapshot(&self, env: &AppEnv, snapshot: &SnapshotBlob) -> Result<()> {
-        let keychain_backed = cfg!(target_os = "macos")
-            && snapshot
-                .files
-                .iter()
-                .any(|file| file.name == "claude_keychain.txt");
-        let file_creds = fs::read_to_string(credentials_path(env))
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-        let keychain_creds =
-            || read_keychain_password().and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-        let live_creds = if keychain_backed {
-            keychain_creds().or(file_creds)
+        // cc-switch write-engine pattern: stage pre-restore bytes for every
+        // file target and the Keychain preimage before the first mutation, so
+        // a failure or abort mid-way through the multi-step restore below
+        // (credentials file, keychain, config) cannot leave Claude Code
+        // half-switched between accounts.
+        let mut file_targets = Vec::new();
+        if snapshot_text(snapshot, "claude_credentials.json")?.is_some() {
+            file_targets.push(credentials_path(env));
+        }
+        if snapshot_text(snapshot, "claude_config.json")?.is_some() {
+            file_targets.push(config_path(env));
+        }
+        let _file_guard = if file_targets.is_empty() {
+            None
         } else {
-            file_creds.or_else(keychain_creds)
+            let parent = file_targets
+                .iter()
+                .filter_map(|path| path.parent())
+                .next()
+                .unwrap_or(&env.home_dir)
+                .to_path_buf();
+            fs::create_dir_all(&parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+            Some(super::FileRestoreGuard::stage(&parent, &file_targets)?)
         };
-        let shared = shared_credential_fields(live_creds.as_ref());
+        #[cfg(target_os = "macos")]
+        let keychain_guard = KeychainRestoreGuard::stage();
 
-        if let Some(raw) = snapshot_text(snapshot, "claude_credentials.json")? {
-            let dir = claude_dir(env);
-            fs::create_dir_all(&dir)
-                .with_context(|| format!("failed to create {}", dir.display()))?;
-            let merged = merge_shared_credential_fields(&raw, shared.as_ref());
-            let path = credentials_path(env);
-            write_atomic(&path, &merged, true)
-                .with_context(|| format!("failed to restore {}", path.display()))?;
-            // The snapshot uses a credentials file; ensure no stale Keychain
-            // entry from a previous Keychain-backed account remains.  Claude
-            // Code prefers Keychain when both exist, so leaving the old entry
-            // would cause it to authenticate as the previous account.
-            #[cfg(target_os = "macos")]
-            if !keychain_backed {
-                super::claude_keychain::delete_password(
-                    &keychain_service(),
-                    &super::claude_keychain::account_name(),
-                )
-                .context("failed to remove stale Claude Keychain credentials")?;
-            }
+        restore_snapshot_inner(env, snapshot)?;
+
+        if let Some(guard) = _file_guard {
+            guard.commit();
         }
-        if cfg!(target_os = "macos")
-            && let Some(password) = snapshot_text(snapshot, "claude_keychain.txt")?
-        {
-            let merged = merge_shared_credential_fields(&password, shared.as_ref());
-            super::claude_keychain::set_password(
-                &keychain_service(),
-                &super::claude_keychain::account_name(),
-                &merged,
-            )
-            .context("failed to restore Claude Code credentials in the system keychain")?;
-            // The snapshot uses Keychain; ensure no stale credentials file
-            // from a previous file-backed account remains.  Claude Code reads
-            // the file when no Keychain entry exists, so leaving it around
-            // would cause reads to merge the stale file token.
-            if snapshot_text(snapshot, "claude_credentials.json")?.is_none() {
-                match fs::remove_file(credentials_path(env)) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        return Err(error)
-                            .context("failed to remove stale Claude credentials file");
-                    }
-                }
-            }
-        }
-        if let Some(raw) = snapshot_text(snapshot, "claude_config.json")? {
-            let stored: Value = serde_json::from_str(&raw)
-                .context("claude_config.json in snapshot is not valid JSON")?;
-            let oauth_account = stored
-                .get("oauthAccount")
-                .cloned()
-                .context("claude_config.json in snapshot has no oauthAccount")?;
-            let path = config_path(env);
-            let merged = match fs::read_to_string(&path) {
-                Ok(existing_raw) => {
-                    let mut existing: Value =
-                        serde_json::from_str(&existing_raw).with_context(|| {
-                            format!(
-                                "{} is not valid JSON; refusing to overwrite it",
-                                path.display()
-                            )
-                        })?;
-                    let object = existing
-                        .as_object_mut()
-                        .with_context(|| format!("{} is not a JSON object", path.display()))?;
-                    object.insert("oauthAccount".to_owned(), oauth_account);
-                    existing
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    serde_json::json!({"oauthAccount": oauth_account})
-                }
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("failed to read {}", path.display()));
-                }
-            };
-            write_atomic(&path, &serde_json::to_string_pretty(&merged)?, true)
-                .with_context(|| format!("failed to restore {}", path.display()))?;
-        }
+        #[cfg(target_os = "macos")]
+        keychain_guard.commit();
         Ok(())
     }
 
@@ -951,6 +930,110 @@ impl ProviderAdapter for ClaudeAdapter {
         parse_usage(&body)
     }
 }
+
+/// Multi-step restore body, run inside the file + keychain guards staged by
+/// `restore_snapshot`. Free function because trait-impl blocks can only hold
+/// trait members.
+fn restore_snapshot_inner(env: &AppEnv, snapshot: &SnapshotBlob) -> Result<()> {
+    let keychain_backed = cfg!(target_os = "macos")
+            && snapshot
+                .files
+                .iter()
+                .any(|file| file.name == "claude_keychain.txt");
+        let file_creds = fs::read_to_string(credentials_path(env))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+        let keychain_creds =
+            || read_keychain_password().and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+        let live_creds = if keychain_backed {
+            keychain_creds().or(file_creds)
+        } else {
+            file_creds.or_else(keychain_creds)
+        };
+        let shared = shared_credential_fields(live_creds.as_ref());
+
+        if let Some(raw) = snapshot_text(snapshot, "claude_credentials.json")? {
+            let dir = claude_dir(env);
+            fs::create_dir_all(&dir)
+                .with_context(|| format!("failed to create {}", dir.display()))?;
+            let merged = merge_shared_credential_fields(&raw, shared.as_ref());
+            let path = credentials_path(env);
+            write_atomic(&path, &merged, true)
+                .with_context(|| format!("failed to restore {}", path.display()))?;
+            // The snapshot uses a credentials file; ensure no stale Keychain
+            // entry from a previous Keychain-backed account remains.  Claude
+            // Code prefers Keychain when both exist, so leaving the old entry
+            // would cause it to authenticate as the previous account.
+            #[cfg(target_os = "macos")]
+            if !keychain_backed {
+                super::claude_keychain::delete_password(
+                    &keychain_service(),
+                    &super::claude_keychain::account_name(),
+                )
+                .context("failed to remove stale Claude Keychain credentials")?;
+            }
+        }
+        if cfg!(target_os = "macos")
+            && let Some(password) = snapshot_text(snapshot, "claude_keychain.txt")?
+        {
+            let merged = merge_shared_credential_fields(&password, shared.as_ref());
+            super::claude_keychain::set_password(
+                &keychain_service(),
+                &super::claude_keychain::account_name(),
+                &merged,
+            )
+            .context("failed to restore Claude Code credentials in the system keychain")?;
+            // The snapshot uses Keychain; ensure no stale credentials file
+            // from a previous file-backed account remains.  Claude Code reads
+            // the file when no Keychain entry exists, so leaving it around
+            // would cause reads to merge the stale file token.
+            if snapshot_text(snapshot, "claude_credentials.json")?.is_none() {
+                match fs::remove_file(credentials_path(env)) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error)
+                            .context("failed to remove stale Claude credentials file");
+                    }
+                }
+            }
+        }
+        if let Some(raw) = snapshot_text(snapshot, "claude_config.json")? {
+            let stored: Value = serde_json::from_str(&raw)
+                .context("claude_config.json in snapshot is not valid JSON")?;
+            let oauth_account = stored
+                .get("oauthAccount")
+                .cloned()
+                .context("claude_config.json in snapshot has no oauthAccount")?;
+            let path = config_path(env);
+            let merged = match fs::read_to_string(&path) {
+                Ok(existing_raw) => {
+                    let mut existing: Value =
+                        serde_json::from_str(&existing_raw).with_context(|| {
+                            format!(
+                                "{} is not valid JSON; refusing to overwrite it",
+                                path.display()
+                            )
+                        })?;
+                    let object = existing
+                        .as_object_mut()
+                        .with_context(|| format!("{} is not a JSON object", path.display()))?;
+                    object.insert("oauthAccount".to_owned(), oauth_account);
+                    existing
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    serde_json::json!({"oauthAccount": oauth_account})
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to read {}", path.display()));
+                }
+            };
+            write_atomic(&path, &serde_json::to_string_pretty(&merged)?, true)
+                .with_context(|| format!("failed to restore {}", path.display()))?;
+        }
+        Ok(())
+    }
 
 /// `claude-code/<version>` like the real CLI, detected once per process.
 /// Detection never blocks usage: any failure falls back to a pinned version.
@@ -1203,6 +1286,54 @@ mod tests {
         assert_eq!(
             fs::read_to_string(config_path(&env)).expect("config"),
             "{not json"
+        );
+    }
+
+    #[test]
+    fn restore_rolls_back_credentials_when_config_step_fails() {
+        // Multi-step restore: credentials are written first, then an
+        // unparseable live .claude.json makes the config step fail. The file
+        // guard must put the original credentials back so Claude Code is not
+        // left half-switched.
+        let (_temp, env) = test_env();
+        let dir = claude_dir(&env);
+        fs::create_dir_all(&dir).expect("claude dir");
+        let original = r#"{"claudeAiOauth":{"accessToken":"original"}}"#;
+        fs::write(credentials_path(&env), original).expect("credentials");
+        fs::write(config_path(&env), "{not json").expect("config");
+        let snapshot = snapshot_with(&[
+            (
+                "claude_credentials.json",
+                r#"{"claudeAiOauth":{"accessToken":"new"}}"#,
+            ),
+            (
+                "claude_config.json",
+                r#"{"oauthAccount":{"emailAddress":"new@x"}}"#,
+            ),
+        ]);
+
+        assert!(CLAUDE.restore_snapshot(&env, &snapshot).is_err());
+        assert_eq!(
+            fs::read_to_string(credentials_path(&env)).expect("credentials"),
+            original
+        );
+        assert_eq!(
+            fs::read_to_string(config_path(&env)).expect("config"),
+            "{not json"
+        );
+        // No private backup dir left behind after a successful rollback.
+        assert_eq!(
+            fs::read_dir(&dir)
+                .expect("read dir")
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".roster-restore-")
+                })
+                .count(),
+            0
         );
     }
 

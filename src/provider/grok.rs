@@ -300,10 +300,12 @@ impl ProviderAdapter for GrokAdapter {
         fs::create_dir_all(&directory)
             .with_context(|| format!("failed to create {}", directory.display()))?;
         let path = auth_path(env);
-        let temp = path.with_extension("json.tmp");
-        fs::write(&temp, &bytes).with_context(|| format!("failed to write {}", temp.display()))?;
-        fs::rename(&temp, &path)
-            .with_context(|| format!("failed to replace {}", path.display()))?;
+        // cc-switch pattern: stage the pre-restore bytes before the write so a
+        // failure cannot leave auth.json half-switched. write_atomic_bytes also
+        // creates the temp file 0600, unlike the previous plain fs::write.
+        let guard = super::FileRestoreGuard::stage(&directory, std::slice::from_ref(&path))?;
+        super::write_atomic_bytes(&path, &bytes)?;
+        guard.commit();
         Ok(())
     }
 

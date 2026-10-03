@@ -4,9 +4,9 @@ Codex Roster is an independent native macOS application built for the Codex comm
 
 Except for the original MIT foundation explicitly identified below, Codex Roster does not include source code, visual assets, account data, credentials, or state from the referenced projects.
 
-## Reference audit — 2026-09-22
+## Reference audit — 2026-10-03
 
-Synced with the About → References & licenses panel in the macOS app on 2026-09-22.
+Synced with the About → References & licenses panel in the macOS app on 2026-09-22; cc-switch entry added 2026-10-03.
 
 | Source | Revision reviewed | Role in Codex Roster | License / boundary |
 | --- | --- | --- | --- |
@@ -20,8 +20,13 @@ Synced with the About → References & licenses panel in the macOS app on 2026-0
 | [getagentseal/codeburn](https://github.com/getagentseal/codeburn) | `v0.9.24` / `desktop-v0.9.24` reviewed 2026-09-16 | Codex cache-accounting, subagent sidechain handling, cumulative-token fallback, and session-file validation research | MIT; independently reimplemented |
 | [vibe-cafe/vibe-usage](https://github.com/vibe-cafe/vibe-usage) | `@vibe-cafe/vibe-usage@0.10.21` reviewed 2026-09-05 | Optional VibeCafe collector/API integration for 7-day tokens, estimated cost, sessions, and active time | MIT; public endpoint/response format integrated independently, no upstream source imported |
 | [donvito/agent-monitor](https://github.com/donvito/agent-monitor) | `main` reviewed 2026-09-16 | Codex subagent hierarchy extraction (`thread_source`, `parent_thread_id`) and token USD pricing rate research | MIT; independently reimplemented |
+| [farion1231/cc-switch](https://github.com/farion1231/cc-switch) | reviewed 2026-10-03 | Crash-safe multi-provider credential write-engine research: staged writes, pre-mutation byte backup, rollback-on-failure guards | MIT; independently reimplemented |
 
 The reviewed updates were applied selectively. Roster preserves the stricter local-first rule from current switching research: it does not refresh inactive accounts' OAuth refresh tokens in the background.
+
+## cc-switch
+
+We reviewed [farion1231/cc-switch](https://github.com/farion1231/cc-switch) (MIT, © 2025 Jason Young) for its crash-safe write engine — staging every target file's pre-mutation bytes, restoring them on failure, and committing only after verification. Codex Roster independently reimplements the appropriate pieces: a shared `FileRestoreGuard` (private `.roster-restore-<uuid>` staging dir, rollback-on-drop) plus a `KeychainRestoreGuard` for Claude's macOS Keychain-backed credentials. No source code, assets, or upstream abstractions were copied. cc-switch is a Tauri/React tool managing 10+ agentic apps; Roster keeps its own lean native-macOS scope.
 
 ## Agent Monitor
 

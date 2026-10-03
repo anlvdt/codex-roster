@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Crash-safe provider restores** (Claude, Grok): byte-level backup of every target file (or `.absent` marker) is staged under a private `.roster-restore-<uuid>` dir before the first mutation, and a guard rolls all targets back on drop unless committed — a failure mid-way through Claude's credentials → keychain → `.claude.json` or Grok's creds+settings restore can no longer leave the tool half-switched. Claude's macOS Keychain preimage is also staged/restored on failure. Grok staging now creates files `0600` instead of leaking creds via `0644`. Pattern researched from [farion1231/cc-switch](https://github.com/farion1231/cc-switch) (MIT); independently reimplemented.
+
 ## v0.4.8 - 2026-09-22
 
 ### Added

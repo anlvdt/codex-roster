@@ -64,7 +64,7 @@ enum NotchExpansionState: Equatable {
     case fullyExpanded
 }
 
-private enum NotchScreen: CaseIterable {
+enum NotchScreen: CaseIterable {
     case codex
     case claude
 
@@ -72,6 +72,20 @@ private enum NotchScreen: CaseIterable {
         switch self {
         case .codex: return "Codex"
         case .claude: return "Claude Code"
+        }
+    }
+
+    var shortTitle: String {
+        switch self {
+        case .codex: return "Codex"
+        case .claude: return "Claude"
+        }
+    }
+
+    var other: NotchScreen {
+        switch self {
+        case .codex: return .claude
+        case .claude: return .codex
         }
     }
 }
@@ -96,6 +110,7 @@ struct NotchWindowView: View {
     @State private var isWindowExpanded = false
     @State private var geometry: NotchGeometry = .detect()
     @State private var notchScreen: NotchScreen = .codex
+    @State private var bothAgentsRunning = ChatGPTDesktop.isRunning && ClaudeDesktop.isRunning
     @State private var horizontalScroll: CGFloat = 0
     @State private var lastScreenSwipeAt: TimeInterval = 0
 
@@ -105,7 +120,7 @@ struct NotchWindowView: View {
     @State private var accountForEditing: SavedAccount? = nil
 
     private let maxExpandedWidth: CGFloat = NotchRosterLayout.deckWidth
-    private let earWidth: CGFloat = 126
+    private let earWidth: CGFloat = 146
     /// Non-notch compact pill width (centered under the top edge).
     private let nonNotchCompactWidth: CGFloat = 270
     private var hasNotch: Bool { geometry.hasNotch }
@@ -310,6 +325,12 @@ struct NotchWindowView: View {
                 geometry = measured
             }
         }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didLaunchApplicationNotification)) { _ in
+            bothAgentsRunning = ChatGPTDesktop.isRunning && ClaudeDesktop.isRunning
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didTerminateApplicationNotification)) { _ in
+            bothAgentsRunning = ChatGPTDesktop.isRunning && ClaudeDesktop.isRunning
+        }
         .onDisappear {
             hoverTask?.cancel()
             collapseTask?.cancel()
@@ -341,6 +362,7 @@ struct NotchWindowView: View {
         } label: {
             PrismFilamentView(
                 quota: compactQuota,
+                dualQuotas: dualEarQuotas,
                 diameter: miniDiameter,
                 compact: true,
                 notchWidth: hasNotch ? notchWidth : 0,
@@ -419,7 +441,14 @@ struct NotchWindowView: View {
             Text(notchScreen.title)
                 .font(PrismTheme.fontCaptionBold)
                 .foregroundStyle(PrismTheme.textBright)
+                .lineLimit(1)
                 .frame(maxWidth: .infinity)
+
+            if let companion = companionQuota {
+                NotchCompanionChip(companion: companion) {
+                    switchNotchScreen(companion.screen)
+                }
+            }
 
             Button {
                 switchNotchScreen(.claude)
@@ -433,7 +462,7 @@ struct NotchWindowView: View {
             .disabled(notchScreen == .claude)
             .accessibilityLabel(language.text("Màn hình Claude Code", "Claude Code screen"))
         }
-        .frame(width: 156, height: NotchRosterLayout.screenSwitcherHeight)
+        .frame(width: companionQuota == nil ? 156 : 274, height: NotchRosterLayout.screenSwitcherHeight)
         .background(PrismTheme.surfacePanel.opacity(0.94), in: Capsule())
     }
 
@@ -465,6 +494,28 @@ struct NotchWindowView: View {
         }
     }
 
+    /// The other agent's 5-hour reading, only while both Desktop apps are open
+    /// and that agent's quota data exists.
+    private var companionQuota: NotchCompanionQuota? {
+        guard bothAgentsRunning else { return nil }
+        switch notchScreen.other {
+        case .codex:
+            return NotchCompanionQuota(codex: activeAccount)
+        case .claude:
+            return NotchCompanionQuota(claude: store.claudeAccounts.first(where: \.isActive))
+        }
+    }
+
+    /// Both agents' readings keyed to their fixed notch ears (Codex = left).
+    /// Only non-nil when both Desktop apps are running and both snapshots have data.
+    private var dualEarQuotas: (codex: NotchCompanionQuota, claude: NotchCompanionQuota)? {
+        guard bothAgentsRunning,
+              let codex = NotchCompanionQuota(codex: activeAccount),
+              let claude = NotchCompanionQuota(claude: store.claudeAccounts.first(where: \.isActive))
+        else { return nil }
+        return (codex, claude)
+    }
+
     private var compactAccessibilityLabel: String {
         let quota = compactQuota
         let five = quota.fivePercent
@@ -475,9 +526,16 @@ struct NotchWindowView: View {
         let bankedText = banked > 0
             ? language.text(", \(banked) lượt banked reset", ", \(banked) banked resets available")
             : ""
+        let companionText = companionQuota.map { companion in
+            let value = companion.fivePercent.map { "\($0)%" } ?? language.text("chưa có", "no data")
+            return language.text(
+                " \(companion.shortName) cũng đang mở, 5 giờ còn \(value).",
+                " \(companion.shortName) is also open, 5-hour \(value)."
+            )
+        } ?? ""
         return language.text(
-            "\(quota.providerName): 5 giờ còn \(fiveText), tuần còn \(weekText)\(bankedText). Mở AgentDock.",
-            "\(quota.providerName): 5-hour \(fiveText), weekly \(weekText)\(bankedText). Open AgentDock."
+            "\(quota.providerName): 5 giờ còn \(fiveText), tuần còn \(weekText)\(bankedText).\(companionText) Mở AgentDock.",
+            "\(quota.providerName): 5-hour \(fiveText), weekly \(weekText)\(bankedText).\(companionText) Open AgentDock."
         )
     }
     /// Leave-grace before auto-collapse. Long enough to cross shape edges /

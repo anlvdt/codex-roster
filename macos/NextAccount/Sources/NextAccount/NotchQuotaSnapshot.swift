@@ -1,5 +1,36 @@
 import Foundation
 
+/// A second live agent reduced to its 5-hour reading. Shown only while both
+/// Desktop apps are running; the focused agent keeps its full telemetry.
+struct NotchCompanionQuota: Equatable {
+    let screen: NotchScreen
+    let shortName: String
+    let fivePercent: Int?
+    let fiveResetDate: Date?
+    let planLabel: String?
+    let displayName: String?
+
+    init?(codex account: SavedAccount?) {
+        guard let account else { return nil }
+        screen = .codex
+        shortName = "Codex"
+        fivePercent = account.usage?.fiveHour?.displayRemainingPercent
+        fiveResetDate = account.usage?.fiveHour?.resetAt.value
+        planLabel = account.planLabel
+        displayName = account.displayName
+    }
+
+    init?(claude account: ProviderAccount?) {
+        guard let account else { return nil }
+        screen = .claude
+        shortName = "Claude"
+        fivePercent = account.window("five_hour")?.remainingPercent
+        fiveResetDate = account.window("five_hour")?.resetAt?.value
+        planLabel = account.planLabel
+        displayName = account.displayName
+    }
+}
+
 /// Only the selected provider supplies compact-notch telemetry, including no-data states.
 struct NotchQuotaSnapshot {
     let providerName: String

@@ -1883,8 +1883,20 @@ struct MenuBarView: View {
 }
 
 enum AppInfo {
+    static var displayName: String {
+        guard let name = (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else {
+            return "AgentDock"
+        }
+        return name
+    }
+
     static var shortVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+    }
+
+    static var versionLabel: String {
+        "\(displayName) v\(shortVersion)"
     }
 }
 

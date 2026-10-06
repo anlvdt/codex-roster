@@ -730,12 +730,12 @@ struct PrismQuickSwitchDeck: View {
 
             Spacer(minLength: 4)
 
-            Text("v\(AppInfo.shortVersion)")
+            Text(AppInfo.versionLabel)
                 .font(PrismTheme.fontMono)
                 .foregroundStyle(PrismTheme.textSecondary)
                 .help(language.text(
-                    "Phiên bản \(AppInfo.shortVersion)",
-                    "Version \(AppInfo.shortVersion)"
+                    "\(AppInfo.displayName) phiên bản \(AppInfo.shortVersion)",
+                    "\(AppInfo.displayName) version \(AppInfo.shortVersion)"
                 ))
         }
         .padding(.top, 2)

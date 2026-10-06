@@ -325,6 +325,13 @@ enum ProviderCommand {
         status: bool,
         #[arg(long)]
         apply: bool,
+        /// Apply only if this preflighted account is still the selected candidate.
+        #[arg(
+            long,
+            requires = "apply",
+            conflicts_with_all = ["enable", "disable", "status", "threshold", "hysteresis", "cooldown", "strategy"]
+        )]
+        preferred_account_id: Option<Uuid>,
         #[arg(long)]
         threshold: Option<u8>,
         #[arg(long)]
@@ -535,6 +542,7 @@ pub fn run() -> Result<()> {
                     disable,
                     status: _,
                     apply,
+                    preferred_account_id,
                     threshold,
                     hysteresis,
                     cooldown,
@@ -562,7 +570,7 @@ pub fn run() -> Result<()> {
                             enabled, threshold, hysteresis, cooldown, strategy,
                         )?
                     } else if apply {
-                        app.claude_auto_switch_apply(None)?
+                        app.claude_auto_switch_apply(preferred_account_id)?
                     } else {
                         app.claude_auto_switch_decide()?
                     };
@@ -1464,6 +1472,62 @@ fn print_usage_summary(usage: &AccountUsageView) {
                     None => println!("  {title} · no expiry reported"),
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod provider_apply_cli_tests {
+    use super::*;
+
+    #[test]
+    fn claude_apply_preserves_preflighted_candidate() {
+        let id = Uuid::new_v4();
+        let cli = Cli::try_parse_from([
+            "codex-roster",
+            "providers",
+            "auto-switch",
+            "claude",
+            "--apply",
+            "--preferred-account-id",
+            &id.to_string(),
+            "--json",
+        ])
+        .unwrap();
+        let Some(Command::Providers {
+            command:
+                Some(ProviderCommand::AutoSwitch {
+                    apply,
+                    preferred_account_id,
+                    ..
+                }),
+        }) = cli.command
+        else {
+            panic!("unexpected command")
+        };
+        assert!(apply);
+        assert_eq!(preferred_account_id, Some(id));
+    }
+
+    #[test]
+    fn preflighted_candidate_requires_unambiguous_apply() {
+        let id = Uuid::new_v4().to_string();
+        for extra in [
+            vec![],
+            vec!["--apply", "--enable"],
+            vec!["--apply", "--status"],
+            vec!["--apply", "--threshold", "80"],
+        ] {
+            let mut args = vec![
+                "codex-roster",
+                "providers",
+                "auto-switch",
+                "claude",
+                "--preferred-account-id",
+                &id,
+            ];
+            args.extend(extra);
+            assert!(Cli::try_parse_from(args).is_err());
         }
     }
 }

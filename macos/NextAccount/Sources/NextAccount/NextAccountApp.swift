@@ -34,6 +34,39 @@ extension Notification.Name {
     static let editAccount = Notification.Name("codexRoster.editAccount")
 }
 
+enum RosterSheetArbitration {
+    static func canPresentAuxiliary(isBusy: Bool, auxiliaryActive: Bool, reloginActive: Bool) -> Bool {
+        !isBusy && !auxiliaryActive && !reloginActive
+    }
+}
+
+/// Keep the current presentation until its dismissal completes. Notifications
+/// may append IDs, but must never replace the login already on screen.
+struct ReloginPresentationQueue {
+    private(set) var activeID: UUID?
+    private(set) var pendingIDs: [UUID] = []
+
+    mutating func enqueue(_ ids: [UUID]) {
+        for id in ids where id != activeID && !pendingIDs.contains(id) {
+            pendingIDs.append(id)
+        }
+    }
+
+    mutating func takeNext(isBusy: Bool = false, validIDs: Set<UUID>) -> UUID? {
+        guard !isBusy, activeID == nil else { return nil }
+        while !pendingIDs.isEmpty {
+            let id = pendingIDs.removeFirst()
+            guard validIDs.contains(id) else { continue }
+            activeID = id
+            return id
+        }
+        return nil
+    }
+
+    mutating func didDismiss() { activeID = nil }
+    mutating func cancelPending() { pendingIDs.removeAll() }
+}
+
 private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var showDashboardObserver: NSObjectProtocol?
 
@@ -1670,7 +1703,7 @@ struct ReloginAccountSheet: View {
                     Button(language.text("Thử lại", "Try again")) {
                         localError = nil
                         isCompleting = false
-                        store.startRelogin(for: account)
+                        didStart = store.startRelogin(for: account)
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(.orange)
@@ -1695,8 +1728,11 @@ struct ReloginAccountSheet: View {
         .interactiveDismissDisabled(store.isPendingLogin || isCompleting)
         .onAppear {
             guard !didStart else { return }
-            didStart = true
-            store.startRelogin(for: account)
+            didStart = store.startRelogin(for: account)
+        }
+        .onChange(of: store.isBusyForActions) { _, busy in
+            guard !busy, !didStart else { return }
+            didStart = store.startRelogin(for: account)
         }
         .onChange(of: store.newAccountLoginState) { _, state in
             switch state {
@@ -1781,6 +1817,8 @@ struct AccountEditorSheet: View {
 }
 
 struct MenuBarView: View {
+    var notchNavigationWidth: CGFloat = 156
+    @Binding var rosterFilter: RosterListFilter
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @EnvironmentObject private var updater: GitHubUpdater
@@ -1788,6 +1826,8 @@ struct MenuBarView: View {
 
     var body: some View {
         PrismQuickSwitchDeck(
+            notchNavigationWidth: notchNavigationWidth,
+            rosterFilter: $rosterFilter,
             openSettings: openSettings,
             openOperations: openOperations,
             openAddAccountFlow: openAddAccountFlow,

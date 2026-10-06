@@ -244,6 +244,45 @@ enum NewAccountLoginState: Equatable {
     case failed(String)
 }
 
+/// Pure login lifecycle policy; a successful exit gets time to settle auth.json.
+struct CodexLoginWatchdog {
+    let startedAt: Date
+    var exitedAt: Date?
+
+    mutating func failure(exitStatus: Int32?, now: Date = .now) -> String? {
+        if let exitStatus {
+            if exitStatus != 0 { return "Codex login exited with status \(exitStatus). Retry sign-in." }
+            if exitedAt == nil { exitedAt = now }
+            if let exitedAt, now.timeIntervalSince(exitedAt) >= 5 {
+                return "Codex login exited without a usable account. Retry sign-in."
+            }
+        }
+        if now.timeIntervalSince(startedAt) >= 15 * 60 {
+            return "Codex login timed out. Retry sign-in."
+        }
+        return nil
+    }
+}
+
+/// Completion may not report success until it can own the action slot.
+@MainActor
+enum ReloginActionReadiness {
+    static func waitUntilIdle(
+        attempts: Int = 150, interval: Duration = .milliseconds(100),
+        isBusy: () -> Bool
+    ) async throws {
+        for _ in 0..<attempts {
+            try Task.checkCancellation()
+            if !isBusy() { return }
+            try await Task.sleep(for: interval)
+        }
+        throw CLIError(AppLanguage.text(
+            "Một thao tác khác vẫn đang chạy. Chờ hoàn tất rồi thử lưu lại.",
+            "Another operation is still running. Wait for it to finish, then retry saving."
+        ))
+    }
+}
+
 /// How "Add account" should treat the live Codex / ChatGPT Desktop session.
 enum AddAccountMode: String, CaseIterable, Identifiable {
     /// Capture login into a roster snapshot only. Does not touch live `~/.codex`,
@@ -352,6 +391,7 @@ final class AccountStore: ObservableObject {
     private var claudeMonitorTask: Task<Void, Never>?
     /// Refresh cadence for the Claude tab starts only after it is first opened.
     private var claudeTabOpened = false
+    private var claudeNotchMonitoringActive = false
     private var claudeTabRefreshGate = PassiveRefreshGate(interval: 60)
     private var providerStatusRefreshGate = PassiveRefreshGate(interval: 60)
     private var coreBootstrapStarted = false
@@ -622,7 +662,9 @@ final class AccountStore: ObservableObject {
     }
 
     /// Open browser sign-in so the user can refresh an expired saved account.
-    func startRelogin(for account: SavedAccount) {
+    @discardableResult
+    func startRelogin(for account: SavedAccount) -> Bool {
+        guard !isBusyForActions else { return false }
         isInteractiveLoginInProgress = true
         isPendingLogin = true
         pendingAddAccountMode = .addAndSwitch
@@ -630,6 +672,7 @@ final class AccountStore: ObservableObject {
         run {
             try await self.beginOrResumeAddAccountLogin(expectedEmail: account.email)
         }
+        return true
     }
 
     private func beginOrResumeAddAccountLogin(expectedEmail: String?) async throws {
@@ -738,17 +781,26 @@ final class AccountStore: ObservableObject {
         newAccountLoginWatchTask?.cancel()
         newAccountLoginWatchTask = Task { [weak self] in
             guard let self else { return }
+            var watchdog = CodexLoginWatchdog(startedAt: .now)
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 guard !Task.isCancelled else { return }
                 guard case .waiting = self.newAccountLoginState else { return }
+                if let failure = watchdog.failure(exitStatus: CodexLoginLauncher.exitStatus) {
+                    await self.failPendingLogin(failure)
+                    return
+                }
                 guard let addStatus = try? await self.cli.decode(AddAccountStatusOutput.self, arguments: ["add-account-status"]),
                       addStatus.active,
-                      addStatus.authChanged,
-                      let status = try? await self.cli.decode(StatusOutput.self, arguments: ["status"]),
+                      addStatus.authChanged else {
+                    continue
+                }
+                guard !Task.isCancelled, case .waiting = self.newAccountLoginState else { return }
+                guard let status = try? await self.cli.decode(StatusOutput.self, arguments: ["status"]),
                       let current = status.currentAccount else {
                     continue
                 }
+                guard !Task.isCancelled, case .waiting = self.newAccountLoginState else { return }
                 if let expected = self.expectedReloginEmail,
                    current.email.caseInsensitiveCompare(expected) != .orderedSame {
                     continue
@@ -770,10 +822,15 @@ final class AccountStore: ObservableObject {
         newAccountLoginWatchTask = Task { [weak self] in
             guard let self else { return }
             var lastSize: Int = -1
+            var watchdog = CodexLoginWatchdog(startedAt: .now)
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 guard !Task.isCancelled else { return }
                 guard case .waiting = self.newAccountLoginState else { return }
+                if let failure = watchdog.failure(exitStatus: CodexLoginLauncher.exitStatus) {
+                    await self.failPendingLogin(failure)
+                    return
+                }
                 guard let data = try? Data(contentsOf: authURL), !data.isEmpty else {
                     continue
                 }
@@ -791,6 +848,21 @@ final class AccountStore: ObservableObject {
                 return
             }
         }
+    }
+
+    private func failPendingLogin(_ message: String) async {
+        CodexLoginLauncher.stop()
+        var failure = message
+        if isAddAccountSession {
+            do { _ = try await cli.data(arguments: ["cancel-add-account", "--json"]) }
+            catch {
+                Diagnostics.logFailure("cancel failed login", error)
+                failure += " Previous session restoration failed: \(error.localizedDescription)"
+            }
+        }
+        clearPendingLoginFlags()
+        newAccountLoginWatchTask = nil
+        newAccountLoginState = .failed(failure)
     }
 
     /// Relogin of the same email is a credential refresh, not a duplicate enrollment.
@@ -957,7 +1029,7 @@ final class AccountStore: ObservableObject {
     /// Save the live Codex session after re-login and confirm the target account recovered.
     @MainActor
     func completeRelogin(for account: SavedAccount) async throws {
-        guard !isWorking else { return }
+        try await ReloginActionReadiness.waitUntilIdle { self.isBusyForActions }
         isWorking = true
         defer { isWorking = false }
         // Verify the live session email before save so a wrong login cannot upsert another row.
@@ -2685,6 +2757,17 @@ final class AccountStore: ObservableObject {
         }
     }
 
+    /// The compact notch needs Claude telemetry even before its screen is opened.
+    func setClaudeNotchMonitoring(_ enabled: Bool) {
+        guard claudeNotchMonitoringActive != enabled else { return }
+        claudeNotchMonitoringActive = enabled
+        guard enabled else { return }
+        Task {
+            await refreshClaudeRosterAsync(silently: true)
+            await refreshClaudeUsageAsync(force: false)
+        }
+    }
+
     private func startClaudeMonitoring() {
         guard claudeMonitorTask == nil else { return }
         claudeMonitorTask = Task { [weak self] in
@@ -2704,7 +2787,7 @@ final class AccountStore: ObservableObject {
                     await self?.claudeAutoSwitchTick()
                 }
                 ticks += 1
-                if self?.claudeTabOpened == true && ticks % 5 == 0 {
+                if (self?.claudeTabOpened == true || self?.claudeNotchMonitoringActive == true) && ticks % 5 == 0 {
                     await self?.refreshClaudeUsageAsync(force: false)
                 }
                 try? await Task.sleep(for: .seconds(60))
@@ -2722,6 +2805,7 @@ final class AccountStore: ObservableObject {
             ClaudeSessionContinuity.recentInterruptedSession()
         }.value
         do {
+            var applyArguments = ["providers", "auto-switch", "claude", "--apply"]
             if usesClaudeDesktop {
                 let decision: ProviderAutoSwitchOutput = try await cli.decode(ProviderAutoSwitchOutput.self,
                     arguments: ["providers", "auto-switch", "claude"])
@@ -2736,10 +2820,11 @@ final class AccountStore: ObservableObject {
                         "Auto-switch is waiting: save the replacement account's Desktop login first.")
                     return
                 }
+                applyArguments += ["--preferred-account-id", candidate.uuidString]
             }
             let output: ProviderAutoSwitchOutput = try await cli.decode(
                 ProviderAutoSwitchOutput.self,
-                arguments: ["providers", "auto-switch", "claude", "--apply"]
+                arguments: applyArguments
             )
             claudeAutoSwitch = output
             if output.status == "switched" {
@@ -2747,9 +2832,19 @@ final class AccountStore: ObservableObject {
                     "Đã đổi đăng nhập CLI đã lưu. Phiên đang mở chưa được xác minh: kiểm tra /status, hoặc đóng và mở lại bằng claude --resume. Desktop cần đăng nhập riêng.",
                     "Saved CLI login changed. Running sessions are unverified: check /status, or close and reopen with claude --resume. Desktop needs a separate sign-in."
                 )
+                // The tab may never have loaded. Resolve the switched identity from
+                // the authoritative roster rather than a possibly empty UI cache.
+                let list: ProviderListOutput = try await cli.decode(ProviderListOutput.self,
+                    arguments: ["providers", "list", "--provider", "claude"])
+                claudeAccounts = list.accounts
+                guard let id = output.candidateAccountId,
+                      let selected = list.accounts.first(where: { $0.id == id && $0.isActive }),
+                      !selected.email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw CLIError("Claude did not confirm the switched account identity. The conversation has not been resumed.")
+                }
                 if let id = output.candidateAccountId {
                     do { _ = try await switchClaudeDesktopIfNeeded(id,
-                        email: claudeAccounts.first(where: { $0.id == id })?.email) }
+                        email: selected.email) }
                     catch { claudeErrorMessage = error.localizedDescription; return }
                 }
                 if !usesClaudeDesktop, output.trigger == "at_limit",
@@ -2757,7 +2852,7 @@ final class AccountStore: ObservableObject {
                    let interrupted {
                     do {
                         try await ClaudeSessionContinuity.resume(interrupted,
-                            expectedEmail: claudeAccounts.first(where: { $0.id == output.candidateAccountId })?.email)
+                            expectedEmail: selected.email)
                     }
                     catch { claudeErrorMessage = error.localizedDescription }
                 }
@@ -2768,7 +2863,7 @@ final class AccountStore: ObservableObject {
                 await refreshClaudeRosterAsync(silently: true)
             }
         } catch {
-            // Transient CLI failure — next tick retries.
+            claudeErrorMessage = error.localizedDescription
         }
     }
 
@@ -2836,6 +2931,7 @@ final class AccountStore: ObservableObject {
             autoSwitchState = .waitingForLogin
             return
         }
+        var desktopToRestore: ChatGPTDesktop.RelaunchPlan?
         do {
             // Always decide first — ChatGPT being open must not hide an exhausted active account.
             // While paused (all exhausted), still decide so recovery can clear the pause,
@@ -2921,6 +3017,7 @@ final class AccountStore: ObservableObject {
                     autoSwitchState = .closingDesktop
                     try await self.preserveLiveSessionBeforeDesktopQuit()
                     relaunch = try await ChatGPTDesktop.prepareForAccountSwitch(force: true)
+                    desktopToRestore = relaunch
                     ChatGPTDesktop.clearWebSessionCacheOnce(didClear: &didClearWebSession)
                     didCloseDesktop = true
                 }
@@ -2958,6 +3055,7 @@ final class AccountStore: ObservableObject {
                 // quit at decide time (post-quit branch skipped).
                 ChatGPTDesktop.clearWebSessionCacheOnce(didClear: &didClearWebSession)
                 var launched = await relaunch.launchAndConfirm()
+                if launched { desktopToRestore = nil }
                 var acceptance: DesktopAcceptanceResult = .timedOut
                 let expectedEmail = self.accounts.first(where: { $0.id == applied.candidateAccountId })?.email
                     ?? candidateName
@@ -3012,6 +3110,13 @@ final class AccountStore: ObservableObject {
                 autoSwitchState = .checkFailed
             }
         } catch {
+            if let desktopToRestore {
+                let restored = await desktopToRestore.launchAndConfirm()
+                errorMessage = error.localizedDescription
+                if !restored {
+                    errorMessage = "\(error.localizedDescription) ChatGPT could not be reopened. Reopen Desktop and retry."
+                }
+            }
             let message = error.localizedDescription.lowercased()
             if message.contains("đóng") || message.contains("close") || message.contains("chatgpt") || message.contains("codex") {
                 autoSwitchState = .waitingForProcesses
@@ -3492,6 +3597,11 @@ private struct CLIError: LocalizedError {
 @MainActor
 private enum CodexLoginLauncher {
     private static var process: Process?
+
+    static var exitStatus: Int32? {
+        guard let process, !process.isRunning else { return nil }
+        return process.terminationStatus
+    }
 
     /// Start `codex login`. When `codexHome` is set, login writes credentials
     /// only into that isolated home (enroll-only); live `~/.codex` is untouched.

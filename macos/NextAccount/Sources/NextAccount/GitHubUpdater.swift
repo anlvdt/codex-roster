@@ -5,7 +5,7 @@ import Security
 
 @MainActor
 final class GitHubUpdater: ObservableObject {
-    struct Update: Equatable {
+    struct Update: Equatable, Sendable {
         let version: String
         let assetURL: URL
         let digest: String
@@ -33,7 +33,7 @@ final class GitHubUpdater: ObservableObject {
     @Published private(set) var state: State = .idle
 
     private static let latestReleaseURL = URL(string: "https://api.github.com/repos/anlvdt/codex-roster/releases/latest")!
-    private static let maximumArchiveBytes = 128 * 1024 * 1024
+    nonisolated private static let maximumArchiveBytes = 128 * 1024 * 1024
     private var automaticCheckTask: Task<Void, Never>?
 
     func startAutomaticChecks(currentVersion: String) {
@@ -63,7 +63,7 @@ final class GitHubUpdater: ObservableObject {
             do {
                 let extractedApp = try await Self.downloadAndExtract(update)
                 guard let self else { return }
-                try self.scheduleInstall(extractedApp: extractedApp)
+                try await self.scheduleInstall(extractedApp: extractedApp)
             } catch {
                 self?.state = .failed(error.localizedDescription)
             }
@@ -87,8 +87,24 @@ final class GitHubUpdater: ObservableObject {
         }
     }
 
-    private func scheduleInstall(extractedApp: URL) throws {
+    private func scheduleInstall(extractedApp: URL) async throws {
         let installedApp = Bundle.main.bundleURL
+        try await Task.detached(priority: .utility) {
+            try Self.startInstallHelper(extractedApp: extractedApp, installedApp: installedApp)
+        }.value
+        state = .installing
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            NSApplication.shared.terminate(nil)
+        }
+    }
+
+    /// All staging, helper I/O, and failure cleanup belong to a utility worker.
+    nonisolated static func startInstallHelper(extractedApp: URL, installedApp: URL) throws {
+        let stagingDirectory = extractedApp.deletingLastPathComponent()
+        var helperStarted = false
+        defer {
+            if !helperStarted { try? FileManager.default.removeItem(at: stagingDirectory) }
+        }
         guard installedApp.pathExtension == "app" else {
             throw UpdaterError(AppLanguage.text("Cần cài AgentDock dưới dạng app bundle trước khi tự cập nhật.", "AgentDock must be installed as an app bundle before it can update itself."))
         }
@@ -97,17 +113,12 @@ final class GitHubUpdater: ObservableObject {
             throw UpdaterError(AppLanguage.text("AgentDock không có quyền cập nhật \(installedApp.path). Hãy chuyển app vào thư mục Applications có quyền ghi rồi thử lại.", "AgentDock does not have permission to update \(installedApp.path). Move it to a writable Applications folder and try again."))
         }
 
-        let updateBundle = installDirectory
-            .appendingPathComponent(".AgentDock.update-\(UUID().uuidString).app")
-        try FileManager.default.copyItem(at: extractedApp, to: updateBundle)
-        do {
-            try Self.verifyCodeSignature(of: updateBundle, matching: installedApp)
-        } catch {
-            try? FileManager.default.removeItem(at: updateBundle)
-            throw error
+        let updateBundle = try stageUpdate(extractedApp: extractedApp, installedApp: installedApp)
+        defer {
+            if !helperStarted {
+                try? FileManager.default.removeItem(at: updateBundle)
+            }
         }
-
-        let stagingDirectory = extractedApp.deletingLastPathComponent()
         let helper = stagingDirectory.appendingPathComponent("install-update.sh")
         let appProcessID = ProcessInfo.processInfo.processIdentifier
         let backupBundle = installDirectory.appendingPathComponent(".AgentDock.previous.app")
@@ -117,10 +128,14 @@ final class GitHubUpdater: ObservableObject {
         let script = """
         #!/bin/sh
         set -eu
+        cleanup_update() {
+          /bin/rm -rf \(shellQuote(updateBundle.path)) \(shellQuote(stagingDirectory.path))
+        }
+        trap cleanup_update EXIT
         log_directory="$HOME/Library/Logs/CodexRoster"
         /bin/mkdir -p "$log_directory"
         exec >> "$log_directory/updater.log" 2>&1
-        tray_pattern=\(Self.shellQuote(bundledTrayPattern))
+        tray_pattern=\(shellQuote(bundledTrayPattern))
         for helper_pid in $(/usr/bin/pgrep -f "$tray_pattern" 2>/dev/null || true); do
           if [ "$helper_pid" != "\(appProcessID)" ]; then
             /bin/kill -TERM "$helper_pid" 2>/dev/null || true
@@ -135,19 +150,18 @@ final class GitHubUpdater: ObservableObject {
         while /bin/kill -0 \(appProcessID) 2>/dev/null; do
           sleep 0.1
         done
-        /bin/rm -rf \(Self.shellQuote(backupBundle.path))
-        /bin/mv \(Self.shellQuote(installedApp.path)) \(Self.shellQuote(backupBundle.path))
-        if ! /bin/mv \(Self.shellQuote(updateBundle.path)) \(Self.shellQuote(installedApp.path)); then
-          /bin/mv \(Self.shellQuote(backupBundle.path)) \(Self.shellQuote(installedApp.path))
+        /bin/rm -rf \(shellQuote(backupBundle.path))
+        /bin/mv \(shellQuote(installedApp.path)) \(shellQuote(backupBundle.path))
+        if ! /bin/mv \(shellQuote(updateBundle.path)) \(shellQuote(installedApp.path)); then
+          /bin/mv \(shellQuote(backupBundle.path)) \(shellQuote(installedApp.path))
           exit 1
         fi
-        if ! /usr/bin/open \(Self.shellQuote(installedApp.path)); then
-          /bin/rm -rf \(Self.shellQuote(installedApp.path))
-          /bin/mv \(Self.shellQuote(backupBundle.path)) \(Self.shellQuote(installedApp.path))
-          /usr/bin/open \(Self.shellQuote(installedApp.path))
+        if ! /usr/bin/open \(shellQuote(installedApp.path)); then
+          /bin/rm -rf \(shellQuote(installedApp.path))
+          /bin/mv \(shellQuote(backupBundle.path)) \(shellQuote(installedApp.path))
+          /usr/bin/open \(shellQuote(installedApp.path))
           exit 1
         fi
-        /bin/rm -rf \(Self.shellQuote(stagingDirectory.path))
         """
         try script.write(to: helper, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
@@ -156,10 +170,7 @@ final class GitHubUpdater: ObservableObject {
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
         process.arguments = [helper.path]
         try process.run()
-        state = .installing
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            NSApplication.shared.terminate(nil)
-        }
+        helperStarted = true
     }
 
     private static func fetchLatestUpdate() async throws -> Update {
@@ -203,6 +214,16 @@ final class GitHubUpdater: ObservableObject {
         guard let response = response as? HTTPURLResponse, response.statusCode == 200 else {
             throw UpdaterError(AppLanguage.text("Không tải được file ZIP cập nhật macOS.", "Could not download the macOS update ZIP."))
         }
+        let installedApp = Bundle.main.bundleURL
+        return try await Task.detached(priority: .utility) {
+            try Self.prepareArchive(temporaryArchive, update: update, installedApp: installedApp)
+        }.value
+    }
+
+    /// Digest, extraction, and signature checks run outside the UI actor.
+    nonisolated static func prepareArchive(
+        _ temporaryArchive: URL, update: Update, installedApp: URL, stagingRoot: URL? = nil
+    ) throws -> URL {
         let archiveSize = try FileManager.default.attributesOfItem(atPath: temporaryArchive.path)[.size] as? NSNumber
         guard let archiveSize, archiveSize.intValue <= maximumArchiveBytes else {
             throw UpdaterError(AppLanguage.text("File ZIP cập nhật macOS vượt quá dung lượng cho phép.", "The macOS update ZIP exceeds the allowed size."))
@@ -212,7 +233,11 @@ final class GitHubUpdater: ObservableObject {
             throw UpdaterError(AppLanguage.text("Bản cập nhật tải về không khớp mã SHA-256 của GitHub.", "The downloaded update did not match GitHub's SHA-256 digest."))
         }
 
-        let stagingDirectory = try makePrivateStagingDirectory()
+        let stagingDirectory = try makePrivateStagingDirectory(root: stagingRoot)
+        var prepared = false
+        defer {
+            if !prepared { try? FileManager.default.removeItem(at: stagingDirectory) }
+        }
         let archive = stagingDirectory.appendingPathComponent("update.zip")
         try FileManager.default.copyItem(at: temporaryArchive, to: archive)
         try runTool("/usr/bin/ditto", arguments: ["-x", "-k", archive.path, stagingDirectory.path])
@@ -231,15 +256,29 @@ final class GitHubUpdater: ObservableObject {
               installedVersion == update.version else {
             throw UpdaterError(AppLanguage.text("Phiên bản trong ZIP cập nhật không khớp bản phát hành GitHub.", "The update ZIP version does not match the GitHub release."))
         }
-        try verifyCodeSignature(of: app, matching: Bundle.main.bundleURL)
+        try verifyCodeSignature(of: app, matching: installedApp)
+        prepared = true
         return app
+    }
+
+    nonisolated static func stageUpdate(extractedApp: URL, installedApp: URL) throws -> URL {
+        let updateBundle = installedApp.deletingLastPathComponent()
+            .appendingPathComponent(".AgentDock.update-\(UUID().uuidString).app")
+        do {
+            try FileManager.default.copyItem(at: extractedApp, to: updateBundle)
+            try verifyCodeSignature(of: updateBundle, matching: installedApp)
+            return updateBundle
+        } catch {
+            try? FileManager.default.removeItem(at: updateBundle)
+            throw error
+        }
     }
 
     /// The helper script is executed from here, so it must not live in a
     /// location other processes can write to: `$TMPDIR` is replaced by a
     /// 0700 directory under Application Support.
-    private static func makePrivateStagingDirectory() throws -> URL {
-        let support = try FileManager.default.url(
+    nonisolated private static func makePrivateStagingDirectory(root: URL? = nil) throws -> URL {
+        let support = try root ?? FileManager.default.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,
             appropriateFor: nil,
@@ -267,7 +306,7 @@ final class GitHubUpdater: ObservableObject {
     /// and, when the running app has a real signing identity, to satisfy that
     /// app's designated requirement (same team/identity). Ad-hoc signed
     /// installs have no stable identity to pin, so only validity is enforced.
-    static func verifyCodeSignature(of candidate: URL, matching installed: URL) throws {
+    nonisolated static func verifyCodeSignature(of candidate: URL, matching installed: URL) throws {
         let failure = UpdaterError(AppLanguage.text(
             "Chữ ký mã của bản cập nhật không hợp lệ hoặc không khớp bản đang cài.",
             "The update's code signature is invalid or does not match the installed app."
@@ -286,7 +325,7 @@ final class GitHubUpdater: ObservableObject {
 
     /// Designated requirement of the installed app, or nil when it is ad-hoc
     /// signed (or unsigned) and therefore has no identity to match against.
-    private static func installedDesignatedRequirement(_ installed: URL) -> SecRequirement? {
+    nonisolated private static func installedDesignatedRequirement(_ installed: URL) -> SecRequirement? {
         var code: SecStaticCode?
         guard SecStaticCodeCreateWithPath(installed as CFURL, [], &code) == errSecSuccess,
               let code else { return nil }
@@ -299,7 +338,7 @@ final class GitHubUpdater: ObservableObject {
         return requirement
     }
 
-    private static func sha256(of file: URL) throws -> String {
+    nonisolated private static func sha256(of file: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
         var hasher = SHA256()
@@ -309,7 +348,7 @@ final class GitHubUpdater: ObservableObject {
         return "sha256:" + hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func runTool(_ executable: String, arguments: [String]) throws {
+    nonisolated private static func runTool(_ executable: String, arguments: [String]) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -320,7 +359,7 @@ final class GitHubUpdater: ObservableObject {
         }
     }
 
-    private static func shellQuote(_ value: String) -> String {
+    nonisolated private static func shellQuote(_ value: String) -> String {
         // Close the quoted string, escape the apostrophe, then reopen it.
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }

@@ -1,5 +1,29 @@
 import Foundation
 
+enum NotchQuotaVerification: Equatable {
+    case verified
+    case cached
+    case unverified
+
+    init(claude account: ProviderAccount?) {
+        if account?.hasFreshUsage == true {
+            self = .verified
+        } else if account?.usage != nil {
+            self = .cached
+        } else {
+            self = .unverified
+        }
+    }
+
+    func caption(in language: AppLanguage) -> String? {
+        switch self {
+        case .verified: nil
+        case .cached: language == .vietnamese ? "Cache · chưa xác minh" : "Cached · unverified"
+        case .unverified: language == .vietnamese ? "Chưa xác minh" : "Unverified"
+        }
+    }
+}
+
 /// A second live agent reduced to its 5-hour reading. Shown only while both
 /// Desktop apps are running; the focused agent keeps its full telemetry.
 struct NotchCompanionQuota: Equatable {
@@ -9,25 +33,28 @@ struct NotchCompanionQuota: Equatable {
     let fiveResetDate: Date?
     let planLabel: String?
     let displayName: String?
+    let verification: NotchQuotaVerification
 
     init?(codex account: SavedAccount?) {
-        guard let account else { return nil }
+        guard let account, let fivePercent = account.usage?.fiveHour?.displayRemainingPercent else { return nil }
         screen = .codex
         shortName = "Codex"
-        fivePercent = account.usage?.fiveHour?.displayRemainingPercent
+        self.fivePercent = fivePercent
         fiveResetDate = account.usage?.fiveHour?.resetAt.value
         planLabel = account.planLabel
         displayName = account.displayName
+        verification = account.usageError == nil ? .verified : .cached
     }
 
     init?(claude account: ProviderAccount?) {
-        guard let account else { return nil }
+        guard let account, let fivePercent = account.window("five_hour")?.remainingPercent else { return nil }
         screen = .claude
         shortName = "Claude"
-        fivePercent = account.window("five_hour")?.remainingPercent
+        self.fivePercent = fivePercent
         fiveResetDate = account.window("five_hour")?.resetAt?.value
         planLabel = account.planLabel
         displayName = account.displayName
+        verification = NotchQuotaVerification(claude: account)
     }
 }
 
@@ -41,6 +68,7 @@ struct NotchQuotaSnapshot {
     let bankedCount: Int
     let planLabel: String?
     let displayName: String?
+    let verification: NotchQuotaVerification
 
     init(codex account: SavedAccount?) {
         providerName = "Codex"
@@ -51,6 +79,7 @@ struct NotchQuotaSnapshot {
         bankedCount = account?.bankedResetCount ?? 0
         planLabel = account?.planLabel
         displayName = account?.displayName
+        verification = account?.usage == nil ? .unverified : (account?.usageError == nil ? .verified : .cached)
     }
 
     init(claude account: ProviderAccount?) {
@@ -62,6 +91,7 @@ struct NotchQuotaSnapshot {
         bankedCount = 0
         planLabel = account?.planLabel
         displayName = account?.displayName
+        verification = NotchQuotaVerification(claude: account)
     }
 }
 

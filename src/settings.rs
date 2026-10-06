@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::file_store::replace_file_with_recovery;
+use crate::file_store::{RecoveryFileKind, list_recovery_files, replace_file_with_recovery};
 use crate::model::ClaudeAutoSwitchStrategy;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -83,6 +83,23 @@ fn default_auto_resume_session() -> bool {
 
 pub fn load_settings(app_data_dir: &Path) -> Result<AppSettings> {
     let path = settings_path(app_data_dir);
+    let pending = path.with_extension("json.pending");
+    let mut candidates = list_recovery_files(&path, Some(&pending))?;
+    // A valid canonical file is committed state. Otherwise prefer the most
+    // recent valid recovery file over defaults (which can enable auto-resume).
+    candidates.sort_by_key(|entry| {
+        (
+            entry.kind != RecoveryFileKind::Canonical,
+            std::cmp::Reverse(entry.modified),
+        )
+    });
+    for entry in candidates {
+        if let Ok(bytes) = fs::read(&entry.path)
+            && let Ok(settings) = serde_json::from_slice(&bytes)
+        {
+            return Ok(settings);
+        }
+    }
     match fs::read(&path) {
         Ok(bytes) => Ok(serde_json::from_slice(&bytes).unwrap_or_default()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(AppSettings::default()),
@@ -111,6 +128,50 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn review_regression_settings_recovery_preserves_disabled_auto_resume() {
+        for canonical in [None, Some(b"{corrupt".as_slice())] {
+            for recovery in [
+                "settings.json.bak-old",
+                "settings.json.tmp-new",
+                "settings.json.pending",
+            ] {
+                let temp = tempdir().unwrap();
+                let original = AppSettings {
+                    auto_resume_session: false,
+                    claude_auto_switch: true,
+                    ..AppSettings::default()
+                };
+                fs::write(
+                    temp.path().join(recovery),
+                    serde_json::to_vec(&original).unwrap(),
+                )
+                .unwrap();
+                if let Some(bytes) = canonical {
+                    fs::write(settings_path(temp.path()), bytes).unwrap();
+                }
+                fs::write(temp.path().join("settings.json.tmp-invalid"), b"{").unwrap();
+                assert_eq!(load_settings(temp.path()).unwrap(), original);
+            }
+        }
+    }
+
+    #[test]
+    fn review_regression_settings_valid_canonical_wins_over_stale_recovery() {
+        let temp = tempdir().unwrap();
+        let canonical = AppSettings {
+            auto_resume_session: false,
+            ..AppSettings::default()
+        };
+        save_settings(temp.path(), &canonical).unwrap();
+        fs::write(
+            temp.path().join("settings.json.pending"),
+            serde_json::to_vec(&AppSettings::default()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(load_settings(temp.path()).unwrap(), canonical);
+    }
 
     #[test]
     fn missing_settings_default_to_disabled() {

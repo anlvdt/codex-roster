@@ -29,7 +29,7 @@ private func makeFixtureApp(signed: Bool) throws -> URL {
     return app
 }
 
-@Test func updaterRejectsUnsignedBundle() throws {
+@MainActor @Test func updaterRejectsUnsignedBundle() throws {
     let candidate = try makeFixtureApp(signed: false)
     let installed = try makeFixtureApp(signed: true)
     #expect(throws: (any Error).self) {
@@ -37,7 +37,7 @@ private func makeFixtureApp(signed: Bool) throws -> URL {
     }
 }
 
-@Test func updaterRejectsTamperedBundle() throws {
+@MainActor @Test func updaterRejectsTamperedBundle() throws {
     let candidate = try makeFixtureApp(signed: true)
     let installed = try makeFixtureApp(signed: true)
     try Data("#!/bin/sh\nexit 1\n".utf8)
@@ -47,7 +47,7 @@ private func makeFixtureApp(signed: Bool) throws -> URL {
     }
 }
 
-@Test func updaterAcceptsValidlySignedBundle() throws {
+@MainActor @Test func updaterAcceptsValidlySignedBundle() throws {
     let candidate = try makeFixtureApp(signed: true)
     let installed = try makeFixtureApp(signed: true)
     try GitHubUpdater.verifyCodeSignature(of: candidate, matching: installed)

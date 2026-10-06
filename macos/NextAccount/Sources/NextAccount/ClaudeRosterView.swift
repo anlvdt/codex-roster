@@ -3,6 +3,7 @@ import SwiftUI
 /// Claude Code account deck shared by the notch and Roster Console.
 struct ClaudeRosterView: View {
     var notchLayout = false
+    var notchNavigationWidth: CGFloat = 156
     var onQuotaGuidePresentationChanged: (Bool) -> Void = { _ in }
     var onInteractionPresentationChanged: (Bool) -> Void = { _ in }
 
@@ -182,8 +183,7 @@ struct ClaudeRosterView: View {
             HStack(alignment: .top, spacing: 8) {
                 notchLiveWing.frame(maxWidth: .infinity, alignment: .topLeading)
                 Color.clear
-                    .frame(width: NotchGeometry.detect().hasNotch
-                        ? NotchGeometry.detect().cameraWidth : 156)
+                    .frame(width: max(NotchGeometry.detect().cameraWidth, notchNavigationWidth))
                 notchAutomationWing.frame(maxWidth: .infinity, alignment: .topLeading)
             }
             .frame(height: 150 + (Self.notchShowsQuotaCaption(account: store.claudeAccounts.first(where: \.isActive))

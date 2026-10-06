@@ -39,5 +39,12 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Run tests
         run: cargo test --all
+      - name: Run Swift tests
+        run: |
+          set -euo pipefail
+          while IFS= read -r test_id; do
+            filter_id=${test_id%%(*}
+            swift test --package-path macos/NextAccount --skip-build --filter "$filter_id"
+          done < <(swift test --package-path macos/NextAccount list)
       - name: Build the native macOS app
         run: bash scripts/build-macos-app.sh

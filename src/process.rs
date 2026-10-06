@@ -9,6 +9,25 @@ use crate::model::{AUTH_FILES, RunningCodexProcess};
 const SUMMARY_LIMIT: usize = 72;
 const EXECUTABLE_WIDTH: usize = 12;
 const ROLE_WIDTH: usize = 14;
+const CODEX_VALUE_FLAGS: &[&str] = &[
+    "-c",
+    "--config",
+    "-C",
+    "--cd",
+    "-m",
+    "--model",
+    "-p",
+    "--profile",
+    "-s",
+    "--sandbox",
+    "-a",
+    "--ask-for-approval",
+    "-i",
+    "--image",
+    "--enable",
+    "--disable",
+    "--local-provider",
+];
 pub fn detect_running_codex_processes() -> Vec<RunningCodexProcess> {
     let mut system = System::new();
     system.refresh_processes_specifics(
@@ -128,7 +147,13 @@ fn parse_lsof_pids(stdout: &str) -> HashSet<u32> {
 }
 
 pub fn is_force_skippable_process(process: &RunningCodexProcess) -> bool {
-    matches!(process.origin.as_deref(), Some("desktop") | Some("plugin"))
+    if process.origin.as_deref() == Some("cli") {
+        return is_background_server_process(process);
+    }
+    // A bundled executable can also run a foreground CLI session. Its path
+    // alone must not override a coding/login role when forcing activation.
+    (matches!(process.origin.as_deref(), Some("desktop") | Some("plugin"))
+        && matches!(process.role.as_str(), "process" | "main"))
         || is_desktop_like_process(process)
         || is_desktop_main_process(process)
         || is_background_server_process(process)
@@ -226,12 +251,18 @@ fn is_roster_process(name: &str, command: &[String]) -> bool {
     if is_roster_name(name) {
         return true;
     }
-    command.iter().any(|token| {
-        let token = token.to_ascii_lowercase();
-        token.contains("codex roster.app")
-            || token.contains("codex-roster")
-            || token.contains("codexroster")
-    })
+    // Only executable identity can exclude Roster. Prompts and working
+    // directories may mention this repository even in a live Codex session.
+    let executable_is_roster = command
+        .first()
+        .and_then(|token| path_file_name(token))
+        .is_some_and(is_roster_name);
+    let wrapped_roster = matches!(name, "node" | "node.exe")
+        && command
+            .get(1)
+            .and_then(|token| path_file_name(token))
+            .is_some_and(is_roster_name);
+    executable_is_roster || wrapped_roster
 }
 
 fn is_roster_name(name: &str) -> bool {
@@ -296,11 +327,33 @@ fn is_desktop_owned_command(name: &str, command: &[String], role: &str) -> bool 
     if is_chatgpt_name(name) || name.starts_with("codex helper") {
         return true;
     }
+    // Only the executable (and a Node wrapper's script) identifies its owner.
+    // Prompt text, config values and working directories are untrusted here.
+    let identity_tokens = if matches!(name, "node" | "node.exe")
+        && command
+            .get(1)
+            .and_then(|token| path_file_name(token))
+            .is_some_and(|script| script.eq_ignore_ascii_case("codex.js"))
+    {
+        2
+    } else {
+        1
+    };
     let blob = command
         .iter()
+        .take(identity_tokens)
         .map(|token| token.to_ascii_lowercase())
         .collect::<Vec<_>>()
         .join("\n");
+    // Bare bundled backends still start the interactive CLI. Only the native
+    // app's main executable can be classified as a Desktop main process.
+    if matches!(role, "process" | "main")
+        && is_codex_bin_name(name)
+        && !blob.contains("contents/macos/")
+        && !blob.contains("contents\\macos\\")
+    {
+        return false;
+    }
     if blob.contains("chatgpt.app")
         || blob.contains("codex.app/")
         || blob.contains("codex.app\\")
@@ -376,18 +429,32 @@ fn classify_wrapped_codex_command(command: &[String]) -> Option<(String, Option<
 
 /// Skip leading flags before the first positional subcommand.
 ///
-/// Consumes long `--…` flags and `-c <value>` (Codex config override) pairs.
-/// Other lone short flags without a following value fall through unchanged.
+/// Consume known flag/value pairs without treating their values as roles.
+/// Unknown flags leave the process conservatively blocking activation.
 fn skip_config_flags<'a, I>(tokens: &mut I) -> Option<&'a String>
 where
     I: Iterator<Item = &'a String>,
 {
     while let Some(token) = tokens.next() {
-        if token.starts_with("--") {
+        if token == "--" {
+            return None;
+        }
+        if CODEX_VALUE_FLAGS.contains(&token.as_str()) {
+            let _ = tokens.next();
             continue;
         }
-        if token == "-c" {
-            let _ = tokens.next();
+        if (token.starts_with("--") && token.contains('='))
+            || matches!(
+                token.as_str(),
+                "--search"
+                    | "--full-auto"
+                    | "--dangerously-bypass-approvals-and-sandbox"
+                    | "--oss"
+                    | "--no-alt-screen"
+                    | "--help"
+                    | "--version"
+            )
+        {
             continue;
         }
         return Some(token);
@@ -396,10 +463,22 @@ where
 }
 
 fn detect_flag_value(command: &[String], prefix: &str) -> Option<String> {
-    command
-        .iter()
-        .find_map(|token| token.strip_prefix(prefix))
-        .map(|value| value.to_ascii_lowercase())
+    // Electron flags precede positional arguments. Never treat a CLI prompt
+    // or an option value that happens to look like a flag as a process role.
+    let mut tokens = command.iter().skip(1);
+    while let Some(token) = tokens.next() {
+        if token == "--" || !token.starts_with('-') {
+            break;
+        }
+        if CODEX_VALUE_FLAGS.contains(&token.as_str()) {
+            let _ = tokens.next();
+            continue;
+        }
+        if let Some(value) = token.strip_prefix(prefix) {
+            return Some(value.to_ascii_lowercase());
+        }
+    }
+    None
 }
 
 fn summarize_args(command: &[String]) -> Option<String> {
@@ -488,6 +567,140 @@ mod tests {
         matches_codex_process, truncate_summary,
     };
     use crate::model::RunningCodexProcess;
+
+    #[test]
+    fn bundled_cli_main_prompt_is_not_a_desktop_main_role() {
+        let command = vec![
+            "/Applications/Codex.app/Contents/Resources/codex".to_owned(),
+            "main".to_owned(),
+        ];
+        let process = super::format_process(sysinfo::Pid::from_u32(42), "codex", &command);
+        assert_eq!(process.origin.as_deref(), Some("cli"));
+        assert!(!is_force_skippable_process(&process));
+    }
+
+    #[test]
+    fn bundled_desktop_main_process_stays_force_skippable() {
+        let command = vec!["/Applications/Codex.app/Contents/MacOS/Codex".to_owned()];
+        let process = super::format_process(sysinfo::Pid::from_u32(42), "codex", &command);
+        assert_eq!(process.origin.as_deref(), Some("desktop"));
+        assert!(is_force_skippable_process(&process));
+    }
+
+    #[test]
+    fn bare_bundled_cli_and_main_prompt_cannot_be_skipped_as_desktop_main() {
+        for args in [
+            vec!["/Applications/Codex.app/Contents/Resources/codex"],
+            vec![
+                "/Applications/Codex.app/Contents/Resources/codex",
+                "--no-alt-screen",
+            ],
+            vec!["/Users/x/.codex/plugins/.plugin-appserver/codex"],
+            vec!["codex", "main"],
+        ] {
+            let command = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            let process = super::format_process(sysinfo::Pid::from_u32(42), "codex", &command);
+            assert_eq!(process.origin.as_deref(), Some("cli"), "{command:?}");
+            assert!(!is_force_skippable_process(&process), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn cli_sessions_from_desktop_or_plugin_binaries_still_block_force_activation() {
+        for executable in [
+            "/Applications/Codex.app/Contents/Resources/codex",
+            "/Users/x/.codex/plugins/.plugin-appserver/codex",
+        ] {
+            for role in ["exec", "review", "resume", "fork", "login", "write a poem"] {
+                let command = vec![executable.to_owned(), role.to_owned()];
+                let process = super::format_process(sysinfo::Pid::from_u32(42), "codex", &command);
+                assert_eq!(process.origin.as_deref(), Some("desktop"));
+                assert!(!is_force_skippable_process(&process), "{command:?}");
+                assert_eq!(
+                    super::filter_blocking(vec![process], &Default::default()).len(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn flag_like_cli_prompts_and_directories_do_not_create_electron_roles() {
+        for args in [
+            vec!["codex", "--", "--type=renderer"],
+            vec!["codex", "--cd", "--type=renderer", "exec", "review"],
+            vec!["codex", "--cd", "--utility-sub-type=gpu", "exec", "review"],
+        ] {
+            let command = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            let process = super::format_process(sysinfo::Pid::from_u32(42), "codex", &command);
+            assert!(!is_force_skippable_process(&process), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn cli_prompt_paths_and_flag_values_cannot_make_activation_force_skippable() {
+        for (name, executable) in [("codex", "codex"), ("node", "node")] {
+            for args in [
+                vec![
+                    "exec",
+                    "inspect /Applications/Codex.app/Contents and .codex/plugins/foo",
+                ],
+                vec!["--cd", "app-server", "exec", "review"],
+                vec!["--config", "app-server", "exec", "review"],
+                vec!["exec", "--", "--type=renderer"],
+                vec!["exec", "--", "--utility-sub-type=gpu"],
+            ] {
+                let mut command = vec![executable.to_owned()];
+                if name == "node" {
+                    command.push("/opt/codex.js".to_owned());
+                }
+                command.extend(args.into_iter().map(str::to_owned));
+                let process = super::format_process(sysinfo::Pid::from_u32(42), name, &command);
+                assert_eq!(process.origin.as_deref(), Some("cli"), "{command:?}");
+                assert_eq!(process.role, "exec", "{command:?}");
+                assert!(!is_force_skippable_process(&process), "{command:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn roster_mentions_in_codex_arguments_still_block_activation() {
+        for (name, args) in [
+            ("codex", vec!["codex", "exec", "review codex-roster"]),
+            ("codex", vec!["codex", "-C", "/work/codex-roster"]),
+            ("codex", vec!["codex", "codex-roster"]),
+            (
+                "codex",
+                vec!["/work/codex-roster/bin/codex", "exec", "review"],
+            ),
+            (
+                "node",
+                vec![
+                    "node",
+                    "/work/codex-roster/codex.js",
+                    "exec",
+                    "review codex-roster",
+                ],
+            ),
+            ("node", vec!["node", "codex.js", "-C", "/work/codex-roster"]),
+        ] {
+            let command = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert!(matches_codex_process(name, &command), "{command:?}");
+            let process = super::format_process(sysinfo::Pid::from_u32(42), name, &command);
+            assert_eq!(
+                super::filter_blocking(vec![process], &Default::default()).len(),
+                1
+            );
+        }
+        assert!(!matches_codex_process(
+            "node",
+            &[
+                "node".to_owned(),
+                "/work/codex-roster.js".to_owned(),
+                "codex".to_owned()
+            ]
+        ));
+    }
 
     #[test]
     fn matches_codex_process_ignores_roster_binaries() {

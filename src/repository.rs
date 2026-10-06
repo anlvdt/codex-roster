@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -30,6 +31,7 @@ pub struct SnapshotRepository<S> {
 
 struct PreparedBackupImport {
     index: MetadataIndex,
+    explicit_restore: bool,
     snapshots: Vec<PreparedSnapshot>,
     created: usize,
     updated: usize,
@@ -39,6 +41,233 @@ struct PreparedSnapshot {
     secret_key: String,
     encoded_snapshot: Vec<u8>,
     previous_value: Option<Vec<u8>>,
+}
+
+/// Provider APIs persist immediately, so prepare their entire local store in a
+/// sibling directory and retain the old store until the Codex commit succeeds.
+struct PreparedProviderImport {
+    staging_dir: PathBuf,
+    destination: PathBuf,
+    committed: bool,
+    created: usize,
+    updated: usize,
+}
+
+impl PreparedProviderImport {
+    fn new(data_dir: &Path) -> Result<Self> {
+        fs::create_dir_all(data_dir)?;
+        let staging_dir = data_dir.join(format!(".backup-import-{}", Uuid::new_v4().simple()));
+        fs::create_dir(&staging_dir)?;
+        let prepared = Self {
+            staging_dir,
+            destination: data_dir.join("providers"),
+            committed: false,
+            created: 0,
+            updated: 0,
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&prepared.staging_dir, fs::Permissions::from_mode(0o700))?;
+        }
+        if prepared.destination.exists() {
+            copy_provider_directory(
+                &prepared.destination,
+                &prepared.staging_dir.join("providers"),
+            )?;
+        }
+        Ok(prepared)
+    }
+
+    fn commit(&mut self) -> Result<()> {
+        let original = self.staging_dir.join("original-providers");
+        if self.destination.exists() {
+            fs::rename(&self.destination, &original).context("failed to retain provider store")?;
+        }
+        if let Err(error) = fs::rename(self.staging_dir.join("providers"), &self.destination) {
+            if original.exists()
+                && let Err(rollback) = fs::rename(&original, &self.destination)
+            {
+                self.committed = true; // Preserve the original for manual recovery.
+                return Err(anyhow!(
+                    "provider commit failed: {error}; rollback failed: {rollback}; original retained at {}",
+                    original.display()
+                ));
+            }
+            return Err(error).context("failed to persist prepared providers");
+        }
+        self.committed = true;
+        Ok(())
+    }
+
+    fn rollback(&mut self) -> Result<()> {
+        if self.destination.exists() {
+            fs::rename(&self.destination, self.staging_dir.join("providers"))?;
+        }
+        let original = self.staging_dir.join("original-providers");
+        if original.exists() {
+            fs::rename(&original, &self.destination).with_context(|| {
+                format!(
+                    "failed to restore provider store retained at {}",
+                    original.display()
+                )
+            })?;
+        }
+        self.committed = false;
+        Ok(())
+    }
+}
+
+impl Drop for PreparedProviderImport {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_dir_all(&self.staging_dir);
+        }
+    }
+}
+
+fn copy_provider_directory(source: &Path, destination: &Path) -> Result<()> {
+    if !fs::symlink_metadata(source)?.is_dir() {
+        return Err(anyhow!(
+            "provider staging requires a regular directory: {}",
+            source.display()
+        ));
+    }
+    fs::create_dir(destination)?;
+    fs::set_permissions(destination, fs::metadata(source)?.permissions())?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let target = destination.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_provider_directory(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            let modified = fs::metadata(entry.path())?.modified()?;
+            fs::copy(entry.path(), &target)?;
+            // Recovery ranks candidates by source age, not staging copy order.
+            fs::File::open(&target)?
+                .set_times(fs::FileTimes::new().set_modified(modified))
+                .with_context(|| {
+                    format!("failed to preserve modified time at {}", target.display())
+                })?;
+        } else {
+            return Err(anyhow!(
+                "cannot stage provider entry {}",
+                entry.path().display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Explicit restore can rebuild damaged provider metadata. Work only on the
+/// private staged copy, preserving recovery bytes before normal store cleanup.
+fn recover_provider_index_for_restore(staging_dir: &Path) -> Result<()> {
+    use crate::file_store::{RecoveryFileKind, list_recovery_files, replace_file_with_recovery};
+
+    let path = staging_dir.join("providers/index.json");
+    let mut candidates = list_recovery_files(&path, None)?;
+    candidates.sort_by_key(|entry| {
+        (
+            entry.kind != RecoveryFileKind::Canonical,
+            std::cmp::Reverse(entry.modified),
+        )
+    });
+    let valid_index = |bytes: &[u8]| {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+            return false;
+        };
+        value["schema_version"].as_u64() == Some(1)
+            && serde_json::from_value::<Vec<crate::provider_store::ProviderSavedAccount>>(
+                value
+                    .get("accounts")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([])),
+            )
+            .is_ok()
+    };
+    let mut recovered = None;
+    for entry in &candidates {
+        if let Ok(bytes) = fs::read(&entry.path)
+            && valid_index(&bytes)
+        {
+            if entry.kind == RecoveryFileKind::Canonical {
+                return Ok(());
+            }
+            recovered = Some(bytes);
+            break;
+        }
+    }
+    let directory = path.parent().expect("provider index parent");
+    fs::create_dir_all(directory)?;
+    for entry in candidates {
+        let preserved = directory.join(format!("preserved-index-{}.json", Uuid::new_v4().simple()));
+        fs::copy(&entry.path, &preserved)
+            .map(|_| ())
+            .or_else(|_| fs::hard_link(&entry.path, &preserved))
+            .with_context(|| {
+                format!(
+                    "failed to preserve provider index at {}",
+                    entry.path.display()
+                )
+            })?;
+    }
+    let bytes = recovered.unwrap_or_else(|| br#"{"schema_version":1,"accounts":[]}"#.to_vec());
+    replace_file_with_recovery(&path, None, |temp| {
+        fs::write(temp, &bytes)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(temp, fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    })
+}
+
+struct SnapshotImportUndo {
+    directory: PathBuf,
+    retain: bool,
+}
+
+impl SnapshotImportUndo {
+    fn new(data_dir: &Path, snapshots: &[PreparedSnapshot]) -> Result<Self> {
+        let directory = data_dir.join(format!(".snapshot-import-undo-{}", Uuid::new_v4().simple()));
+        fs::create_dir_all(&directory)?;
+        let undo = Self {
+            directory,
+            retain: false,
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&undo.directory, fs::Permissions::from_mode(0o700))?;
+        }
+        let store = LocalSecretStore::new(&undo.directory.join("snapshots"));
+        for snapshot in snapshots {
+            if let Some(previous) = &snapshot.previous_value {
+                store
+                    .save(&snapshot.secret_key, previous)
+                    .context("failed to retain previous snapshot before import")?;
+            }
+        }
+        let manifest = snapshots
+            .iter()
+            .map(|snapshot| (&snapshot.secret_key, snapshot.previous_value.is_some()))
+            .collect::<Vec<_>>();
+        fs::write(
+            undo.directory.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+        Ok(undo)
+    }
+}
+
+impl Drop for SnapshotImportUndo {
+    fn drop(&mut self) {
+        if !self.retain {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
 }
 
 impl<S> SnapshotRepository<S>
@@ -98,7 +327,11 @@ where
                 skipped_accounts += 1;
                 continue;
             }
-            let Some(encoded_snapshot) = legacy_store.load(&legacy.secret_key)? else {
+            let encoded_snapshot = match legacy_store.load(&legacy.secret_key) {
+                Ok(snapshot) => snapshot,
+                Err(error) => return Err(self.roll_back_recovered_secrets(&undo, error)),
+            };
+            let Some(encoded_snapshot) = encoded_snapshot else {
                 skipped_accounts += 1;
                 continue;
             };
@@ -485,8 +718,15 @@ where
         &self,
         environment: &EnvironmentKind,
         accounts: &[crate::backup::ProviderBackupAccount],
-    ) -> Result<(usize, usize)> {
-        let store = self.provider_backup_store();
+    ) -> Result<Option<PreparedProviderImport>> {
+        if accounts.is_empty() {
+            return Ok(None);
+        }
+        let mut staged = PreparedProviderImport::new(&self.data_dir)?;
+        let store = crate::provider_store::ProviderAccountStore::new(
+            &staged.staging_dir,
+            LocalSecretStore::new(&staged.staging_dir.join("providers/snapshots")),
+        );
         let mut created = 0;
         let mut updated = 0;
         for account in accounts {
@@ -503,7 +743,49 @@ where
                 updated += 1;
             }
         }
-        Ok((created, updated))
+        staged.created = created;
+        staged.updated = updated;
+        Ok(Some(staged))
+    }
+
+    fn prepare_provider_full_restore(
+        &self,
+        environment: &EnvironmentKind,
+        accounts: &[crate::backup::ProviderBackupAccount],
+    ) -> Result<Option<PreparedProviderImport>> {
+        if accounts.is_empty() && !self.data_dir.join("providers").exists() {
+            return Ok(None);
+        }
+        let mut staged = PreparedProviderImport::new(&self.data_dir)?;
+        recover_provider_index_for_restore(&staged.staging_dir)?;
+        let store = crate::provider_store::ProviderAccountStore::new(
+            &staged.staging_dir,
+            LocalSecretStore::new(&staged.staging_dir.join("providers/snapshots")),
+        );
+        for account in accounts {
+            let (record, is_new) = store.save(
+                environment,
+                account.provider,
+                &account.identity,
+                &account.snapshot,
+            )?;
+            store.set_label(environment, record.id, account.custom_label.clone())?;
+            if is_new {
+                staged.created += 1;
+            } else {
+                staged.updated += 1;
+            }
+        }
+        // Full restore replaces this environment's roster, including an empty
+        // provider list. Perform removals only in the prepared directory.
+        for record in store.list(environment, None)? {
+            if !accounts.iter().any(|account| {
+                account.provider == record.provider && account.identity.matches(&record.identity)
+            }) {
+                store.remove(environment, record.id)?;
+            }
+        }
+        Ok(Some(staged))
     }
 
     pub fn import_backup(
@@ -514,9 +796,12 @@ where
         let provider_accounts = std::mem::take(&mut backup.provider_accounts);
         self.validate_provider_backup(&provider_accounts)?;
         let prepared = self.prepare_backup_import(environment, backup, false)?;
-        self.apply_backup_import(&prepared)?;
-        let (provider_created, provider_updated) =
-            self.import_provider_backup(environment, &provider_accounts)?;
+        let providers = self.import_provider_backup(environment, &provider_accounts)?;
+        let (provider_created, provider_updated) = providers
+            .as_ref()
+            .map(|prepared| (prepared.created, prepared.updated))
+            .unwrap_or_default();
+        self.apply_combined_backup_import(&prepared, providers)?;
         self.maybe_write_automatic_full_backup(environment);
         Ok((
             prepared.created + provider_created,
@@ -530,18 +815,16 @@ where
 
     pub fn restore_latest_full_backup(&self, environment: &EnvironmentKind) -> Result<usize> {
         let password = automatic_backup_password()?;
-        // Prefer the fullest readable backup so a newer empty/shrunk backup cannot
-        // destroy a larger prior roster when the user asks to restore.
         let mut backup = self
             .best_automatic_full_backup(&password)?
             .ok_or_else(|| anyhow!("no automatic full backup is available"))?;
         let count = backup.accounts.len() + backup.provider_accounts.len();
         let provider_accounts = std::mem::take(&mut backup.provider_accounts);
         self.validate_provider_backup(&provider_accounts)?;
-        let previous_index = self.index_store.load_index()?;
+        let previous_index = self.index_store.index_for_restore()?;
         let prepared = self.prepare_backup_import(environment, backup, true)?;
-        self.apply_backup_import(&prepared)?;
-        self.import_provider_backup(environment, &provider_accounts)?;
+        let providers = self.prepare_provider_full_restore(environment, &provider_accounts)?;
+        self.apply_combined_backup_import(&prepared, providers)?;
         let retained_keys = prepared
             .index
             .accounts
@@ -583,15 +866,32 @@ where
             let Ok(bundle) = read_encrypted(&path, password) else {
                 continue;
             };
+            let mut seen_identities = HashSet::new();
+            if self
+                .validate_provider_backup(&bundle.provider_accounts)
+                .is_err()
+                || bundle.accounts.iter().any(|account| {
+                    crate::codex::validate_snapshot(&account.snapshot).is_err()
+                        || !crate::codex::identity_from_snapshot(&account.snapshot).is_ok_and(
+                            |identity| {
+                                let key = identity
+                                    .subject
+                                    .as_deref()
+                                    .map(|subject| format!("subject:{subject}"))
+                                    .unwrap_or_else(|| {
+                                        format!("email:{}", identity.email.to_ascii_lowercase())
+                                    });
+                                backup_identity_matches_snapshot(&account.identity, &identity)
+                                    && seen_identities.insert(key)
+                            },
+                        )
+                })
+            {
+                continue;
+            }
             let replace = match &best {
                 None => true,
-                Some(current) => {
-                    bundle.accounts.len() + bundle.provider_accounts.len()
-                        > current.accounts.len() + current.provider_accounts.len()
-                        || (bundle.accounts.len() + bundle.provider_accounts.len()
-                            == current.accounts.len() + current.provider_accounts.len()
-                            && bundle.exported_at > current.exported_at)
-                }
+                Some(current) => bundle.exported_at > current.exported_at,
             };
             if replace {
                 best = Some(bundle);
@@ -609,7 +909,11 @@ where
         if backup.accounts.len() > MAX_BACKUP_ACCOUNTS {
             return Err(anyhow!("backup contains too many accounts"));
         }
-        let current = self.index_store.load_index()?;
+        let current = if replace_environment {
+            self.index_store.index_for_restore()?
+        } else {
+            self.index_store.load_index()?
+        };
         let mut index = if replace_environment {
             MetadataIndex {
                 schema_version: METADATA_SCHEMA_VERSION,
@@ -709,6 +1013,7 @@ where
         }
         Ok(PreparedBackupImport {
             index,
+            explicit_restore: replace_environment,
             snapshots,
             created,
             updated,
@@ -716,35 +1021,88 @@ where
     }
 
     fn apply_backup_import(&self, prepared: &PreparedBackupImport) -> Result<()> {
+        let mut undo = SnapshotImportUndo::new(&self.data_dir, &prepared.snapshots)?;
         let mut written = Vec::with_capacity(prepared.snapshots.len());
         for snapshot in &prepared.snapshots {
+            written.push(snapshot);
             if let Err(error) = self
                 .secret_store
                 .save(&snapshot.secret_key, &snapshot.encoded_snapshot)
             {
-                self.restore_prepared_snapshots(&written);
-                return Err(error).context("failed to persist imported snapshot data");
+                return Err(self.failed_backup_import(&written, error, &mut undo))
+                    .context("failed to persist imported snapshot data");
             }
-            written.push(snapshot);
         }
-        if let Err(error) = self.index_store.save_index(&prepared.index) {
-            self.restore_prepared_snapshots(&written);
-            return Err(error).context("failed to persist imported roster metadata");
+        let result = if prepared.explicit_restore {
+            self.index_store.restore_index(&prepared.index)
+        } else {
+            self.index_store.save_index(&prepared.index)
+        };
+        if let Err(error) = result {
+            return Err(self.failed_backup_import(&written, error, &mut undo))
+                .context("failed to persist imported roster metadata");
         }
         Ok(())
     }
 
-    fn restore_prepared_snapshots(&self, snapshots: &[&PreparedSnapshot]) {
+    fn restore_prepared_snapshots(&self, snapshots: &[&PreparedSnapshot]) -> Result<()> {
+        let mut failures = Vec::new();
         for snapshot in snapshots.iter().rev() {
-            match snapshot.previous_value.as_deref() {
-                Some(value) => {
-                    let _ = self.secret_store.save(&snapshot.secret_key, value);
-                }
-                None => {
-                    let _ = self.secret_store.delete(&snapshot.secret_key);
-                }
+            let result = match &snapshot.previous_value {
+                Some(value) => self.secret_store.save(&snapshot.secret_key, value),
+                None => self.secret_store.delete(&snapshot.secret_key),
+            };
+            if let Err(error) = result {
+                failures.push(format!("{}: {error:#}", snapshot.secret_key));
             }
         }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!("{}", failures.join("; ")))
+        }
+    }
+
+    fn failed_backup_import(
+        &self,
+        written: &[&PreparedSnapshot],
+        cause: anyhow::Error,
+        undo: &mut SnapshotImportUndo,
+    ) -> anyhow::Error {
+        match self.restore_prepared_snapshots(written) {
+            Ok(()) => cause.context("imported snapshots were rolled back"),
+            Err(rollback) => {
+                undo.retain = true;
+                cause.context(format!(
+                    "snapshot rollback was incomplete: {rollback:#}; encrypted undo retained at {}",
+                    undo.directory.display()
+                ))
+            }
+        }
+    }
+
+    fn apply_combined_backup_import(
+        &self,
+        prepared: &PreparedBackupImport,
+        mut providers: Option<PreparedProviderImport>,
+    ) -> Result<()> {
+        if let Some(providers) = &mut providers {
+            providers.commit()?;
+        }
+        if let Err(error) = self.apply_backup_import(prepared) {
+            if let Some(providers) = &mut providers
+                && let Err(rollback) = providers.rollback()
+            {
+                return Err(
+                    error.context(format!("provider rollback was incomplete: {rollback:#}"))
+                );
+            }
+            return Err(error);
+        }
+        if let Some(providers) = &mut providers {
+            providers.committed = false; // Drop cleans up the retained old store.
+        }
+        Ok(())
     }
 
     pub fn create_automatic_full_backup(&self, environment: &EnvironmentKind) -> Result<usize> {
@@ -825,21 +1183,20 @@ where
             return Err(anyhow!("saved account {account_id} not found"));
         };
         let metadata = index.accounts.remove(position);
-        let deleted_secret = self.secret_store.load(&metadata.secret_key).ok().flatten();
+        let deleted_secret = self.secret_store.load(&metadata.secret_key)?;
+        let preimage = PreparedSnapshot {
+            secret_key: metadata.secret_key.clone(),
+            encoded_snapshot: Vec::new(),
+            previous_value: deleted_secret,
+        };
+        let mut undo = SnapshotImportUndo::new(&self.data_dir, std::slice::from_ref(&preimage))?;
         if let Err(error) = self.secret_store.delete(&metadata.secret_key) {
-            return Err(error).context("failed to delete saved snapshot data");
+            return Err(self.failed_backup_import(&[&preimage], error, &mut undo))
+                .context("failed to delete saved snapshot data");
         }
         if let Err(error) = self.index_store.save_index(&index) {
-            if let Some(serialized_snapshot) = deleted_secret.as_deref()
-                && let Err(restore_error) = self
-                    .secret_store
-                    .save(&metadata.secret_key, serialized_snapshot)
-            {
-                return Err(anyhow!(
-                    "failed to persist deleted metadata and failed to restore saved snapshot data: {error:#}; restore error: {restore_error:#}"
-                ));
-            }
-            return Err(error);
+            return Err(self.failed_backup_import(&[&preimage], error, &mut undo))
+                .context("failed to persist deleted metadata");
         }
         self.maybe_write_automatic_full_backup(environment);
         Ok(())
@@ -962,6 +1319,1057 @@ mod tests {
                     bytes_base64: base64::engine::general_purpose::STANDARD.encode("sid"),
                 },
             ],
+        }
+    }
+
+    fn review_mixed_backup() -> BackupBundle {
+        let mut backup = BackupBundle::new(vec![BackupAccount {
+            identity: identity("codex@example.com", "codex-sub"),
+            custom_label: None,
+            archived: false,
+            snapshot: valid_snapshot("codex@example.com", "codex-sub"),
+        }]);
+        backup
+            .provider_accounts
+            .push(crate::backup::ProviderBackupAccount {
+                provider: AiProvider::Claude,
+                identity: DisplayIdentity {
+                    email: "claude@example.com".to_owned(),
+                    subject: None,
+                    name: None,
+                    plan_label: None,
+                },
+                custom_label: Some("Imported label".to_owned()),
+                snapshot: SnapshotBlob {
+                    schema_version: 1,
+                    files: vec![crate::model::SnapshotFile {
+                        name: "claude_config.json".to_owned(),
+                        bytes_base64: base64::engine::general_purpose::STANDARD
+                            .encode(r#"{"oauthAccount":{"emailAddress":"claude@example.com"}}"#),
+                    }],
+                },
+            });
+        backup
+    }
+
+    struct ReviewFailingDeleteStore {
+        inner: MemorySecretStore,
+        fail: std::cell::Cell<bool>,
+    }
+
+    #[test]
+    fn review_recovery_full_restore_preserves_recovered_codex_environment() {
+        for corrupt in [false, true] {
+            let temp = tempdir().unwrap();
+            let repo = SnapshotRepository::new(temp.path(), MemorySecretStore::default());
+            let env = EnvironmentKind::Macos;
+            let other_env = EnvironmentKind::Linux;
+            let other_snapshot = valid_snapshot("other@example.com", "other-sub");
+            let other = repo
+                .save_snapshot_without_backup(
+                    &other_env,
+                    &identity("other@example.com", "other-sub"),
+                    &other_snapshot,
+                )
+                .unwrap()
+                .0;
+            let mut recovered = repo.index_store.load_index().unwrap();
+            recovered.write_generation = 100;
+            fs::write(
+                temp.path().join("account-list-backups/metadata-100.json"),
+                serde_json::to_vec(&recovered).unwrap(),
+            )
+            .unwrap();
+            let path = temp.path().join("metadata.json");
+            if corrupt {
+                fs::write(&path, b"{damaged metadata").unwrap();
+            } else {
+                fs::remove_file(&path).unwrap();
+            }
+            let mut backup = review_mixed_backup();
+            backup.provider_accounts.clear();
+            let prepared = repo.prepare_backup_import(&env, backup, true).unwrap();
+            assert_eq!(prepared.index.write_generation, 100);
+            repo.apply_combined_backup_import(&prepared, None).unwrap();
+            assert_eq!(repo.index_store.load_index().unwrap().write_generation, 101);
+            assert_eq!(
+                repo.load_snapshot(&other_env, other.id).unwrap().1,
+                other_snapshot
+            );
+            let restored = repo.list_accounts(&env).unwrap().remove(0);
+            repo.set_custom_label(&env, restored.id, Some("After restore".to_owned()))
+                .unwrap();
+            assert_eq!(repo.index_store.load_index().unwrap().write_generation, 102);
+            assert_eq!(repo.restore_latest_account_list_backup().unwrap(), 2);
+            assert_eq!(
+                repo.get_account(&env, restored.id)
+                    .unwrap()
+                    .unwrap()
+                    .custom_label
+                    .as_deref(),
+                Some("After restore")
+            );
+            assert_eq!(
+                repo.load_snapshot(&other_env, other.id).unwrap().1,
+                other_snapshot
+            );
+        }
+    }
+
+    #[test]
+    fn review_recovery_provider_restore_rebuilds_corrupt_index() {
+        for empty in [false, true] {
+            for recovery in [
+                None,
+                Some("index.json.bak-valid"),
+                Some("index.json.tmp-valid"),
+            ] {
+                let temp = tempdir().unwrap();
+                let repo = SnapshotRepository::new(temp.path(), MemorySecretStore::default());
+                let env = EnvironmentKind::Macos;
+                let other_env = EnvironmentKind::Linux;
+                let mut backup = review_mixed_backup();
+                let account = backup.provider_accounts[0].clone();
+                let store = repo.provider_backup_store();
+                let (other, _) = store
+                    .save(
+                        &other_env,
+                        account.provider,
+                        &account.identity,
+                        &account.snapshot,
+                    )
+                    .unwrap();
+                let (removed, _) = store
+                    .save(&env, account.provider, &account.identity, &account.snapshot)
+                    .unwrap();
+                let path = temp.path().join("providers/index.json");
+                let valid = fs::read(&path).unwrap();
+                if let Some(name) = recovery {
+                    fs::write(path.with_file_name(name), &valid).unwrap();
+                }
+                fs::write(
+                    path.with_file_name("index.json.bak-invalid"),
+                    b"{bad recovery",
+                )
+                .unwrap();
+                let damaged = b"{damaged provider metadata";
+                fs::write(&path, damaged).unwrap();
+                // Recovery is explicit: ordinary import still rejects this store.
+                assert!(repo.import_backup(&env, backup.clone()).is_err());
+                assert_eq!(fs::read(&path).unwrap(), damaged);
+                if empty {
+                    backup.provider_accounts.clear();
+                }
+                let providers = repo
+                    .prepare_provider_full_restore(&env, &backup.provider_accounts)
+                    .unwrap();
+                assert_eq!(fs::read(&path).unwrap(), damaged);
+                let prepared = repo.prepare_backup_import(&env, backup, true).unwrap();
+                repo.apply_combined_backup_import(&prepared, providers)
+                    .unwrap();
+                assert_eq!(store.list(&env, None).unwrap().len(), usize::from(!empty));
+                if empty {
+                    assert!(store.get(&env, removed.id).unwrap().is_none());
+                }
+                if recovery.is_some() {
+                    assert_eq!(
+                        store.load_snapshot(&other_env, other.id).unwrap().1,
+                        account.snapshot
+                    );
+                }
+                assert!(
+                    fs::read_dir(temp.path().join("providers"))
+                        .unwrap()
+                        .flatten()
+                        .any(|entry| {
+                            entry
+                                .file_name()
+                                .to_string_lossy()
+                                .starts_with("preserved-index-")
+                                && fs::read(entry.path()).unwrap() == damaged
+                        })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn review_recovery_provider_restore_keeps_source_candidate_order() {
+        for empty in [false, true] {
+            for (older_name, newer_name) in [
+                ("index.json.bak-older", "index.json.tmp-newer"),
+                ("index.json.tmp-older", "index.json.bak-newer"),
+            ] {
+                let temp = tempdir().unwrap();
+                let repo = SnapshotRepository::new(temp.path(), MemorySecretStore::default());
+                let env = EnvironmentKind::Macos;
+                let other_env = EnvironmentKind::Linux;
+                let mut backup = review_mixed_backup();
+                let account = backup.provider_accounts[0].clone();
+                let store = repo.provider_backup_store();
+                store
+                    .save(&env, account.provider, &account.identity, &account.snapshot)
+                    .unwrap();
+                let path = temp.path().join("providers/index.json");
+                let older = fs::read(&path).unwrap();
+                let (other, _) = store
+                    .save(
+                        &other_env,
+                        account.provider,
+                        &account.identity,
+                        &account.snapshot,
+                    )
+                    .unwrap();
+                let newer = fs::read(&path).unwrap();
+                let older_time = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(60);
+                let newer_time = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(120);
+                for (name, bytes, modified) in [
+                    (older_name, older.as_slice(), older_time),
+                    (newer_name, newer.as_slice(), newer_time),
+                ] {
+                    let candidate = path.with_file_name(name);
+                    fs::write(&candidate, bytes).unwrap();
+                    fs::File::open(&candidate)
+                        .unwrap()
+                        .set_times(fs::FileTimes::new().set_modified(modified))
+                        .unwrap();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o400)).unwrap();
+                    }
+                }
+                let damaged = b"{damaged provider metadata";
+                fs::write(&path, damaged).unwrap();
+                if empty {
+                    backup.provider_accounts.clear();
+                }
+                let providers = repo
+                    .prepare_provider_full_restore(&env, &backup.provider_accounts)
+                    .unwrap()
+                    .unwrap();
+                for (name, modified) in [(older_name, older_time), (newer_name, newer_time)] {
+                    assert_eq!(
+                        fs::metadata(providers.staging_dir.join("providers").join(name))
+                            .unwrap()
+                            .modified()
+                            .unwrap(),
+                        modified
+                    );
+                }
+                assert_eq!(fs::read(&path).unwrap(), damaged);
+                let prepared = repo.prepare_backup_import(&env, backup, true).unwrap();
+                repo.apply_combined_backup_import(&prepared, Some(providers))
+                    .unwrap();
+                assert_eq!(store.list(&env, None).unwrap().len(), usize::from(!empty));
+                assert_eq!(
+                    store.load_snapshot(&other_env, other.id).unwrap().1,
+                    account.snapshot
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn review_recovery_provider_restore_rolls_back_original_corruption() {
+        let temp = tempdir().unwrap();
+        let repo = SnapshotRepository::new(
+            temp.path(),
+            ReviewFailingSaveStore {
+                inner: MemorySecretStore::default(),
+                fail_next: std::cell::Cell::new(false),
+            },
+        );
+        let env = EnvironmentKind::Macos;
+        let backup = review_mixed_backup();
+        let account = &backup.provider_accounts[0];
+        repo.provider_backup_store()
+            .save(
+                &EnvironmentKind::Linux,
+                account.provider,
+                &account.identity,
+                &account.snapshot,
+            )
+            .unwrap();
+        let path = temp.path().join("providers/index.json");
+        let valid = fs::read(&path).unwrap();
+        fs::write(path.with_file_name("index.json.bak-valid"), &valid).unwrap();
+        let damaged = b"{damaged provider metadata";
+        fs::write(&path, damaged).unwrap();
+        let providers = repo
+            .prepare_provider_full_restore(&env, &backup.provider_accounts)
+            .unwrap();
+        let prepared = repo.prepare_backup_import(&env, backup, true).unwrap();
+        repo.secret_store.fail_next.set(true);
+        assert!(
+            repo.apply_combined_backup_import(&prepared, providers)
+                .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), damaged);
+        assert_eq!(
+            fs::read(path.with_file_name("index.json.bak-valid")).unwrap(),
+            valid
+        );
+        assert!(repo.list_accounts(&env).unwrap().is_empty());
+    }
+
+    #[test]
+    fn review_regression_full_restore_replaces_provider_roster_and_preserves_other_environment() {
+        for empty in [false, true] {
+            let temp = tempdir().unwrap();
+            let repo = SnapshotRepository::new(temp.path(), MemorySecretStore::default());
+            let env = EnvironmentKind::Windows;
+            let other_env = EnvironmentKind::Linux;
+            let backup = review_mixed_backup();
+            let account = &backup.provider_accounts[0];
+            let store = repo.provider_backup_store();
+            let (_, _) = store
+                .save(&env, account.provider, &account.identity, &account.snapshot)
+                .unwrap();
+            let (other, _) = store
+                .save(
+                    &other_env,
+                    account.provider,
+                    &account.identity,
+                    &account.snapshot,
+                )
+                .unwrap();
+            let mut removed_identity = account.identity.clone();
+            removed_identity.email = "removed@example.com".to_owned();
+            let (removed, _) = store
+                .save(&env, account.provider, &removed_identity, &account.snapshot)
+                .unwrap();
+            let original_index = fs::read(temp.path().join("providers/index.json")).unwrap();
+            let accounts = if empty {
+                &[][..]
+            } else {
+                backup.provider_accounts.as_slice()
+            };
+            let providers = repo.prepare_provider_full_restore(&env, accounts).unwrap();
+            assert_eq!(
+                fs::read(temp.path().join("providers/index.json")).unwrap(),
+                original_index
+            );
+            let prepared = repo
+                .prepare_backup_import(&env, backup.clone(), true)
+                .unwrap();
+            repo.apply_combined_backup_import(&prepared, providers)
+                .unwrap();
+            assert_eq!(store.list(&env, None).unwrap().len(), usize::from(!empty));
+            assert!(store.get(&env, removed.id).unwrap().is_none());
+            assert_eq!(
+                store.load_snapshot(&other_env, other.id).unwrap().1,
+                account.snapshot
+            );
+            assert!(!fs::read_dir(temp.path()).unwrap().flatten().any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".backup-import-")
+            }));
+        }
+    }
+
+    impl SecretStore for ReviewFailingDeleteStore {
+        fn save(&self, key: &str, value: &[u8]) -> Result<()> {
+            if self.fail.get() {
+                return Err(anyhow!("injected rollback failure"));
+            }
+            self.inner.save(key, value)
+        }
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            self.inner.load(key)
+        }
+        fn delete(&self, key: &str) -> Result<()> {
+            self.inner.delete(key)?;
+            if self.fail.get() {
+                return Err(anyhow!("injected partial delete failure"));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn review_regression_delete_failed_rollback_retains_encrypted_preimage() {
+        let temp = tempdir().unwrap();
+        let repo = SnapshotRepository::new(
+            temp.path(),
+            ReviewFailingDeleteStore {
+                inner: MemorySecretStore::default(),
+                fail: std::cell::Cell::new(false),
+            },
+        );
+        let env = EnvironmentKind::Windows;
+        let record = repo
+            .save_snapshot_without_backup(
+                &env,
+                &identity("codex@example.com", "codex-sub"),
+                &valid_snapshot("codex@example.com", "codex-sub"),
+            )
+            .unwrap()
+            .0;
+        let previous = repo.secret_store.load(&record.secret_key).unwrap().unwrap();
+        let metadata = fs::read(temp.path().join("metadata.json")).unwrap();
+        repo.secret_store.fail.set(true);
+        let error = repo.delete_snapshot(&env, record.id).unwrap_err();
+        assert!(format!("{error:#}").contains("encrypted undo retained at"));
+        assert_eq!(
+            fs::read(temp.path().join("metadata.json")).unwrap(),
+            metadata
+        );
+        assert!(
+            repo.secret_store
+                .load(&record.secret_key)
+                .unwrap()
+                .is_none()
+        );
+        let retained = fs::read_dir(temp.path())
+            .unwrap()
+            .flatten()
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".snapshot-import-undo-")
+            })
+            .unwrap()
+            .path();
+        assert_eq!(
+            LocalSecretStore::new(&retained.join("snapshots"))
+                .load(&record.secret_key)
+                .unwrap()
+                .unwrap(),
+            previous
+        );
+    }
+
+    struct ReviewFailNthSaveStore {
+        inner: MemorySecretStore,
+        remaining: std::cell::Cell<usize>,
+    }
+
+    impl SecretStore for ReviewFailNthSaveStore {
+        fn save(&self, key: &str, value: &[u8]) -> Result<()> {
+            self.inner.save(key, value)?;
+            let remaining = self.remaining.get();
+            if remaining > 0 {
+                self.remaining.set(remaining - 1);
+                if remaining == 1 {
+                    return Err(anyhow!("injected later partial write"));
+                }
+            }
+            Ok(())
+        }
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            self.inner.load(key)
+        }
+        fn delete(&self, key: &str) -> Result<()> {
+            self.inner.delete(key)
+        }
+    }
+
+    #[test]
+    fn review_regression_later_partial_import_restores_updated_and_absent_preimages() {
+        let temp = tempdir().unwrap();
+        let repo = SnapshotRepository::new(
+            temp.path(),
+            ReviewFailNthSaveStore {
+                inner: MemorySecretStore::default(),
+                remaining: std::cell::Cell::new(0),
+            },
+        );
+        let env = EnvironmentKind::Windows;
+        let original = valid_snapshot("codex@example.com", "codex-sub");
+        let record = repo
+            .save_snapshot_without_backup(
+                &env,
+                &identity("codex@example.com", "codex-sub"),
+                &original,
+            )
+            .unwrap()
+            .0;
+        let metadata_before = fs::read(temp.path().join("metadata.json")).unwrap();
+        let secret_before = repo.secret_store.load(&record.secret_key).unwrap();
+        let mut backup = review_mixed_backup();
+        backup.accounts[0].snapshot.files[1].bytes_base64 =
+            base64::engine::general_purpose::STANDARD.encode("changed sid");
+        backup.accounts.push(BackupAccount {
+            identity: identity("new@example.com", "new-sub"),
+            custom_label: None,
+            archived: false,
+            snapshot: valid_snapshot("new@example.com", "new-sub"),
+        });
+        let provider = &backup.provider_accounts[0];
+        let store = repo.provider_backup_store();
+        let (provider_record, _) = store
+            .save(
+                &env,
+                provider.provider,
+                &provider.identity,
+                &provider.snapshot,
+            )
+            .unwrap();
+        store
+            .set_label(&env, provider_record.id, Some("old label".to_owned()))
+            .unwrap();
+        let provider_before = fs::read(temp.path().join("providers/index.json")).unwrap();
+        let provider_snapshot_before = store.load_snapshot(&env, provider_record.id).unwrap().1;
+        let prepared = repo
+            .prepare_backup_import(&env, backup.clone(), false)
+            .unwrap();
+        let absent_key = prepared.snapshots[1].secret_key.clone();
+        let providers = repo
+            .import_provider_backup(&env, &backup.provider_accounts)
+            .unwrap();
+        repo.secret_store.remaining.set(2);
+        assert!(
+            repo.apply_combined_backup_import(&prepared, providers)
+                .is_err()
+        );
+        assert_eq!(
+            repo.secret_store.load(&record.secret_key).unwrap(),
+            secret_before
+        );
+        assert!(repo.secret_store.load(&absent_key).unwrap().is_none());
+        assert_eq!(
+            fs::read(temp.path().join("metadata.json")).unwrap(),
+            metadata_before
+        );
+        assert_eq!(
+            fs::read(temp.path().join("providers/index.json")).unwrap(),
+            provider_before
+        );
+        assert_eq!(
+            store.load_snapshot(&env, provider_record.id).unwrap().1,
+            provider_snapshot_before
+        );
+        assert!(!fs::read_dir(temp.path()).unwrap().flatten().any(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(".backup-import-") || name.starts_with(".snapshot-import-undo-")
+        }));
+    }
+
+    #[test]
+    fn review_regression_duplicate_identity_full_backup_is_skipped() {
+        let temp = tempdir().unwrap();
+        let repo = SnapshotRepository::new(temp.path(), MemorySecretStore::default());
+        fs::create_dir(repo.automatic_backup_dir()).unwrap();
+        let mut valid = review_mixed_backup();
+        valid.exported_at = OffsetDateTime::now_utc() - Duration::days(1);
+        let mut duplicate = valid.clone();
+        duplicate.exported_at += Duration::hours(1);
+        duplicate.accounts.push(duplicate.accounts[0].clone());
+        write_encrypted(
+            &repo.automatic_backup_dir().join("valid.codexroster"),
+            &valid,
+            "fixture-password",
+        )
+        .unwrap();
+        write_encrypted(
+            &repo.automatic_backup_dir().join("duplicate.codexroster"),
+            &duplicate,
+            "fixture-password",
+        )
+        .unwrap();
+        assert_eq!(
+            repo.best_automatic_full_backup("fixture-password")
+                .unwrap()
+                .unwrap()
+                .exported_at,
+            valid.exported_at
+        );
+    }
+
+    #[test]
+    fn review_regression_mixed_import_provider_prepare_failure_preserves_codex() {
+        let temp = tempdir().unwrap();
+        let repo = SnapshotRepository::new(temp.path(), MemorySecretStore::default());
+        let env = EnvironmentKind::Windows;
+        let account = repo
+            .save_snapshot_without_backup(
+                &env,
+                &identity("codex@example.com", "codex-sub"),
+                &valid_snapshot("codex@example.com", "codex-sub"),
+            )
+            .unwrap()
+            .0;
+        let metadata_before = fs::read(temp.path().join("metadata.json")).unwrap();
+        let secret_before = repo.secret_store.load(&account.secret_key).unwrap();
+        fs::create_dir(temp.path().join("providers")).unwrap();
+        fs::write(
+            temp.path().join("providers/index.json"),
+            b"{corrupt provider index",
+        )
+        .unwrap();
+        let error = repo.import_backup(&env, review_mixed_backup()).unwrap_err();
+        assert!(format!("{error:#}").contains("provider index"));
+        assert_eq!(
+            fs::read(temp.path().join("metadata.json")).unwrap(),
+            metadata_before
+        );
+        assert_eq!(
+            repo.secret_store.load(&account.secret_key).unwrap(),
+            secret_before
+        );
+        assert_eq!(
+            fs::read(temp.path().join("providers/index.json")).unwrap(),
+            b"{corrupt provider index"
+        );
+        assert!(!fs::read_dir(temp.path()).unwrap().flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".backup-import-")
+        }));
+    }
+
+    struct ReviewFailingSaveStore {
+        inner: MemorySecretStore,
+        fail_next: std::cell::Cell<bool>,
+    }
+
+    impl SecretStore for ReviewFailingSaveStore {
+        fn save(&self, key: &str, value: &[u8]) -> Result<()> {
+            self.inner.save(key, value)?;
+            if self.fail_next.replace(false) {
+                return Err(anyhow!("injected partial snapshot write failure"));
+            }
+            Ok(())
+        }
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            self.inner.load(key)
+        }
+        fn delete(&self, key: &str) -> Result<()> {
+            self.inner.delete(key)
+        }
+    }
+
+    #[test]
+    fn review_regression_mixed_import_rolls_back_both_stores_after_codex_write_failure() {
+        let temp = tempdir().unwrap();
+        let repo = SnapshotRepository::new(
+            temp.path(),
+            ReviewFailingSaveStore {
+                inner: MemorySecretStore::default(),
+                fail_next: std::cell::Cell::new(false),
+            },
+        );
+        let env = EnvironmentKind::Windows;
+        let account = repo
+            .save_snapshot_without_backup(
+                &env,
+                &identity("codex@example.com", "codex-sub"),
+                &valid_snapshot("codex@example.com", "codex-sub"),
+            )
+            .unwrap()
+            .0;
+        let metadata_before = fs::read(temp.path().join("metadata.json")).unwrap();
+        let secret_before = repo.secret_store.load(&account.secret_key).unwrap();
+        let provider = review_mixed_backup().provider_accounts.remove(0);
+        let store = repo.provider_backup_store();
+        let (record, _) = store
+            .save(
+                &env,
+                provider.provider,
+                &provider.identity,
+                &provider.snapshot,
+            )
+            .unwrap();
+        store
+            .set_label(&env, record.id, Some("Original label".to_owned()))
+            .unwrap();
+        let provider_before = fs::read(temp.path().join("providers/index.json")).unwrap();
+        let provider_secret = store.load_snapshot(&env, record.id).unwrap().1;
+        repo.secret_store.fail_next.set(true);
+        assert!(repo.import_backup(&env, review_mixed_backup()).is_err());
+        assert_eq!(
+            fs::read(temp.path().join("metadata.json")).unwrap(),
+            metadata_before
+        );
+        assert_eq!(
+            repo.secret_store.load(&account.secret_key).unwrap(),
+            secret_before
+        );
+        assert_eq!(
+            fs::read(temp.path().join("providers/index.json")).unwrap(),
+            provider_before
+        );
+        assert_eq!(
+            store.load_snapshot(&env, record.id).unwrap().1,
+            provider_secret
+        );
+    }
+
+    #[test]
+    fn review_regression_mixed_import_rolls_back_provider_when_codex_metadata_save_fails() {
+        let temp = tempdir().unwrap();
+        let repo = SnapshotRepository::new(temp.path(), MemorySecretStore::default());
+        let env = EnvironmentKind::Windows;
+        let prepared = repo
+            .prepare_backup_import(&env, review_mixed_backup(), false)
+            .unwrap();
+        let providers = repo
+            .import_provider_backup(&env, &review_mixed_backup().provider_accounts)
+            .unwrap();
+        // Make the canonical metadata destination a nonempty directory. Its
+        // recovery read must fail after provider commit, without permissions tricks.
+        fs::create_dir(temp.path().join("metadata.json")).unwrap();
+        fs::write(temp.path().join("metadata.json/blocker"), b"fixture").unwrap();
+        assert!(
+            repo.apply_combined_backup_import(&prepared, providers)
+                .is_err()
+        );
+        assert!(!temp.path().join("providers").exists());
+        for snapshot in prepared.snapshots {
+            assert!(
+                repo.secret_store
+                    .load(&snapshot.secret_key)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn review_regression_explicit_full_restore_accepts_missing_or_corrupt_metadata() {
+        for metadata in [None, Some(b"{damaged metadata".as_slice())] {
+            let temp = tempdir().unwrap();
+            let repo = SnapshotRepository::new(temp.path(), MemorySecretStore::default());
+            fs::create_dir(temp.path().join("snapshots")).unwrap();
+            fs::write(temp.path().join("snapshots/orphan.snapshot"), b"fixture").unwrap();
+            if let Some(bytes) = metadata {
+                fs::write(temp.path().join("metadata.json"), bytes).unwrap();
+            }
+            let env = EnvironmentKind::Windows;
+            let backup = review_mixed_backup();
+            let prepared = repo
+                .prepare_backup_import(&env, backup.clone(), true)
+                .unwrap();
+            let providers = repo
+                .import_provider_backup(&env, &backup.provider_accounts)
+                .unwrap();
+            repo.apply_combined_backup_import(&prepared, providers)
+                .unwrap();
+            assert_eq!(repo.list_accounts(&env).unwrap().len(), 1);
+            assert_eq!(
+                repo.provider_backup_store().list(&env, None).unwrap().len(),
+                1
+            );
+            if let Some(bytes) = metadata {
+                assert!(fs::read_dir(temp.path()).unwrap().flatten().any(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("preserved-metadata-")
+                        && fs::read(entry.path()).unwrap() == bytes
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn review_regression_legacy_late_load_error_undoes_earlier_writes() {
+        let legacy = tempdir().unwrap();
+        let legacy_repo = SnapshotRepository::new(legacy.path(), MemorySecretStore::default());
+        let env = EnvironmentKind::Windows;
+        let snapshot = valid_snapshot("legacy@example.com", "legacy-sub");
+        let first = legacy_repo
+            .save_snapshot_without_backup(
+                &env,
+                &identity("legacy@example.com", "legacy-sub"),
+                &snapshot,
+            )
+            .unwrap()
+            .0;
+        let second = legacy_repo
+            .save_snapshot_without_backup(
+                &env,
+                &identity("broken@example.com", "broken-sub"),
+                &valid_snapshot("broken@example.com", "broken-sub"),
+            )
+            .unwrap()
+            .0;
+        fs::create_dir(legacy.path().join("snapshots")).unwrap();
+        let secret_path = |key: &str| {
+            legacy.path().join("snapshots").join(format!(
+                "{}.snapshot",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key)
+            ))
+        };
+        fs::write(
+            secret_path(&first.secret_key),
+            serde_json::to_vec(&snapshot).unwrap(),
+        )
+        .unwrap();
+        fs::create_dir(secret_path(&second.secret_key)).unwrap();
+        let current = tempdir().unwrap();
+        let repo = SnapshotRepository::new(current.path(), MemorySecretStore::default());
+        repo.secret_store
+            .save(&first.secret_key, b"previous secret")
+            .unwrap();
+        let error = repo
+            .recover_legacy_snapshots(&env, legacy.path())
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("rolled back"));
+        assert_eq!(
+            repo.secret_store.load(&first.secret_key).unwrap().unwrap(),
+            b"previous secret"
+        );
+        assert!(repo.list_accounts(&env).unwrap().is_empty());
+    }
+
+    #[test]
+    fn review_regression_partial_local_secret_delete_restores_account_snapshot() {
+        let temp = tempdir().unwrap();
+        let repo = SnapshotRepository::new(
+            temp.path(),
+            LocalSecretStore::new(&temp.path().join("snapshots")),
+        );
+        let env = EnvironmentKind::Windows;
+        let snapshot = valid_snapshot("codex@example.com", "codex-sub");
+        let account = repo
+            .save_snapshot_without_backup(
+                &env,
+                &identity("codex@example.com", "codex-sub"),
+                &snapshot,
+            )
+            .unwrap()
+            .0;
+        let filename = format!(
+            "{}.snapshot.bak-stale",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&account.secret_key)
+        );
+        fs::create_dir(temp.path().join("snapshots").join(filename)).unwrap();
+        assert!(repo.delete_snapshot(&env, account.id).is_err());
+        assert_eq!(repo.load_snapshot(&env, account.id).unwrap().1, snapshot);
+        assert_eq!(repo.list_accounts(&env).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn review_regression_full_backup_selection_uses_newest_valid_instead_of_largest() {
+        let temp = tempdir().unwrap();
+        let repo = SnapshotRepository::new(temp.path(), MemorySecretStore::default());
+        fs::create_dir(repo.automatic_backup_dir()).unwrap();
+        let mut old = review_mixed_backup();
+        old.exported_at = OffsetDateTime::now_utc() - Duration::days(2);
+        let mut latest = BackupBundle::new(vec![BackupAccount {
+            identity: identity("new@example.com", "new-sub"),
+            custom_label: None,
+            archived: false,
+            snapshot: valid_snapshot("new@example.com", "new-sub"),
+        }]);
+        latest.exported_at = old.exported_at + Duration::days(1);
+        write_encrypted(
+            &repo.automatic_backup_dir().join("old.codexroster"),
+            &old,
+            "fixture-password",
+        )
+        .unwrap();
+        write_encrypted(
+            &repo.automatic_backup_dir().join("latest.codexroster"),
+            &latest,
+            "fixture-password",
+        )
+        .unwrap();
+        fs::write(
+            repo.automatic_backup_dir().join("corrupt.codexroster"),
+            b"invalid ciphertext",
+        )
+        .unwrap();
+        let selected = repo
+            .best_automatic_full_backup("fixture-password")
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.accounts.len(), 1);
+        assert_eq!(selected.accounts[0].identity.email, "new@example.com");
+        assert!(selected.provider_accounts.is_empty());
+    }
+
+    #[test]
+    fn review_regression_newer_decryptable_but_invalid_full_backup_is_skipped() {
+        let temp = tempdir().unwrap();
+        let repo = SnapshotRepository::new(temp.path(), MemorySecretStore::default());
+        fs::create_dir(repo.automatic_backup_dir()).unwrap();
+        let mut valid = review_mixed_backup();
+        valid.exported_at = OffsetDateTime::now_utc() - Duration::days(1);
+        let mut invalid = valid.clone();
+        invalid.exported_at += Duration::hours(1);
+        invalid.accounts[0].snapshot.files[0].bytes_base64 = "not base64".to_owned();
+        write_encrypted(
+            &repo.automatic_backup_dir().join("valid.codexroster"),
+            &valid,
+            "fixture-password",
+        )
+        .unwrap();
+        write_encrypted(
+            &repo.automatic_backup_dir().join("invalid.codexroster"),
+            &invalid,
+            "fixture-password",
+        )
+        .unwrap();
+        assert_eq!(
+            repo.best_automatic_full_backup("fixture-password")
+                .unwrap()
+                .unwrap()
+                .exported_at,
+            valid.exported_at
+        );
+    }
+
+    #[test]
+    fn review_regression_provider_failed_rollback_retains_original_directory() {
+        let temp = tempdir().unwrap();
+        let repo = SnapshotRepository::new(temp.path(), MemorySecretStore::default());
+        let env = EnvironmentKind::Windows;
+        let provider = review_mixed_backup().provider_accounts.remove(0);
+        repo.provider_backup_store()
+            .save(
+                &env,
+                provider.provider,
+                &provider.identity,
+                &provider.snapshot,
+            )
+            .unwrap();
+        let previous = fs::read(temp.path().join("providers/index.json")).unwrap();
+        let mut staged = repo
+            .import_provider_backup(&env, &[provider])
+            .unwrap()
+            .unwrap();
+        let retained = staged.staging_dir.clone();
+        staged.commit().unwrap();
+        fs::create_dir(staged.staging_dir.join("providers")).unwrap();
+        fs::write(staged.staging_dir.join("providers/blocker"), b"fixture").unwrap();
+        assert!(staged.rollback().is_err());
+        drop(staged);
+        assert_eq!(
+            fs::read(retained.join("original-providers/index.json")).unwrap(),
+            previous
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn review_regression_provider_staging_is_private_and_rejects_symlinks() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let temp = tempdir().unwrap();
+        let repo = SnapshotRepository::new(temp.path(), MemorySecretStore::default());
+        let provider = review_mixed_backup().provider_accounts.remove(0);
+        let staged = repo
+            .import_provider_backup(&EnvironmentKind::Windows, std::slice::from_ref(&provider))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fs::metadata(&staged.staging_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(staged.staging_dir.join("providers/snapshots"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        drop(staged);
+        fs::create_dir(temp.path().join("providers")).unwrap();
+        fs::write(temp.path().join("unrelated"), b"unchanged").unwrap();
+        symlink(
+            temp.path().join("unrelated"),
+            temp.path().join("providers/link"),
+        )
+        .unwrap();
+        assert!(
+            repo.import_provider_backup(&EnvironmentKind::Windows, &[provider])
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(temp.path().join("unrelated")).unwrap(),
+            b"unchanged"
+        );
+    }
+
+    struct ReviewRollbackFailureStore {
+        inner: MemorySecretStore,
+        failure_mode: std::cell::Cell<u8>,
+    }
+
+    impl SecretStore for ReviewRollbackFailureStore {
+        fn save(&self, key: &str, value: &[u8]) -> Result<()> {
+            if self.failure_mode.get() == 1 {
+                self.inner.save(key, value)?;
+                self.failure_mode.set(2);
+                return Err(anyhow!("injected partial write failure"));
+            }
+            if self.failure_mode.get() == 2 {
+                return Err(anyhow!("injected persistent save failure"));
+            }
+            self.inner.save(key, value)
+        }
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            self.inner.load(key)
+        }
+        fn delete(&self, key: &str) -> Result<()> {
+            self.inner.delete(key)
+        }
+    }
+
+    #[test]
+    fn review_regression_failed_snapshot_rollback_retains_encrypted_previous_value() {
+        let temp = tempdir().unwrap();
+        let repo = SnapshotRepository::new(
+            temp.path(),
+            ReviewRollbackFailureStore {
+                inner: MemorySecretStore::default(),
+                failure_mode: std::cell::Cell::new(0),
+            },
+        );
+        let env = EnvironmentKind::Windows;
+        let snapshot = valid_snapshot("codex@example.com", "codex-sub");
+        let record = repo
+            .save_snapshot_without_backup(
+                &env,
+                &identity("codex@example.com", "codex-sub"),
+                &snapshot,
+            )
+            .unwrap()
+            .0;
+        let previous = repo.secret_store.load(&record.secret_key).unwrap().unwrap();
+        let prepared = repo
+            .prepare_backup_import(&env, review_mixed_backup(), false)
+            .unwrap();
+        repo.secret_store.failure_mode.set(1);
+        let error = repo.apply_backup_import(&prepared).unwrap_err();
+        assert!(format!("{error:#}").contains("encrypted undo retained at"));
+        let retained = fs::read_dir(temp.path())
+            .unwrap()
+            .flatten()
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".snapshot-import-undo-")
+            })
+            .unwrap()
+            .path();
+        assert_eq!(
+            LocalSecretStore::new(&retained.join("snapshots"))
+                .load(&record.secret_key)
+                .unwrap()
+                .unwrap(),
+            previous
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(retained).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
         }
     }
 

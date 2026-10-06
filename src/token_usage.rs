@@ -12,7 +12,7 @@ use time::{Duration, OffsetDateTime};
 
 use crate::model::{TokenUsageBreakdownOutput, TokenUsageDayOutput, TokenUsageSummaryOutput};
 
-const CACHE_VERSION: u8 = 4;
+const CACHE_VERSION: u8 = 5;
 const CACHE_FILE_NAME: &str = ".codex-roster-token-usage-v1.json";
 
 #[derive(Default, Serialize, Deserialize)]
@@ -422,7 +422,23 @@ fn check_session_meta_first_line(file: &Path, cached: &mut CachedSession) {
         return;
     };
     if let Ok(val) = serde_json::from_str::<Value>(first_line.trim()) {
-        update_session_context(&val, cached);
+        // The first record is only a fallback for immutable session ancestry.
+        // Its model/cwd must not replace the most recent parsed turn context.
+        if val
+            .pointer("/payload/thread_source")
+            .and_then(Value::as_str)
+            .is_some_and(|source| source.eq_ignore_ascii_case("subagent"))
+        {
+            cached.is_subagent = true;
+        }
+        if let Some(parent) = val
+            .pointer("/payload/parent_thread_id")
+            .and_then(Value::as_str)
+            .filter(|parent| !parent.is_empty())
+        {
+            cached.is_subagent = true;
+            cached.parent_thread_id = Some(parent.to_owned());
+        }
     }
 }
 
@@ -670,6 +686,71 @@ fn estimate_cost_usd(usage: &CachedTokenUsage, model: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appended_tokens_keep_latest_model_and_project_after_metadata_rescan() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions = temp.path().join("sessions");
+        fs::create_dir_all(&sessions).expect("sessions");
+        let rollout = sessions.join("rollout-context.jsonl");
+        fs::write(&rollout, concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"model\":\"gpt-5.6-sol\",\"cwd\":\"/work/old-project\"}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.6-luna\",\"cwd\":\"/work/new-project\"}}\n",
+            "{\"timestamp\":\"2026-08-30T01:00:00Z\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":1000000,\"total_tokens\":1000000},\"total_token_usage\":{\"input_tokens\":1000000,\"total_tokens\":1000000}}}}\n"
+        )).expect("rollout");
+        let now = OffsetDateTime::parse("2026-08-30T10:00:00Z", &Rfc3339).expect("now");
+        let first = summarize_session_tokens(&sessions, now).expect("first summary");
+        // Reload once without an append, too: the metadata fallback runs even
+        // when refresh_cached_session returns an unchanged cached record.
+        summarize_session_tokens(&sessions, now).expect("unchanged summary");
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .expect("append");
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "timestamp": "2026-08-30T01:01:00Z",
+                "payload": {"type": "token_count", "info": {
+                    "last_token_usage": {"input_tokens": 1000000, "total_tokens": 1000000},
+                    "total_token_usage": {"input_tokens": 2000000, "total_tokens": 2000000}
+                }}
+            })
+        )
+        .expect("event");
+        let summary = summarize_session_tokens(&sessions, now).expect("appended summary");
+        assert_eq!(summary.all_time, 2000000);
+        assert_eq!(summary.by_model.len(), 1);
+        assert_eq!(summary.by_model[0].label, "gpt-5.6-luna");
+        assert_eq!(summary.by_model[0].tokens, 2000000);
+        assert_eq!(summary.by_project.len(), 1);
+        assert_eq!(summary.by_project[0].label, "new-project");
+        assert_eq!(summary.by_project[0].tokens, 2000000);
+        assert!((summary.estimated_cost_usd - 2.0 * first.estimated_cost_usd).abs() < 1e-9);
+    }
+
+    #[test]
+    fn old_token_cache_with_stale_context_is_invalidated() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cache_path = temp.path().join(CACHE_FILE_NAME);
+        let mut old = TokenUsageCache {
+            version: 4,
+            ..Default::default()
+        };
+        old.files.insert(
+            "sessions/rollout.jsonl".to_owned(),
+            CachedSession {
+                model: "obsolete-model".to_owned(),
+                project: "obsolete-project".to_owned(),
+                ..Default::default()
+            },
+        );
+        fs::write(&cache_path, serde_json::to_vec(&old).expect("cache JSON")).expect("cache");
+        let current = load_cache(&cache_path, 0);
+        assert_eq!(current.version, CACHE_VERSION);
+        assert!(current.files.is_empty());
+    }
 
     #[test]
     fn summarizes_token_events_without_counting_duplicate_snapshots() {

@@ -31,7 +31,7 @@ import Testing
     }
 }
 
-@Test func prereleaseTaggedReleaseIsNotOfferedAsStable() {
+@MainActor @Test func prereleaseTaggedReleaseIsNotOfferedAsStable() {
     let json = """
     {"tag_name":"v9.9.9-rc1","draft":false,"prerelease":false,
      "assets":[{"name":"x-macos.zip","browser_download_url":"https://example.com/x.zip","digest":"sha256:abc"}]}

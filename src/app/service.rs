@@ -69,13 +69,21 @@ where
         &self,
         account_id: Option<Uuid>,
     ) -> Result<crate::model::EnableLunaReserveOutput> {
-        let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
-        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
-
         if let Some(target_id) = account_id
             && !self.is_live_saved_account(target_id)?
         {
+            // Activation owns its locks; do not acquire them recursively.
             self.activate(target_id)?;
+        }
+
+        let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        if let Some(target_id) = account_id
+            && !self.is_live_saved_account(target_id)?
+        {
+            anyhow::bail!(
+                "active account changed before enabling Luna Reserve; retry for the selected account"
+            );
         }
 
         let live = codex::try_read_live_auth_bundle(&self.env)?
@@ -1901,6 +1909,81 @@ mod tests {
         AccountUsageView, DisplayIdentity, EnvironmentKind, UsageSource, UsageWindowView,
     };
     use crate::secrets::test_support::MemorySecretStore;
+
+    #[test]
+    fn luna_reserve_enables_active_and_inactive_saved_accounts_without_recursive_locks() {
+        for already_active in [false, true] {
+            let temp = tempdir().expect("tempdir");
+            let env = AppEnv {
+                kind: EnvironmentKind::Linux,
+                home_dir: temp.path().to_path_buf(),
+                codex_root: temp.path().join(".codex"),
+                app_data_dir: temp.path().join("app"),
+            };
+            std::fs::create_dir_all(&env.codex_root).expect("codex root");
+            let target_auth = auth_json_fixture("target@example.com", "target", Some("pro"));
+            let (identity, snapshot) =
+                codex::snapshot_from_auth_json(target_auth.as_bytes()).expect("snapshot");
+            let repo = SnapshotRepository::new(&env.app_data_dir, MemorySecretStore::default());
+            let target_id = repo
+                .save_snapshot(&env.kind, &identity, &snapshot)
+                .expect("save")
+                .0
+                .id;
+            let current_auth = if already_active {
+                target_auth
+            } else {
+                auth_json_fixture("current@example.com", "current", Some("pro"))
+            };
+            std::fs::write(env.codex_root.join("auth.json"), current_auth).expect("auth");
+            std::fs::write(
+                env.codex_root.join("config.toml"),
+                "model = \"previous-model\"\n",
+            )
+            .expect("config");
+            let app = App::new(env, repo);
+
+            let output = app
+                .enable_luna_reserve(Some(target_id))
+                .expect("enable Luna");
+
+            assert_eq!(output.account_email, "target@example.com");
+            assert_eq!(output.previous_model.as_deref(), Some("previous-model"));
+            assert!(
+                app.is_live_saved_account(target_id)
+                    .expect("selected identity")
+            );
+            assert_eq!(
+                codex::read_configured_model(&app.env.codex_root).as_deref(),
+                Some("gpt-5.6-luna")
+            );
+            let _auth = AuthLock::acquire(&app.env.app_data_dir).expect("released auth lock");
+            let _operation =
+                OperationLock::acquire(&app.env.app_data_dir).expect("released state lock");
+        }
+    }
+
+    #[test]
+    fn luna_reserve_failed_activation_leaves_model_unchanged() {
+        let temp = tempdir().expect("tempdir");
+        let env = AppEnv {
+            kind: EnvironmentKind::Linux,
+            home_dir: temp.path().to_path_buf(),
+            codex_root: temp.path().join(".codex"),
+            app_data_dir: temp.path().join("app"),
+        };
+        std::fs::create_dir_all(&env.codex_root).expect("codex root");
+        let original = "model = \"previous-model\"\n";
+        std::fs::write(env.codex_root.join("config.toml"), original).expect("config");
+        let repo = SnapshotRepository::new(&env.app_data_dir, MemorySecretStore::default());
+        let app = App::new(env, repo);
+        assert!(app.enable_luna_reserve(Some(Uuid::new_v4())).is_err());
+        assert!(app.enable_luna_reserve(None).is_err());
+        assert_eq!(
+            std::fs::read_to_string(app.env.codex_root.join("config.toml")).expect("config"),
+            original
+        );
+    }
 
     #[test]
     fn activation_never_forces_through_running_codex_processes() {

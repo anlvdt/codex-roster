@@ -63,18 +63,51 @@ pub fn write_encrypted(path: &Path, bundle: &BackupBundle, password: &str) -> Re
     ensure_password(password)?;
     let plaintext = serde_json::to_vec(bundle).context("failed to encode backup")?;
     let encryptor = age::Encryptor::with_user_passphrase(SecretString::from(password.to_owned()));
-    let file = std::fs::File::create(path)
-        .with_context(|| format!("failed to create {}", path.display()))?;
-    let mut writer = encryptor
-        .wrap_output(file)
-        .context("failed to initialize encrypted backup")?;
-    writer
-        .write_all(&plaintext)
-        .context("failed to write encrypted backup")?;
-    writer
-        .finish()
-        .context("failed to finish encrypted backup")?;
-    Ok(())
+    write_backup_atomically(path, |file| {
+        let mut writer = encryptor
+            .wrap_output(file)
+            .context("failed to initialize encrypted backup")?;
+        writer
+            .write_all(&plaintext)
+            .context("failed to write encrypted backup")?;
+        writer.finish().context("failed to finish encrypted backup")
+    })
+}
+
+fn write_backup_atomically<F>(path: &Path, write: F) -> Result<()>
+where
+    F: FnOnce(std::fs::File) -> Result<std::fs::File>,
+{
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("backup path needs a file name"))?;
+    let temp = parent.join(format!(
+        "{}.tmp-{}",
+        name.to_string_lossy(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let result = (|| {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        let mut file = write(file)?;
+        file.flush().context("failed to flush encrypted backup")?;
+        file.sync_all().context("failed to sync encrypted backup")?;
+        drop(file);
+        #[cfg(not(windows))]
+        std::fs::rename(&temp, path).context("failed to replace encrypted backup")?;
+        // std::fs::rename cannot overwrite an existing destination on Windows.
+        #[cfg(windows)]
+        crate::file_store::replace_file_with_recovery(path, None, |staged| {
+            std::fs::copy(&temp, staged)?;
+            Ok(())
+        })?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&temp);
+    result
 }
 
 pub fn read_encrypted(path: &Path, password: &str) -> Result<BackupBundle> {
@@ -357,6 +390,37 @@ pub fn newest_automatic_backup(directory: &Path) -> Result<std::path::PathBuf> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn review_regression_failed_backup_write_preserves_existing_destination() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("backup.codexroster");
+        std::fs::write(&path, b"previous encrypted backup").unwrap();
+        let error = write_backup_atomically(&path, |mut file| {
+            file.write_all(b"partial encrypted output")?;
+            Err(anyhow!("injected encryption/finalization failure"))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("injected"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"previous encrypted backup");
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn review_regression_backup_success_replaces_existing_file_after_finish() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("backup.codexroster");
+        std::fs::write(&path, b"previous").unwrap();
+        let bundle = BackupBundle::new(Vec::new());
+        write_encrypted(&path, &bundle, "fixture-password").unwrap();
+        assert_eq!(
+            read_encrypted(&path, "fixture-password")
+                .unwrap()
+                .exported_at,
+            bundle.exported_at
+        );
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
 
     #[cfg(unix)]
     #[test]

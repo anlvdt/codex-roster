@@ -113,7 +113,8 @@ import Testing
     #expect(NotchRosterLayout.preferredColumnCount(sectionCounts: sections) == 2)
     #expect(NotchRosterLayout.columnCount(sectionCounts: sections, expanded: true) == 2)
     #expect(NotchRosterLayout.contentRowCount(sectionCounts: sections, columns: 3) == 4)
-    #expect(!NotchRosterLayout.needsRosterScroll(sectionCounts: sections, expanded: true))
+    // Screen-dependent defaults vary between local and CI display environments.
+    #expect(!NotchRosterLayout.needsRosterScroll(sectionCounts: sections, expanded: true, maximumHeight: 1_000))
 }
 
 @Test func smallRosterStaysTwoColumnsWhenExpanded() {

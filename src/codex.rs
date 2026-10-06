@@ -221,6 +221,10 @@ pub fn begin_add_account_session(env: &AppEnv) -> Result<()> {
     let cap_sid = env.codex_root.join("cap_sid");
     let backup_auth = env.codex_root.join(ADD_ACCOUNT_AUTH_BACKUP);
     let backup_sid = env.codex_root.join(ADD_ACCOUNT_CAP_BACKUP);
+    // Stale backups from a previously completed session must not stand in for
+    // files that are absent at the start of this session.
+    remove_file_if_exists(&backup_auth)?;
+    remove_file_if_exists(&backup_sid)?;
     if auth.exists() {
         fs::copy(&auth, &backup_auth).with_context(|| {
             format!(
@@ -229,17 +233,21 @@ pub fn begin_add_account_session(env: &AppEnv) -> Result<()> {
                 backup_auth.display()
             )
         })?;
-        if cap_sid.exists() {
-            fs::copy(&cap_sid, &backup_sid).with_context(|| {
-                format!(
-                    "failed to back up {} to {}",
-                    cap_sid.display(),
-                    backup_sid.display()
-                )
-            })?;
-        }
     }
-    fs::write(env.codex_root.join(ADD_ACCOUNT_MARKER), b"pending").with_context(|| {
+    if cap_sid.exists() {
+        fs::copy(&cap_sid, &backup_sid).with_context(|| {
+            format!(
+                "failed to back up {} to {}",
+                cap_sid.display(),
+                backup_sid.display()
+            )
+        })?;
+    }
+    let marker = serde_json::to_vec(&serde_json::json!({
+        "auth_present": auth.exists(),
+        "cap_present": cap_sid.exists(),
+    }))?;
+    fs::write(env.codex_root.join(ADD_ACCOUNT_MARKER), marker).with_context(|| {
         format!(
             "failed to start add-account session in {}",
             env.codex_root.display()
@@ -271,6 +279,43 @@ pub fn cancel_add_account_session(env: &AppEnv) -> Result<()> {
     let cap_sid = env.codex_root.join("cap_sid");
     let backup_auth = env.codex_root.join(ADD_ACCOUNT_AUTH_BACKUP);
     let backup_sid = env.codex_root.join(ADD_ACCOUNT_CAP_BACKUP);
+    let marker = fs::read(env.codex_root.join(ADD_ACCOUNT_MARKER))?;
+    // The legacy marker used the literal "pending". Every newer marker must
+    // explicitly record both preimages before cancellation may remove live files.
+    let initial: Option<serde_json::Value> = if marker == b"pending" {
+        None
+    } else {
+        let value: serde_json::Value = serde_json::from_slice(&marker)
+            .context("add-account marker is damaged; cannot safely cancel login")?;
+        if value
+            .get("auth_present")
+            .and_then(serde_json::Value::as_bool)
+            .is_none()
+            || value
+                .get("cap_present")
+                .and_then(serde_json::Value::as_bool)
+                .is_none()
+        {
+            bail!("add-account marker lacks original file state; cannot safely cancel login");
+        }
+        Some(value)
+    };
+    if initial
+        .as_ref()
+        .and_then(|value| value["auth_present"].as_bool())
+        == Some(true)
+        && !backup_auth.exists()
+    {
+        bail!("the previous auth backup is missing; cannot safely cancel login");
+    }
+    if initial
+        .as_ref()
+        .and_then(|value| value["cap_present"].as_bool())
+        == Some(true)
+        && !backup_sid.exists()
+    {
+        bail!("the previous cap_sid backup is missing; cannot safely cancel login");
+    }
     if backup_auth.exists() {
         copy_atomic(&backup_auth, &auth).with_context(|| {
             format!(
@@ -279,17 +324,19 @@ pub fn cancel_add_account_session(env: &AppEnv) -> Result<()> {
                 backup_auth.display()
             )
         })?;
-        if backup_sid.exists() {
-            copy_atomic(&backup_sid, &cap_sid).with_context(|| {
-                format!(
-                    "failed to restore {} from {}",
-                    cap_sid.display(),
-                    backup_sid.display()
-                )
-            })?;
-        } else {
-            remove_file_if_exists(&cap_sid)?;
-        }
+    } else {
+        remove_file_if_exists(&auth)?;
+    }
+    if backup_sid.exists() {
+        copy_atomic(&backup_sid, &cap_sid).with_context(|| {
+            format!(
+                "failed to restore {} from {}",
+                cap_sid.display(),
+                backup_sid.display()
+            )
+        })?;
+    } else {
+        remove_file_if_exists(&cap_sid)?;
     }
     clear_add_account_artifacts(env);
     Ok(())
@@ -742,50 +789,44 @@ pub fn auth_json_fixture(email: &str, subject: &str, plan: Option<&str>) -> Stri
 pub fn read_configured_model(codex_root: &Path) -> Option<String> {
     let config_path = codex_root.join("config.toml");
     let content = fs::read_to_string(config_path).ok()?;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("model") {
-            let parts: Vec<&str> = trimmed.splitn(2, '=').collect();
-            if parts.len() == 2 && parts[0].trim() == "model" {
-                let model = parts[1].trim().trim_matches('"').trim_matches('\'');
-                return Some(model.to_owned());
-            }
-        }
-    }
-    None
+    let config: ModelConfig = toml::from_str(&content).ok()?;
+    config.model.map(toml::Spanned::into_inner)
 }
 
 pub fn set_configured_model(codex_root: &Path, new_model: &str) -> Result<()> {
     let config_path = codex_root.join("config.toml");
-    if !config_path.exists() {
-        fs::write(&config_path, format!("model = \"{new_model}\"\n"))
-            .with_context(|| format!("failed to create {}", config_path.display()))?;
-        return Ok(());
-    }
-    let content = fs::read_to_string(&config_path)
-        .with_context(|| format!("failed to read {}", config_path.display()))?;
-    let mut replaced = false;
-    let mut new_lines = Vec::new();
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("model") && trimmed.split('=').next().map(str::trim) == Some("model")
-        {
-            new_lines.push(format!("model = \"{new_model}\""));
-            replaced = true;
-        } else {
-            new_lines.push(line.to_owned());
+    let content = match fs::read_to_string(&config_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", config_path.display()));
         }
-    }
-    if !replaced {
-        new_lines.insert(0, format!("model = \"{new_model}\""));
-    }
-    let mut result = new_lines.join("\n");
-    if content.ends_with('\n') {
-        result.push('\n');
-    }
+    };
+    let config: ModelConfig =
+        toml::from_str(&content).context("cannot update model in invalid Codex config.toml")?;
+    let encoded = serde_json::to_string(new_model)?;
+    let result = if let Some(model) = config.model {
+        let mut result = content.clone();
+        result.replace_range(model.start()..model.end(), &encoded);
+        result
+    } else {
+        let newline = if content.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        format!("model = {encoded}{newline}{content}")
+    };
+    let _: ModelConfig =
+        toml::from_str(&result).context("updated Codex model config is invalid")?;
     fs::write(&config_path, result)
         .with_context(|| format!("failed to write {}", config_path.display()))?;
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct ModelConfig {
+    model: Option<toml::Spanned<String>>,
 }
 
 #[cfg(test)]
@@ -795,6 +836,191 @@ mod tests {
 
     use super::*;
     use crate::model::EnvironmentKind;
+
+    #[test]
+    fn review_regression_cancel_damaged_marker_keeps_live_files_and_artifacts() -> Result<()> {
+        for marker in [b"{".as_slice(), b"{}", b"null", b"{\"auth_present\":false}"] {
+            let temp = tempdir()?;
+            let env = AppEnv {
+                kind: EnvironmentKind::Linux,
+                home_dir: temp.path().to_path_buf(),
+                codex_root: temp.path().join("codex"),
+                app_data_dir: temp.path().join("data"),
+            };
+            fs::create_dir(&env.codex_root)?;
+            fs::write(env.codex_root.join(ADD_ACCOUNT_MARKER), marker)?;
+            fs::write(env.codex_root.join("auth.json"), b"live auth")?;
+            fs::write(env.codex_root.join("cap_sid"), b"live sid")?;
+            assert!(cancel_add_account_session(&env).is_err());
+            assert_eq!(fs::read(env.codex_root.join("auth.json"))?, b"live auth");
+            assert_eq!(fs::read(env.codex_root.join("cap_sid"))?, b"live sid");
+            assert!(add_account_session_active(&env));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn review_regression_cancel_restores_original_file_absence() -> Result<()> {
+        for cap_present in [false, true] {
+            let temp = tempdir()?;
+            let env = AppEnv {
+                kind: EnvironmentKind::Linux,
+                home_dir: temp.path().to_path_buf(),
+                codex_root: temp.path().join("codex"),
+                app_data_dir: temp.path().join("data"),
+            };
+            fs::create_dir(&env.codex_root)?;
+            fs::write(
+                env.codex_root.join(ADD_ACCOUNT_AUTH_BACKUP),
+                b"stale session",
+            )?;
+            fs::write(env.codex_root.join(ADD_ACCOUNT_CAP_BACKUP), b"stale sid")?;
+            if cap_present {
+                fs::write(env.codex_root.join("cap_sid"), b"original sid")?;
+            }
+            begin_add_account_session(&env)?;
+            fs::write(env.codex_root.join("auth.json"), b"new auth")?;
+            fs::write(env.codex_root.join("cap_sid"), b"new sid")?;
+            cancel_add_account_session(&env)?;
+            assert!(!env.codex_root.join("auth.json").exists());
+            assert!(!add_account_session_active(&env));
+            if cap_present {
+                assert_eq!(fs::read(env.codex_root.join("cap_sid"))?, b"original sid");
+            } else {
+                assert!(!env.codex_root.join("cap_sid").exists());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn review_regression_cancel_missing_original_backup_keeps_session_recoverable() -> Result<()> {
+        let temp = tempdir()?;
+        let env = AppEnv {
+            kind: EnvironmentKind::Linux,
+            home_dir: temp.path().to_path_buf(),
+            codex_root: temp.path().join("codex"),
+            app_data_dir: temp.path().join("data"),
+        };
+        fs::create_dir(&env.codex_root)?;
+        fs::write(env.codex_root.join("auth.json"), b"original auth")?;
+        begin_add_account_session(&env)?;
+        fs::remove_file(env.codex_root.join(ADD_ACCOUNT_AUTH_BACKUP))?;
+        fs::write(env.codex_root.join("auth.json"), b"new auth")?;
+        assert!(cancel_add_account_session(&env).is_err());
+        assert!(add_account_session_active(&env));
+        assert_eq!(fs::read(env.codex_root.join("auth.json"))?, b"new auth");
+        Ok(())
+    }
+
+    #[test]
+    fn review_regression_model_reads_and_edits_root_only_preserving_format() -> Result<()> {
+        let temp = tempdir()?;
+        let path = temp.path().join("config.toml");
+        let original = "# Config\r\n  model = 'root-old' # keep comment\r\n[profiles.fast]\r\nmodel = \"profile-model\"\r\n[other]\r\nmodel = 'other-model'";
+        fs::write(&path, original)?;
+        assert_eq!(
+            read_configured_model(temp.path()).as_deref(),
+            Some("root-old")
+        );
+        set_configured_model(temp.path(), "root-new")?;
+        assert_eq!(
+            fs::read_to_string(&path)?,
+            original.replacen("'root-old'", "\"root-new\"", 1)
+        );
+        assert_eq!(
+            read_configured_model(temp.path()).as_deref(),
+            Some("root-new")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn review_regression_nested_model_only_gets_new_root_model() -> Result<()> {
+        let temp = tempdir()?;
+        let path = temp.path().join("config.toml");
+        let original = "# Config\n[profiles.fast]\nmodel = \"profile-model\"\n";
+        fs::write(&path, original)?;
+        assert_eq!(read_configured_model(temp.path()), None);
+        set_configured_model(temp.path(), "root-new")?;
+        assert_eq!(
+            fs::read_to_string(&path)?,
+            format!("model = \"root-new\"\n{original}")
+        );
+        assert_eq!(
+            read_configured_model(temp.path()).as_deref(),
+            Some("root-new")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn review_regression_model_scope_ignores_headers_and_assignments_in_multiline_text()
+    -> Result<()> {
+        let temp = tempdir()?;
+        let path = temp.path().join("config.toml");
+        let original = "instructions = '''\n[profiles.fake]\nmodel = 'text only'\n'''\n\"model\" = \"root\" # root value\n[profiles.real]\nmodel = 'profile'\n";
+        fs::write(&path, original)?;
+        assert_eq!(read_configured_model(temp.path()).as_deref(), Some("root"));
+        set_configured_model(temp.path(), "new\"model")?;
+        assert_eq!(
+            read_configured_model(temp.path()).as_deref(),
+            Some("new\"model")
+        );
+        assert!(fs::read_to_string(path)?.contains("model = 'text only'"));
+        Ok(())
+    }
+
+    #[test]
+    fn review_regression_model_supports_multiline_and_toml_unicode_escapes() -> Result<()> {
+        let cases = [
+            ("\"\"\"\ngpt-\\\n   model\"\"\"", "gpt-model"),
+            ("'''\ngpt-model'''", "gpt-model"),
+            (r#""gpt-\U0000006Dodel""#, "gpt-model"),
+            (r#""gpt-\u006Dodel""#, "gpt-model"),
+            ("'gpt-\\literal'", "gpt-\\literal"),
+        ];
+        for (value, expected) in cases {
+            let temp = tempdir()?;
+            let path = temp.path().join("config.toml");
+            let original = format!(
+                "# tiếng Việt\nmodel = {value} # keep\n[profiles.fast]\nmodel = 'nested'\n"
+            );
+            fs::write(&path, &original)?;
+            assert_eq!(
+                read_configured_model(temp.path()).as_deref(),
+                Some(expected)
+            );
+            set_configured_model(temp.path(), "new-model")?;
+            assert_eq!(
+                fs::read_to_string(&path)?,
+                original.replacen(value, "\"new-model\"", 1)
+            );
+            assert_eq!(
+                read_configured_model(temp.path()).as_deref(),
+                Some("new-model")
+            );
+            let _: toml::Value = toml::from_str(&fs::read_to_string(path)?)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn review_regression_model_setter_fails_closed_for_invalid_config_or_root_type() -> Result<()> {
+        for original in [
+            "model = 123\n[profiles.fast]\nmodel = 'nested'\n",
+            "model = 'one'\nmodel = 'duplicate'\n",
+            "model = \"unterminated\n",
+            "[model]\nname = 'table'\n",
+        ] {
+            let temp = tempdir()?;
+            let path = temp.path().join("config.toml");
+            fs::write(&path, original)?;
+            assert!(set_configured_model(temp.path(), "new-model").is_err());
+            assert_eq!(fs::read_to_string(path)?, original);
+        }
+        Ok(())
+    }
 
     #[test]
     fn reads_bundle_and_restores_it() -> Result<()> {

@@ -46,21 +46,28 @@ fn credentials_path(env: &AppEnv) -> PathBuf {
     claude_dir(env).join(".credentials.json")
 }
 
-fn claude_config_paths(env: &AppEnv) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from) {
-        paths.push(dir.join(".claude.json"));
-    }
-    paths.push(env.home_dir.join(".claude.json"));
-    paths.push(claude_dir(env).join(".claude.json"));
-    paths
+fn config_path(env: &AppEnv) -> PathBuf {
+    config_path_for_scope(
+        env,
+        std::env::var_os("CLAUDE_CONFIG_DIR")
+            .as_deref()
+            .map(Path::new),
+    )
 }
 
-fn config_path(env: &AppEnv) -> PathBuf {
-    claude_config_paths(env)
-        .into_iter()
-        .find(|path| path.is_file())
-        .unwrap_or_else(|| env.home_dir.join(".claude.json"))
+fn config_path_for_scope(env: &AppEnv, explicit_dir: Option<&Path>) -> PathBuf {
+    // A missing scoped config is still the scoped restore target. Falling
+    // back to the default account would pair identities across scopes.
+    if let Some(dir) = explicit_dir {
+        return dir.join(".claude.json");
+    }
+    [
+        env.home_dir.join(".claude.json"),
+        env.home_dir.join(".claude/.claude.json"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+    .unwrap_or_else(|| env.home_dir.join(".claude.json"))
 }
 
 fn keychain_service_for_dir(dir: Option<&Path>) -> String {
@@ -236,11 +243,21 @@ struct KeychainRestoreGuard {
 
 #[cfg(target_os = "macos")]
 impl KeychainRestoreGuard {
-    fn stage() -> Self {
-        Self {
-            previous: read_keychain_password(),
+    fn stage() -> Result<Self> {
+        Self::stage_with_reader(|| {
+            super::claude_keychain::get_password(
+                &keychain_service(),
+                &super::claude_keychain::account_name(),
+            )
+        })
+    }
+
+    fn stage_with_reader(read: impl FnOnce() -> Result<Option<String>>) -> Result<Self> {
+        Ok(Self {
+            previous: read()
+                .context("failed to stage Claude Keychain credentials; restore aborted")?,
             committed: false,
-        }
+        })
     }
 
     fn commit(mut self) {
@@ -628,7 +645,14 @@ fn parse_usage(body: &str) -> Result<ProviderUsageView> {
             window.will_last_to_reset = Some(pace.will_last_to_reset);
         }
     }
-    Ok(ProviderUsageView {
+    let invalid_model_limit = ["seven_day_sonnet", "seven_day_opus"]
+        .into_iter()
+        .any(|key| {
+            value.get(key).is_some_and(|raw| {
+                !raw.is_null() && !windows.iter().any(|window| window.key == key)
+            })
+        });
+    let mut usage = ProviderUsageView {
         provider: AiProvider::Claude,
         fetched_at,
         status: ProviderUsageStatus::Ok,
@@ -637,7 +661,36 @@ fn parse_usage(body: &str) -> Result<ProviderUsageView> {
         windows,
         plan_label: None,
         detail: None,
-    })
+    };
+    if invalid_model_limit || !usage_covers_required_limits(&usage, None) {
+        usage.status = ProviderUsageStatus::Error;
+        usage.detail =
+            Some("Claude quota response is incomplete; required limits are unknown".into());
+    }
+    Ok(usage)
+}
+
+/// Automatic selection must not turn missing quota into available headroom.
+pub(crate) fn usage_covers_required_limits(
+    usage: &ProviderUsageView,
+    known: Option<&ProviderUsageView>,
+) -> bool {
+    let usable = |key: &str| {
+        usage.windows.iter().any(|window| {
+            window.key == key && window.used_percent.is_some_and(|percent| percent <= 100)
+        })
+    };
+    ["five_hour", "seven_day"].into_iter().all(usable)
+        && known.is_none_or(|previous| {
+            previous.windows.iter().all(|window| {
+                !matches!(window.key.as_str(), "seven_day_sonnet" | "seven_day_opus")
+                    || usable(&window.key)
+            })
+        })
+        && usage.windows.iter().all(|window| {
+            !matches!(window.key.as_str(), "seven_day_sonnet" | "seven_day_opus")
+                || usable(&window.key)
+        })
 }
 
 impl ProviderAdapter for ClaudeAdapter {
@@ -790,7 +843,7 @@ impl ProviderAdapter for ClaudeAdapter {
             Some(super::FileRestoreGuard::stage(&parent, &file_targets)?)
         };
         #[cfg(target_os = "macos")]
-        let keychain_guard = KeychainRestoreGuard::stage();
+        let keychain_guard = KeychainRestoreGuard::stage()?;
 
         restore_snapshot_inner(env, snapshot)?;
 
@@ -1091,6 +1144,90 @@ fn status_view(status: ProviderUsageStatus, http_status: u16) -> ProviderUsageVi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_review_scoped_config_never_uses_default_identity() {
+        let (_temp, env) = test_env();
+        let default = env.home_dir.join(".claude.json");
+        let original =
+            r#"{"oauthAccount":{"emailAddress":"default@example.com","accountUuid":"default"}}"#;
+        fs::write(&default, original).unwrap();
+        let scoped_dir = env.home_dir.join("scoped");
+        fs::create_dir_all(&scoped_dir).unwrap();
+        let path = config_path_for_scope(&env, Some(&scoped_dir));
+        assert_eq!(path, scoped_dir.join(".claude.json"));
+        let credentials = serde_json::json!({"claudeAiOauth": {
+            "email": "scoped@example.com", "accountUuid": "scoped", "accessToken": "fixture"
+        }});
+        let identity =
+            identity_from_bundle_parts(read_config_value(&path).as_ref(), Some(&credentials))
+                .unwrap();
+        assert_eq!(identity.subject.as_deref(), Some("scoped"));
+        assert_eq!(identity.email, "scoped@example.com");
+        fs::write(&path, r#"{"oauthAccount":{"accountUuid":"scoped"}}"#).unwrap();
+        assert_eq!(config_path_for_scope(&env, Some(&scoped_dir)), path);
+        assert_eq!(fs::read_to_string(default).unwrap(), original);
+    }
+
+    #[test]
+    fn provider_review_default_config_retains_legacy_fallback() {
+        let (_temp, env) = test_env();
+        let default = env.home_dir.join(".claude.json");
+        assert_eq!(config_path_for_scope(&env, None), default);
+        let legacy = env.home_dir.join(".claude/.claude.json");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, "{}").unwrap();
+        assert_eq!(config_path_for_scope(&env, None), legacy);
+        fs::write(&default, "{}").unwrap();
+        assert_eq!(config_path_for_scope(&env, None), default);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn provider_review_keychain_read_error_cannot_construct_rollback_guard() {
+        // No guard exists on error, so Drop cannot delete a credential.
+        let staged =
+            KeychainRestoreGuard::stage_with_reader(|| anyhow::bail!("fixture read denied"));
+        let error = match staged {
+            Ok(guard) => {
+                guard.commit();
+                panic!("read errors must abort staging")
+            }
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("fixture read denied"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn provider_review_keychain_staging_preserves_verified_presence() {
+        for previous in [None, Some("fixture password".to_owned())] {
+            let guard = KeychainRestoreGuard::stage_with_reader(|| Ok(previous.clone())).unwrap();
+            let preserved = guard.previous == previous;
+            guard.commit(); // Never invoke a real Keychain write in this test.
+            assert!(preserved);
+        }
+    }
+
+    #[test]
+    fn provider_review_partial_oauth_usage_is_unknown() {
+        for body in [
+            r#"{}"#,
+            r#"{"five_hour":{"utilization":1}}"#,
+            r#"{"seven_day":{"utilization":1}}"#,
+            r#"{"five_hour":{"utilization":1},"seven_day":{"utilization":"invalid"}}"#,
+            r#"{"five_hour":{"utilization":-1},"seven_day":{"utilization":1}}"#,
+            r#"{"five_hour":{"utilization":1},"seven_day":{"utilization":1},"seven_day_opus":{"utilization":"invalid"}}"#,
+        ] {
+            let usage = parse_usage(body).unwrap();
+            assert_eq!(usage.status, ProviderUsageStatus::Error, "{body}");
+        }
+        let complete =
+            parse_usage(r#"{"five_hour":{"utilization":1},"seven_day":{"utilization":99},"seven_day_opus":null}"#)
+                .unwrap();
+        assert_eq!(complete.status, ProviderUsageStatus::Ok);
+        assert!(usage_covers_required_limits(&complete, None));
+    }
 
     #[test]
     fn explicit_config_dir_has_its_own_keychain_service() {

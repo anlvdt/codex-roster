@@ -61,7 +61,9 @@ enum Decision {
 }
 
 fn claude_binding_utilization(usage: &ProviderUsageView) -> Option<u8> {
-    if usage.status != ProviderUsageStatus::Ok {
+    if usage.status != ProviderUsageStatus::Ok
+        || !crate::provider::claude::usage_covers_required_limits(usage, None)
+    {
         return None;
     }
     usage
@@ -550,6 +552,33 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_review_partial_usage_cannot_qualify_for_auto_switch() {
+        for missing in ["five_hour", "seven_day"] {
+            let mut partial = usage(ProviderUsageStatus::Ok, 1, 1);
+            partial.windows.retain(|window| window.key != missing);
+            assert_eq!(claude_binding_utilization(&partial), None);
+        }
+        let mut invalid = usage(ProviderUsageStatus::Ok, 1, 1);
+        invalid.windows[1].used_percent = None;
+        assert_eq!(claude_binding_utilization(&invalid), None);
+        invalid.windows[1].used_percent = Some(101);
+        assert_eq!(claude_binding_utilization(&invalid), None);
+        let mut model_unknown = usage(ProviderUsageStatus::Ok, 1, 1);
+        model_unknown
+            .windows
+            .push(crate::model::ProviderUsageWindowView {
+                key: "seven_day_opus".into(),
+                used_percent: None,
+                ..Default::default()
+            });
+        assert_eq!(claude_binding_utilization(&model_unknown), None);
+        assert_eq!(
+            claude_binding_utilization(&usage(ProviderUsageStatus::Ok, 1, 99)),
+            Some(99)
+        );
+    }
 
     fn settings(
         strategy: ClaudeAutoSwitchStrategy,

@@ -353,9 +353,28 @@ struct ResetsMeta {
 /// after an announcement still tells the user, without replaying old history.
 pub fn fetch_new_reset_events(app_data_dir: &Path) -> Result<Vec<ResetEvent>> {
     let now = OffsetDateTime::now_utc();
+    process_reset_feed_results(
+        app_data_dir,
+        fetch_resets_status(),
+        fetch_resets_list(),
+        now,
+    )
+}
+
+fn process_reset_feed_results(
+    app_data_dir: &Path,
+    status: Result<ResetsStatusResponse>,
+    list: Result<ResetsListResponse>,
+    now: OffsetDateTime,
+) -> Result<Vec<ResetEvent>> {
+    // A failed poll is not an empty successful baseline. Leave notification
+    // state untouched so recovery can still replay recent announcements.
+    if let (Err(status_error), Err(list_error)) = (&status, &list) {
+        bail!("reset polling failed: status: {status_error}; list: {list_error}");
+    }
     let mut events = Vec::new();
 
-    match fetch_resets_status() {
+    match status {
         Ok(status) => {
             if let Some(event) = scheduled_status_event(status.data.scheduled_reset.as_ref()) {
                 push_unique_event(&mut events, event);
@@ -375,7 +394,7 @@ pub fn fetch_new_reset_events(app_data_dir: &Path) -> Result<Vec<ResetEvent>> {
         }
     }
 
-    if let Ok(list) = fetch_resets_list() {
+    if let Ok(list) = list {
         for announcement in list.data {
             if let Some(event) = announcement_event(Some(&announcement), map_completed_reset_kind) {
                 push_unique_event(&mut events, event);
@@ -702,6 +721,93 @@ fn write_notification_state(path: &Path, state: &NotificationState) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn recent_list_fixture() -> ResetsListResponse {
+        serde_json::from_value(serde_json::json!({"data": [{
+            "id": "recent", "reset_type": "regular",
+            "announced_at": "2026-08-22T01:00:00Z", "text": "Confirmed reset"
+        }]}))
+        .expect("list fixture")
+    }
+
+    #[test]
+    fn failed_reset_feeds_leave_state_untouched_and_recovery_replays_recent_event() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let now = parse_event_time("2026-08-22T02:00:00Z").expect("now");
+        let path = temp.path().join(NOTIFICATION_STATE_FILE);
+        assert!(
+            process_reset_feed_results(
+                temp.path(),
+                Err(anyhow::anyhow!("status offline")),
+                Err(anyhow::anyhow!("list offline")),
+                now
+            )
+            .is_err()
+        );
+        assert!(
+            !path.exists(),
+            "failed first poll must not initialize state"
+        );
+
+        let events = process_reset_feed_results(
+            temp.path(),
+            Err(anyhow::anyhow!("status offline")),
+            Ok(recent_list_fixture()),
+            now + time::Duration::minutes(1),
+        )
+        .expect("recovery");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, "recent");
+        let before = fs::read(&path).expect("state");
+        assert!(
+            process_reset_feed_results(
+                temp.path(),
+                Err(anyhow::anyhow!("status offline")),
+                Err(anyhow::anyhow!("list offline")),
+                now + time::Duration::hours(1)
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(path).expect("unchanged state"), before);
+    }
+
+    #[test]
+    fn reset_feeds_preserve_both_partial_success_paths_and_successful_empty_poll() {
+        let now = parse_event_time("2026-08-22T02:00:00Z").expect("now");
+        for status_succeeds in [false, true] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let status = if status_succeeds {
+                Ok(
+                    serde_json::from_value(serde_json::json!({"data": {"latest_reset": {
+                        "id": "recent", "reset_type": "regular",
+                        "announced_at": "2026-08-22T01:00:00Z", "text": "Confirmed reset"
+                    }}}))
+                    .expect("status fixture"),
+                )
+            } else {
+                Err(anyhow::anyhow!("status offline"))
+            };
+            let list = if status_succeeds {
+                Err(anyhow::anyhow!("list offline"))
+            } else {
+                Ok(recent_list_fixture())
+            };
+            let events = process_reset_feed_results(temp.path(), status, list, now)
+                .expect("partial success");
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].id, "recent");
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let events = process_reset_feed_results(
+            temp.path(),
+            Err(anyhow::anyhow!("status offline")),
+            Ok(ResetsListResponse { data: Vec::new() }),
+            now,
+        )
+        .expect("successful empty list");
+        assert!(events.is_empty());
+        assert!(temp.path().join(NOTIFICATION_STATE_FILE).exists());
+    }
 
     #[test]
     fn status_only_outlook_preserves_schedule_without_probabilities() {

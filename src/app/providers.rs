@@ -298,6 +298,20 @@ where
             });
         }
 
+        self.provider_usage_with_adapter(
+            adapter(provider),
+            account_id,
+            &crate::claude_quota_bridge::config_dir(&self.env.home_dir),
+        )
+    }
+
+    fn provider_usage_with_adapter(
+        &self,
+        provider_adapter: &dyn ProviderAdapter,
+        account_id: Option<Uuid>,
+        claude_config_dir: &std::path::Path,
+    ) -> Result<ProviderUsageOutput> {
+        let provider = provider_adapter.provider();
         let store = self.provider_store();
         let is_live_request = account_id.is_none();
         let (mut identity, mut snapshot, saved_record) = match account_id {
@@ -312,7 +326,7 @@ where
                 (record.identity.clone(), snapshot, Some(record))
             }
             None => {
-                let live = adapter(provider).read_live_auth(&self.env)?;
+                let live = provider_adapter.read_live_auth(&self.env)?;
                 let record = if provider == AiProvider::Claude {
                     store
                         .list(&self.env.kind, Some(provider))?
@@ -328,8 +342,8 @@ where
             saved_record
                 .as_ref()
                 .map(|record| {
-                    preserve_claude_api_cooldown(
-                        &self.env.home_dir,
+                    preserve_claude_api_cooldown_in_dir(
+                        claude_config_dir,
                         record,
                         time::OffsetDateTime::now_utc(),
                     )
@@ -346,7 +360,7 @@ where
                     .and_then(|record| record.cached_usage.as_ref()),
             )
             && let Some(usage) = crate::claude_quota_bridge::read_usage(
-                &crate::claude_quota_bridge::config_dir(&self.env.home_dir),
+                claude_config_dir,
                 &identity,
                 time::OffsetDateTime::now_utc(),
             )
@@ -385,7 +399,6 @@ where
                 usage,
             });
         }
-        let provider_adapter = adapter(provider);
         let mut fetched = match &saved_record {
             _ if is_live_request => provider_adapter.fetch_usage(&snapshot),
             Some(record) => match self.fetch_saved_usage_with_refresh(
@@ -409,12 +422,32 @@ where
             && let Ok(refreshed) = provider_adapter.read_live_auth(&self.env)
             && refreshed.snapshot != snapshot
         {
+            if !identity.matches(&refreshed.identity) {
+                bail!(
+                    "live {provider} identity changed while checking usage; retry for the current account"
+                );
+            }
             identity = refreshed.identity;
             snapshot = refreshed.snapshot;
             fetched = provider_adapter.fetch_usage(&snapshot);
         }
         let usage = match fetched {
-            Ok(usage) if usage.status == ProviderUsageStatus::Ok => usage,
+            Ok(mut usage) if usage.status == ProviderUsageStatus::Ok => {
+                if provider == AiProvider::Claude
+                    && !crate::provider::claude::usage_covers_required_limits(
+                        &usage,
+                        saved_record
+                            .as_ref()
+                            .and_then(|record| record.cached_usage.as_ref()),
+                    )
+                {
+                    usage.status = ProviderUsageStatus::Error;
+                    usage.detail = Some("Claude quota response omits required or previously known limits; quota is unknown".into());
+                    stale_or_status(saved_record.as_ref(), usage)
+                } else {
+                    usage
+                }
+            }
             Ok(usage) => stale_or_status(saved_record.as_ref(), usage),
             Err(error) => {
                 if let Some(record) = &saved_record
@@ -478,9 +511,9 @@ where
             }
         }
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        let removed = store.remove(&self.env.kind, account_id)?;
         LocalSecretStore::new(&self.env.app_data_dir.join("claude-desktop-logins"))
             .delete(&account_id.to_string())?;
-        let removed = store.remove(&self.env.kind, account_id)?;
         Ok(crate::model::ProviderDeleteOutput {
             id: removed.id,
             email: removed.identity.email,
@@ -707,11 +740,19 @@ fn preserve_claude_api_cooldown(
     now: time::OffsetDateTime,
 ) -> Result<Option<time::Duration>> {
     let dir = crate::claude_quota_bridge::config_dir(home);
+    preserve_claude_api_cooldown_in_dir(&dir, record, now)
+}
+
+fn preserve_claude_api_cooldown_in_dir(
+    dir: &std::path::Path,
+    record: &ProviderSavedAccount,
+    now: time::OffsetDateTime,
+) -> Result<Option<time::Duration>> {
     if let Some(wait) = claude_rate_limit_wait(record, now) {
-        crate::claude_quota_bridge::remember_api_cooldown(&dir, record.id, now + wait)?;
+        crate::claude_quota_bridge::remember_api_cooldown(dir, record.id, now + wait)?;
     }
     Ok(crate::claude_quota_bridge::api_cooldown(
-        &dir, record.id, now,
+        dir, record.id, now,
     ))
 }
 
@@ -883,6 +924,287 @@ fn legacy_usage_to_provider(usage: AccountUsageView) -> ProviderUsageView {
 mod tests {
     use super::*;
     use crate::model::{DisplayIdentity, EnvironmentKind};
+
+    struct ReviewAdapter {
+        live: std::sync::Mutex<std::collections::VecDeque<crate::provider::ProviderAuthBundle>>,
+        fetched: std::sync::Mutex<std::collections::VecDeque<ProviderUsageView>>,
+    }
+
+    impl ProviderAdapter for ReviewAdapter {
+        fn provider(&self) -> AiProvider {
+            AiProvider::Claude
+        }
+        fn capabilities(&self) -> &'static [crate::model::ProviderCapability] {
+            &[]
+        }
+        fn try_read_live_auth(
+            &self,
+            env: &crate::env::AppEnv,
+        ) -> Result<Option<crate::provider::ProviderAuthBundle>> {
+            self.read_live_auth(env).map(Some)
+        }
+        fn read_live_auth(
+            &self,
+            _env: &crate::env::AppEnv,
+        ) -> Result<crate::provider::ProviderAuthBundle> {
+            Ok(self
+                .live
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("fixture live identity"))
+        }
+        fn try_read_live_identity_noninteractive(
+            &self,
+            _env: &crate::env::AppEnv,
+        ) -> Result<Option<DisplayIdentity>> {
+            Ok(None)
+        }
+        fn identity_from_snapshot(&self, _snapshot: &SnapshotBlob) -> Result<DisplayIdentity> {
+            bail!("unused fixture identity extraction")
+        }
+        fn restore_snapshot(
+            &self,
+            _env: &crate::env::AppEnv,
+            _snapshot: &SnapshotBlob,
+        ) -> Result<()> {
+            bail!("fixture must not restore credentials")
+        }
+        fn fetch_usage(&self, _snapshot: &SnapshotBlob) -> Result<ProviderUsageView> {
+            Ok(self
+                .fetched
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("fixture quota response"))
+        }
+    }
+
+    fn review_app() -> (
+        tempfile::TempDir,
+        App<crate::secrets::test_support::MemorySecretStore>,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let env = crate::env::AppEnv {
+            kind: EnvironmentKind::Macos,
+            home_dir: temp.path().join("home"),
+            codex_root: temp.path().join("home/.codex"),
+            app_data_dir: temp.path().join("data"),
+        };
+        let repository = crate::repository::SnapshotRepository::new(
+            &env.app_data_dir,
+            crate::secrets::test_support::MemorySecretStore::default(),
+        );
+        (temp, App::new(env, repository))
+    }
+
+    fn review_bundle(subject: &str, token: &str) -> crate::provider::ProviderAuthBundle {
+        use base64::Engine;
+        crate::provider::ProviderAuthBundle {
+            identity: DisplayIdentity {
+                email: format!("{subject}@example.com"),
+                subject: Some(subject.into()),
+                name: None,
+                plan_label: None,
+            },
+            snapshot: SnapshotBlob {
+                schema_version: crate::model::SNAPSHOT_SCHEMA_VERSION,
+                files: vec![crate::model::SnapshotFile {
+                    name: "claude_credentials.json".into(),
+                    bytes_base64: base64::engine::general_purpose::STANDARD.encode(format!(
+                        r#"{{"claudeAiOauth":{{"accessToken":"{token}"}}}}"#
+                    )),
+                }],
+            },
+        }
+    }
+
+    fn review_quota(percent: u8) -> ProviderUsageView {
+        let mut quota = usage(ProviderUsageStatus::Ok, None);
+        quota.fetched_at = time::OffsetDateTime::now_utc();
+        quota.windows = ["five_hour", "seven_day"]
+            .into_iter()
+            .map(|key| ProviderUsageWindowView {
+                key: key.into(),
+                used_percent: Some(percent),
+                ..Default::default()
+            })
+            .collect();
+        quota
+    }
+
+    #[test]
+    fn provider_review_identity_changed_retry_leaves_both_caches_untouched() {
+        let (_temp, app) = review_app();
+        let store = app.provider_store();
+        let a = review_bundle("a", "a-token");
+        let b = review_bundle("b", "b-token");
+        let (record_a, _) = store
+            .save(&app.env.kind, AiProvider::Claude, &a.identity, &a.snapshot)
+            .unwrap();
+        let (record_b, _) = store
+            .save(&app.env.kind, AiProvider::Claude, &b.identity, &b.snapshot)
+            .unwrap();
+        store
+            .record_usage(&app.env.kind, record_a.id, review_quota(10))
+            .unwrap();
+        store
+            .record_usage(&app.env.kind, record_b.id, review_quota(90))
+            .unwrap();
+        let before_a = store.get(&app.env.kind, record_a.id).unwrap().unwrap();
+        let before_b = store.get(&app.env.kind, record_b.id).unwrap().unwrap();
+        let fixture = ReviewAdapter {
+            live: std::sync::Mutex::new([a, b].into()),
+            fetched: std::sync::Mutex::new(
+                [
+                    usage(ProviderUsageStatus::CredentialExpired, Some("HTTP 401")),
+                    review_quota(90),
+                ]
+                .into(),
+            ),
+        };
+        let error = app
+            .provider_usage_with_adapter(&fixture, None, &app.env.home_dir.join(".claude"))
+            .unwrap_err();
+        assert!(error.to_string().contains("identity changed"));
+        assert_eq!(
+            fixture.fetched.lock().unwrap().len(),
+            1,
+            "must reject before fetching the new account"
+        );
+        for before in [before_a, before_b] {
+            let after = store.get(&app.env.kind, before.id).unwrap().unwrap();
+            assert_eq!(after.cached_usage, before.cached_usage);
+            assert_eq!(after.cached_usage_error, before.cached_usage_error);
+        }
+    }
+
+    #[test]
+    fn provider_review_same_identity_token_rotation_still_retries_and_caches() {
+        let (_temp, app) = review_app();
+        let store = app.provider_store();
+        let a = review_bundle("a", "old-token");
+        let (record, _) = store
+            .save(&app.env.kind, AiProvider::Claude, &a.identity, &a.snapshot)
+            .unwrap();
+        let fresh = review_quota(40);
+        let fixture = ReviewAdapter {
+            live: std::sync::Mutex::new([a, review_bundle("a", "rotated-token")].into()),
+            fetched: std::sync::Mutex::new(
+                [
+                    usage(ProviderUsageStatus::CredentialExpired, None),
+                    fresh.clone(),
+                ]
+                .into(),
+            ),
+        };
+        let output = app
+            .provider_usage_with_adapter(&fixture, None, &app.env.home_dir.join(".claude"))
+            .unwrap();
+        assert_eq!(output.account.subject.as_deref(), Some("a"));
+        assert_eq!(output.usage, fresh);
+        assert_eq!(
+            store
+                .get(&app.env.kind, record.id)
+                .unwrap()
+                .unwrap()
+                .cached_usage,
+            Some(fresh)
+        );
+        assert!(fixture.fetched.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn provider_review_omitted_known_model_cap_preserves_cache_as_stale() {
+        let (_temp, app) = review_app();
+        let store = app.provider_store();
+        let a = review_bundle("a", "fixture-token");
+        let (record, _) = store
+            .save(&app.env.kind, AiProvider::Claude, &a.identity, &a.snapshot)
+            .unwrap();
+        let mut cached = review_quota(10);
+        cached.windows.push(ProviderUsageWindowView {
+            key: "seven_day_opus".into(),
+            used_percent: Some(100),
+            ..Default::default()
+        });
+        store
+            .record_usage(&app.env.kind, record.id, cached.clone())
+            .unwrap();
+        let fixture = ReviewAdapter {
+            live: std::sync::Mutex::new([a].into()),
+            fetched: std::sync::Mutex::new([review_quota(1)].into()),
+        };
+        let output = app
+            .provider_usage_with_adapter(&fixture, None, &app.env.home_dir.join(".claude"))
+            .unwrap();
+        assert_eq!(output.usage.status, ProviderUsageStatus::Stale);
+        assert_eq!(output.usage.windows, cached.windows);
+        let after = store.get(&app.env.kind, record.id).unwrap().unwrap();
+        assert_eq!(after.cached_usage, Some(cached));
+        assert!(
+            after
+                .cached_usage_error
+                .unwrap()
+                .contains("previously known limits")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn provider_review_failed_index_write_retains_desktop_snapshot() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_temp, app) = review_app();
+        let store = app.provider_store();
+        let a = review_bundle("a", "fixture-token");
+        let (record, _) = store
+            .save(&app.env.kind, AiProvider::Claude, &a.identity, &a.snapshot)
+            .unwrap();
+        let desktop_store =
+            LocalSecretStore::new(&app.env.app_data_dir.join("claude-desktop-logins"));
+        let payload = serde_json::to_vec(&a.snapshot).unwrap();
+        desktop_store
+            .save(&record.id.to_string(), &payload)
+            .unwrap();
+        let index_dir = app.env.app_data_dir.join("providers");
+        let previous_permissions = std::fs::metadata(&index_dir).unwrap().permissions();
+        std::fs::set_permissions(&index_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = app.provider_delete(record.id, true);
+        std::fs::set_permissions(&index_dir, previous_permissions).unwrap();
+        assert!(result.is_err(), "fixture must prevent the index write");
+        assert!(store.get(&app.env.kind, record.id).unwrap().is_some());
+        assert_eq!(
+            desktop_store.load(&record.id.to_string()).unwrap(),
+            Some(payload)
+        );
+        assert!(store.load_snapshot(&app.env.kind, record.id).is_ok());
+    }
+
+    #[test]
+    fn provider_review_successful_delete_removes_desktop_snapshot() {
+        let (_temp, app) = review_app();
+        let store = app.provider_store();
+        let a = review_bundle("a", "fixture-token");
+        let (record, _) = store
+            .save(&app.env.kind, AiProvider::Claude, &a.identity, &a.snapshot)
+            .unwrap();
+        let desktop_store =
+            LocalSecretStore::new(&app.env.app_data_dir.join("claude-desktop-logins"));
+        desktop_store
+            .save(
+                &record.id.to_string(),
+                &serde_json::to_vec(&a.snapshot).unwrap(),
+            )
+            .unwrap();
+        app.provider_delete(record.id, true).unwrap();
+        assert!(store.get(&app.env.kind, record.id).unwrap().is_none());
+        assert!(
+            desktop_store
+                .load(&record.id.to_string())
+                .unwrap()
+                .is_none()
+        );
+    }
 
     fn usage(status: ProviderUsageStatus, detail: Option<&str>) -> ProviderUsageView {
         ProviderUsageView {

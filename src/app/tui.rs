@@ -256,6 +256,7 @@ pub(crate) struct InteractiveMenu {
 struct PersistentRenderState {
     total_lines: usize,
     row_lines: Vec<usize>,
+    clipped: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -494,26 +495,57 @@ fn select_persistent_entry(
     let term = Term::stderr();
     let mut selection = default_selection.min(menu.len().saturating_sub(1));
     term.hide_cursor()?;
-    let render_state = render_persistent_menu(&term, menu, selection, feedback)?;
+    let mut rendered_size = term.size();
+    let mut render_state = render_persistent_menu(&term, menu, selection, feedback)?;
     loop {
-        match term.read_key()? {
+        let key = term.read_key()?;
+        let current_size = term.size();
+        if current_size != rendered_size {
+            // A resize may reflow already printed rows. Their old physical
+            // positions cannot be used for selective rewrites or clearing.
+            term.clear_screen()?;
+            render_state = render_persistent_menu(&term, menu, selection, feedback)?;
+            rendered_size = current_size;
+        }
+        match key {
             Key::ArrowUp | Key::Char('k') => {
                 let next = if selection == 0 {
                     menu.len().saturating_sub(1)
                 } else {
                     selection - 1
                 };
-                update_persistent_selection(&term, menu, &render_state, selection, next)?;
+                update_persistent_selection(
+                    &term,
+                    menu,
+                    &mut render_state,
+                    selection,
+                    next,
+                    feedback,
+                )?;
                 selection = next;
             }
             Key::ArrowDown | Key::Char('j') => {
                 let next = (selection + 1) % menu.len().max(1);
-                update_persistent_selection(&term, menu, &render_state, selection, next)?;
+                update_persistent_selection(
+                    &term,
+                    menu,
+                    &mut render_state,
+                    selection,
+                    next,
+                    feedback,
+                )?;
                 selection = next;
             }
             Key::ArrowLeft | Key::ArrowRight | Key::Tab => {
                 let next = jump_section(menu, selection);
-                update_persistent_selection(&term, menu, &render_state, selection, next)?;
+                update_persistent_selection(
+                    &term,
+                    menu,
+                    &mut render_state,
+                    selection,
+                    next,
+                    feedback,
+                )?;
                 selection = next;
             }
             Key::Enter => {
@@ -551,63 +583,111 @@ fn render_persistent_menu(
     selection: usize,
     feedback: &[String],
 ) -> Result<PersistentRenderState> {
-    let mut lines = 0usize;
+    let (rows, columns) = term.size();
+    let (lines, state) = persistent_menu_viewport(menu, selection, feedback, rows, columns);
+    for line in lines {
+        term.write_line(&line)?;
+    }
+    Ok(state)
+}
+
+fn fit_persistent_line(value: &str, columns: u16) -> String {
+    // Keep one column spare so reaching the right edge never triggers an
+    // automatic wrap. console handles ANSI styles and Unicode display widths.
+    let width = usize::from(columns).saturating_sub(1);
+    if width == 0 {
+        return String::new();
+    }
+    let single_line = value.replace(['\n', '\r', '\t'], " ");
+    console::truncate_str(&single_line, width, "…").into_owned()
+}
+
+fn persistent_menu_lines(
+    menu: &InteractiveMenu,
+    selection: usize,
+    feedback: &[String],
+    columns: u16,
+) -> (Vec<String>, PersistentRenderState) {
+    let mut lines = Vec::new();
     let mut row_lines = Vec::with_capacity(menu.len());
     for line in feedback {
-        term.write_line(line)?;
-        lines += 1;
+        lines.push(line.clone());
     }
     if !feedback.is_empty() {
-        term.write_line("")?;
-        lines += 1;
+        lines.push(String::new());
     }
     if !menu.prompt.is_empty() {
-        term.write_line(&style(menu.prompt).bold().to_string())?;
-        lines += 1;
+        lines.push(style(menu.prompt).bold().to_string());
     }
-    term.write_line(&render_section_heading("Active Account"))?;
-    lines += 1;
+    lines.push(render_section_heading("Active Account"));
     if let Some(current_status_label) = &menu.current_status_label {
-        term.write_line(
-            &style(format!("  {current_status_label}"))
+        lines.push(
+            style(format!("  {current_status_label}"))
                 .white()
                 .to_string(),
-        )?;
+        );
     } else {
-        term.write_line(&style("  (not logged in)").white().to_string())?;
+        lines.push(style("  (not logged in)").white().to_string());
     }
-    lines += 1;
-    term.write_line(&render_section_heading("Saved Accounts"))?;
-    lines += 1;
+    lines.push(render_section_heading("Saved Accounts"));
     if menu.accounts.is_empty() {
-        term.write_line(&style("  (no saved accounts)").dim().to_string())?;
-        lines += 1;
+        lines.push(style("  (no saved accounts)").dim().to_string());
     } else {
         for index in 0..menu.accounts.len() {
-            row_lines.push(lines);
-            term.write_line(&render_menu_row(menu, selection, index))?;
-            lines += 1;
+            row_lines.push(lines.len());
+            lines.push(render_menu_row(menu, selection, index));
         }
     }
-    term.write_line(&render_section_heading("Actions"))?;
-    lines += 1;
+    lines.push(render_section_heading("Actions"));
     for index in menu.accounts.len()..menu.len() {
-        row_lines.push(lines);
-        term.write_line(&render_menu_row(menu, selection, index))?;
-        lines += 1;
+        row_lines.push(lines.len());
+        lines.push(render_menu_row(menu, selection, index));
     }
-    term.write_line(&render_divider())?;
-    lines += 1;
-    term.write_line(
-        &style("Arrows or j/k move. Tab or left/right jumps sections. Enter selects. q exits.")
+    lines.push(render_divider());
+    lines.push(
+        style("Arrows or j/k move. Tab or left/right jumps sections. Enter selects. q exits.")
             .dim()
             .to_string(),
-    )?;
-    lines += 1;
-    Ok(PersistentRenderState {
-        total_lines: lines,
+    );
+    let state = PersistentRenderState {
+        total_lines: lines.len(),
         row_lines,
-    })
+        clipped: false,
+    };
+    let lines = lines
+        .into_iter()
+        .map(|line| fit_persistent_line(&line, columns))
+        .collect();
+    (lines, state)
+}
+
+fn persistent_menu_viewport(
+    menu: &InteractiveMenu,
+    selection: usize,
+    feedback: &[String],
+    rows: u16,
+    columns: u16,
+) -> (Vec<String>, PersistentRenderState) {
+    let (mut lines, mut state) = persistent_menu_lines(menu, selection, feedback, columns);
+    // The newline after the last row needs a spare physical row. Otherwise
+    // scrolling removes the first row and cursor-up can no longer reach it.
+    let capacity = usize::from(rows).saturating_sub(1);
+    if lines.len() > capacity {
+        let selected_row = state.row_lines.get(selection).copied().unwrap_or(0);
+        let start = selected_row
+            .saturating_sub(capacity / 2)
+            .min(lines.len().saturating_sub(capacity));
+        lines = lines.into_iter().skip(start).take(capacity).collect();
+        for row in &mut state.row_lines {
+            *row = row
+                .checked_sub(start)
+                .filter(|row| *row < capacity)
+                .unwrap_or(usize::MAX);
+        }
+        state.total_lines = lines.len();
+        state.clipped = true;
+    }
+    (lines, state)
 }
 
 fn render_menu_row(menu: &InteractiveMenu, selection: usize, index: usize) -> String {
@@ -627,11 +707,17 @@ fn render_divider() -> String {
 fn update_persistent_selection(
     term: &Term,
     menu: &InteractiveMenu,
-    render_state: &PersistentRenderState,
+    render_state: &mut PersistentRenderState,
     previous: usize,
     next: usize,
+    feedback: &[String],
 ) -> Result<()> {
     if previous == next {
+        return Ok(());
+    }
+    if render_state.clipped {
+        term.clear_last_lines(render_state.total_lines)?;
+        *render_state = render_persistent_menu(term, menu, next, feedback)?;
         return Ok(());
     }
     rewrite_menu_row(term, menu, render_state, previous, false)?;
@@ -650,7 +736,10 @@ fn rewrite_menu_row(
     let lines_up = render_state.total_lines.saturating_sub(line_index);
     term.move_cursor_up(lines_up)?;
     term.clear_line()?;
-    term.write_line(&render_menu_row_explicit(menu, index, selected))?;
+    term.write_line(&fit_persistent_line(
+        &render_menu_row_explicit(menu, index, selected),
+        term.size().1,
+    ))?;
     term.move_cursor_down(lines_up.saturating_sub(1))?;
     Ok(())
 }
@@ -879,6 +968,105 @@ mod tests {
     };
     use crate::repository::SnapshotRepository;
     use crate::secrets::test_support::MemorySecretStore;
+
+    #[test]
+    fn persistent_menu_keeps_unicode_rows_and_selection_aligned_across_width_changes() {
+        let menu = InteractiveMenu {
+            prompt: "Select an account with a long prompt",
+            current_status_label: Some(
+                "用户@example.com Plan: Pro 5h Remaining: 25% Weekly Remaining: 50%".to_owned(),
+            ),
+            accounts: vec![
+                InteractiveItem {
+                    label: "用户@example.com 5h Reset: tomorrow Weekly Reset: next week".to_owned(),
+                    action: InteractiveAction::Activate(Uuid::nil()),
+                },
+                InteractiveItem {
+                    label: "cafe\u{301}@example.com Plan: Plus Remaining: 30%".to_owned(),
+                    action: InteractiveAction::Activate(Uuid::nil()),
+                },
+            ],
+            actions: vec![InteractiveItem {
+                label: "Quit".to_owned(),
+                action: InteractiveAction::Quit,
+            }],
+        };
+        let feedback = vec![
+            "\x1b[31mLong feedback with 用户 and cafe\u{301}\x1b[0m\nsecond line\ttext".to_owned(),
+        ];
+        let (wide, wide_state) = persistent_menu_lines(&menu, 1, &feedback, 120);
+        let (narrow, narrow_state) = persistent_menu_lines(&menu, 1, &feedback, 24);
+        let (expanded, expanded_state) = persistent_menu_lines(&menu, 1, &feedback, 120);
+        assert_eq!(wide, expanded, "resize redraw restores unclipped text");
+        assert_eq!(wide_state.row_lines, narrow_state.row_lines);
+        assert_eq!(wide_state.row_lines, expanded_state.row_lines);
+        for (lines, state, columns) in [(&wide, &wide_state, 120), (&narrow, &narrow_state, 24)] {
+            assert_eq!(state.total_lines, lines.len());
+            for line in lines {
+                assert!(console::measure_text_width(line) < columns);
+                assert!(!line.contains(['\n', '\r', '\t']));
+            }
+            assert!(console::strip_ansi_codes(&lines[state.row_lines[1]]).starts_with("> "));
+            assert!(console::strip_ansi_codes(&lines[state.row_lines[0]]).starts_with("  "));
+            // Initial rendering and later row rewrites use the same fitter.
+            assert_eq!(
+                lines[state.row_lines[1]],
+                fit_persistent_line(&render_menu_row_explicit(&menu, 1, true), columns as u16)
+            );
+        }
+    }
+
+    #[test]
+    fn persistent_line_handles_tiny_terminals_and_unicode_display_width() {
+        for columns in 0..=8 {
+            let line = fit_persistent_line("\x1b[32m用户 cafe\u{301} 🦀\x1b[0m", columns);
+            assert!(console::measure_text_width(&line) <= usize::from(columns).saturating_sub(1));
+        }
+        assert_eq!(fit_persistent_line("用户", 5), "用户");
+        assert_eq!(fit_persistent_line("用户", 4), "用…");
+        assert_eq!(fit_persistent_line("cafe\u{301}", 5), "cafe\u{301}");
+    }
+
+    #[test]
+    fn persistent_menu_fits_terminal_height_and_keeps_every_selection_visible() {
+        let menu = InteractiveMenu {
+            prompt: "Choose an account",
+            current_status_label: Some("Active account".to_owned()),
+            accounts: (0..30)
+                .map(|index| InteractiveItem {
+                    label: format!("account-{index}@example.com"),
+                    action: InteractiveAction::Activate(Uuid::nil()),
+                })
+                .collect(),
+            actions: vec![InteractiveItem {
+                label: "Quit".to_owned(),
+                action: InteractiveAction::Quit,
+            }],
+        };
+        let feedback = vec!["Last operation completed".to_owned(); 10];
+        for rows in [2, 3, 8, 24, 80] {
+            for selection in 0..menu.len() {
+                let (lines, state) =
+                    persistent_menu_viewport(&menu, selection, &feedback, rows, 40);
+                assert!(lines.len() < usize::from(rows));
+                assert_eq!(state.total_lines, lines.len());
+                let selected_row = state.row_lines[selection];
+                assert!(selected_row < lines.len());
+                assert_eq!(
+                    lines[selected_row],
+                    fit_persistent_line(&render_menu_row_explicit(&menu, selection, true), 40)
+                );
+                for (index, row) in state.row_lines.iter().enumerate() {
+                    if *row != usize::MAX {
+                        assert_eq!(
+                            lines[*row],
+                            fit_persistent_line(&render_menu_row(&menu, selection, index), 40)
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     fn sample_status_with_email(email: &str, current_saved_id: Option<Uuid>) -> StatusOutput {
         StatusOutput {

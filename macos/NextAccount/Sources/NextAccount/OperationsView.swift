@@ -30,6 +30,19 @@ struct OperationsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .rosterSecondaryContent()
+        .sheet(isPresented: Binding(
+            get: { selection != nil },
+            set: { if !$0 { selection = nil } }
+        )) {
+            if let id = selection,
+               let account = accountForContextMenuAction(in: store.accounts, capturedID: id) {
+                OperationsAccountDetail(account: account)
+                    .environmentObject(language)
+            } else {
+                Text(language.text("Tài khoản không còn trong danh bạ.", "This account is no longer in the roster."))
+                    .padding(24)
+            }
+        }
         .onAppear {
             store.refreshTokenUsage(silently: true)
             store.refreshOpenAIStatus(silently: true)
@@ -62,12 +75,7 @@ struct OperationsView: View {
                     selection: $selection,
                     action: action,
                     reloginAll: { accounts in
-                        for account in accounts {
-                            NotificationCenter.default.post(
-                                name: .showReloginAccount,
-                                object: account.id.uuidString
-                            )
-                        }
+                        NotificationCenter.default.post(name: .showReloginAccount, object: accounts.map(\.id))
                     }
                 )
             } else {
@@ -278,5 +286,36 @@ struct OperationsView: View {
         case .generationInProgress:
             language.text("Chờ Codex hết tạo phản hồi", "Waiting for Codex generation to finish")
         }
+    }
+}
+
+private struct OperationsAccountDetail: View {
+    @EnvironmentObject private var language: LanguageStore
+    @Environment(\.dismiss) private var dismiss
+    let account: SavedAccount
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(account.displayName).font(RosterSecondaryChrome.title)
+            HStack {
+                Text(account.email).textSelection(.enabled)
+                CopyEmailButton(email: account.email)
+            }
+            if let plan = account.planLabel { Text(plan).foregroundStyle(.secondary) }
+            if account.archived {
+                Label(language.text("Đã cất", "Archived"), systemImage: "archivebox")
+            }
+            Text(account.usageStatus(in: language.language))
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+            PrismDualChamberGauge(fiveHour: account.usage?.fiveHour, weekly: account.usage?.weekly)
+            HStack {
+                Spacer()
+                Button(language.text("Đóng", "Close")) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(24)
+        .frame(width: RosterSecondaryChrome.sheetWidth)
     }
 }

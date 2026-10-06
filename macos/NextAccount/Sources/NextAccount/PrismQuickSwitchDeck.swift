@@ -1,8 +1,36 @@
 import SwiftUI
 
+/// Both the native host and the switchboard measure this exact displayed set.
+struct NotchDisplayedRoster {
+    let accounts: [SavedAccount]
+    let sectionCounts: [Int]
+
+    init(accounts: [SavedAccount], filter: RosterListFilter) {
+        self.accounts = accounts.filter { filter.matches($0) }
+        sectionCounts = NotchRosterLayout.planSectionAccountCounts(from: self.accounts)
+    }
+}
+
+/// There is exactly one update action per menu state. Busy states are status-only.
+enum RosterUpdateMenuAction: Equatable {
+    case check
+    case install
+    case none
+
+    static func resolve(_ state: GitHubUpdater.State) -> Self {
+        switch state {
+        case .available: .install
+        case .checking, .downloading, .installing: .none
+        default: .check
+        }
+    }
+}
+
 /// Panoramic Notch Console for Codex Roster (`NotchRosterLayout.deckWidth` × dynamic height).
 /// Frames the MacBook camera notch; dense upper strip + 2-column roster switchboard.
 struct PrismQuickSwitchDeck: View {
+    var notchNavigationWidth: CGFloat = 156
+    @Binding var rosterFilter: RosterListFilter
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @EnvironmentObject private var updater: GitHubUpdater
@@ -22,7 +50,6 @@ struct PrismQuickSwitchDeck: View {
     var openEditAccount: (SavedAccount) -> Void = { _ in }
     var openAbout: () -> Void = {}
 
-    @State private var rosterFilter: RosterListFilter = .all
     @State private var justSwitchedID: UUID? = nil
 
     private var activeAccount: SavedAccount? {
@@ -30,12 +57,12 @@ struct PrismQuickSwitchDeck: View {
     }
 
     private var filteredAccounts: [SavedAccount] {
-        let matching = store.accounts.filter { rosterFilter.matches($0) }
+        let matching = NotchDisplayedRoster(accounts: store.accounts, filter: rosterFilter).accounts
         return store.sortedAccounts(matching)
     }
 
     private var rosterSectionCounts: [Int] {
-        NotchRosterLayout.planSectionAccountCounts(from: filteredAccounts)
+        NotchDisplayedRoster(accounts: store.accounts, filter: rosterFilter).sectionCounts
     }
 
     private var rosterColumnCount: Int {
@@ -73,7 +100,7 @@ struct PrismQuickSwitchDeck: View {
             // Shortcuts only for accounts that can actually be switched to —
             // usable quota or a redeemable banked reset (not exhausted-only).
             let canSwitch = account.isUsableForSwitch || account.restingHasBankedReset
-            if !account.isActive && canSwitch && !account.requiresLogin && !account.usageErrorBlocksActivation {
+            if !account.archived && !account.isActive && canSwitch && !account.requiresLogin && !account.usageErrorBlocksActivation {
                 if nextShortcut <= 9 {
                     map[account.id] = nextShortcut
                     nextShortcut += 1
@@ -160,9 +187,7 @@ struct PrismQuickSwitchDeck: View {
     // MARK: - Upper Deck (Live | Camera gap | Usage) — balanced heights, stretch to fill
     private var upperDeckFramingNotch: some View {
         let geometry = NotchGeometry.detect()
-        let centerGapWidth = geometry.hasNotch
-            ? geometry.cameraWidth
-            : 156
+        let centerGapWidth = max(geometry.cameraWidth, notchNavigationWidth)
         return HStack(alignment: .top, spacing: 8) {
             upperLeftWing
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -588,16 +613,17 @@ struct PrismQuickSwitchDeck: View {
     }
 
     private var openAIStatusBadge: some View {
-        let isOperational = (store.openAIStatus?.indicator ?? "none") == "none"
+        let isOperational = store.openAIStatus?.isOperational
+        let tint = isOperational.map { $0 ? PrismTheme.emerald : PrismTheme.ruby } ?? PrismTheme.textSecondary
         return HStack(spacing: 5) {
             Circle()
-                .fill(isOperational ? PrismTheme.emerald : PrismTheme.ruby)
+                .fill(tint)
                 .frame(width: 6, height: 6)
-            Text(isOperational
-                ? language.text("OpenAI ổn", "OpenAI OK")
-                : language.text("Sự cố OpenAI", "OpenAI issue"))
+            Text(isOperational.map {
+                $0 ? language.text("OpenAI ổn", "OpenAI OK") : language.text("Sự cố OpenAI", "OpenAI issue")
+            } ?? language.text("OpenAI chưa rõ", "OpenAI unknown"))
                 .font(PrismTheme.fontCaptionBold)
-                .foregroundStyle(isOperational ? PrismTheme.emerald : PrismTheme.ruby)
+                .foregroundStyle(tint)
                 .lineLimit(1)
         }
         .padding(.horizontal, 8)
@@ -843,9 +869,7 @@ struct PrismQuickSwitchDeck: View {
                         Label(language.text("Phục hồi", "Import backup"), systemImage: "square.and.arrow.down")
                     }
                     Divider()
-                    Button { updater.checkForUpdates(currentVersion: AppInfo.shortVersion) } label: {
-                        Label(language.text("Kiểm tra cập nhật", "Check for updates"), systemImage: "arrow.down.app")
-                    }
+                    updateMenuItems
                     Button { openAbout() } label: {
                         Label(language.text("Giới thiệu", "About"), systemImage: "info.circle")
                     }
@@ -943,6 +967,38 @@ struct PrismQuickSwitchDeck: View {
             store.refreshResetOutlook(silently: true)
             store.refreshResetTimeline(silently: true)
             store.refreshResetJuice(silently: true)
+        }
+    }
+
+    @ViewBuilder
+    private var updateMenuItems: some View {
+        let state = updater.state
+        switch state {
+        case .checking:
+            Label(language.text("Đang kiểm tra cập nhật…", "Checking for updates…"), systemImage: "arrow.triangle.2.circlepath")
+        case .downloading:
+            Label(language.text("Đang tải bản cập nhật…", "Downloading update…"), systemImage: "arrow.down.circle")
+        case .installing:
+            Label(language.text("Đang cài bản cập nhật…", "Installing update…"), systemImage: "gearshape.2")
+        case .upToDate:
+            Label(language.text("Đang dùng bản mới nhất", "You're up to date"), systemImage: "checkmark.circle")
+        case .failed(let message):
+            Text(language.text("Cập nhật thất bại: \(message)", "Update failed: \(message)"))
+                .foregroundStyle(PrismTheme.ruby)
+                .help(message)
+        default:
+            EmptyView()
+        }
+        if RosterUpdateMenuAction.resolve(state) == .install, case .available(let update) = state {
+            Button { updater.installAvailableUpdate() } label: {
+                Label(language.text("Cài bản \(update.version)", "Install \(update.version)"), systemImage: "arrow.down.app")
+            }
+            .disabled(updater.state.isBusy)
+        } else if RosterUpdateMenuAction.resolve(state) == .check {
+            Button { updater.checkForUpdates(currentVersion: AppInfo.shortVersion) } label: {
+                Label(language.text("Kiểm tra cập nhật", "Check for updates"), systemImage: "arrow.down.app")
+            }
+            .disabled(updater.state.isBusy)
         }
     }
 
@@ -1107,7 +1163,11 @@ private struct PrismCompactAccountCard: View {
                 .popover(isPresented: $showsDetails) { accountDetails }
 
                 Group {
-                    if account.isActive {
+                    if account.archived {
+                        Label(language.text("Đã cất", "Archived"), systemImage: "archivebox")
+                            .font(PrismTheme.fontCaptionBold)
+                            .foregroundStyle(.secondary)
+                    } else if account.isActive {
                         HStack(spacing: 2) {
                             Image(systemName: "checkmark.circle.fill")
                                 .font(PrismTheme.fontChipIcon)
@@ -1197,6 +1257,21 @@ private struct PrismCompactAccountCard: View {
                 }
             }
             Divider()
+            Button {
+                guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID),
+                      !target.isActive else { return }
+                if target.archived {
+                    store.restore(target)
+                } else {
+                    store.archive(target)
+                }
+            } label: {
+                Label(account.archived
+                    ? language.text("Khôi phục", "Restore")
+                    : language.text("Cất tài khoản", "Archive account"),
+                    systemImage: account.archived ? "arrow.uturn.backward" : "archivebox")
+            }
+            .disabled(account.isActive || store.isBusyForActions || store.isWorking)
             Button(role: .destructive) {
                 guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
                 store.delete(target)
@@ -1210,7 +1285,7 @@ private struct PrismCompactAccountCard: View {
     /// Manual Switch when activation is not blocked — Free/exhausted rows stay
     /// switchable by hand. Shortcuts / Ready / auto-switch keep `isUsableForSwitch`.
     private var canOfferSwitch: Bool {
-        !account.usageErrorBlocksActivation
+        !account.archived && !account.usageErrorBlocksActivation
     }
 
     private func quotaLabel(_ title: String, percent: Int?) -> some View {
@@ -1305,6 +1380,9 @@ private struct PrismCompactAccountCard: View {
 
     /// Explicit row state so users don't infer from 0% bars alone.
     private var rowStatus: (text: String, tint: Color)? {
+        if account.archived {
+            return (language.text("Đã cất · không tự chuyển", "Archived · excluded from auto-switch"), PrismTheme.textSecondary)
+        }
         if account.isActive { return nil }
         if account.requiresLogin {
             return (language.text("Cần đăng nhập", "Needs Login"), PrismTheme.amber)

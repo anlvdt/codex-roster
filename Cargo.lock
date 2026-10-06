@@ -301,6 +301,7 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "time",
+ "toml",
  "ureq",
  "uuid",
 ]

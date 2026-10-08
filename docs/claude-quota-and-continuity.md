@@ -65,3 +65,13 @@ pending captures from earlier app versions.
 ## Live refresh behavior
 
 The app reads connected local quota every ten seconds while the Claude tab or notch is enabled. OAuth fallback checks run every minute and refresh the active account after two minutes; inactive accounts retain fifteen-minute caching. New local aggregates can be displayed with older model caps, but that combined view stays unverified and does not renew model freshness. See the [2026-10-08 audit](claude-quota-audit-2026-10-08.md) for findings, source research, and limits.
+
+## Automatic login detection
+
+AgentDock checks Claude Code's official `auth status` at launch, on opening the Claude surface, and every minute. Only a subscription login (`loggedIn: true`, `authMethod: claude.ai`, nonempty email) is synchronized into the encrypted roster. New accounts and rotated credentials are detected without pressing Save; unchanged credentials cause no writes. Synchronization validates the live credential email against the verified status and does not refresh tokens or restore credentials. Known quota, labels, and HTTP 429 cooldowns survive synchronization.
+
+The app connects the local quota bridge automatically, preserving the existing statusline and backing up settings. An installer failure leaves OAuth fallback available. Existing Claude Code processes need to be restarted before reading changed statusline settings.
+
+If signed out, the app shows **Not signed in**, keeps old quota identified as cached, and provides **Sign in** on the Claude surface. That button opens Claude's browser authentication for the live CLI; after completion the app detects and saves the account automatically. It never opens authentication in the background. User authentication is still required; account credentials cannot be inferred from a saved email or Desktop login. Credential-changing account actions and auto-switch pause during this sign-in flow.
+
+**Live** requires official authentication matching the account and fresh, error-free quota. Selected roster rows are labeled **Selected** rather than implying live telemetry. Automatic API polling pauses while signed out; local observation remains independent.

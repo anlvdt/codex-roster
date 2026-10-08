@@ -135,6 +135,84 @@ where
         })
     }
 
+    pub fn provider_sync_claude(&self, email: &str) -> Result<ProviderListOutput> {
+        self.provider_sync_claude_with_adapter(email, adapter(AiProvider::Claude))
+    }
+
+    fn provider_sync_claude_with_adapter(
+        &self,
+        email: &str,
+        provider_adapter: &dyn ProviderAdapter,
+    ) -> Result<ProviderListOutput> {
+        let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
+        let live = provider_adapter.read_live_auth(&self.env)?;
+        if provider_adapter.provider() != AiProvider::Claude
+            || !crate::provider::claude::has_oauth_token(&live.snapshot)
+            || email.trim().is_empty()
+            || live.identity.email == crate::provider::claude::UNKNOWN_EMAIL
+            || !live.identity.email.eq_ignore_ascii_case(email.trim())
+        {
+            bail!("Claude CLI login does not match the verified signed-in account");
+        }
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        let store = self.provider_store();
+        if let Some(record) =
+            store.find_matching(&self.env.kind, AiProvider::Claude, &live.identity)?
+        {
+            let (_, snapshot) = store.load_snapshot(&self.env.kind, record.id)?;
+            if snapshot != live.snapshot {
+                preserve_claude_api_cooldown(
+                    &self.env.home_dir,
+                    &record,
+                    time::OffsetDateTime::now_utc(),
+                )?;
+                let auth_error = record.requires_login()
+                    || record.consecutive_auth_failures > 0
+                    || record.cached_usage_error.as_deref().is_some_and(|error| {
+                        error.contains("HTTP 401")
+                            || error.contains("HTTP 403")
+                            || error.contains("claude_cli_auth_missing")
+                            || error.contains("OAuth access token not found")
+                    });
+                if auth_error {
+                    store.save_for_record(
+                        &self.env.kind,
+                        record.id,
+                        &live.identity,
+                        &live.snapshot,
+                    )?;
+                } else {
+                    store.save_rotated_snapshot(
+                        &self.env.kind,
+                        record.id,
+                        &snapshot,
+                        &live.snapshot,
+                    )?;
+                }
+            }
+        } else {
+            store.save(
+                &self.env.kind,
+                AiProvider::Claude,
+                &live.identity,
+                &live.snapshot,
+            )?;
+        }
+        let mut accounts = Vec::new();
+        for record in store.list(&self.env.kind, Some(AiProvider::Claude))? {
+            let (_, snapshot) = store.load_snapshot(&self.env.kind, record.id)?;
+            let mut view = record.view(record.identity.matches(&live.identity));
+            view.activation_block_reason = record.activation_block_reason(Some(&snapshot));
+            view.can_activate = view.activation_block_reason.is_none();
+            accounts.push(view);
+        }
+        Ok(ProviderListOutput {
+            environment: self.env.kind.clone(),
+            provider: Some(AiProvider::Claude),
+            accounts,
+        })
+    }
+
     pub fn provider_save_current(&self, provider: AiProvider) -> Result<ProviderSaveOutput> {
         if provider == AiProvider::OpenAi {
             let output = self.save_current()?;
@@ -1139,6 +1217,216 @@ mod tests {
             })
             .collect();
         quota
+    }
+
+    #[test]
+    fn sync_claude_detects_new_login_and_preserves_unchanged_record() {
+        let (_root, app) = review_app();
+        let bundle = review_bundle("synced", "token-one");
+        let fixture = ReviewAdapter {
+            live: std::sync::Mutex::new(
+                [
+                    review_bundle("synced", "token-one"),
+                    review_bundle("synced", "token-one"),
+                ]
+                .into(),
+            ),
+            fetched: std::sync::Mutex::new([].into()),
+        };
+        let output = app
+            .provider_sync_claude_with_adapter("SYNCED@example.com", &fixture)
+            .unwrap();
+        assert_eq!(output.accounts.len(), 1);
+        assert!(output.accounts[0].is_active);
+        let id = output.accounts[0].id;
+        let store = app.provider_store();
+        store
+            .record_usage(&app.env.kind, id, review_quota(20))
+            .unwrap();
+        store
+            .record_usage_error(
+                &app.env.kind,
+                id,
+                "Claude usage endpoint returned HTTP 429; retry after 600 seconds".into(),
+            )
+            .unwrap();
+        let before = store.get(&app.env.kind, id).unwrap().unwrap();
+        app.provider_sync_claude_with_adapter("synced@example.com", &fixture)
+            .unwrap();
+        let after = store.get(&app.env.kind, id).unwrap().unwrap();
+        assert_eq!(before.updated_at, after.updated_at);
+        assert_eq!(before.cached_usage_error, after.cached_usage_error);
+        assert_eq!(before.cached_usage, after.cached_usage);
+        assert_eq!(
+            store.load_snapshot(&app.env.kind, id).unwrap().1,
+            bundle.snapshot
+        );
+    }
+
+    #[test]
+    fn sync_claude_rotates_known_credentials_without_losing_quota_or_label() {
+        let (_root, app) = review_app();
+        let old = review_bundle("synced", "token-one");
+        let new = review_bundle("synced", "token-two");
+        let store = app.provider_store();
+        let (record, _) = store
+            .save(
+                &app.env.kind,
+                AiProvider::Claude,
+                &old.identity,
+                &old.snapshot,
+            )
+            .unwrap();
+        store
+            .set_label(&app.env.kind, record.id, Some("Work".into()))
+            .unwrap();
+        store
+            .record_usage(&app.env.kind, record.id, review_quota(20))
+            .unwrap();
+        store
+            .record_usage_error(
+                &app.env.kind,
+                record.id,
+                "Claude usage endpoint returned HTTP 429; retry after 600 seconds".into(),
+            )
+            .unwrap();
+        let fixture = ReviewAdapter {
+            live: std::sync::Mutex::new([review_bundle("synced", "token-two")].into()),
+            fetched: std::sync::Mutex::new([].into()),
+        };
+        let output = app
+            .provider_sync_claude_with_adapter("synced@example.com", &fixture)
+            .unwrap();
+        assert_eq!(output.accounts.len(), 1);
+        assert_eq!(output.accounts[0].id, record.id);
+        let saved = store.get(&app.env.kind, record.id).unwrap().unwrap();
+        assert_eq!(saved.custom_label.as_deref(), Some("Work"));
+        assert!(saved.cached_usage.is_some());
+        assert!(saved.cached_usage_error.as_deref().unwrap().contains("429"));
+        assert_eq!(
+            store.load_snapshot(&app.env.kind, record.id).unwrap().1,
+            new.snapshot
+        );
+        assert!(
+            crate::claude_quota_bridge::api_cooldown(
+                &crate::claude_quota_bridge::config_dir(&app.env.home_dir),
+                record.id,
+                time::OffsetDateTime::now_utc()
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn sync_claude_rejects_unverified_identity_and_missing_credentials() {
+        let (_root, app) = review_app();
+        let saved = review_bundle("saved", "saved-token");
+        let store = app.provider_store();
+        let (record, _) = store
+            .save(
+                &app.env.kind,
+                AiProvider::Claude,
+                &saved.identity,
+                &saved.snapshot,
+            )
+            .unwrap();
+        let mut missing = review_bundle("synced", "token");
+        missing.snapshot.files.clear();
+        let mut unknown = review_bundle("synced", "token");
+        unknown.identity.email = crate::provider::claude::UNKNOWN_EMAIL.into();
+        for bundle in [missing, unknown, review_bundle("wrong", "token")] {
+            let fixture = ReviewAdapter {
+                live: std::sync::Mutex::new([bundle].into()),
+                fetched: std::sync::Mutex::new([].into()),
+            };
+            assert!(
+                app.provider_sync_claude_with_adapter("synced@example.com", &fixture)
+                    .is_err()
+            );
+            assert_eq!(
+                store
+                    .list(&app.env.kind, Some(AiProvider::Claude))
+                    .unwrap()
+                    .len(),
+                1
+            );
+            let (after, snapshot) = store.load_snapshot(&app.env.kind, record.id).unwrap();
+            assert_eq!(after.updated_at, record.updated_at);
+            assert_eq!(snapshot, saved.snapshot);
+        }
+    }
+
+    #[test]
+    fn sync_claude_changed_credentials_clear_missing_auth_error() {
+        for error in [
+            "claude_cli_auth_missing: sign in",
+            "Claude OAuth access token not found",
+        ] {
+            let (_root, app) = review_app();
+            let old = review_bundle("synced", "old-token");
+            let store = app.provider_store();
+            let (record, _) = store
+                .save(
+                    &app.env.kind,
+                    AiProvider::Claude,
+                    &old.identity,
+                    &old.snapshot,
+                )
+                .unwrap();
+            store
+                .record_usage_error(&app.env.kind, record.id, error.into())
+                .unwrap();
+            let fixture = ReviewAdapter {
+                live: std::sync::Mutex::new([review_bundle("synced", "new-token")].into()),
+                fetched: std::sync::Mutex::new([].into()),
+            };
+            app.provider_sync_claude_with_adapter("synced@example.com", &fixture)
+                .unwrap();
+            assert!(
+                store
+                    .get(&app.env.kind, record.id)
+                    .unwrap()
+                    .unwrap()
+                    .cached_usage_error
+                    .is_none(),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn sync_claude_changed_credentials_recover_login_error() {
+        let (_root, app) = review_app();
+        let old = review_bundle("synced", "old-token");
+        let store = app.provider_store();
+        let (record, _) = store
+            .save(
+                &app.env.kind,
+                AiProvider::Claude,
+                &old.identity,
+                &old.snapshot,
+            )
+            .unwrap();
+        store
+            .record_usage(&app.env.kind, record.id, review_quota(20))
+            .unwrap();
+        store
+            .record_usage_error(
+                &app.env.kind,
+                record.id,
+                format!("{LOGIN_REQUIRED_ERROR_PREFIX}: expired token"),
+            )
+            .unwrap();
+        let fixture = ReviewAdapter {
+            live: std::sync::Mutex::new([review_bundle("synced", "new-token")].into()),
+            fetched: std::sync::Mutex::new([].into()),
+        };
+        app.provider_sync_claude_with_adapter("synced@example.com", &fixture)
+            .unwrap();
+        let after = store.get(&app.env.kind, record.id).unwrap().unwrap();
+        assert!(!after.requires_login());
+        assert_eq!(after.id, record.id);
+        assert!(after.cached_usage.is_some());
     }
 
     #[test]

@@ -246,6 +246,13 @@ enum VibeUsageCommand {
 
 #[derive(Subcommand)]
 enum ProviderCommand {
+    /// Synchronize an already signed-in Claude CLI account verified by the caller.
+    SyncClaude {
+        #[arg(long)]
+        email: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Save or restore a matching Claude Desktop login while Desktop is closed.
     ClaudeDesktop {
         account_id: Uuid,
@@ -404,6 +411,16 @@ pub fn run() -> Result<()> {
         }
         Some(Command::Providers { command }) => {
             match command.unwrap_or(ProviderCommand::Status { json: false }) {
+                ProviderCommand::SyncClaude { email, json } => {
+                    let output = app.provider_sync_claude(&email)?;
+                    if json {
+                        print_json(&output)?;
+                    } else {
+                        for account in &output.accounts {
+                            println!("{}", render_provider_account_summary(account));
+                        }
+                    }
+                }
                 ProviderCommand::ClaudeDesktop {
                     account_id,
                     save,
@@ -1493,6 +1510,24 @@ fn print_usage_summary(usage: &AccountUsageView) {
 #[cfg(test)]
 mod provider_apply_cli_tests {
     use super::*;
+
+    #[test]
+    fn sync_claude_requires_verified_email() {
+        assert!(
+            Cli::try_parse_from(["codex-roster", "providers", "sync-claude", "--json"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "codex-roster",
+                "providers",
+                "sync-claude",
+                "--email",
+                "signed-in@example.com",
+                "--json"
+            ])
+            .is_ok()
+        );
+    }
 
     #[test]
     fn claude_apply_preserves_preflighted_candidate() {

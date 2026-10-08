@@ -388,6 +388,11 @@ final class AccountStore: ObservableObject {
     /// Never set for enroll-only adds.
     private var pendingLoginDesktopRelaunch: ChatGPTDesktop.RelaunchPlan?
     private var resetNotificationTask: Task<Void, Never>?
+    @Published var claudeLiveAuthStatus: ClaudeLiveAuthStatus?
+    @Published var claudeDetectionMessage: String?
+    @Published var isSigningInLiveClaude = false
+    private var isDetectingClaudeLogin = false
+    private var claudeBridgeConnected = false
     private var claudeMonitorTask: Task<Void, Never>?
     private var claudeLocalMonitorTask: Task<Void, Never>?
     private var isReadingClaudeLocalQuota = false
@@ -2543,7 +2548,7 @@ final class AccountStore: ObservableObject {
     }
 
     func saveLiveClaudeAccount() {
-        guard !isSavingClaude else { return }
+        guard !isSavingClaude, !isSigningInLiveClaude else { return }
         isSavingClaude = true
         Task {
             defer { isSavingClaude = false }
@@ -2565,7 +2570,7 @@ final class AccountStore: ObservableObject {
 
     func activateClaudeAccount(_ id: UUID) {
         Task {
-            guard !isSwitchingClaude, !isBusyForActions, !isSwitching else { return }
+            guard !isSwitchingClaude, !isBusyForActions, !isSwitching, !isSigningInLiveClaude else { return }
             isSwitchingClaude = true
             defer { isSwitchingClaude = false }
             let interrupted = await Task.detached(priority: .utility) {
@@ -2763,8 +2768,9 @@ final class AccountStore: ObservableObject {
         claudeTabOpened = true
         guard claudeTabRefreshGate.request() else { return }
         Task {
+            await detectClaudeLoginAsync()
             await refreshClaudeRosterAsync(silently: true)
-            await refreshClaudeUsageAsync(force: false)
+            await refreshClaudeUsageAsync(force: false, localOnly: isSigningInLiveClaude || claudeLiveAuthStatus?.subscriptionEmail == nil)
         }
     }
 
@@ -2774,8 +2780,53 @@ final class AccountStore: ObservableObject {
         claudeNotchMonitoringActive = enabled
         guard enabled else { return }
         Task {
+            await detectClaudeLoginAsync()
             await refreshClaudeRosterAsync(silently: true)
-            await refreshClaudeUsageAsync(force: false)
+            await refreshClaudeUsageAsync(force: false, localOnly: isSigningInLiveClaude || claudeLiveAuthStatus?.subscriptionEmail == nil)
+        }
+    }
+
+    private func detectClaudeLoginAsync(afterLogin: Bool = false) async {
+        guard !isDetectingClaudeLogin, !isSwitchingClaude, !isSavingClaude,
+              !isSigningInLiveClaude || afterLogin else { return }
+        isDetectingClaudeLogin = true
+        defer { isDetectingClaudeLogin = false }
+        do {
+            let status = try await ClaudeLiveDetection.status()
+            claudeLiveAuthStatus = status
+            claudeDetectionMessage = nil
+            if let email = status.subscriptionEmail {
+                let list: ProviderListOutput = try await cli.decode(
+                    ProviderListOutput.self,
+                    arguments: ["providers", "sync-claude", "--email", email])
+                claudeAccounts = list.accounts
+            }
+            if !claudeBridgeConnected {
+                do {
+                    try await ClaudeQuotaBridgeInstaller.install()
+                    claudeBridgeConnected = true
+                } catch {
+                    // Local feed setup is optional: preserve verified auth and OAuth fallback.
+                    claudeDetectionMessage = error.localizedDescription
+                }
+            }
+        } catch {
+            claudeLiveAuthStatus = nil
+            claudeDetectionMessage = error.localizedDescription
+        }
+    }
+
+    func signInLiveClaude() {
+        guard !isSigningInLiveClaude, !isSwitchingClaude, !isSavingClaude,
+              !isDetectingClaudeLogin, !isBusyForActions else { return }
+        isSigningInLiveClaude = true
+        Task {
+            defer { isSigningInLiveClaude = false }
+            do {
+                try await ClaudeLiveDetection.login(email: claudeAccounts.first(where: \.isActive)?.email)
+                await detectClaudeLoginAsync(afterLogin: true)
+                await refreshClaudeUsageAsync(force: false, localOnly: claudeLiveAuthStatus?.subscriptionEmail == nil)
+            } catch { claudeDetectionMessage = error.localizedDescription }
         }
     }
 
@@ -2796,6 +2847,7 @@ final class AccountStore: ObservableObject {
                 // `enabled` lives in CLI settings — fetch status first so the
                 // loop knows it without the tab ever being opened.
                 let refreshAPI = apiGate.request()
+                if refreshAPI { await self?.detectClaudeLoginAsync() }
                 if refreshAPI && self?.claudeAutoSwitch == nil {
                     if let auto = try? await self?.cli.decode(
                         ProviderAutoSwitchOutput.self,
@@ -2804,11 +2856,14 @@ final class AccountStore: ObservableObject {
                         self?.claudeAutoSwitch = auto
                     }
                 }
-                if autoSwitchGate.request() && self?.claudeAutoSwitch?.enabled == true {
+                if autoSwitchGate.request() && self?.claudeAutoSwitch?.enabled == true
+                    && self?.claudeLiveAuthStatus?.subscriptionEmail != nil
+                    && self?.isSigningInLiveClaude != true {
                     await self?.claudeAutoSwitchTick()
                 }
                 if self?.claudeTabOpened == true || self?.claudeNotchMonitoringActive == true {
-                    if refreshAPI {
+                    if refreshAPI && self?.claudeLiveAuthStatus?.subscriptionEmail != nil
+                        && self?.isSigningInLiveClaude != true {
                         await self?.refreshClaudeUsageAsync(force: false)
                     }
                 }
@@ -2820,7 +2875,7 @@ final class AccountStore: ObservableObject {
     /// `providers auto-switch claude --apply` re-decides server-side and only
     /// switches when a candidate is ready, so a bare apply is safe to repeat.
     private func claudeAutoSwitchTick() async {
-        guard !isBusyForActions, !isSwitching, !isSwitchingClaude else { return }
+        guard !isBusyForActions, !isSwitching, !isSwitchingClaude, !isSigningInLiveClaude else { return }
         isSwitchingClaude = true
         defer { isSwitchingClaude = false }
         let interrupted = await Task.detached(priority: .utility) {

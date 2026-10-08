@@ -183,10 +183,11 @@ struct ClaudeRosterView: View {
             store.claudeLiveAuthStatus?.verifiesQuota(email: $0.email, fresh: $0.hasFreshUsage) == true
         } ?? false
         let text = verified ? language.text("Trực tiếp", "Live")
+            : account?.hasFreshUsage == true ? language.text("Quota đã xác minh", "Verified quota")
             : store.claudeLiveAuthStatus == nil ? language.text("Đang kiểm tra", "Checking")
             : store.claudeLiveAuthStatus?.subscriptionEmail == nil ? language.text("Chưa đăng nhập", "Not signed in")
             : language.text("Quota đã lưu", "Cached quota")
-        return chip(text, tint: verified ? PrismTheme.emerald : PrismTheme.amber)
+        return chip(text, tint: verified || account?.hasFreshUsage == true ? PrismTheme.emerald : PrismTheme.amber)
     }
 
     private var notchLiveWing: some View {
@@ -231,14 +232,14 @@ struct ClaudeRosterView: View {
             if let active {
                 if let window = active.window("five_hour") { summaryQuota(window, label: "5h") }
                 if let window = active.window("seven_day") { summaryQuota(window, label: "7d") }
-                if !active.hasFreshUsage || store.claudeLiveAuthStatus?.subscriptionEmail == nil {
+                if !active.hasFreshUsage {
                     HStack(spacing: 4) {
                         Text(quotaWarning(active))
                             .font(PrismTheme.fontMicro).foregroundStyle(.secondary).lineLimit(1)
                             .help(quotaWarning(active))
                         Spacer(minLength: 0)
-                        if store.claudeLiveAuthStatus?.subscriptionEmail == nil {
-                            Button(language.text("Đăng nhập", "Sign in")) { store.signInLiveClaude() }
+                        if active.requiresLogin {
+                            Button(language.text("Kết nối quota", "Connect quota")) { store.signInLiveClaude() }
                                 .buttonStyle(.borderless).font(PrismTheme.fontMicro)
                                 .disabled(store.isSigningInLiveClaude)
                         }
@@ -255,7 +256,7 @@ struct ClaudeRosterView: View {
                 HStack {
                     Text(language.text("App tự nhận đăng nhập Claude Code.", "Claude Code login is detected automatically."))
                         .font(PrismTheme.fontCaption).foregroundStyle(.secondary)
-                    Button(language.text("Đăng nhập", "Sign in")) { store.signInLiveClaude() }
+                    Button(language.text("Kết nối quota", "Connect quota")) { store.signInLiveClaude() }
                         .disabled(store.isSigningInLiveClaude)
                 }
             }
@@ -268,7 +269,7 @@ struct ClaudeRosterView: View {
 
     private var quotaDetailsPanel: some View {
         let account = store.claudeAccounts.first(where: \.isActive)
-        return VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Label(language.text("Tổng quan sử dụng", "Usage overview"), systemImage: "chart.bar")
                     .font(PrismTheme.fontBodyCompactBold)
@@ -285,9 +286,8 @@ struct ClaudeRosterView: View {
             if let monthly = account?.window("extra_usage") {
                 Text(extraWindowText(monthly))
                     .font(PrismTheme.fontCaption).foregroundStyle(.secondary)
-                Text(language.text("Hạn mức chi tiêu thêm, không phải quota token tháng.",
-                                   "Extra spending cap, not a monthly token quota."))
-                    .font(PrismTheme.fontMicro).foregroundStyle(.secondary)
+                    .help(language.text("Hạn mức chi tiêu thêm, không phải quota token tháng.",
+                                        "Extra spending cap, not a monthly token quota."))
             } else {
                 Text(language.text("Tháng: chưa có dữ liệu", "Monthly: no data available"))
                     .font(PrismTheme.fontCaption).foregroundStyle(.secondary)
@@ -296,7 +296,7 @@ struct ClaudeRosterView: View {
                 .font(PrismTheme.fontCaption).foregroundStyle(.secondary)
             Spacer(minLength: 0)
         }
-        .padding(12)
+        .padding(10)
         .frame(maxWidth: .infinity, maxHeight: notchLayout ? .infinity : nil, alignment: .topLeading)
         .background(notchWingShape)
     }
@@ -325,8 +325,8 @@ struct ClaudeRosterView: View {
             Text(language.text("Quota & đặt lại", "Quota & resets"))
                 .font(PrismTheme.fontSection)
             Text(language.text(
-                "Cần đăng nhập Claude Code trong Terminal bằng cùng tài khoản. Đăng nhập Claude Desktop riêng không kết nối quota CLI. App tự phát hiện đăng nhập và lưu tài khoản để theo dõi quota.",
-                "Sign in to Claude Code in Terminal with the same account. Claude Desktop login alone does not connect CLI quota. The app detects your login and saves the account automatically."))
+                "Mỗi tài khoản có kết nối quota được lưu riêng. Nút đăng nhập dùng môi trường cô lập, không đổi tài khoản CLI đang dùng. Tài khoản trùng phiên CLI hiện tại vẫn theo phiên đó; tài khoản khác dùng kết nối đã lưu.",
+                "Each account has a separately saved quota connection. Sign-in uses an isolated environment and preserves the current CLI account. The account matching your current CLI follows that session; other accounts use saved connections."))
             Text("claude auth login")
                 .font(.system(.body, design: .monospaced))
                 .textSelection(.enabled)
@@ -465,14 +465,14 @@ struct ClaudeRosterView: View {
         } else {
             VStack(alignment: .trailing, spacing: 4) {
                 Text(language.text(
-                    store.isSigningInLiveClaude ? "Đang xác minh phiên…" : state == .signedOut ? "Chưa đăng nhập CLI" : state == .otherSession ? "Không phải phiên CLI hiện tại" : "Chưa xác minh đăng nhập",
-                    store.isSigningInLiveClaude ? "Verifying session…" : state == .signedOut ? "Not signed in to CLI" : state == .otherSession ? "Not the current CLI session" : "Login unverified"))
+                    store.isSigningInLiveClaude ? "Đang kết nối quota…" : account.requiresLogin ? "Cần đăng nhập lại" : account.hasFreshUsage ? "Quota đã kết nối" : "Kết nối đã lưu · chưa xác minh",
+                    store.isSigningInLiveClaude ? "Connecting quota…" : account.requiresLogin ? "Sign-in required" : account.hasFreshUsage ? "Quota connected" : "Connection saved · unverified"))
                     .font(PrismTheme.fontMicro)
                     .foregroundStyle(.secondary)
                     .fixedSize()
                 Button { store.signInLiveClaude(account: account) } label: {
-                    Label(language.text(signingIn ? "Đang đăng nhập…" : "Đăng nhập",
-                                        signingIn ? "Signing in…" : "Sign in"),
+                    Label(language.text(signingIn ? "Đang đăng nhập…" : account.requiresLogin ? "Đăng nhập" : "Kết nối lại",
+                                        signingIn ? "Signing in…" : account.requiresLogin ? "Sign in" : "Reconnect"),
                           systemImage: "person.crop.circle.badge.checkmark")
                         .font(.system(size: 12, weight: .semibold))
                         .padding(.vertical, 2)
@@ -482,7 +482,7 @@ struct ClaudeRosterView: View {
                 .controlSize(.small)
                 .fixedSize()
                 .disabled(store.isSigningInLiveClaude || store.isSwitchingClaude || store.isSavingClaude)
-                .help(language.text("Đăng nhập Claude Code bằng \(account.email)", "Sign in to Claude Code as \(account.email)"))
+                .help(language.text("Kết nối quota riêng cho \(account.email), giữ nguyên phiên CLI hiện tại.", "Connect quota separately for \(account.email), preserving your current CLI session."))
                 .accessibilityLabel(language.text("Đăng nhập \(account.email)", "Sign in as \(account.email)"))
             }
         }
@@ -561,7 +561,7 @@ struct ClaudeRosterView: View {
             }
             HStack(spacing: 8) {
                 if store.claudeLiveAuthStatus?.subscriptionEmail == nil {
-                    Button(language.text("Đăng nhập", "Sign in")) { store.signInLiveClaude() }
+                    Button(language.text("Kết nối quota", "Connect quota")) { store.signInLiveClaude() }
                         .disabled(store.isSigningInLiveClaude)
                 } else {
                     Text(language.text("Tự đồng bộ tài khoản", "Account sync is automatic"))
@@ -642,14 +642,10 @@ struct ClaudeRosterView: View {
     }
 
     private func quotaWarning(_ account: ProviderAccount) -> String {
-        if store.claudeLiveAuthStatus?.subscriptionEmail == nil {
-            return store.claudeDetectionMessage ?? language.text(
-                "Chờ đăng nhập Claude Code · app sẽ tự đồng bộ", "Waiting for Claude Code login · automatic sync enabled")
-        }
         if account.usageError?.contains("claude_cli_auth_missing:") == true
             || account.usageError?.contains("OAuth access token not found") == true {
-            return language.text("CLI chưa đăng nhập · bấm Đăng nhập; app sẽ tự đồng bộ",
-                "CLI not signed in · click Sign in; the app syncs automatically")
+            return language.text("Cần kết nối quota lại cho tài khoản này",
+                "Reconnect quota for this account")
         }
         if account.usageError?.contains("HTTP 429") == true {
             return language.text("API quota giới hạn yêu cầu (429) · đang chờ thử lại",

@@ -2,6 +2,22 @@ import Foundation
 import Testing
 @testable import CodexRoster
 
+@Test func claudeScopedRunnerKeepsLoginWritesOutOfTheLiveDirectory() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let live = root.appendingPathComponent("live")
+    let isolated = root.appendingPathComponent("isolated")
+    try FileManager.default.createDirectory(at: live, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: isolated, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let credential = live.appendingPathComponent("fixture-login")
+    try Data("original-account".utf8).write(to: credential)
+    let env = ClaudeCLIEnrollment.environment(config: isolated, base: ["CLAUDE_CONFIG_DIR": live.path])
+    _ = try await ClaudeLiveDetection.run(URL(fileURLWithPath: "/bin/zsh"),
+        ["-c", "printf isolated-account > \"$CLAUDE_CONFIG_DIR/fixture-login\""], timeout: 2, environment: env)
+    #expect(try String(contentsOf: credential, encoding: .utf8) == "original-account")
+    #expect(try String(contentsOf: isolated.appendingPathComponent("fixture-login"), encoding: .utf8) == "isolated-account")
+}
+
 @Test func claudeCardLoginStatusUsesAuthInsteadOfSelectionOrQuota() throws {
     let signedIn = try ClaudeLiveAuthStatus.parse(Data(#"{"loggedIn":true,"authMethod":"claude.ai","email":"a@example.com"}"#.utf8))
     let signedOut = try ClaudeLiveAuthStatus.parse(Data(#"{"loggedIn":false}"#.utf8))

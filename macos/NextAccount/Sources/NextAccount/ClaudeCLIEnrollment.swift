@@ -73,34 +73,8 @@ enum ClaudeCLIEnrollment {
 
     private static func run(_ executable: URL, _ args: [String], env: [String: String],
                             timeout: TimeInterval, capture: Bool = true) async throws -> Data {
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = executable
-        process.arguments = args
-        process.environment = env
-        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = capture ? pipe : FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try Task.checkCancellation()
-        try process.run()
-        let deadline = Date().addingTimeInterval(timeout)
-        do {
-            while process.isRunning {
-                try Task.checkCancellation()
-                guard Date() < deadline else { throw failure("Đăng nhập quá thời gian chờ. Hãy thử lại.") }
-                try await Task.sleep(for: .milliseconds(150))
-            }
-        } catch {
-            if process.isRunning { process.terminate() }
-            process.waitUntilExit()
-            throw error
-        }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw failure("Claude CLI chưa hoàn tất thao tác. Kiểm tra kết nối, hoàn tất đăng nhập trong trình duyệt rồi thử lại.")
-        }
-        return capture ? pipe.fileHandleForReading.readDataToEndOfFile() : Data()
+        let output = try await ClaudeLiveDetection.run(executable, args, timeout: timeout, environment: env)
+        return capture ? output : Data()
     }
 
     private static func failure(_ message: String) -> NSError {

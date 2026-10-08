@@ -2734,15 +2734,15 @@ final class AccountStore: ObservableObject {
     }
 
     /// Called when the Claude Code tab appears — refreshes the roster and
-    /// enables ten-second local quota observation and periodic API refresh. The auto-switch monitor
-    /// itself starts at app launch in `startCoreMonitoring`.
+    /// enables ten-second local quota observation and periodic API refresh.
+    /// Monitoring starts at app launch in `startCoreMonitoring`.
     func claudeTabDidAppear() {
         claudeTabOpened = true
         guard claudeTabRefreshGate.request() else { return }
         Task {
             await detectClaudeLoginAsync()
             await refreshClaudeRosterAsync(silently: true)
-            await refreshClaudeUsageAsync(force: false, localOnly: isSigningInLiveClaude || claudeLiveAuthStatus?.subscriptionEmail == nil)
+            await refreshClaudeUsageAsync(force: false, localOnly: isSigningInLiveClaude)
         }
     }
 
@@ -2754,7 +2754,7 @@ final class AccountStore: ObservableObject {
         Task {
             await detectClaudeLoginAsync()
             await refreshClaudeRosterAsync(silently: true)
-            await refreshClaudeUsageAsync(force: false, localOnly: isSigningInLiveClaude || claudeLiveAuthStatus?.subscriptionEmail == nil)
+            await refreshClaudeUsageAsync(force: false, localOnly: isSigningInLiveClaude)
         }
     }
 
@@ -2801,13 +2801,14 @@ final class AccountStore: ObservableObject {
                 claudeSignInAccountID = nil
             }
             do {
-                try await ClaudeLiveDetection.login(email: email)
+                let connected = try await ClaudeCLIEnrollment.login(email: email ?? "")
+                claudeSwitchMessage = AppLanguage.text("Đã lưu kết nối quota cho \(connected). Phiên CLI hiện tại được giữ nguyên.", "Quota connection saved for \(connected). Current CLI session preserved.")
+                await refreshClaudeRosterAsync(silently: true)
                 await detectClaudeLoginAsync(afterLogin: true)
-                await refreshClaudeUsageAsync(force: false, localOnly: claudeLiveAuthStatus?.subscriptionEmail == nil)
+                await refreshClaudeUsageAsync(force: false, localOnly: false)
             } catch {
-                // Browser login may already have changed the CLI account. Do not
-                // retain the old authenticated badge or treat this as target success.
-                claudeLiveAuthStatus = nil
+                // Enrollment is isolated. Preserve the existing live CLI status;
+                // a failed or mismatched login must not change the current session.
                 claudeDetectionMessage = error.localizedDescription
                 claudeErrorMessage = error.localizedDescription
                 await refreshClaudeRosterAsync(silently: true)
@@ -2838,8 +2839,7 @@ final class AccountStore: ObservableObject {
                 let refreshAPI = apiGate.request()
                 if refreshAPI { await self?.detectClaudeLoginAsync() }
                 if self?.claudeTabOpened == true || self?.claudeNotchMonitoringActive == true {
-                    if refreshAPI && self?.claudeLiveAuthStatus?.subscriptionEmail != nil
-                        && self?.isSigningInLiveClaude != true {
+                    if refreshAPI && self?.isSigningInLiveClaude != true {
                         await self?.refreshClaudeUsageAsync(force: false)
                     }
                 }

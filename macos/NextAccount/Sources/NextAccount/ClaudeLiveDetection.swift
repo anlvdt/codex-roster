@@ -54,21 +54,6 @@ enum ClaudeLiveDetection {
         } onCancel: { operation.cancel() }
     }
 
-    /// Invoked only by the sign-in button, never by background detection.
-    static func login(email: String?) async throws {
-        let operation = Task.detached(priority: .userInitiated) {
-            let executable = try await resolveCLI()
-            var args = ["auth", "login", "--claudeai"]
-            if let email, !email.isEmpty { args += ["--email", email] }
-            _ = try await run(executable, args, timeout: 600)
-            let data = try await run(executable, ["auth", "status"], timeout: 20, signedOutAllowed: true)
-            _ = try ClaudeLiveAuthStatus.parse(data).requireSubscriptionEmail(expected: email)
-        }
-        try await withTaskCancellationHandler {
-            try await operation.value
-        } onCancel: { operation.cancel() }
-    }
-
     private static func resolveCLI() async throws -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let candidates = [home.appendingPathComponent(".local/bin/claude"),
@@ -86,7 +71,7 @@ enum ClaudeLiveDetection {
     }
 
     static func run(_ executable: URL, _ args: [String], timeout: TimeInterval,
-                            signedOutAllowed: Bool = false) async throws -> Data {
+                            signedOutAllowed: Bool = false, environment: [String: String]? = nil) async throws -> Data {
         // A file prevents pipe deadlock while Claude waits for browser login.
         let output = FileManager.default.temporaryDirectory.appendingPathComponent("claude-detection-\(UUID().uuidString)")
         guard FileManager.default.createFile(atPath: output.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
@@ -97,6 +82,7 @@ enum ClaudeLiveDetection {
         let process = Process()
         process.executableURL = executable
         process.arguments = args
+        process.environment = environment
         process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = handle

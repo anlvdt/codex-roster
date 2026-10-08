@@ -9,27 +9,6 @@ private func uiReviewCodexAccount(archived: Bool, active: Bool = false) -> Saved
         isActive: active, archived: archived, usage: nil, usageError: nil)
 }
 
-private func uiReviewClaudeAccount(
-    age: TimeInterval = 10, status: String = "ok", error: String? = nil,
-    statusline: Bool = false, resetOffset: TimeInterval = 3_600
-) -> ProviderAccount {
-    let now = Date()
-    let reset = RustDate(value: now.addingTimeInterval(resetOffset))
-    func window(_ key: String, remaining: Int) -> ProviderUsageWindow {
-        .init(key: key, label: key, usedPercent: 100 - remaining,
-            remainingPercent: remaining, resetAt: reset, used: nil, limit: nil,
-            unit: nil, expectedUsedPercent: nil, aheadOfPace: nil,
-            projectedExhaustionAt: nil, willLastToReset: nil)
-    }
-    return ProviderAccount(id: UUID(), provider: .claude, email: "fixture@example.invalid",
-        subject: nil, name: nil, customLabel: nil, planLabel: "Pro", isActive: true,
-        updatedAt: .init(value: now), lastActivatedAt: nil,
-        usage: .init(fetchedAt: .init(value: now.addingTimeInterval(-age)), status: status,
-            headlineWindow: nil, windows: [window("five_hour", remaining: 61), window("seven_day", remaining: 83)],
-            detail: statusline ? "Claude Code statusline" : nil),
-        usageError: error, canActivate: true, activationBlockReason: nil)
-}
-
 @Test func uiReviewDisabledNotchAlwaysRoutesLauncherToSettings() {
     #expect(RosterLauncherDestination.resolve(notchEnabled: false) == .settings)
     #expect(RosterLauncherDestination.resolve(notchEnabled: true) == .notch)
@@ -88,42 +67,6 @@ private func uiReviewClaudeAccount(
     #expect(queue.activeID == last && queue.pendingIDs.isEmpty)
     queue.didDismiss()
     #expect(queue.takeNext(validIDs: [first, last]) == nil)
-}
-
-@Test func uiReviewFreshClaudeQuotaRemainsVerifiedInBothSnapshots() {
-    let account = uiReviewClaudeAccount(statusline: true)
-    #expect(account.hasFreshUsage)
-    #expect(NotchQuotaSnapshot(claude: account).verification == .verified)
-    #expect(NotchCompanionQuota(claude: account)?.verification == .verified)
-    #expect(NotchQuotaVerification.verified.caption(in: .english) == nil)
-}
-
-@Test func uiReviewClaude429KeepsReadingsButLabelsThemCached() {
-    let account = uiReviewClaudeAccount(error: "429 Too Many Requests")
-    let primary = NotchQuotaSnapshot(claude: account)
-    let companion = NotchCompanionQuota(claude: account)
-    #expect(!account.hasFreshUsage)
-    #expect(primary.fivePercent == 61 && primary.weekPercent == 83)
-    #expect(companion?.fivePercent == 61)
-    #expect(primary.verification == .cached && companion?.verification == .cached)
-    #expect(primary.verification.caption(in: .english) == "Cached · unverified")
-}
-
-@Test(arguments: [
-    uiReviewClaudeAccount(age: 121, statusline: true),
-    uiReviewClaudeAccount(age: 901),
-    uiReviewClaudeAccount(status: "unavailable"),
-    uiReviewClaudeAccount(resetOffset: -2),
-]) func uiReviewExpiredOrFailedClaudeQuotaCannotLookVerified(account: ProviderAccount) {
-    #expect(!account.hasFreshUsage)
-    #expect(NotchQuotaSnapshot(claude: account).verification == .cached)
-    #expect(NotchCompanionQuota(claude: account)?.verification == .cached)
-}
-
-@Test func uiReviewMissingClaudeQuotaIsExplicitlyUnverified() {
-    #expect(NotchQuotaSnapshot(claude: nil).verification == .unverified)
-    #expect(NotchQuotaSnapshot(claude: nil).verification.caption(in: .english) == "Unverified")
-    #expect(NotchCompanionQuota(claude: nil) == nil)
 }
 
 @Test func uiReviewUpdateMenuOffersInstallOnlyForAnAvailableRelease() {

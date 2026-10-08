@@ -102,8 +102,8 @@ struct AutomationSettingsView: View {
                 ) {
                     Toggle(
                         language.text(
-                            "Mở AgentDock khi đăng nhập macOS",
-                            "Open AgentDock at login"
+                            "Mở Codex Roster khi đăng nhập macOS",
+                            "Open Codex Roster at login"
                         ),
                         isOn: Binding(
                             get: { store.launchAtLoginEnabled },

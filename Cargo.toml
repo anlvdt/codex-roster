@@ -11,6 +11,15 @@ readme = "README.md"
 keywords = ["codex", "cli", "ide", "accounts"]
 categories = ["command-line-utilities"]
 
+[features]
+default = []
+external-providers = []
+
+[[bin]]
+name = "claude-quota-bridge"
+path = "src/bin/claude-quota-bridge.rs"
+required-features = ["external-providers"]
+
 [dependencies]
 anyhow = "1.0.102"
 age = "0.11.2"

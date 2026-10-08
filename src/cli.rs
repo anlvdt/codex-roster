@@ -10,10 +10,13 @@ use uuid::Uuid;
 use crate::app::{App, InteractiveExit, InteractiveMode};
 use crate::env;
 use crate::model::{
-    AccountUsageView, AccountView, AiProvider, AutoStartUsageWindowsRunOutput,
-    AutoStartUsageWindowsStatusOutput, ClaudeAutoSwitchStrategy, ProviderAccountView,
-    ProviderStatusOutput, ProviderUsageOutput, ProviderUsageStatus, ProviderUsageView,
-    RunningCodexProcess, TokenUsageSummaryOutput, UsageOutput,
+    AccountUsageView, AccountView, AutoStartUsageWindowsRunOutput,
+    AutoStartUsageWindowsStatusOutput, RunningCodexProcess, TokenUsageSummaryOutput, UsageOutput,
+};
+#[cfg(feature = "external-providers")]
+use crate::model::{
+    AiProvider, ClaudeAutoSwitchStrategy, ProviderAccountView, ProviderStatusOutput,
+    ProviderUsageOutput, ProviderUsageStatus, ProviderUsageView,
 };
 use crate::openai_status::fetch_openai_status;
 use crate::process::format_process_table;
@@ -43,7 +46,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Inspect and manage accounts for Codex, Claude Code, Cursor, and Grok Build.
+    #[cfg(feature = "external-providers")]
+    /// Inspect and manage external provider accounts.
     Providers {
         #[command(subcommand)]
         command: Option<ProviderCommand>,
@@ -244,6 +248,7 @@ enum VibeUsageCommand {
     Status,
 }
 
+#[cfg(feature = "external-providers")]
 #[derive(Subcommand)]
 enum ProviderCommand {
     /// Synchronize an already signed-in Claude CLI account verified by the caller.
@@ -409,6 +414,7 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
+        #[cfg(feature = "external-providers")]
         Some(Command::Providers { command }) => {
             match command.unwrap_or(ProviderCommand::Status { json: false }) {
                 ProviderCommand::SyncClaude { email, json } => {
@@ -1140,6 +1146,7 @@ where
 {
     crate::app::spawn_auto_start_usage_windows_worker(app.env().clone());
     crate::app::spawn_auto_switch_worker(app.env().clone());
+    #[cfg(feature = "external-providers")]
     crate::app::spawn_claude_auto_switch_worker(app.env().clone());
     crate::app::spawn_usage_refresh_worker(app.env().clone());
     crate::app::spawn_vibe_usage_worker(app.env().clone());
@@ -1218,6 +1225,7 @@ fn print_usage_output(output: &UsageOutput) {
     print_usage_summary(&output.usage);
 }
 
+#[cfg(feature = "external-providers")]
 fn parse_ai_provider(value: &str) -> std::result::Result<AiProvider, String> {
     match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
         "openai" | "open_ai" | "codex" => Ok(AiProvider::OpenAi),
@@ -1230,6 +1238,7 @@ fn parse_ai_provider(value: &str) -> std::result::Result<AiProvider, String> {
     }
 }
 
+#[cfg(feature = "external-providers")]
 fn parse_claude_auto_switch_strategy(
     value: &str,
 ) -> std::result::Result<ClaudeAutoSwitchStrategy, String> {
@@ -1242,6 +1251,7 @@ fn parse_claude_auto_switch_strategy(
     }
 }
 
+#[cfg(feature = "external-providers")]
 fn print_provider_status(output: &ProviderStatusOutput) {
     println!("Environment: {}", output.environment);
     for provider in &output.providers {
@@ -1271,6 +1281,7 @@ fn print_provider_status(output: &ProviderStatusOutput) {
     }
 }
 
+#[cfg(feature = "external-providers")]
 fn render_provider_account_summary(account: &ProviderAccountView) -> String {
     let mut line = format!(
         "{} {} {}{}",
@@ -1290,6 +1301,7 @@ fn render_provider_account_summary(account: &ProviderAccountView) -> String {
     line
 }
 
+#[cfg(feature = "external-providers")]
 fn append_provider_usage_summary(line: &mut String, usage: &ProviderUsageView) {
     if usage.status != ProviderUsageStatus::Ok {
         line.push_str(&format!(" [usage: {:?}]", usage.status).to_ascii_lowercase());
@@ -1326,6 +1338,7 @@ fn append_provider_usage_summary(line: &mut String, usage: &ProviderUsageView) {
     }
 }
 
+#[cfg(feature = "external-providers")]
 fn print_provider_usage_output(output: &ProviderUsageOutput) {
     println!("Environment: {}", output.environment);
     println!("Provider: {}", output.usage.provider);
@@ -1507,7 +1520,7 @@ fn print_usage_summary(usage: &AccountUsageView) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "external-providers"))]
 mod provider_apply_cli_tests {
     use super::*;
 
@@ -1578,5 +1591,16 @@ mod provider_apply_cli_tests {
             args.extend(extra);
             assert!(Cli::try_parse_from(args).is_err());
         }
+    }
+}
+
+#[cfg(all(test, not(feature = "external-providers")))]
+mod codex_only_cli_tests {
+    use super::*;
+
+    #[test]
+    fn default_cli_exposes_codex_without_external_provider_actions() {
+        assert!(Cli::try_parse_from(["codex-roster", "list", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["codex-roster", "providers", "status"]).is_err());
     }
 }

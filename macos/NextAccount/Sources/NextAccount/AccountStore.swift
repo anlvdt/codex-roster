@@ -305,7 +305,6 @@ final class AccountStore: ObservableObject {
     @Published private(set) var resetTimeline: [ResetTimelineEvent]?
     @Published private(set) var resetJuice: ResetJuice?
     @Published private(set) var openAIStatus: OpenAIServiceStatus?
-    @Published private(set) var providerStates: [ProviderState] = []
     @Published private(set) var autoSwitchWhenExhausted: Bool
     @Published private(set) var autoResumeSession: Bool
     @Published private(set) var autoSwitchState: AutoSwitchState?
@@ -318,14 +317,6 @@ final class AccountStore: ObservableObject {
     @Published private(set) var isLoadingTokenUsage = false
     @Published private(set) var isLoadingResetOutlook = false
     @Published private(set) var isLoadingOpenAIStatus = false
-    @Published private(set) var isLoadingProviderStatus = false
-    @Published private(set) var claudeAccounts: [ProviderAccount] = []
-    @Published private(set) var claudeAutoSwitch: ProviderAutoSwitchOutput?
-    @Published private(set) var isLoadingClaude = false
-    @Published private(set) var isSavingClaude = false
-    @Published private(set) var claudeErrorMessage: String?
-    @Published private(set) var claudeSwitchMessage: String?
-    @Published private(set) var isSwitchingClaude = false
     @Published private(set) var isRefreshingQuotaInBackground = false
     @Published private(set) var lastQuotaRefreshAt: Date?
     @Published private(set) var accountSortMode: AccountSortMode
@@ -388,20 +379,6 @@ final class AccountStore: ObservableObject {
     /// Never set for enroll-only adds.
     private var pendingLoginDesktopRelaunch: ChatGPTDesktop.RelaunchPlan?
     private var resetNotificationTask: Task<Void, Never>?
-    @Published var claudeLiveAuthStatus: ClaudeLiveAuthStatus?
-    @Published var claudeDetectionMessage: String?
-    @Published var isSigningInLiveClaude = false
-    @Published var claudeSignInAccountID: UUID?
-    private var isDetectingClaudeLogin = false
-    private var claudeBridgeConnected = false
-    private var claudeMonitorTask: Task<Void, Never>?
-    private var claudeLocalMonitorTask: Task<Void, Never>?
-    private var isReadingClaudeLocalQuota = false
-    /// Refresh cadence for the Claude tab starts only after it is first opened.
-    private var claudeTabOpened = false
-    private var claudeNotchMonitoringActive = false
-    private var claudeTabRefreshGate = PassiveRefreshGate(interval: 60)
-    private var providerStatusRefreshGate = PassiveRefreshGate(interval: 60)
     private var coreBootstrapStarted = false
     private var menuInteractionUntil: Date?
     private var isRefreshingAccountsInBackground = false
@@ -2037,7 +2014,6 @@ final class AccountStore: ObservableObject {
         startAutoSwitchMonitoring()
         startQuotaMonitoring()
         startVibeUsageMonitoring()
-        startClaudeMonitoring()
     }
 
     /// Mirrors the Rust worker's `vibe_usage::is_configured`.
@@ -2466,458 +2442,6 @@ final class AccountStore: ObservableObject {
             } catch {
                 if !silently { errorMessage = error.localizedDescription }
             }
-        }
-    }
-
-    func refreshProviderStatus(silently: Bool = false) {
-        guard !isLoadingProviderStatus else { return }
-        if silently && !providerStatusRefreshGate.request() { return }
-        isLoadingProviderStatus = true
-        Task {
-            defer { isLoadingProviderStatus = false }
-            do {
-                let output = try await cli.decode(ProviderStatusOutput.self, arguments: ["providers", "status"])
-                providerStates = output.providers
-            } catch {
-                if !silently { errorMessage = error.localizedDescription }
-            }
-        }
-    }
-
-    // MARK: - Claude Code roster
-
-    func refreshClaudeRoster(silently: Bool = false) {
-        Task { await refreshClaudeRosterAsync(silently: silently) }
-    }
-
-    private func refreshClaudeRosterAsync(silently: Bool) async {
-        guard !isLoadingClaude else { return }
-        isLoadingClaude = true
-        defer { isLoadingClaude = false }
-        do {
-            let list: ProviderListOutput = try await cli.decode(
-                ProviderListOutput.self,
-                arguments: ["providers", "list", "--provider", "claude"]
-            )
-            claudeAccounts = list.accounts
-        } catch {
-            if !silently { claudeErrorMessage = error.localizedDescription }
-        }
-    }
-
-    func refreshClaudeUsage(force: Bool) {
-        Task { await refreshClaudeUsageAsync(force: force) }
-    }
-
-    private func refreshClaudeUsageAsync(force: Bool, localOnly: Bool = false) async {
-        if localOnly {
-            guard !isReadingClaudeLocalQuota else { return }
-            isReadingClaudeLocalQuota = true
-        } else {
-            guard !isLoadingClaude else { return }
-            isLoadingClaude = true
-        }
-        defer {
-            if localOnly { isReadingClaudeLocalQuota = false }
-            else { isLoadingClaude = false }
-        }
-        do {
-            var arguments = ["providers", "refresh-usage", "claude"]
-            if localOnly { arguments.append("--local-only") }
-            if force { arguments.append("--force") }
-            let list: ProviderListOutput = try await cli.decode(
-                ProviderListOutput.self,
-                arguments: arguments
-            )
-            claudeAccounts = list.accounts
-            if !localOnly { claudeErrorMessage = nil }
-        } catch {
-            claudeErrorMessage = error.localizedDescription
-        }
-    }
-
-    func saveLiveClaudeAccount() {
-        guard !isSavingClaude, !isSigningInLiveClaude else { return }
-        isSavingClaude = true
-        Task {
-            defer { isSavingClaude = false }
-            do {
-                let saved: ProviderSaveOutput = try await cli.decode(
-                    ProviderSaveOutput.self,
-                    arguments: ["providers", "save", "claude"]
-                )
-                _ = saved
-                claudeSwitchMessage = AppLanguage.text("Đã lưu tài khoản CLI đang đăng nhập.", "Signed-in CLI account saved.")
-                claudeErrorMessage = nil
-                await refreshClaudeUsageAsync(force: true)
-            } catch {
-                claudeErrorMessage = error.localizedDescription
-            }
-            await refreshClaudeRosterAsync(silently: true)
-        }
-    }
-
-    func activateClaudeAccount(_ id: UUID) {
-        Task {
-            guard !isSwitchingClaude, !isBusyForActions, !isSwitching, !isSigningInLiveClaude else { return }
-            isSwitchingClaude = true
-            defer { isSwitchingClaude = false }
-            do {
-                let output: ProviderActivateOutput = try await cli.decode(
-                    ProviderActivateOutput.self,
-                    arguments: ["providers", "activate", id.uuidString]
-                )
-                claudeErrorMessage = output.warnings?.joined(separator: "\n")
-                claudeSwitchMessage = AppLanguage.text(
-                    "Đã đổi đăng nhập CLI sang \(output.account.email). Đóng phiên CLI cũ; kiểm tra /status trong phiên mới. Desktop cần đăng nhập riêng.",
-                    "CLI login changed to \(output.account.email). Close the old CLI session; check /status in the new one. Desktop needs a separate sign-in."
-                )
-            } catch {
-                claudeErrorMessage = error.localizedDescription
-            }
-            await refreshClaudeRosterAsync(silently: true)
-        }
-    }
-
-    private var usesClaudeDesktop: Bool {
-        UserDefaults.standard.object(forKey: "claude_roster_switch_desktop") as? Bool == true
-    }
-
-    private func requireClaudeDesktopLogin(_ id: UUID) async throws -> ClaudeDesktopLoginStatus {
-        let status: ClaudeDesktopLoginStatus = try await cli.decode(ClaudeDesktopLoginStatus.self,
-            arguments: ["providers", "claude-desktop", id.uuidString, "--json"])
-        guard status.saved || status.liveAccountMatches else {
-            try await ClaudeDesktop.open()
-            let email = claudeAccounts.first(where: { $0.id == id })?.email ?? id.uuidString
-            throw NSError(domain: "ClaudeDesktop", code: 1, userInfo: [NSLocalizedDescriptionKey:
-                AppLanguage.text("Đã mở Desktop. Đăng nhập \(email), rồi chọn Lưu đăng nhập Desktop ở menu tài khoản này. Chưa chuyển tài khoản vì chưa có đăng nhập Desktop đã lưu.",
-                    "Desktop opened. Sign in as \(email), then choose Save Desktop login in this account's menu. The account has not switched because its Desktop login is not saved yet.")])
-        }
-        return status
-    }
-
-    /// Desktop credentials are saved independently; never infer its login from CLI.
-    private func switchClaudeDesktopIfNeeded(_ id: UUID, email: String?) async throws -> Bool {
-        guard usesClaudeDesktop else { return false }
-        let status = try await requireClaudeDesktopLogin(id)
-        let session = await Task.detached(priority: .utility) { ClaudeDesktop.recentCodeSession() }.value
-        let url = try await ClaudeDesktop.prepareForSwitch()
-        do {
-            let _: ClaudeDesktopLoginStatus = try await cli.decode(ClaudeDesktopLoginStatus.self,
-                arguments: ["providers", "claude-desktop", id.uuidString, status.saved ? "--restore" : "--save", "--json"])
-        } catch {
-            try? await ClaudeDesktop.relaunch(at: url)
-            throw error
-        }
-        try await ClaudeDesktop.relaunch(at: url)
-        claudeSwitchMessage = AppLanguage.text(
-            "Đã khôi phục đăng nhập Desktop và mở lại app. Kiểm tra tài khoản trong Desktop; nếu đăng nhập hết hạn, đăng nhập lại rồi lưu lại.",
-            "Desktop login restored and app reopened. Check the account in Desktop; if the login expired, sign in and save it again.")
-        if UserDefaults.standard.object(forKey: "claude_roster_auto_resume") as? Bool != false, let session {
-            try await ClaudeSessionContinuity.resume(session, automaticallyContinue: false, expectedEmail: email, inDesktop: true)
-        }
-        return true
-    }
-
-    func saveClaudeDesktopLogin(_ id: UUID) {
-        Task {
-            guard !isSwitchingClaude else { return }
-            isSwitchingClaude = true
-            defer { isSwitchingClaude = false }
-            var reopen: URL?
-            do {
-                reopen = try await ClaudeDesktop.prepareForSwitch()
-                let _: ClaudeDesktopLoginStatus = try await cli.decode(ClaudeDesktopLoginStatus.self,
-                    arguments: ["providers", "claude-desktop", id.uuidString, "--save", "--json"])
-                claudeErrorMessage = nil
-                claudeSwitchMessage = AppLanguage.text("Đã lưu đăng nhập Desktop riêng cho tài khoản này.",
-                    "Saved this account's separate Desktop login.")
-            } catch { claudeErrorMessage = error.localizedDescription }
-            if let reopen {
-                do { try await ClaudeDesktop.relaunch(at: reopen) }
-                catch { claudeErrorMessage = error.localizedDescription }
-            }
-        }
-    }
-
-    func reopenClaudeCLI() {
-        Task {
-            do {
-                try await ClaudeSessionContinuity.openResumePicker(
-                    expectedEmail: claudeAccounts.first(where: \.isActive)?.email
-                )
-            } catch { claudeErrorMessage = error.localizedDescription }
-        }
-    }
-
-    func restartClaudeDesktop() {
-        Task {
-            do {
-                try await ClaudeDesktop.restart()
-                claudeSwitchMessage = AppLanguage.text(
-                    "Đã mở lại Claude Desktop. Đăng xuất rồi đăng nhập tài khoản đã chọn trong app; đăng nhập CLI không đổi tài khoản Desktop. Chat cũ vẫn thuộc tài khoản cũ.",
-                    "Claude Desktop reopened. Sign out and sign in to the selected account in the app; CLI login does not switch Desktop. Existing chats belong to their original account."
-                )
-            } catch { claudeErrorMessage = error.localizedDescription }
-        }
-    }
-
-    func dismissClaudeError() {
-        claudeErrorMessage = nil
-    }
-
-    func deleteClaudeAccount(_ id: UUID) {
-        Task {
-            do {
-                _ = try await cli.data(
-                    arguments: ["providers", "delete", id.uuidString, "--json"]
-                )
-                claudeErrorMessage = nil
-            } catch {
-                claudeErrorMessage = error.localizedDescription
-            }
-            await refreshClaudeRosterAsync(silently: true)
-        }
-    }
-
-    func setClaudeLabel(_ id: UUID, label: String?) {
-        Task {
-            do {
-                var arguments = ["providers", "set-label", id.uuidString]
-                if let label, !label.isEmpty {
-                    arguments.append(label)
-                }
-                _ = try await cli.data(arguments: arguments + ["--json"])
-                claudeErrorMessage = nil
-            } catch {
-                claudeErrorMessage = error.localizedDescription
-            }
-            await refreshClaudeRosterAsync(silently: true)
-        }
-    }
-
-    func setClaudeAutoSwitch(
-        enabled: Bool?,
-        threshold: Int? = nil,
-        hysteresis: Int? = nil,
-        cooldown: Int? = nil,
-        strategy: String? = nil
-    ) {
-        Task {
-            var arguments = ["providers", "auto-switch", "claude"]
-            if let enabled {
-                arguments.append(enabled ? "--enable" : "--disable")
-            }
-            if let threshold {
-                arguments += ["--threshold", String(threshold)]
-            }
-            if let hysteresis {
-                arguments += ["--hysteresis", String(hysteresis)]
-            }
-            if let cooldown {
-                arguments += ["--cooldown", String(cooldown)]
-            }
-            if let strategy {
-                arguments += ["--strategy", strategy]
-            }
-            do {
-                let output: ProviderAutoSwitchOutput = try await cli.decode(
-                    ProviderAutoSwitchOutput.self,
-                    arguments: arguments
-                )
-                claudeAutoSwitch = output
-                claudeErrorMessage = nil
-            } catch {
-                claudeErrorMessage = error.localizedDescription
-            }
-        }
-    }
-
-    /// Called when the Claude Code tab appears — refreshes the roster and
-    /// enables ten-second local quota observation and periodic API refresh.
-    /// Monitoring starts at app launch in `startCoreMonitoring`.
-    func claudeTabDidAppear() {
-        claudeTabOpened = true
-        guard claudeTabRefreshGate.request() else { return }
-        Task {
-            await detectClaudeLoginAsync()
-            await refreshClaudeRosterAsync(silently: true)
-            await refreshClaudeUsageAsync(force: false, localOnly: isSigningInLiveClaude)
-        }
-    }
-
-    /// The compact notch needs Claude telemetry even before its screen is opened.
-    func setClaudeNotchMonitoring(_ enabled: Bool) {
-        guard claudeNotchMonitoringActive != enabled else { return }
-        claudeNotchMonitoringActive = enabled
-        guard enabled else { return }
-        Task {
-            await detectClaudeLoginAsync()
-            await refreshClaudeRosterAsync(silently: true)
-            await refreshClaudeUsageAsync(force: false, localOnly: isSigningInLiveClaude)
-        }
-    }
-
-    private func detectClaudeLoginAsync(afterLogin: Bool = false) async {
-        guard !isDetectingClaudeLogin, !isSwitchingClaude, !isSavingClaude,
-              !isSigningInLiveClaude || afterLogin else { return }
-        isDetectingClaudeLogin = true
-        defer { isDetectingClaudeLogin = false }
-        do {
-            let status = try await ClaudeLiveDetection.status()
-            claudeLiveAuthStatus = status
-            claudeDetectionMessage = nil
-            if let email = status.subscriptionEmail {
-                let list: ProviderListOutput = try await cli.decode(
-                    ProviderListOutput.self,
-                    arguments: ["providers", "sync-claude", "--email", email])
-                claudeAccounts = list.accounts
-            }
-            if !claudeBridgeConnected {
-                do {
-                    try await ClaudeQuotaBridgeInstaller.install()
-                    claudeBridgeConnected = true
-                } catch {
-                    // Local feed setup is optional: preserve verified auth and OAuth fallback.
-                    claudeDetectionMessage = error.localizedDescription
-                }
-            }
-        } catch {
-            claudeLiveAuthStatus = nil
-            claudeDetectionMessage = error.localizedDescription
-        }
-    }
-
-    func signInLiveClaude(account: ProviderAccount? = nil) {
-        guard !isSigningInLiveClaude, !isSwitchingClaude, !isSavingClaude,
-              !isDetectingClaudeLogin, !isBusyForActions else { return }
-        isSigningInLiveClaude = true
-        claudeSignInAccountID = account?.id
-        claudeDetectionMessage = nil
-        let email = account?.email ?? claudeAccounts.first(where: \.isActive)?.email
-        Task {
-            defer {
-                isSigningInLiveClaude = false
-                claudeSignInAccountID = nil
-            }
-            do {
-                let connected = try await ClaudeCLIEnrollment.login(email: email ?? "")
-                claudeSwitchMessage = AppLanguage.text("Đã lưu kết nối quota cho \(connected). Phiên CLI hiện tại được giữ nguyên.", "Quota connection saved for \(connected). Current CLI session preserved.")
-                await refreshClaudeRosterAsync(silently: true)
-                await detectClaudeLoginAsync(afterLogin: true)
-                await refreshClaudeUsageAsync(force: false, localOnly: false)
-            } catch {
-                // Enrollment is isolated. Preserve the existing live CLI status;
-                // a failed or mismatched login must not change the current session.
-                claudeDetectionMessage = error.localizedDescription
-                claudeErrorMessage = error.localizedDescription
-                await refreshClaudeRosterAsync(silently: true)
-            }
-        }
-    }
-
-    private func startClaudeMonitoring() {
-        guard claudeMonitorTask == nil else { return }
-        claudeLocalMonitorTask = Task { [weak self] in
-            while !Task.isCancelled {
-                if self?.claudeTabOpened == true || self?.claudeNotchMonitoringActive == true {
-                    await self?.refreshClaudeUsageAsync(force: false, localOnly: true)
-                }
-                try? await Task.sleep(for: .seconds(10))
-            }
-        }
-        claudeMonitorTask = Task { [weak self] in
-            UserDefaults.standard.set(false, forKey: "claude_roster_auto_resume")
-            UserDefaults.standard.set(false, forKey: "claude_roster_switch_desktop")
-            let _: ProviderAutoSwitchOutput? = try? await self?.cli.decode(
-                ProviderAutoSwitchOutput.self,
-                arguments: ["providers", "auto-switch", "claude", "--disable"])
-            var apiGate = PassiveRefreshGate(interval: 60)
-            while !Task.isCancelled {
-                // Claude is monitoring-only: detect login and refresh quota;
-                // never decide, apply a switch, or resume a conversation.
-                let refreshAPI = apiGate.request()
-                if refreshAPI { await self?.detectClaudeLoginAsync() }
-                if self?.claudeTabOpened == true || self?.claudeNotchMonitoringActive == true {
-                    if refreshAPI && self?.isSigningInLiveClaude != true {
-                        await self?.refreshClaudeUsageAsync(force: false)
-                    }
-                }
-                try? await Task.sleep(for: .seconds(10))
-            }
-        }
-    }
-
-    /// `providers auto-switch claude --apply` re-decides server-side and only
-    /// switches when a candidate is ready, so a bare apply is safe to repeat.
-    private func claudeAutoSwitchTick() async {
-        guard !isBusyForActions, !isSwitching, !isSwitchingClaude, !isSigningInLiveClaude else { return }
-        isSwitchingClaude = true
-        defer { isSwitchingClaude = false }
-        let interrupted = await Task.detached(priority: .utility) {
-            ClaudeSessionContinuity.recentInterruptedSession()
-        }.value
-        do {
-            var applyArguments = ["providers", "auto-switch", "claude", "--apply"]
-            if usesClaudeDesktop {
-                let decision: ProviderAutoSwitchOutput = try await cli.decode(ProviderAutoSwitchOutput.self,
-                    arguments: ["providers", "auto-switch", "claude"])
-                claudeAutoSwitch = decision
-                guard decision.status == "ready", let candidate = decision.candidateAccountId else { return }
-                // Background monitoring never opens a sign-in window for an unenrolled account.
-                let status: ClaudeDesktopLoginStatus = try await cli.decode(ClaudeDesktopLoginStatus.self,
-                    arguments: ["providers", "claude-desktop", candidate.uuidString, "--json"])
-                guard status.saved || status.liveAccountMatches else {
-                    claudeSwitchMessage = AppLanguage.text(
-                        "Tự chuyển đang chờ: cần lưu đăng nhập Desktop cho tài khoản thay thế.",
-                        "Auto-switch is waiting: save the replacement account's Desktop login first.")
-                    return
-                }
-                applyArguments += ["--preferred-account-id", candidate.uuidString]
-            }
-            let output: ProviderAutoSwitchOutput = try await cli.decode(
-                ProviderAutoSwitchOutput.self,
-                arguments: applyArguments
-            )
-            claudeAutoSwitch = output
-            if output.status == "switched" {
-                claudeErrorMessage = output.detail
-                claudeSwitchMessage = AppLanguage.text(
-                    "Đã đổi đăng nhập CLI đã lưu. Phiên đang mở chưa được xác minh: kiểm tra /status, hoặc đóng và mở lại bằng claude --resume. Desktop cần đăng nhập riêng.",
-                    "Saved CLI login changed. Running sessions are unverified: check /status, or close and reopen with claude --resume. Desktop needs a separate sign-in."
-                )
-                // The tab may never have loaded. Resolve the switched identity from
-                // the authoritative roster rather than a possibly empty UI cache.
-                let list: ProviderListOutput = try await cli.decode(ProviderListOutput.self,
-                    arguments: ["providers", "list", "--provider", "claude"])
-                claudeAccounts = list.accounts
-                guard let id = output.candidateAccountId,
-                      let selected = list.accounts.first(where: { $0.id == id && $0.isActive }),
-                      !selected.email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                    throw CLIError("Claude did not confirm the switched account identity. The conversation has not been resumed.")
-                }
-                if let id = output.candidateAccountId {
-                    do { _ = try await switchClaudeDesktopIfNeeded(id,
-                        email: selected.email) }
-                    catch { claudeErrorMessage = error.localizedDescription; return }
-                }
-                if !usesClaudeDesktop, output.trigger == "at_limit",
-                   UserDefaults.standard.object(forKey: "claude_roster_auto_resume") as? Bool != false,
-                   let interrupted {
-                    do {
-                        try await ClaudeSessionContinuity.resume(interrupted,
-                            expectedEmail: selected.email)
-                    }
-                    catch { claudeErrorMessage = error.localizedDescription }
-                }
-                ResetNotifier.showClaudeAccountSwitched(
-                    output.candidateDisplayName
-                        ?? AppLanguage.text("tài khoản khác", "another account")
-                )
-                await refreshClaudeRosterAsync(silently: true)
-            }
-        } catch {
-            claudeErrorMessage = error.localizedDescription
         }
     }
 
@@ -3542,8 +3066,8 @@ private struct AccountHubCLI {
         } catch {
             let command = arguments.first ?? "requested"
             throw CLIError(AppLanguage.text(
-                "Không thể đọc dữ liệu cho \(command). Hãy làm mới AgentDock rồi thử lại.",
-                "Could not decode data for \(command). Refresh AgentDock and try again."
+                "Không thể đọc dữ liệu cho \(command). Hãy làm mới Codex Roster rồi thử lại.",
+                "Could not decode data for \(command). Refresh Codex Roster and try again."
             ))
         }
     }
@@ -3606,8 +3130,8 @@ private struct AccountHubCLI {
             error.fileHandleForReading.closeFile()
             _ = captures.wait(timeout: .now() + 2)
             throw CLIError(AppLanguage.text(
-                "AgentDock không kịp hoàn tất trong hai phút.",
-                "AgentDock did not finish within two minutes."
+                "Codex Roster không kịp hoàn tất trong hai phút.",
+                "Codex Roster did not finish within two minutes."
             ))
         }
         captures.wait()
@@ -3616,8 +3140,8 @@ private struct AccountHubCLI {
             let errorData = errorCapture.data
             let detail = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
             throw CLIError(detail?.isEmpty == false ? detail! : AppLanguage.text(
-                "Lệnh AgentDock thất bại.",
-                "The AgentDock command failed."
+                "Lệnh Codex Roster thất bại.",
+                "The Codex Roster command failed."
             ))
         }
         return outputData
@@ -4514,21 +4038,6 @@ private enum ResetNotifier {
             subtitle: "codex-resets.com",
             body: signal.summary,
             url: signal.url
-        )
-    }
-
-    static func showClaudeAccountSwitched(_ name: String) {
-        enqueue(
-            identifier: "codex-roster-claude-switch-\(Int(Date().timeIntervalSince1970))",
-            title: AppLanguage.text(
-                "Đã đổi đăng nhập Claude CLI đã lưu",
-                "Saved Claude CLI login changed"
-            ),
-            subtitle: name,
-            body: AppLanguage.text(
-                "Kiểm tra /status trong CLI; mở lại bằng claude --resume nếu cần. Claude Desktop cần đăng nhập riêng.",
-                "Check /status in the CLI; reopen with claude --resume if needed. Claude Desktop needs a separate sign-in."
-            )
         )
     }
 
@@ -5670,7 +5179,6 @@ struct AutoSwitchOutput: Decodable {
 
 enum AIProvider: String, CaseIterable, Identifiable, Decodable {
     case openAI = "open_ai"
-    case claude
     case cursor
     case grok
 
@@ -5679,7 +5187,6 @@ enum AIProvider: String, CaseIterable, Identifiable, Decodable {
     var name: String {
         switch self {
         case .openAI: "OpenAI / Codex"
-        case .claude: "Claude Code"
         case .cursor: "Cursor"
         case .grok: "Grok Build"
         }
@@ -5688,7 +5195,6 @@ enum AIProvider: String, CaseIterable, Identifiable, Decodable {
     var compactName: String {
         switch self {
         case .openAI: "Codex"
-        case .claude: "Claude"
         case .cursor: "Cursor"
         case .grok: "Grok"
         }
@@ -5697,7 +5203,6 @@ enum AIProvider: String, CaseIterable, Identifiable, Decodable {
     var icon: String {
         switch self {
         case .openAI: "sparkles"
-        case .claude: "brain.head.profile"
         case .cursor: "cursorarrow"
         case .grok: "bolt.fill"
         }

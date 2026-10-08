@@ -32,3 +32,11 @@ import Testing
         #expect(Date().timeIntervalSince(started) < 3)
     }
 }
+
+@Test func claudeAccountSignInVerifiesTheSelectedEmail() throws {
+    let signedIn = ClaudeLiveAuthStatus(loggedIn: true, authMethod: "claude.ai", email: "A@example.com")
+    #expect(try signedIn.requireSubscriptionEmail(expected: "a@example.com") == "A@example.com")
+    #expect(throws: (any Error).self) { try signedIn.requireSubscriptionEmail(expected: "b@example.com") }
+    let signedOut = ClaudeLiveAuthStatus(loggedIn: false, authMethod: "none", email: nil)
+    #expect(throws: (any Error).self) { try signedOut.requireSubscriptionEmail(expected: "a@example.com") }
+}

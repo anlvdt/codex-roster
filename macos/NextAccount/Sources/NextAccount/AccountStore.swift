@@ -391,6 +391,7 @@ final class AccountStore: ObservableObject {
     @Published var claudeLiveAuthStatus: ClaudeLiveAuthStatus?
     @Published var claudeDetectionMessage: String?
     @Published var isSigningInLiveClaude = false
+    @Published var claudeSignInAccountID: UUID?
     private var isDetectingClaudeLogin = false
     private var claudeBridgeConnected = false
     private var claudeMonitorTask: Task<Void, Never>?
@@ -2816,17 +2817,30 @@ final class AccountStore: ObservableObject {
         }
     }
 
-    func signInLiveClaude() {
+    func signInLiveClaude(account: ProviderAccount? = nil) {
         guard !isSigningInLiveClaude, !isSwitchingClaude, !isSavingClaude,
               !isDetectingClaudeLogin, !isBusyForActions else { return }
         isSigningInLiveClaude = true
+        claudeSignInAccountID = account?.id
+        claudeDetectionMessage = nil
+        let email = account?.email ?? claudeAccounts.first(where: \.isActive)?.email
         Task {
-            defer { isSigningInLiveClaude = false }
+            defer {
+                isSigningInLiveClaude = false
+                claudeSignInAccountID = nil
+            }
             do {
-                try await ClaudeLiveDetection.login(email: claudeAccounts.first(where: \.isActive)?.email)
+                try await ClaudeLiveDetection.login(email: email)
                 await detectClaudeLoginAsync(afterLogin: true)
                 await refreshClaudeUsageAsync(force: false, localOnly: claudeLiveAuthStatus?.subscriptionEmail == nil)
-            } catch { claudeDetectionMessage = error.localizedDescription }
+            } catch {
+                // Browser login may already have changed the CLI account. Do not
+                // retain the old authenticated badge or treat this as target success.
+                claudeLiveAuthStatus = nil
+                claudeDetectionMessage = error.localizedDescription
+                claudeErrorMessage = error.localizedDescription
+                await refreshClaudeRosterAsync(silently: true)
+            }
         }
     }
 

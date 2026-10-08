@@ -514,6 +514,24 @@ struct ClaudeRosterView: View {
         }
     }
 
+    private func accountSignInButton(_ account: ProviderAccount) -> some View {
+        let signingIn = store.isSigningInLiveClaude && store.claudeSignInAccountID == account.id
+        return Button { store.signInLiveClaude(account: account) } label: {
+            Label(language.text(signingIn ? "Đang đăng nhập…" : "Đăng nhập",
+                                signingIn ? "Signing in…" : "Sign in"),
+                  systemImage: "person.crop.circle.badge.checkmark")
+                .font(.system(size: 12, weight: .semibold))
+                .padding(.vertical, 2)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(PrismTheme.accent)
+        .controlSize(.small)
+        .fixedSize()
+        .disabled(store.isSigningInLiveClaude || store.isSwitchingClaude || store.isSavingClaude)
+        .help(language.text("Đăng nhập Claude Code bằng \(account.email)", "Sign in to Claude Code as \(account.email)"))
+        .accessibilityLabel(language.text("Đăng nhập \(account.email)", "Sign in as \(account.email)"))
+    }
+
     private func notchAccountCard(_ account: ProviderAccount) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
@@ -538,6 +556,7 @@ struct ClaudeRosterView: View {
                         .font(PrismTheme.fontCaptionBold)
                         .foregroundStyle(PrismTheme.emerald)
                 }
+                accountSignInButton(account)
                 Button { detailsTarget = account } label: {
                     Image(systemName: account.requiresResave || account.requiresLogin ? "exclamationmark.circle" : "info.circle")
                         .font(.system(size: 14))
@@ -555,8 +574,8 @@ struct ClaudeRosterView: View {
                 if !account.isActive {
                     Button(language.text("Chuyển", "Switch")) { switchTarget = account }
                         .disabled(!account.canActivate)
-                        .buttonStyle(.borderedProminent)
-                        .tint(PrismTheme.accent)
+                        .buttonStyle(.bordered)
+                        .tint(PrismTheme.titanium)
                         .controlSize(.small)
                 }
             }
@@ -1030,6 +1049,7 @@ struct ClaudeRosterView: View {
                 }
                 statusChip(account)
                 Spacer(minLength: 0)
+                accountSignInButton(account)
                 Menu {
                     Button(language.text("Lưu đăng nhập Desktop", "Save Desktop login"), systemImage: "desktopcomputer") {
                         store.saveClaudeDesktopLogin(account.id)

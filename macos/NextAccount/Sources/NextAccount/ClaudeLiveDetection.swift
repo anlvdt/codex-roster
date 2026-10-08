@@ -17,6 +17,15 @@ struct ClaudeLiveAuthStatus: Decodable {
         return email
     }
 
+    func requireSubscriptionEmail(expected: String?) throws -> String {
+        guard let signedIn = subscriptionEmail,
+              expected.map({ signedIn.caseInsensitiveCompare($0) == .orderedSame }) ?? true else {
+            throw NSError(domain: "ClaudeLiveDetection", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Claude login does not match the selected account. Sign in again with the selected email."])
+        }
+        return signedIn
+    }
+
     func verifiesQuota(email: String, fresh: Bool) -> Bool {
         fresh && subscriptionEmail?.caseInsensitiveCompare(email) == .orderedSame
     }
@@ -41,6 +50,8 @@ enum ClaudeLiveDetection {
             var args = ["auth", "login", "--claudeai"]
             if let email, !email.isEmpty { args += ["--email", email] }
             _ = try await run(executable, args, timeout: 600)
+            let data = try await run(executable, ["auth", "status"], timeout: 20, signedOutAllowed: true)
+            _ = try ClaudeLiveAuthStatus.parse(data).requireSubscriptionEmail(expected: email)
         }
         try await withTaskCancellationHandler {
             try await operation.value

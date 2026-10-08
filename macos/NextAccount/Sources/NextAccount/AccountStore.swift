@@ -389,6 +389,8 @@ final class AccountStore: ObservableObject {
     private var pendingLoginDesktopRelaunch: ChatGPTDesktop.RelaunchPlan?
     private var resetNotificationTask: Task<Void, Never>?
     private var claudeMonitorTask: Task<Void, Never>?
+    private var claudeLocalMonitorTask: Task<Void, Never>?
+    private var isReadingClaudeLocalQuota = false
     /// Refresh cadence for the Claude tab starts only after it is first opened.
     private var claudeTabOpened = false
     private var claudeNotchMonitoringActive = false
@@ -2507,23 +2509,32 @@ final class AccountStore: ObservableObject {
         Task { await refreshClaudeUsageAsync(force: force) }
     }
 
-    private func refreshClaudeUsageAsync(force: Bool) async {
-        guard !isLoadingClaude else { return }
-        isLoadingClaude = true
-        defer { isLoadingClaude = false }
+    private func refreshClaudeUsageAsync(force: Bool, localOnly: Bool = false) async {
+        if localOnly {
+            guard !isReadingClaudeLocalQuota else { return }
+            isReadingClaudeLocalQuota = true
+        } else {
+            guard !isLoadingClaude else { return }
+            isLoadingClaude = true
+        }
+        defer {
+            if localOnly { isReadingClaudeLocalQuota = false }
+            else { isLoadingClaude = false }
+        }
         do {
             var arguments = ["providers", "refresh-usage", "claude"]
+            if localOnly { arguments.append("--local-only") }
             if force { arguments.append("--force") }
             let list: ProviderListOutput = try await cli.decode(
                 ProviderListOutput.self,
                 arguments: arguments
             )
             claudeAccounts = list.accounts
-            claudeErrorMessage = nil
+            if !localOnly { claudeErrorMessage = nil }
         } catch {
             claudeErrorMessage = error.localizedDescription
         }
-        if let auto = try? await cli.decode(
+        if !localOnly, let auto = try? await cli.decode(
             ProviderAutoSwitchOutput.self,
             arguments: ["providers", "auto-switch", "claude", "--status"]
         ) {
@@ -2746,7 +2757,7 @@ final class AccountStore: ObservableObject {
     }
 
     /// Called when the Claude Code tab appears — refreshes the roster and
-    /// enables the periodic 5-minute roster refresh. The auto-switch monitor
+    /// enables ten-second local quota observation and periodic API refresh. The auto-switch monitor
     /// itself starts at app launch in `startCoreMonitoring`.
     func claudeTabDidAppear() {
         claudeTabOpened = true
@@ -2770,12 +2781,22 @@ final class AccountStore: ObservableObject {
 
     private func startClaudeMonitoring() {
         guard claudeMonitorTask == nil else { return }
+        claudeLocalMonitorTask = Task { [weak self] in
+            while !Task.isCancelled {
+                if self?.claudeTabOpened == true || self?.claudeNotchMonitoringActive == true {
+                    await self?.refreshClaudeUsageAsync(force: false, localOnly: true)
+                }
+                try? await Task.sleep(for: .seconds(10))
+            }
+        }
         claudeMonitorTask = Task { [weak self] in
-            var ticks = 0
+            var apiGate = PassiveRefreshGate(interval: 60)
+            var autoSwitchGate = PassiveRefreshGate(interval: 60)
             while !Task.isCancelled {
                 // `enabled` lives in CLI settings — fetch status first so the
                 // loop knows it without the tab ever being opened.
-                if self?.claudeAutoSwitch == nil {
+                let refreshAPI = apiGate.request()
+                if refreshAPI && self?.claudeAutoSwitch == nil {
                     if let auto = try? await self?.cli.decode(
                         ProviderAutoSwitchOutput.self,
                         arguments: ["providers", "auto-switch", "claude", "--status"]
@@ -2783,14 +2804,15 @@ final class AccountStore: ObservableObject {
                         self?.claudeAutoSwitch = auto
                     }
                 }
-                if self?.claudeAutoSwitch?.enabled == true {
+                if autoSwitchGate.request() && self?.claudeAutoSwitch?.enabled == true {
                     await self?.claudeAutoSwitchTick()
                 }
-                ticks += 1
-                if (self?.claudeTabOpened == true || self?.claudeNotchMonitoringActive == true) && ticks % 5 == 0 {
-                    await self?.refreshClaudeUsageAsync(force: false)
+                if self?.claudeTabOpened == true || self?.claudeNotchMonitoringActive == true {
+                    if refreshAPI {
+                        await self?.refreshClaudeUsageAsync(force: false)
+                    }
                 }
-                try? await Task.sleep(for: .seconds(60))
+                try? await Task.sleep(for: .seconds(10))
             }
         }
     }

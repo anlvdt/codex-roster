@@ -385,6 +385,17 @@ where
                 &identity,
                 time::OffsetDateTime::now_utc(),
             )
+            && saved_record
+                .as_ref()
+                .and_then(|record| record.cached_usage.as_ref())
+                .is_none_or(|cached| {
+                    usage.fetched_at > cached.fetched_at
+                        || (usage.fetched_at == cached.fetched_at
+                            && cached
+                                .detail
+                                .as_deref()
+                                .is_some_and(|detail| detail.starts_with("Claude Code statusline")))
+                })
         {
             return Ok(ProviderUsageOutput {
                 environment: self.env.kind.clone(),
@@ -566,6 +577,26 @@ where
         Ok(record.view(is_active))
     }
 
+    /// Read the zero-network Claude Code feed for display. Never refresh tokens
+    /// or call the subscription API on this fast polling path.
+    pub fn provider_local_claude_usage(&self) -> Result<ProviderListOutput> {
+        let mut list = self.provider_list(Some(AiProvider::Claude))?;
+        let dir = crate::claude_quota_bridge::config_dir(&self.env.home_dir);
+        let now = time::OffsetDateTime::now_utc();
+        for account in &mut list.accounts {
+            let identity = crate::model::DisplayIdentity {
+                email: account.email.clone(),
+                subject: account.subject.clone(),
+                name: account.name.clone(),
+                plan_label: account.plan_label.clone(),
+            };
+            if let Some(local) = crate::claude_quota_bridge::read_usage(&dir, &identity, now) {
+                account.usage = Some(local_quota_display(local, account.usage.as_ref()));
+            }
+        }
+        Ok(list)
+    }
+
     pub fn provider_refresh_usage(
         &self,
         provider: AiProvider,
@@ -601,6 +632,10 @@ where
                     &record.identity,
                     time::OffsetDateTime::now_utc(),
                 )
+                && record
+                    .cached_usage
+                    .as_ref()
+                    .is_none_or(|cached| usage.fetched_at > cached.fetched_at)
             {
                 let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
                 store.record_usage(&self.env.kind, record.id, usage)?;
@@ -617,15 +652,11 @@ where
                 continue;
             }
             let stale = force
-                || record.cached_usage.as_ref().is_none_or(|usage| {
-                    let now = time::OffsetDateTime::now_utc();
-                    now - usage.fetched_at > time::Duration::minutes(15)
-                        || usage.windows.iter().any(|window| {
-                            window
-                                .reset_at
-                                .is_some_and(|reset| usage.fetched_at < reset && reset <= now)
-                        })
-                });
+                || quota_refresh_due(
+                    record.cached_usage.as_ref(),
+                    is_live,
+                    time::OffsetDateTime::now_utc(),
+                );
             if !stale {
                 continue;
             }
@@ -661,7 +692,11 @@ where
                 let _ = store.record_usage_error(&self.env.kind, record.id, error.to_string());
             }
         }
-        self.provider_list(Some(provider))
+        if provider == AiProvider::Claude {
+            self.provider_local_claude_usage()
+        } else {
+            self.provider_list(Some(provider))
+        }
     }
 
     pub(crate) fn provider_store(&self) -> ProviderAccountStore<LocalSecretStore> {
@@ -940,6 +975,57 @@ fn legacy_usage_to_provider(usage: AccountUsageView) -> ProviderUsageView {
         plan_label: usage.plan_label,
         detail: None,
     }
+}
+
+/// Active account telemetry follows the two-minute selection freshness budget;
+/// inactive accounts retain the lower-cost background interval.
+fn quota_refresh_due(
+    usage: Option<&ProviderUsageView>,
+    active: bool,
+    now: time::OffsetDateTime,
+) -> bool {
+    let interval = if active {
+        time::Duration::minutes(2)
+    } else {
+        time::Duration::minutes(15)
+    };
+    usage.is_none_or(|usage| {
+        now - usage.fetched_at >= interval
+            || usage.windows.iter().any(|window| {
+                window
+                    .reset_at
+                    .is_some_and(|reset| usage.fetched_at < reset && reset <= now)
+            })
+    })
+}
+
+/// Local aggregate updates may be shown alongside old model caps, but the
+/// combined snapshot must never become verified evidence for auto-switching.
+fn local_quota_display(
+    mut local: ProviderUsageView,
+    previous: Option<&ProviderUsageView>,
+) -> ProviderUsageView {
+    if let Some(previous) = previous.filter(|usage| usage.fetched_at >= local.fetched_at) {
+        return previous.clone();
+    }
+    if let Some(previous) =
+        previous.filter(|usage| !crate::claude_quota_bridge::covers_known_limits(Some(usage)))
+    {
+        local.windows.extend(
+            previous
+                .windows
+                .iter()
+                .filter(|window| window.key.starts_with("seven_day_"))
+                .cloned(),
+        );
+        local.status = ProviderUsageStatus::Stale;
+        local.detail = Some(format!(
+            "Claude Code statusline aggregates observed at {}; model limits last checked at {} (OAuth refresh pending)",
+            local.fetched_at, previous.fetched_at
+        ));
+        local.fetched_at = previous.fetched_at;
+    }
+    local
 }
 
 #[cfg(test)]
@@ -1373,6 +1459,70 @@ mod tests {
     }
 
     #[test]
+    fn older_valid_local_observation_cannot_replace_newer_oauth() {
+        let (_temp, app) = review_app();
+        let store = app.provider_store();
+        let a = review_bundle("a", "fixture-token");
+        let (record, _) = store
+            .save(&app.env.kind, AiProvider::Claude, &a.identity, &a.snapshot)
+            .unwrap();
+        let cached = review_quota(80);
+        store
+            .record_usage(&app.env.kind, record.id, cached.clone())
+            .unwrap();
+        let dir = app.env.home_dir.join(".claude");
+        std::fs::create_dir_all(dir.join("roster-usage")).unwrap();
+        let now = time::OffsetDateTime::now_utc();
+        std::fs::write(
+            dir.join("roster-usage/session.json"),
+            serde_json::json!({
+                "email": a.identity.email, "subject": "a", "observed_at": now.unix_timestamp() - 30,
+                "rate_limits": {
+                    "five_hour": {"used_percentage": 5, "resets_at": now.unix_timestamp() + 3600},
+                    "seven_day": {"used_percentage": 5, "resets_at": now.unix_timestamp() + 7200}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let local = crate::claude_quota_bridge::read_usage(&dir, &a.identity, now).unwrap();
+        store
+            .record_usage(&app.env.kind, record.id, local.clone())
+            .unwrap();
+        let local_fixture = ReviewAdapter {
+            live: std::sync::Mutex::new([review_bundle("a", "fixture-token")].into()),
+            fetched: std::sync::Mutex::new([].into()),
+        };
+        let equal = app
+            .provider_usage_with_adapter(&local_fixture, None, &dir)
+            .unwrap();
+        assert_eq!(equal.usage.fetched_at, local.fetched_at);
+        store
+            .record_usage(&app.env.kind, record.id, cached.clone())
+            .unwrap();
+        let fixture = ReviewAdapter {
+            live: std::sync::Mutex::new([a].into()),
+            fetched: std::sync::Mutex::new([review_quota(90)].into()),
+        };
+        let output = app
+            .provider_usage_with_adapter(&fixture, None, &dir)
+            .unwrap();
+        assert_eq!(output.usage.windows[0].used_percent, Some(90));
+        let after = store.get(&app.env.kind, record.id).unwrap().unwrap();
+        assert_eq!(
+            after.cached_usage.as_ref().unwrap().windows[0].used_percent,
+            Some(90)
+        );
+        app.provider_refresh_usage(AiProvider::Claude, false)
+            .unwrap();
+        let after = store.get(&app.env.kind, record.id).unwrap().unwrap();
+        assert_eq!(
+            after.cached_usage.as_ref().unwrap().windows[0].used_percent,
+            Some(90)
+        );
+    }
+
+    #[test]
     fn provider_review_omitted_known_model_cap_preserves_cache_as_stale() {
         let (_temp, app) = review_app();
         let store = app.provider_store();
@@ -1544,6 +1694,53 @@ mod tests {
             cached_usage_error: error.map(str::to_owned),
             consecutive_auth_failures: 0,
         }
+    }
+
+    #[test]
+    fn active_quota_refreshes_after_two_minutes_while_inactive_is_less_frequent() {
+        let now = time::OffsetDateTime::now_utc();
+        let mut cached = usage(ProviderUsageStatus::Ok, None);
+        cached.fetched_at = now - time::Duration::seconds(119);
+        assert!(!quota_refresh_due(Some(&cached), true, now));
+        cached.fetched_at = now - time::Duration::seconds(120);
+        assert!(quota_refresh_due(Some(&cached), true, now));
+        assert!(!quota_refresh_due(Some(&cached), false, now));
+        cached.fetched_at = now - time::Duration::minutes(15);
+        assert!(quota_refresh_due(Some(&cached), false, now));
+        assert!(quota_refresh_due(None, true, now));
+    }
+
+    #[test]
+    fn live_display_keeps_model_caps_and_does_not_renew_their_freshness() {
+        let mut previous = usage(ProviderUsageStatus::Ok, None);
+        previous.fetched_at = time::OffsetDateTime::UNIX_EPOCH;
+        previous.windows = vec![ProviderUsageWindowView {
+            key: "seven_day_opus".into(),
+            used_percent: Some(100),
+            ..Default::default()
+        }];
+        let mut local = usage(ProviderUsageStatus::Ok, Some("Claude Code statusline"));
+        local.fetched_at = time::OffsetDateTime::now_utc();
+        local.windows = vec![ProviderUsageWindowView {
+            key: "five_hour".into(),
+            used_percent: Some(42),
+            ..Default::default()
+        }];
+        let display = local_quota_display(local, Some(&previous));
+        assert_eq!(display.fetched_at, previous.fetched_at);
+        assert_eq!(display.status, ProviderUsageStatus::Stale);
+        assert!(
+            display
+                .windows
+                .iter()
+                .any(|w| w.key == "five_hour" && w.used_percent == Some(42))
+        );
+        assert!(
+            display
+                .windows
+                .iter()
+                .any(|w| w.key == "seven_day_opus" && w.used_percent == Some(100))
+        );
     }
 
     #[test]

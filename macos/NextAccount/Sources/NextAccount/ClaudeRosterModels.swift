@@ -64,7 +64,7 @@ struct ProviderAccount: Identifiable, Decodable {
     /// `src/app/provider_auto_switch.rs`). `nil` when neither exists.
     var bindingUtilization: Int? {
         let used = (usage?.windows ?? [])
-            .filter { ["five_hour", "seven_day", "seven_day_sonnet", "seven_day_opus"].contains($0.key) }
+            .filter { $0.key == "five_hour" || $0.key == "seven_day" || $0.key.hasPrefix("seven_day_") }
             .compactMap(\.usedPercent)
         return used.max()
     }

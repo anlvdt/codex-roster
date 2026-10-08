@@ -599,6 +599,58 @@ fn parse_usage(body: &str) -> Result<ProviderUsageView> {
     {
         windows.push(window);
     }
+    let mut invalid_scoped_limit = false;
+    let mut scoped_keys = std::collections::HashSet::new();
+    if let Some(limits) = value.get("limits").filter(|value| !value.is_null()) {
+        if let Some(limits) = limits.as_array() {
+            for limit in limits {
+                if limit.get("kind").and_then(Value::as_str) != Some("weekly_scoped")
+                    || limit.get("group").and_then(Value::as_str) != Some("weekly")
+                    || limit
+                        .pointer("/scope/surface")
+                        .is_some_and(|value| !value.is_null())
+                {
+                    continue;
+                }
+                let name = limit
+                    .pointer("/scope/model/display_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
+                let slug = name
+                    .to_ascii_lowercase()
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("_");
+                if slug == "all_models" {
+                    continue;
+                }
+                let key = format!("seven_day_{slug}");
+                let used = limit.get("percent").and_then(usage_number);
+                let reset_raw = limit.get("resets_at").filter(|value| !value.is_null());
+                let reset_at = reset_raw.and_then(parse_datetime);
+                if slug.is_empty()
+                    || used.is_none()
+                    || (reset_raw.is_some() && reset_at.is_none())
+                    || !scoped_keys.insert(key.clone())
+                {
+                    invalid_scoped_limit = true;
+                    continue;
+                }
+                let window = percent_window(
+                    &key,
+                    format!("7 day {name}"),
+                    used.unwrap().ceil(),
+                    reset_at,
+                );
+                windows.retain(|window| window.key != key);
+                windows.push(window);
+            }
+        } else {
+            invalid_scoped_limit = true;
+        }
+    }
     if let Some(extra) = value.get("extra_usage") {
         let used = extra
             .get("used_credits")
@@ -667,7 +719,7 @@ fn parse_usage(body: &str) -> Result<ProviderUsageView> {
         plan_label: None,
         detail: None,
     };
-    if invalid_model_limit || !usage_covers_required_limits(&usage, None) {
+    if invalid_model_limit || invalid_scoped_limit || !usage_covers_required_limits(&usage, None) {
         usage.status = ProviderUsageStatus::Error;
         usage.detail =
             Some("Claude quota response is incomplete; required limits are unknown".into());
@@ -687,15 +739,33 @@ pub(crate) fn usage_covers_required_limits(
     };
     ["five_hour", "seven_day"].into_iter().all(usable)
         && known.is_none_or(|previous| {
-            previous.windows.iter().all(|window| {
-                !matches!(window.key.as_str(), "seven_day_sonnet" | "seven_day_opus")
-                    || usable(&window.key)
+            previous
+                .windows
+                .iter()
+                .all(|window| !window.key.starts_with("seven_day_") || usable(&window.key))
+        })
+        && usage
+            .windows
+            .iter()
+            .all(|window| !window.key.starts_with("seven_day_") || usable(&window.key))
+}
+
+fn retry_after_seconds(raw: Option<&str>, now: OffsetDateTime) -> u64 {
+    raw.map(str::trim)
+        .and_then(|value| {
+            value.parse::<u64>().ok().or_else(|| {
+                let until =
+                    OffsetDateTime::parse(value, &time::format_description::well_known::Rfc2822)
+                        .ok()?;
+                let duration = until - now;
+                (duration > time::Duration::ZERO).then(|| {
+                    duration.whole_seconds() as u64 + u64::from(duration.subsec_nanoseconds() > 0)
+                })
             })
         })
-        && usage.windows.iter().all(|window| {
-            !matches!(window.key.as_str(), "seven_day_sonnet" | "seven_day_opus")
-                || usable(&window.key)
-        })
+        .filter(|value| *value > 0)
+        .unwrap_or(300)
+        .min(86_400)
 }
 
 impl ProviderAdapter for ClaudeAdapter {
@@ -960,14 +1030,13 @@ impl ProviderAdapter for ClaudeAdapter {
             .call()
             .context("Claude usage request failed")?;
         let status = response.status().as_u16();
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(300)
-            .min(86_400);
+        let retry_after = retry_after_seconds(
+            response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok()),
+            OffsetDateTime::now_utc(),
+        );
         let body = response
             .body_mut()
             .read_to_string()
@@ -1312,6 +1381,78 @@ mod tests {
                 .unwrap();
         assert_eq!(complete.status, ProviderUsageStatus::Ok);
         assert!(usage_covers_required_limits(&complete, None));
+    }
+
+    #[test]
+    fn retry_after_honors_http_dates_seconds_and_bounds() {
+        let now = OffsetDateTime::from_unix_timestamp(1_445_412_480).unwrap();
+        for (raw, expected) in [
+            (Some("Wed, 21 Oct 2015 07:30:00 GMT"), 120),
+            (Some(" 60 "), 60),
+            (Some("86401"), 86_400),
+            (Some("Wed, 21 Oct 2015 07:27:00 GMT"), 300),
+            (Some("0"), 300),
+            (Some("invalid"), 300),
+            (None, 300),
+        ] {
+            assert_eq!(retry_after_seconds(raw, now), expected, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn scoped_model_limits_preserve_depletion_and_override_legacy() {
+        let usage = parse_usage(r#"{"five_hour":{"utilization":1},"seven_day":{"utilization":2},"seven_day_opus":{"utilization":3},"limits":[{"kind":"weekly_scoped","group":"weekly","percent":100,"scope":{"model":{"display_name":"Opus"}}},{"kind":"weekly_scoped","group":"weekly","percent":99.9,"scope":{"model":{"display_name":"Future Model"}}}]}"#).unwrap();
+        assert_eq!(usage.status, ProviderUsageStatus::Ok);
+        let opus: Vec<_> = usage
+            .windows
+            .iter()
+            .filter(|w| w.key == "seven_day_opus")
+            .collect();
+        assert_eq!(opus.len(), 1);
+        assert_eq!(opus[0].remaining_percent, Some(0));
+        let future = usage
+            .windows
+            .iter()
+            .find(|w| w.key == "seven_day_future_model")
+            .unwrap();
+        assert_eq!(future.remaining_percent, Some(0));
+        let aggregate =
+            parse_usage(r#"{"five_hour":{"utilization":1},"seven_day":{"utilization":2}}"#)
+                .unwrap();
+        assert!(!usage_covers_required_limits(&aggregate, Some(&usage)));
+    }
+
+    #[test]
+    fn invalid_or_duplicate_scoped_limits_are_unknown() {
+        let scoped = serde_json::json!({"kind":"weekly_scoped","group":"weekly","percent":100,"scope":{"model":{"display_name":"Opus"}}});
+        for limits in [
+            serde_json::json!([scoped.clone(), scoped.clone()]),
+            serde_json::json!([{"kind":"weekly_scoped","group":"weekly","percent":"invalid","scope":{"model":{"display_name":"Opus"}}}]),
+            serde_json::json!([{"kind":"weekly_scoped","group":"weekly","percent":100,"scope":{"model":{"display_name":""}}}]),
+            serde_json::json!([{"kind":"weekly_scoped","group":"weekly","percent":100,"resets_at":"invalid","scope":{"model":{"display_name":"Opus"}}}]),
+        ] {
+            let body = serde_json::json!({"five_hour":{"utilization":1},"seven_day":{"utilization":2},"limits":limits});
+            assert_eq!(
+                parse_usage(&body.to_string()).unwrap().status,
+                ProviderUsageStatus::Error,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn surface_scoped_limits_do_not_replace_model_quota() {
+        let usage = parse_usage(r#"{"five_hour":{"utilization":1},"seven_day":{"utilization":2},"seven_day_opus":{"utilization":3},"limits":[{"kind":"weekly_scoped","group":"weekly","percent":100,"scope":{"surface":"cowork","model":{"display_name":"Opus"}}}]}"#).unwrap();
+        assert_eq!(usage.status, ProviderUsageStatus::Ok);
+        assert_eq!(
+            usage
+                .windows
+                .iter()
+                .find(|w| w.key == "seven_day_opus")
+                .unwrap()
+                .used_percent,
+            Some(3)
+        );
     }
 
     #[test]

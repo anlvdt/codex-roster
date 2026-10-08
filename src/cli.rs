@@ -300,8 +300,11 @@ enum ProviderCommand {
     RefreshUsage {
         #[arg(value_parser = parse_ai_provider)]
         provider: AiProvider,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "local_only")]
         force: bool,
+        /// Read Claude Code local quota only; never contact the usage API.
+        #[arg(long)]
+        local_only: bool,
         #[arg(long)]
         json: bool,
     },
@@ -516,9 +519,17 @@ pub fn run() -> Result<()> {
                 ProviderCommand::RefreshUsage {
                     provider,
                     force,
+                    local_only,
                     json,
                 } => {
-                    let output = app.provider_refresh_usage(provider, force)?;
+                    let output = if local_only {
+                        if provider != AiProvider::Claude {
+                            bail!("--local-only requires Claude");
+                        }
+                        app.provider_local_claude_usage()?
+                    } else {
+                        app.provider_refresh_usage(provider, force)?
+                    };
                     if json {
                         print_json(&output)?;
                     } else {

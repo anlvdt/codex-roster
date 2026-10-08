@@ -70,10 +70,8 @@ fn claude_binding_utilization(usage: &ProviderUsageView) -> Option<u8> {
         .windows
         .iter()
         .filter(|window| {
-            matches!(
-                window.key.as_str(),
-                "five_hour" | "seven_day" | "seven_day_sonnet" | "seven_day_opus"
-            )
+            matches!(window.key.as_str(), "five_hour" | "seven_day")
+                || window.key.starts_with("seven_day_")
         })
         .filter_map(|window| window.used_percent)
         .max()
@@ -710,6 +708,18 @@ mod tests {
             plan_label: None,
             detail: None,
         }
+    }
+
+    #[test]
+    fn generic_model_limit_prevents_selecting_an_exhausted_account() {
+        let mut u = usage(ProviderUsageStatus::Ok, 10, 20);
+        u.windows.push(crate::model::ProviderUsageWindowView {
+            key: "seven_day_fable".into(),
+            used_percent: Some(100),
+            ..Default::default()
+        });
+        assert_eq!(claude_binding_utilization(&u), Some(100));
+        assert_eq!(claude_headroom(&u), Some(0));
     }
 
     #[test]

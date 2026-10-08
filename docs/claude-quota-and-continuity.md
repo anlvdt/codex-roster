@@ -61,3 +61,7 @@ or manual abort supersedes that error. Before queueing, Roster performs another
 read-only discovery and checks the exact thread is still eligible. Bare mid-flight
 cuts without a quota error require manual continuation. This also rejects old
 pending captures from earlier app versions.
+
+## Live refresh behavior
+
+The app reads connected local quota every ten seconds while the Claude tab or notch is enabled. OAuth fallback checks run every minute and refresh the active account after two minutes; inactive accounts retain fifteen-minute caching. New local aggregates can be displayed with older model caps, but that combined view stays unverified and does not renew model freshness. See the [2026-10-08 audit](claude-quota-audit-2026-10-08.md) for findings, source research, and limits.

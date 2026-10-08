@@ -270,7 +270,7 @@ struct ClaudeRosterView: View {
         let account = store.claudeAccounts.first(where: \.isActive)
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Label(language.text("Quota & đặt lại", "Quota & resets"), systemImage: "chart.bar")
+                Label(language.text("Tổng quan sử dụng", "Usage overview"), systemImage: "chart.bar")
                     .font(PrismTheme.fontBodyCompactBold)
                 Spacer(minLength: 4)
                 Button("CLI quota") { showQuotaGuide = true }
@@ -280,6 +280,8 @@ struct ClaudeRosterView: View {
                     }
                     .onChange(of: showQuotaGuide) { _, shown in onQuotaGuidePresentationChanged(shown) }
             }
+            quotaOverviewRow(account?.window("five_hour"), title: language.text("5 giờ", "5-hour"))
+            quotaOverviewRow(account?.window("seven_day"), title: language.text("Tuần", "Weekly"))
             if let monthly = account?.window("extra_usage") {
                 Text(extraWindowText(monthly))
                     .font(PrismTheme.fontCaption).foregroundStyle(.secondary)
@@ -292,14 +294,30 @@ struct ClaudeRosterView: View {
             }
             Text(language.text("Banked reset: chưa có dữ liệu Claude", "Banked resets: no Claude data available"))
                 .font(PrismTheme.fontCaption).foregroundStyle(.secondary)
-            Text(language.text("Mốc reset 5 giờ và tuần hiển thị cạnh từng quota.",
-                               "5-hour and weekly reset times appear beside each quota."))
-                .font(PrismTheme.fontMicro).foregroundStyle(.secondary)
             Spacer(minLength: 0)
         }
         .padding(12)
         .frame(maxWidth: .infinity, maxHeight: notchLayout ? .infinity : nil, alignment: .topLeading)
         .background(notchWingShape)
+    }
+
+    private func quotaOverviewRow(_ window: ProviderUsageWindow?, title: String) -> some View {
+        let used = window?.usedPercent
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Text(title).frame(width: 48, alignment: .leading)
+                ProgressView(value: Double(min(100, max(0, used ?? 0))), total: 100)
+                    .tint((used ?? 0) >= 90 ? PrismTheme.danger : PrismTheme.titanium)
+                Text(used.map { language.text("\($0)% đã dùng", "\($0)% used") }
+                    ?? language.text("Chưa có dữ liệu", "No data"))
+                    .fixedSize()
+            }
+            .font(PrismTheme.fontCaption)
+            Text(window?.resetDescription(in: language.language)
+                ?? language.text("Chưa có mốc reset", "Reset time unavailable"))
+                .font(PrismTheme.fontMicro).foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
     }
 
     private var quotaGuide: some View {
@@ -433,22 +451,41 @@ struct ClaudeRosterView: View {
         }
     }
 
+    @ViewBuilder
     private func accountSignInButton(_ account: ProviderAccount) -> some View {
         let signingIn = store.isSigningInLiveClaude && store.claudeSignInAccountID == account.id
-        return Button { store.signInLiveClaude(account: account) } label: {
-            Label(language.text(signingIn ? "Đang đăng nhập…" : "Đăng nhập",
-                                signingIn ? "Signing in…" : "Sign in"),
-                  systemImage: "person.crop.circle.badge.checkmark")
-                .font(.system(size: 12, weight: .semibold))
-                .padding(.vertical, 2)
+        let state = ClaudeAccountLoginState.resolve(status: store.claudeLiveAuthStatus, email: account.email)
+        if state == .signedIn && !store.isSigningInLiveClaude {
+            Label(language.text("Đã đăng nhập CLI", "Signed in to CLI"), systemImage: "checkmark.circle.fill")
+                .font(PrismTheme.fontCaptionBold)
+                .foregroundStyle(PrismTheme.emerald)
+                .fixedSize()
+                .help(language.text("Claude Code xác nhận phiên đăng nhập bằng \(account.email). Quota có trạng thái cập nhật riêng.",
+                                    "Claude Code confirms a signed-in session as \(account.email). Quota freshness is separate."))
+        } else {
+            VStack(alignment: .trailing, spacing: 4) {
+                Text(language.text(
+                    store.isSigningInLiveClaude ? "Đang xác minh phiên…" : state == .signedOut ? "Chưa đăng nhập CLI" : state == .otherSession ? "Không phải phiên CLI hiện tại" : "Chưa xác minh đăng nhập",
+                    store.isSigningInLiveClaude ? "Verifying session…" : state == .signedOut ? "Not signed in to CLI" : state == .otherSession ? "Not the current CLI session" : "Login unverified"))
+                    .font(PrismTheme.fontMicro)
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+                Button { store.signInLiveClaude(account: account) } label: {
+                    Label(language.text(signingIn ? "Đang đăng nhập…" : "Đăng nhập",
+                                        signingIn ? "Signing in…" : "Sign in"),
+                          systemImage: "person.crop.circle.badge.checkmark")
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.vertical, 2)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(PrismTheme.accent)
+                .controlSize(.small)
+                .fixedSize()
+                .disabled(store.isSigningInLiveClaude || store.isSwitchingClaude || store.isSavingClaude)
+                .help(language.text("Đăng nhập Claude Code bằng \(account.email)", "Sign in to Claude Code as \(account.email)"))
+                .accessibilityLabel(language.text("Đăng nhập \(account.email)", "Sign in as \(account.email)"))
+            }
         }
-        .buttonStyle(.borderedProminent)
-        .tint(PrismTheme.accent)
-        .controlSize(.small)
-        .fixedSize()
-        .disabled(store.isSigningInLiveClaude || store.isSwitchingClaude || store.isSavingClaude)
-        .help(language.text("Đăng nhập Claude Code bằng \(account.email)", "Sign in to Claude Code as \(account.email)"))
-        .accessibilityLabel(language.text("Đăng nhập \(account.email)", "Sign in as \(account.email)"))
     }
 
     private func notchAccountCard(_ account: ProviderAccount) -> some View {
@@ -470,11 +507,6 @@ struct ClaudeRosterView: View {
                         .truncationMode(.middle)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                if account.isActive {
-                    Label(language.text("Đang dùng", "Active"), systemImage: "checkmark.circle.fill")
-                        .font(PrismTheme.fontCaptionBold)
-                        .foregroundStyle(PrismTheme.emerald)
-                }
                 accountSignInButton(account)
                 Button { detailsTarget = account } label: {
                     Image(systemName: account.requiresResave || account.requiresLogin ? "exclamationmark.circle" : "info.circle")

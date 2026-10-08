@@ -31,6 +31,17 @@ struct ClaudeLiveAuthStatus: Decodable {
     }
 }
 
+enum ClaudeAccountLoginState {
+    case signedIn, signedOut, otherSession, unverified
+
+    static func resolve(status: ClaudeLiveAuthStatus?, email: String) -> Self {
+        guard let status else { return .unverified }
+        guard status.loggedIn else { return .signedOut }
+        guard let currentEmail = status.subscriptionEmail else { return .unverified }
+        return currentEmail.caseInsensitiveCompare(email) == .orderedSame ? .signedIn : .otherSession
+    }
+}
+
 enum ClaudeLiveDetection {
     static func status() async throws -> ClaudeLiveAuthStatus {
         let operation = Task.detached(priority: .utility) {

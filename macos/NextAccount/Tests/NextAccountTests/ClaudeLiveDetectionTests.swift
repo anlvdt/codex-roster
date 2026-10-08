@@ -2,6 +2,21 @@ import Foundation
 import Testing
 @testable import CodexRoster
 
+@Test func claudeCardLoginStatusUsesAuthInsteadOfSelectionOrQuota() throws {
+    let signedIn = try ClaudeLiveAuthStatus.parse(Data(#"{"loggedIn":true,"authMethod":"claude.ai","email":"a@example.com"}"#.utf8))
+    let signedOut = try ClaudeLiveAuthStatus.parse(Data(#"{"loggedIn":false}"#.utf8))
+    #expect(ClaudeAccountLoginState.resolve(status: signedIn, email: "A@example.com") == .signedIn)
+    #expect(ClaudeAccountLoginState.resolve(status: signedIn, email: "b@example.com") == .otherSession)
+    #expect(ClaudeAccountLoginState.resolve(status: signedOut, email: "a@example.com") == .signedOut)
+    let apiKey = ClaudeLiveAuthStatus(loggedIn: true, authMethod: "api_key", email: "a@example.com")
+    #expect(ClaudeAccountLoginState.resolve(status: apiKey, email: "a@example.com") == .unverified)
+    for email in [nil, "", "  "] as [String?] {
+        let incomplete = ClaudeLiveAuthStatus(loggedIn: true, authMethod: "claude.ai", email: email)
+        #expect(ClaudeAccountLoginState.resolve(status: incomplete, email: "a@example.com") == .unverified)
+    }
+    #expect(ClaudeAccountLoginState.resolve(status: nil, email: "a@example.com") == .unverified)
+}
+
 @Test func claudeLiveDetectionRejectsMetadataWithoutSubscriptionAuthentication() throws {
     func status(_ value: [String: Any]) throws -> ClaudeLiveAuthStatus {
         try ClaudeLiveAuthStatus.parse(JSONSerialization.data(withJSONObject: value))

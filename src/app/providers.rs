@@ -143,6 +143,7 @@ where
                 action: output.action,
             });
         }
+        let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
         let live = adapter(provider)
             .read_live_auth(&self.env)
             .with_context(|| format!("no live {provider} authentication found"))?;
@@ -202,6 +203,7 @@ where
                 account: openai_account_view(output.account),
                 previous_account_id: output.previous_account_id,
                 requires_relaunch: adapter(AiProvider::OpenAi).requires_relaunch_after_switch(),
+                warnings: Vec::new(),
             });
         }
 
@@ -275,12 +277,31 @@ where
                 return Err(error).context("provider restore could not be verified");
             }
         };
-        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
-        let record = store.mark_activated(&self.env.kind, account_id, &verified.identity)?;
+        // Auth is already restored and verified. Ancillary bookkeeping must not
+        // turn this into an apparent failed switch and suppress Desktop handoff.
+        let metadata = (|| {
+            let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+            store.mark_activated(&self.env.kind, account_id, &verified.identity)
+        })();
+        let (record, warnings) = match metadata {
+            Ok(record) => (record, Vec::new()),
+            Err(error) => {
+                let mut record = target;
+                record.identity = verified.identity;
+                record.last_activated_at = Some(time::OffsetDateTime::now_utc());
+                (
+                    record,
+                    vec![format!(
+                        "Login changed, but local activation metadata could not be saved: {error:#}"
+                    )],
+                )
+            }
+        };
         Ok(ProviderActivateOutput {
             account: record.view(true),
             previous_account_id,
             requires_relaunch: provider_adapter.requires_relaunch_after_switch(),
+            warnings,
         })
     }
 
@@ -490,6 +511,7 @@ where
         {
             bail!("use `delete` for Codex/OpenAI accounts");
         }
+        let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
         let store = self.provider_store();
         let record = store
             .get(&self.env.kind, account_id)?
@@ -712,7 +734,7 @@ where
         match provider_adapter.refresh_snapshot(&current_snapshot) {
             SnapshotRefresh::Refreshed(new) => {
                 let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
-                store.save(&self.env.kind, record.provider, &record.identity, &new)?;
+                store.save_rotated_snapshot(&self.env.kind, record.id, &current_snapshot, &new)?;
                 eprintln!("refreshed Claude token for {}", record.identity.email);
                 Ok(RefreshStep::Rotated(new))
             }
@@ -1031,6 +1053,242 @@ mod tests {
             })
             .collect();
         quota
+    }
+
+    #[test]
+    fn review_fix_refresh_completion_does_not_recreate_deleted_account() {
+        struct DeleteDuringRefresh<'a> {
+            app: &'a App<crate::secrets::test_support::MemorySecretStore>,
+            id: Uuid,
+            replacement: SnapshotBlob,
+        }
+        impl ProviderAdapter for DeleteDuringRefresh<'_> {
+            fn provider(&self) -> AiProvider {
+                AiProvider::Claude
+            }
+            fn capabilities(&self) -> &'static [crate::model::ProviderCapability] {
+                &[]
+            }
+            fn try_read_live_auth(
+                &self,
+                _: &crate::env::AppEnv,
+            ) -> Result<Option<crate::provider::ProviderAuthBundle>> {
+                Ok(Some(review_bundle("other", "other-token")))
+            }
+            fn read_live_auth(
+                &self,
+                env: &crate::env::AppEnv,
+            ) -> Result<crate::provider::ProviderAuthBundle> {
+                Ok(self.try_read_live_auth(env)?.unwrap())
+            }
+            fn identity_from_snapshot(&self, _: &SnapshotBlob) -> Result<DisplayIdentity> {
+                unreachable!()
+            }
+            fn restore_snapshot(&self, _: &crate::env::AppEnv, _: &SnapshotBlob) -> Result<()> {
+                unreachable!()
+            }
+            fn fetch_usage(&self, _: &SnapshotBlob) -> Result<ProviderUsageView> {
+                unreachable!()
+            }
+            fn refresh_snapshot(&self, _: &SnapshotBlob) -> SnapshotRefresh {
+                self.app
+                    .provider_store()
+                    .remove(&self.app.env.kind, self.id)
+                    .unwrap();
+                SnapshotRefresh::Refreshed(self.replacement.clone())
+            }
+        }
+        let (_temp, app) = review_app();
+        let store = app.provider_store();
+        let old = review_bundle("saved", "old-token");
+        let (record, _) = store
+            .save(
+                &app.env.kind,
+                AiProvider::Claude,
+                &old.identity,
+                &old.snapshot,
+            )
+            .unwrap();
+        let fixture = DeleteDuringRefresh {
+            app: &app,
+            id: record.id,
+            replacement: review_bundle("saved", "new-token").snapshot,
+        };
+        let result = app.attempt_snapshot_refresh(&store, &fixture, &record, &old.snapshot);
+        assert!(
+            store
+                .list(&app.env.kind, Some(AiProvider::Claude))
+                .unwrap()
+                .is_empty(),
+            "refresh must not resurrect a removed record"
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn review_fix_delete_waits_for_authentication_transaction() {
+        let (_temp, app) = review_app();
+        let store = app.provider_store();
+        let bundle = review_bundle("saved", "token");
+        let (record, _) = store
+            .save(
+                &app.env.kind,
+                AiProvider::Claude,
+                &bundle.identity,
+                &bundle.snapshot,
+            )
+            .unwrap();
+        let auth = AuthLock::acquire(&app.env.app_data_dir).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                started_tx.send(()).unwrap();
+                done_tx
+                    .send(app.provider_delete(record.id, true).is_ok())
+                    .unwrap();
+            });
+            started_rx.recv().unwrap();
+            let early = done_rx.recv_timeout(std::time::Duration::from_millis(150));
+            drop(auth);
+            assert!(
+                early.is_err(),
+                "deletion completed during an auth transaction"
+            );
+            assert!(
+                done_rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap()
+            );
+        });
+        assert!(store.get(&app.env.kind, record.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn review_fix_activation_reports_success_after_metadata_failure() {
+        use base64::Engine;
+        use std::os::unix::fs::PermissionsExt;
+        let (_temp, app) = review_app();
+        let path = app
+            .env
+            .home_dir
+            .join("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB);")
+            .unwrap();
+        let payload = serde_json::json!({
+            "cursorAuth/cachedEmail": base64::engine::general_purpose::STANDARD.encode("target@example.com"),
+            "cursorAuth/accessToken": base64::engine::general_purpose::STANDARD.encode("target-token")
+        });
+        let snapshot = SnapshotBlob {
+            schema_version: 1,
+            files: vec![crate::model::SnapshotFile {
+                name: "cursor_auth.json".into(),
+                bytes_base64: base64::engine::general_purpose::STANDARD
+                    .encode(serde_json::to_vec(&payload).unwrap()),
+            }],
+        };
+        let identity = adapter(AiProvider::Cursor)
+            .identity_from_snapshot(&snapshot)
+            .unwrap();
+        let (record, _) = app
+            .provider_store()
+            .save(&app.env.kind, AiProvider::Cursor, &identity, &snapshot)
+            .unwrap();
+        let directory = app.env.app_data_dir.join("providers");
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = app.provider_activate(record.id);
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            adapter(AiProvider::Cursor)
+                .read_live_auth(&app.env)
+                .unwrap()
+                .identity
+                .email,
+            "target@example.com"
+        );
+        assert!(
+            result.is_ok(),
+            "verified credential switch must remain successful: {result:?}"
+        );
+    }
+
+    #[test]
+    fn review_fix_rotated_credentials_survive_unwritable_index() {
+        use std::os::unix::fs::PermissionsExt;
+        struct RotatingAdapter {
+            replacement: SnapshotBlob,
+        }
+        impl ProviderAdapter for RotatingAdapter {
+            fn provider(&self) -> AiProvider {
+                AiProvider::Claude
+            }
+            fn capabilities(&self) -> &'static [crate::model::ProviderCapability] {
+                &[]
+            }
+            fn try_read_live_auth(
+                &self,
+                _: &crate::env::AppEnv,
+            ) -> Result<Option<crate::provider::ProviderAuthBundle>> {
+                Ok(Some(review_bundle("other", "other-token")))
+            }
+            fn read_live_auth(
+                &self,
+                env: &crate::env::AppEnv,
+            ) -> Result<crate::provider::ProviderAuthBundle> {
+                Ok(self.try_read_live_auth(env)?.unwrap())
+            }
+            fn identity_from_snapshot(&self, _: &SnapshotBlob) -> Result<DisplayIdentity> {
+                unreachable!()
+            }
+            fn restore_snapshot(&self, _: &crate::env::AppEnv, _: &SnapshotBlob) -> Result<()> {
+                unreachable!()
+            }
+            fn fetch_usage(&self, _: &SnapshotBlob) -> Result<ProviderUsageView> {
+                unreachable!()
+            }
+            fn refresh_snapshot(&self, _: &SnapshotBlob) -> SnapshotRefresh {
+                SnapshotRefresh::Refreshed(self.replacement.clone())
+            }
+        }
+        let (_temp, app) = review_app();
+        let store = app.provider_store();
+        let old = review_bundle("saved", "old-token");
+        let new = review_bundle("saved", "rotated-token").snapshot;
+        let (record, _) = store
+            .save(
+                &app.env.kind,
+                AiProvider::Claude,
+                &old.identity,
+                &old.snapshot,
+            )
+            .unwrap();
+        let parent = app.env.app_data_dir.join("providers");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = app.attempt_snapshot_refresh(
+            &store,
+            &RotatingAdapter {
+                replacement: new.clone(),
+            },
+            &record,
+            &old.snapshot,
+        );
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            store.load_snapshot(&app.env.kind, record.id).unwrap().1,
+            new,
+            "single-use token exchange must not be undone by a metadata failure"
+        );
+        assert!(matches!(result, Ok(RefreshStep::Rotated(_))));
+        assert_eq!(
+            store
+                .list(&app.env.kind, Some(AiProvider::Claude))
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

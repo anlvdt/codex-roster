@@ -451,10 +451,10 @@ where
             match provider_adapter.refresh_snapshot(&snapshot) {
                 SnapshotRefresh::Refreshed(new_snapshot) => {
                     let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
-                    store.save(
+                    store.save_rotated_snapshot(
                         &self.env.kind,
-                        record.provider,
-                        &record.identity,
+                        record.id,
+                        &snapshot,
                         &new_snapshot,
                     )?;
                     eprintln!("refreshed Claude token for {}", record.identity.email);
@@ -482,15 +482,34 @@ where
                 SnapshotRefresh::Transient(_) | SnapshotRefresh::Unsupported => {}
             }
         }
-        self.provider_activate_with_auth_lock(candidate_id)?;
-        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
-        let mut settings = load_settings(&self.env.app_data_dir)?;
-        settings.claude_last_auto_switch_at = Some(OffsetDateTime::now_utc());
-        settings.claude_last_auto_switch_from = output.active_account_id;
-        settings.claude_last_auto_switch_target = Some(candidate_id);
-        save_settings(&self.env.app_data_dir, &settings)?;
+        let activation = self.provider_activate_with_auth_lock(candidate_id)?;
+        self.complete_claude_auto_switch(output, activation.warnings)
+    }
+
+    fn complete_claude_auto_switch(
+        &self,
+        output: ProviderAutoSwitchOutput,
+        mut warnings: Vec<String>,
+    ) -> Result<ProviderAutoSwitchOutput> {
+        let candidate_id = output.candidate_account_id;
+        let bookkeeping = (|| {
+            let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+            let mut settings = load_settings(&self.env.app_data_dir)?;
+            settings.claude_last_auto_switch_at = Some(OffsetDateTime::now_utc());
+            settings.claude_last_auto_switch_from = output.active_account_id;
+            settings.claude_last_auto_switch_target = candidate_id;
+            save_settings(&self.env.app_data_dir, &settings)
+        })();
+        if let Err(error) = bookkeeping {
+            warnings.push(format!(
+                "Login changed, but auto-switch settings could not be saved: {error:#}"
+            ));
+        }
         let mut output = output;
         output.status = "switched".to_owned();
+        if !warnings.is_empty() {
+            output.detail = Some(warnings.join("; "));
+        }
         Ok(output)
     }
 
@@ -552,6 +571,54 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_fix_switched_result_survives_settings_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let env = crate::env::AppEnv {
+            kind: crate::model::EnvironmentKind::Macos,
+            home_dir: temp.path().join("home"),
+            codex_root: temp.path().join("home/.codex"),
+            app_data_dir: temp.path().join("data"),
+        };
+        let repository = crate::repository::SnapshotRepository::new(
+            &env.app_data_dir,
+            crate::secrets::test_support::MemorySecretStore::default(),
+        );
+        let app = App::new(env, repository);
+        drop(OperationLock::acquire(&app.env.app_data_dir).unwrap());
+        let candidate = CandidateRow {
+            id: Uuid::new_v4(),
+            display_name: "target".into(),
+            headroom: 90,
+            utilization: 10,
+            seven_day_reset_at: None,
+        };
+        let output = app.claude_auto_switch_output(
+            &AppSettings::default(),
+            "ready",
+            Some(Trigger::AtLimit),
+            Some(Uuid::new_v4()),
+            Some(&candidate),
+            None,
+        );
+        std::fs::set_permissions(
+            &app.env.app_data_dir,
+            std::fs::Permissions::from_mode(0o500),
+        )
+        .unwrap();
+        let result = app.complete_claude_auto_switch(output, Vec::new());
+        std::fs::set_permissions(
+            &app.env.app_data_dir,
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let result = result.expect("completed credential switch must not be reported as failed");
+        assert_eq!(result.status, "switched");
+        assert_eq!(result.candidate_account_id, Some(candidate.id));
+        assert!(result.detail.unwrap().contains("settings"));
+    }
 
     #[test]
     fn provider_review_partial_usage_cannot_qualify_for_auto_switch() {

@@ -226,8 +226,7 @@ where
             (record, true)
         };
         let bytes = serde_json::to_vec(snapshot).context("failed to encode provider snapshot")?;
-        self.secret_store.save(&record.secret_key, &bytes)?;
-        self.save_index(&index)?;
+        self.save_snapshot_and_index(&record.secret_key, &bytes, &index)?;
         Ok((record, created))
     }
 
@@ -250,9 +249,66 @@ where
         account.updated_at = OffsetDateTime::now_utc();
         let record = account.clone();
         let bytes = serde_json::to_vec(snapshot).context("failed to encode provider snapshot")?;
-        self.secret_store.save(&record.secret_key, &bytes)?;
-        self.save_index(&index)?;
+        self.save_snapshot_and_index(&record.secret_key, &bytes, &index)?;
         Ok(record)
+    }
+
+    /// Persist a token rotation without rewriting unrelated account metadata.
+    /// Callers hold AuthLock then OperationLock; the ID and preimage check also
+    /// reject stale completions rather than creating or overwriting an account.
+    pub(crate) fn save_rotated_snapshot(
+        &self,
+        environment: &EnvironmentKind,
+        account_id: Uuid,
+        expected: &SnapshotBlob,
+        rotated: &SnapshotBlob,
+    ) -> Result<()> {
+        let (record, current) = self.load_snapshot(environment, account_id)?;
+        if &current != expected {
+            bail!("provider snapshot changed during token refresh");
+        }
+        let bytes =
+            serde_json::to_vec(rotated).context("failed to encode rotated provider snapshot")?;
+        // A successful exchange consumes its old refresh token. Never roll the
+        // new pair back just because an index timestamp cannot be published.
+        self.secret_store.save(&record.secret_key, &bytes)
+    }
+
+    fn save_snapshot_and_index(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        index: &ProviderIndex,
+    ) -> Result<()> {
+        let previous = self.secret_store.load(key)?;
+        // The production store encrypts this preimage like every other snapshot.
+        // Keep it if rollback fails, rather than losing the only original login.
+        let undo_key = format!("provider-save-undo:{}", Uuid::new_v4());
+        if let Some(previous) = &previous {
+            self.secret_store
+                .save(&undo_key, previous)
+                .context("failed to retain provider snapshot before save")?;
+        }
+        let result = self
+            .secret_store
+            .save(key, bytes)
+            .and_then(|()| self.save_index(index));
+        if let Err(error) = result {
+            let rollback = match &previous {
+                Some(previous) => self.secret_store.save(key, previous),
+                None => self.secret_store.delete(key),
+            };
+            if let Err(rollback) = rollback {
+                return Err(error.context(format!(
+                    "provider snapshot rollback failed: {rollback:#}; recovery secret key: {}",
+                    if previous.is_some() { &undo_key } else { key }
+                )));
+            }
+            let _ = self.secret_store.delete(&undo_key);
+            return Err(error.context("provider snapshot was rolled back"));
+        }
+        let _ = self.secret_store.delete(&undo_key);
+        Ok(())
     }
 
     pub(crate) fn load_snapshot(
@@ -473,6 +529,165 @@ mod tests {
             name: None,
             plan_label: None,
         }
+    }
+
+    #[test]
+    fn review_fix_failed_identity_adoption_restores_original_snapshot() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderAccountStore::new(temp.path(), MemorySecretStore::default());
+        let original = SnapshotBlob {
+            schema_version: 1,
+            files: vec![],
+        };
+        let replacement = SnapshotBlob {
+            schema_version: 1,
+            files: vec![SnapshotFile {
+                name: "auth".into(),
+                bytes_base64: "e30=".into(),
+            }],
+        };
+        let (record, _) = store
+            .save(
+                &EnvironmentKind::Macos,
+                AiProvider::Claude,
+                &identity("unknown", "unknown"),
+                &original,
+            )
+            .unwrap();
+        let parent = store.index_path.parent().unwrap();
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o500)).unwrap();
+        let result = store.save_for_record(
+            &EnvironmentKind::Macos,
+            record.id,
+            &identity("known@example.com", "known"),
+            &replacement,
+        );
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err());
+        let (loaded, snapshot) = store
+            .load_snapshot(&EnvironmentKind::Macos, record.id)
+            .unwrap();
+        assert_eq!(loaded.identity, record.identity);
+        assert_eq!(snapshot, original);
+    }
+
+    #[test]
+    fn review_fix_failed_new_save_removes_unpublished_secret() {
+        use std::os::unix::fs::PermissionsExt;
+        #[derive(Default)]
+        struct TrackingStore(std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>);
+        impl SecretStore for TrackingStore {
+            fn save(&self, key: &str, value: &[u8]) -> Result<()> {
+                self.0.lock().unwrap().insert(key.into(), value.into());
+                Ok(())
+            }
+            fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+                Ok(self.0.lock().unwrap().get(key).cloned())
+            }
+            fn delete(&self, key: &str) -> Result<()> {
+                self.0.lock().unwrap().remove(key);
+                Ok(())
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderAccountStore::new(temp.path(), TrackingStore::default());
+        let parent = store.index_path.parent().unwrap();
+        fs::create_dir_all(parent).unwrap();
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o500)).unwrap();
+        let result = store.save(
+            &EnvironmentKind::Macos,
+            AiProvider::Cursor,
+            &identity("new@example.com", "new"),
+            &SnapshotBlob {
+                schema_version: 1,
+                files: vec![],
+            },
+        );
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err());
+        assert!(store.secret_store.0.lock().unwrap().is_empty());
+        assert!(
+            store
+                .list(&EnvironmentKind::Macos, None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn review_fix_failed_rollback_retains_original_recovery_secret() {
+        use std::os::unix::fs::PermissionsExt;
+        #[derive(Default)]
+        struct FailingRollbackStore {
+            values: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+            failure: std::sync::Mutex<Option<(String, Vec<u8>)>>,
+        }
+        impl SecretStore for FailingRollbackStore {
+            fn save(&self, key: &str, value: &[u8]) -> Result<()> {
+                if self
+                    .failure
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|(k, v)| k == key && v == value)
+                {
+                    anyhow::bail!("injected rollback failure");
+                }
+                self.values.lock().unwrap().insert(key.into(), value.into());
+                Ok(())
+            }
+            fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+                Ok(self.values.lock().unwrap().get(key).cloned())
+            }
+            fn delete(&self, key: &str) -> Result<()> {
+                self.values.lock().unwrap().remove(key);
+                Ok(())
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderAccountStore::new(temp.path(), FailingRollbackStore::default());
+        let original = SnapshotBlob {
+            schema_version: 1,
+            files: vec![],
+        };
+        let replacement = SnapshotBlob {
+            schema_version: 1,
+            files: vec![SnapshotFile {
+                name: "auth".into(),
+                bytes_base64: "e30=".into(),
+            }],
+        };
+        let identity = identity("saved@example.com", "saved");
+        let (record, _) = store
+            .save(
+                &EnvironmentKind::Macos,
+                AiProvider::Cursor,
+                &identity,
+                &original,
+            )
+            .unwrap();
+        let original_bytes = serde_json::to_vec(&original).unwrap();
+        *store.secret_store.failure.lock().unwrap() =
+            Some((record.secret_key.clone(), original_bytes.clone()));
+        let parent = store.index_path.parent().unwrap();
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o500)).unwrap();
+        let result = store.save(
+            &EnvironmentKind::Macos,
+            AiProvider::Cursor,
+            &identity,
+            &replacement,
+        );
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).unwrap();
+        let error = format!("{:#}", result.unwrap_err());
+        let values = store.secret_store.values.lock().unwrap();
+        let (key, recovered) = values
+            .iter()
+            .find(|(key, _)| key.starts_with("provider-save-undo:"))
+            .unwrap();
+        assert_eq!(recovered, &original_bytes);
+        assert!(error.contains(key));
+        assert!(error.contains("rollback failed"));
     }
 
     #[test]

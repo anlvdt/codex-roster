@@ -665,6 +665,8 @@ pub struct ProviderActivateOutput {
     pub account: ProviderAccountView,
     pub previous_account_id: Option<Uuid>,
     pub requires_relaunch: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -176,11 +176,7 @@ pub fn read_usage(
     now: OffsetDateTime,
 ) -> Option<ProviderUsageView> {
     let mut newest: Option<ProviderUsageView> = None;
-    for entry in fs::read_dir(dir.join("roster-usage"))
-        .ok()?
-        .flatten()
-        .take(1000)
-    {
+    for entry in fs::read_dir(dir.join("roster-usage")).ok()?.flatten() {
         if entry.path().extension().and_then(|x| x.to_str()) != Some("json") {
             continue;
         }
@@ -340,6 +336,46 @@ pub fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn provider_review_usage_scans_beyond_unrelated_directory_entries() {
+        let root = setup();
+        let now = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
+        let dir = root.path().join("roster-usage");
+        fs::create_dir_all(&dir).unwrap();
+        // Pre-create files, inspect this filesystem's actual arbitrary order,
+        // then place observations beyond the old raw-entry cutoff.
+        for i in 0..1100 {
+            fs::write(dir.join(format!("noise-{i}.json")), b"invalid").unwrap();
+        }
+        let paths: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        for (index, timestamp, used) in [
+            (1001, now.unix_timestamp() - 30, 10),
+            (1099, now.unix_timestamp(), 80),
+        ] {
+            let observation = Observation {
+                email: "a@example.com".into(),
+                subject: "account-a".into(),
+                observed_at: timestamp,
+                rate_limits: json!({
+                    "five_hour": {"used_percentage": used, "resets_at": now.unix_timestamp() + 3600},
+                    "seven_day": {"used_percentage": 25, "resets_at": now.unix_timestamp() + 86400}
+                }),
+            };
+            fs::write(&paths[index], serde_json::to_vec(&observation).unwrap()).unwrap();
+        }
+        let usage = read_usage(root.path(), &account(), now)
+            .expect("fresh matching observation after entry 1000");
+        assert_eq!(usage.fetched_at.unix_timestamp(), 1_800_000_000);
+        assert_eq!(usage.windows[0].remaining_percent, Some(20));
+        let mut wrong = account();
+        wrong.subject = Some("other-account".into());
+        assert!(read_usage(root.path(), &wrong, now).is_none());
+        assert!(read_usage(root.path(), &account(), now + time::Duration::minutes(3)).is_none());
+    }
+
     #[test]
     fn default_and_scoped_identity_paths_follow_cli_precedence() {
         let dir = Path::new("/home/test/.claude");

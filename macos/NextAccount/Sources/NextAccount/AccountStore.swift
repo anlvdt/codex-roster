@@ -2566,7 +2566,7 @@ final class AccountStore: ObservableObject {
                     ProviderActivateOutput.self,
                     arguments: ["providers", "activate", id.uuidString]
                 )
-                claudeErrorMessage = nil
+                claudeErrorMessage = output.warnings?.joined(separator: "\n")
                 claudeSwitchMessage = AppLanguage.text(
                     "Đã đổi đăng nhập CLI sang \(output.account.email). Đóng phiên CLI cũ; kiểm tra /status trong phiên mới. Desktop cần đăng nhập riêng.",
                     "CLI login changed to \(output.account.email). Close the old CLI session; check /status in the new one. Desktop needs a separate sign-in."
@@ -2828,6 +2828,7 @@ final class AccountStore: ObservableObject {
             )
             claudeAutoSwitch = output
             if output.status == "switched" {
+                claudeErrorMessage = output.detail
                 claudeSwitchMessage = AppLanguage.text(
                     "Đã đổi đăng nhập CLI đã lưu. Phiên đang mở chưa được xác minh: kiểm tra /status, hoặc đóng và mở lại bằng claude --resume. Desktop cần đăng nhập riêng.",
                     "Saved CLI login changed. Running sessions are unverified: check /status, or close and reopen with claude --resume. Desktop needs a separate sign-in."

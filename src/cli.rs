@@ -471,6 +471,9 @@ pub fn run() -> Result<()> {
                             "Activated {} account {} ({})",
                             output.account.provider, output.account.email, output.account.id
                         );
+                        for warning in &output.warnings {
+                            eprintln!("Warning: {warning}");
+                        }
                         if output.requires_relaunch {
                             println!(
                                 "Relaunch the provider app for the new session to take effect."

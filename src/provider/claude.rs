@@ -17,6 +17,17 @@ use crate::model::{
     SNAPSHOT_SCHEMA_VERSION, SnapshotBlob, SnapshotFile, UsageFidelity,
 };
 
+#[cfg(test)]
+use self::tests::fake_keychain::{
+    delete_password as delete_keychain_password, get_password as get_keychain_password,
+    set_password as set_keychain_password,
+};
+#[cfg(not(test))]
+use super::claude_keychain::{
+    delete_password as delete_keychain_password, get_password as get_keychain_password,
+    set_password as set_keychain_password,
+};
+
 pub struct ClaudeAdapter;
 pub static CLAUDE: ClaudeAdapter = ClaudeAdapter;
 
@@ -100,12 +111,9 @@ fn read_keychain_password() -> Option<String> {
     if !cfg!(target_os = "macos") {
         return None;
     }
-    super::claude_keychain::get_password(
-        &keychain_service(),
-        &super::claude_keychain::account_name(),
-    )
-    .ok()
-    .flatten()
+    get_keychain_password(&keychain_service(), &super::claude_keychain::account_name())
+        .ok()
+        .flatten()
 }
 
 fn oauth_object(value: &Value) -> &Value {
@@ -245,10 +253,7 @@ struct KeychainRestoreGuard {
 impl KeychainRestoreGuard {
     fn stage() -> Result<Self> {
         Self::stage_with_reader(|| {
-            super::claude_keychain::get_password(
-                &keychain_service(),
-                &super::claude_keychain::account_name(),
-            )
+            get_keychain_password(&keychain_service(), &super::claude_keychain::account_name())
         })
     }
 
@@ -274,8 +279,8 @@ impl Drop for KeychainRestoreGuard {
         let account = super::claude_keychain::account_name();
         let service = keychain_service();
         let _ = match &self.previous {
-            Some(value) => super::claude_keychain::set_password(&service, &account, value),
-            None => super::claude_keychain::delete_password(&service, &account),
+            Some(value) => set_keychain_password(&service, &account, value),
+            None => delete_keychain_password(&service, &account),
         };
     }
 }
@@ -823,7 +828,12 @@ impl ProviderAdapter for ClaudeAdapter {
         // (credentials file, keychain, config) cannot leave Claude Code
         // half-switched between accounts.
         let mut file_targets = Vec::new();
-        if snapshot_text(snapshot, "claude_credentials.json")?.is_some() {
+        if snapshot_text(snapshot, "claude_credentials.json")?.is_some()
+            || (cfg!(target_os = "macos")
+                && snapshot_text(snapshot, "claude_keychain.txt")?.is_some())
+        {
+            // Keychain-only restores delete this file; deletion needs a
+            // preimage just as a credentials-file write does.
             file_targets.push(credentials_path(env));
         }
         if snapshot_text(snapshot, "claude_config.json")?.is_some() {
@@ -1016,18 +1026,15 @@ fn restore_snapshot_inner(env: &AppEnv, snapshot: &SnapshotBlob) -> Result<()> {
         // would cause it to authenticate as the previous account.
         #[cfg(target_os = "macos")]
         if !keychain_backed {
-            super::claude_keychain::delete_password(
-                &keychain_service(),
-                &super::claude_keychain::account_name(),
-            )
-            .context("failed to remove stale Claude Keychain credentials")?;
+            delete_keychain_password(&keychain_service(), &super::claude_keychain::account_name())
+                .context("failed to remove stale Claude Keychain credentials")?;
         }
     }
     if cfg!(target_os = "macos")
         && let Some(password) = snapshot_text(snapshot, "claude_keychain.txt")?
     {
         let merged = merge_shared_credential_fields(&password, shared.as_ref());
-        super::claude_keychain::set_password(
+        set_keychain_password(
             &keychain_service(),
             &super::claude_keychain::account_name(),
             &merged,
@@ -1144,6 +1151,84 @@ fn status_view(status: ProviderUsageStatus, http_status: u16) -> ProviderUsageVi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Only the external Keychain boundary is replaced; restore and file guards
+    // still run normally. Thread-local state avoids cross-test interference.
+    pub(super) mod fake_keychain {
+        use super::*;
+        std::thread_local! {
+            static PASSWORD: std::cell::RefCell<Option<Option<String>>> = const { std::cell::RefCell::new(None) };
+        }
+        pub struct Guard;
+        impl Guard {
+            pub fn install(value: Option<String>) -> Self {
+                PASSWORD.with(|slot| {
+                    assert!(slot.borrow().is_none());
+                    *slot.borrow_mut() = Some(value);
+                });
+                Self
+            }
+        }
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                PASSWORD.with(|slot| *slot.borrow_mut() = None);
+            }
+        }
+        pub fn get_password(_service: &str, _account: &str) -> Result<Option<String>> {
+            Ok(PASSWORD.with(|slot| slot.borrow().clone().flatten()))
+        }
+        pub fn set_password(_service: &str, _account: &str, value: &str) -> Result<()> {
+            PASSWORD.with(|slot| {
+                if let Some(current) = slot.borrow_mut().as_mut() {
+                    *current = Some(value.to_owned());
+                }
+            });
+            Ok(())
+        }
+        pub fn delete_password(_service: &str, _account: &str) -> Result<()> {
+            PASSWORD.with(|slot| {
+                if let Some(current) = slot.borrow_mut().as_mut() {
+                    *current = None;
+                }
+            });
+            Ok(())
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn provider_review_keychain_only_failure_restores_deleted_credentials_file() {
+        let _keychain = fake_keychain::Guard::install(Some("original-keychain".into()));
+        let (_temp, env) = test_env();
+        let path = credentials_path(&env);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = br#"{"claudeAiOauth":{"accessToken":"original-file"}}"#;
+        fs::write(&path, original).unwrap();
+        fs::write(config_path(&env), "{not json").unwrap();
+        let snapshot = snapshot_with(&[
+            (
+                "claude_keychain.txt",
+                r#"{"claudeAiOauth":{"accessToken":"new"}}"#,
+            ),
+            (
+                "claude_config.json",
+                r#"{"oauthAccount":{"emailAddress":"new@x"}}"#,
+            ),
+        ]);
+        let error = CLAUDE.restore_snapshot(&env, &snapshot).unwrap_err();
+        assert!(format!("{error:#}").contains("refusing to overwrite"));
+        assert_eq!(fs::read(&path).ok().as_deref(), Some(original.as_slice()));
+        assert_eq!(
+            get_keychain_password(
+                &keychain_service(),
+                &super::super::claude_keychain::account_name()
+            )
+            .unwrap()
+            .as_deref(),
+            Some("original-keychain")
+        );
+        assert_eq!(fs::read_to_string(config_path(&env)).unwrap(), "{not json");
+    }
 
     #[test]
     fn provider_review_scoped_config_never_uses_default_identity() {

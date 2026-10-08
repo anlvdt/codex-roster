@@ -148,6 +148,7 @@ struct ProviderActivateOutput: Decodable {
     let account: ProviderAccount
     let previousAccountId: UUID?
     let requiresRelaunch: Bool
+    let warnings: [String]?
 }
 
 struct ClaudeDesktopLoginStatus: Decodable {

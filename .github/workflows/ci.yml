@@ -42,9 +42,14 @@ jobs:
       - name: Run Swift tests
         run: |
           set -euo pipefail
+          test_ids=$(swift test --package-path macos/NextAccount list)
+          if [[ -z "$test_ids" ]]; then
+            echo "Swift test discovery returned no tests" >&2
+            exit 1
+          fi
           while IFS= read -r test_id; do
             filter_id=${test_id%%(*}
             swift test --package-path macos/NextAccount --skip-build --filter "$filter_id"
-          done < <(swift test --package-path macos/NextAccount list)
+          done <<< "$test_ids"
       - name: Build the native macOS app
         run: bash scripts/build-macos-app.sh

@@ -2,8 +2,21 @@
 
 ## Unreleased
 
+## v0.4.9 - 2026-10-08
+
+### Added
+
+- AgentDock branding, multi-provider account management, Claude Desktop login snapshots, and richer Codex/Claude quota content in the notch.
+
 ### Fixed
 
+- Prevent deleted Claude accounts from being recreated by pending token refreshes, and preserve rotated tokens when account metadata is unwritable.
+- Roll back failed provider saves and retain encrypted recovery credentials when rollback fails.
+- Complete verified account switches despite metadata or settings write failures, and display bookkeeping warnings in the app and CLI.
+- Recover damaged same-account Claude Desktop logins from saved snapshots; preserve healthy rotated logins.
+- Restore credentials deleted by failed Keychain-only switches and find fresh quota observations beyond the first 1,000 directory entries.
+- Fail CI when Swift test discovery fails or finds no tests.
+- Harden backup recovery, account enrollment, session continuation, updater preparation, and notch account actions.
 - **Crash-safe provider restores** (Claude, Grok): byte-level backup of every target file (or `.absent` marker) is staged under a private `.roster-restore-<uuid>` dir before the first mutation, and a guard rolls all targets back on drop unless committed — a failure mid-way through Claude's credentials → keychain → `.claude.json` or Grok's creds+settings restore can no longer leave the tool half-switched. Claude's macOS Keychain preimage is also staged/restored on failure. Grok staging now creates files `0600` instead of leaking creds via `0644`. Pattern researched from [farion1231/cc-switch](https://github.com/farion1231/cc-switch) (MIT); independently reimplemented.
 
 ## v0.4.8 - 2026-09-22

@@ -319,6 +319,20 @@ fn ensure_desktop_closed() -> Result<()> {
     Ok(())
 }
 
+fn restore_same_account_login(
+    root: &Path,
+    vault: &impl SecretStore,
+    key: &str,
+    target: &DesktopProfile,
+) -> Result<()> {
+    match capture(root, target.account) {
+        // A healthy live login may have rotated since the snapshot was saved.
+        Ok(live) => vault_save(vault, key, &live),
+        // Missing live auth must not block recovery or replace the saved login.
+        Err(_) => restore(root, target, target.account),
+    }
+}
+
 impl<S: SecretStore> App<S> {
     pub fn claude_desktop_login(
         &self,
@@ -360,7 +374,7 @@ impl<S: SecretStore> App<S> {
                 // currently use different accounts.
                 if let Some(live) = config(&root).ok().and_then(|c| account_in(&c)) {
                     if live == uuid {
-                        vault_save(&vault, &key, &capture(&root, uuid)?)?;
+                        restore_same_account_login(&root, &vault, &key, &target)?;
                         return Ok(DesktopLoginStatus {
                             saved: true,
                             live_account_matches: true,
@@ -507,5 +521,64 @@ mod tests {
             let bytes = fs::read(entry.unwrap().path()).unwrap();
             assert!(!String::from_utf8_lossy(&bytes).contains("unique-private-login-marker"));
         }
+    }
+
+    #[test]
+    fn same_account_restore_recovers_missing_auth_without_overwriting_saved_login() {
+        for missing in ["cookies", "oauth_cache"] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().join("desktop");
+            let id = Uuid::new_v4();
+            fixture(&root, id, "saved-login");
+            let store = crate::secrets::test_support::MemorySecretStore::default();
+            vault_save(&store, "account", &capture(&root, id).unwrap()).unwrap();
+            let saved = store.load("account").unwrap().unwrap();
+            let target = vault_load(&store, "account", id).unwrap().unwrap();
+            if missing == "cookies" {
+                Connection::open(root.join("Cookies"))
+                    .unwrap()
+                    .execute(&format!("DELETE FROM cookies WHERE {COOKIE_FILTER}"), [])
+                    .unwrap();
+            } else {
+                let mut live = config(&root).unwrap();
+                live.remove("oauth:tokenCache");
+                fs::write(root.join("config.json"), serde_json::to_vec(&live).unwrap()).unwrap();
+            }
+            assert!(capture(&root, id).is_err());
+            restore_same_account_login(&root, &store, "account", &target).unwrap();
+            assert_eq!(config(&root).unwrap()["oauth:tokenCache"], "saved-login");
+            let db = Connection::open(root.join("Cookies")).unwrap();
+            let cookie: Vec<u8> = db
+                .query_row("SELECT encrypted_value FROM cookies WHERE host_key='.claude.ai' AND name='sessionKey'", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(cookie, b"saved-login");
+            assert_eq!(store.load("account").unwrap().unwrap(), saved);
+        }
+    }
+
+    #[test]
+    fn same_account_restore_preserves_and_saves_rotated_healthy_login() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("desktop");
+        let id = Uuid::new_v4();
+        fixture(&root, id, "saved-login");
+        let store = crate::secrets::test_support::MemorySecretStore::default();
+        vault_save(&store, "account", &capture(&root, id).unwrap()).unwrap();
+        let target = vault_load(&store, "account", id).unwrap().unwrap();
+        let mut live = config(&root).unwrap();
+        live.insert("oauth:tokenCache".into(), "rotated-login".into());
+        fs::write(root.join("config.json"), serde_json::to_vec(&live).unwrap()).unwrap();
+        Connection::open(root.join("Cookies"))
+            .unwrap()
+            .execute("UPDATE cookies SET encrypted_value=?1 WHERE host_key='.claude.ai' AND name='sessionKey'", [b"rotated-login".as_slice()])
+            .unwrap();
+        restore_same_account_login(&root, &store, "account", &target).unwrap();
+        assert_eq!(config(&root).unwrap()["oauth:tokenCache"], "rotated-login");
+        let saved = vault_load(&store, "account", id).unwrap().unwrap();
+        assert_eq!(saved.auth["oauth:tokenCache"], "rotated-login");
+        assert_eq!(
+            saved.cookies[0][2].sql_value().unwrap(),
+            Value::Blob(b"rotated-login".to_vec())
+        );
     }
 }

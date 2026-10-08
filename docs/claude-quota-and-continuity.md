@@ -75,3 +75,9 @@ The app connects the local quota bridge automatically, preserving the existing s
 If signed out, the app shows **Not signed in**, keeps old quota identified as cached, and provides **Sign in** on the Claude surface. That button opens Claude's browser authentication for the live CLI; after completion the app detects and saves the account automatically. It never opens authentication in the background. User authentication is still required; account credentials cannot be inferred from a saved email or Desktop login. Credential-changing account actions and auto-switch pause during this sign-in flow.
 
 **Live** requires official authentication matching the account and fresh, error-free quota. Selected roster rows are labeled **Selected** rather than implying live telemetry. Automatic API polling pauses while signed out; local observation remains independent.
+
+## Claude monitoring-only surface
+
+Claude's macOS surface contains quota and reset telemetry, with account sign-in for connecting data. Automation settings, automatic switching, automatic session resumption, Desktop switching, and manual Switch controls have been removed from this surface. On startup AgentDock disables the persisted Claude auto-switch setting and previous auto-resume/Desktop preferences. The background monitor only reads local quota, detects login, synchronizes credentials, and refreshes OAuth quota. Codex automation is unchanged.
+
+The quota panel shows five-hour and weekly percentages and reset times. The monthly field is Claude's `extra_usage` spending cap when supplied, not a monthly token allowance. A missing monthly field is unknown. No verified Claude banked-reset field is supplied by the current subscription/local feed; its display explicitly says no data available and never borrows Codex reset announcements or counters.

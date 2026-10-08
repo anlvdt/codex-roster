@@ -30,15 +30,14 @@ pub fn config_dir(home: &Path) -> PathBuf {
         .unwrap_or_else(|| home.join(".claude"))
 }
 
-/// The documented local payload omits model-specific caps. Do not replace
-/// known caps with an aggregate-only observation and make a depleted model
-/// appear eligible for automatic switching.
+/// The documented local payload omits model-specific caps and monthly spending.
+/// Do not replace this supplemental evidence with an aggregate-only observation.
 pub fn covers_known_limits(previous: Option<&ProviderUsageView>) -> bool {
     previous.is_none_or(|usage| {
         !usage
             .windows
             .iter()
-            .any(|window| window.key.starts_with("seven_day_"))
+            .any(|window| window.key.starts_with("seven_day_") || window.key == "extra_usage")
     })
 }
 

@@ -1077,7 +1077,7 @@ fn quota_refresh_due(
     })
 }
 
-/// Local aggregate updates may be shown alongside old model caps, but the
+/// Local aggregate updates may be shown alongside old model caps and spending, but the
 /// combined snapshot must never become verified evidence for auto-switching.
 fn local_quota_display(
     mut local: ProviderUsageView,
@@ -1086,19 +1086,25 @@ fn local_quota_display(
     if let Some(previous) = previous.filter(|usage| usage.fetched_at >= local.fetched_at) {
         return previous.clone();
     }
-    if let Some(previous) =
-        previous.filter(|usage| !crate::claude_quota_bridge::covers_known_limits(Some(usage)))
-    {
+    if let Some(previous) = previous.filter(|usage| {
+        !crate::claude_quota_bridge::covers_known_limits(Some(usage))
+            || usage
+                .windows
+                .iter()
+                .any(|window| window.key == "extra_usage")
+    }) {
         local.windows.extend(
             previous
                 .windows
                 .iter()
-                .filter(|window| window.key.starts_with("seven_day_"))
+                .filter(|window| {
+                    window.key.starts_with("seven_day_") || window.key == "extra_usage"
+                })
                 .cloned(),
         );
         local.status = ProviderUsageStatus::Stale;
         local.detail = Some(format!(
-            "Claude Code statusline aggregates observed at {}; model limits last checked at {} (OAuth refresh pending)",
+            "Claude Code statusline aggregates observed at {}; supplemental limits and spending last checked at {} (OAuth refresh pending)",
             local.fetched_at, previous.fetched_at
         ));
         local.fetched_at = previous.fetched_at;
@@ -1811,6 +1817,60 @@ mod tests {
     }
 
     #[test]
+    fn newer_local_observation_cannot_erase_monthly_spending() {
+        let (_temp, app) = review_app();
+        let store = app.provider_store();
+        let a = review_bundle("a", "fixture-token");
+        let (record, _) = store
+            .save(&app.env.kind, AiProvider::Claude, &a.identity, &a.snapshot)
+            .unwrap();
+        let mut cached = review_quota(80);
+        cached.fetched_at -= time::Duration::seconds(30);
+        cached.windows.push(ProviderUsageWindowView {
+            key: "extra_usage".into(),
+            used_percent: Some(25),
+            ..Default::default()
+        });
+        store
+            .record_usage(&app.env.kind, record.id, cached.clone())
+            .unwrap();
+        let dir = app.env.home_dir.join(".claude");
+        std::fs::create_dir_all(dir.join("roster-usage")).unwrap();
+        let now = time::OffsetDateTime::now_utc();
+        std::fs::write(
+            dir.join("roster-usage/session.json"),
+            serde_json::json!({
+                "email": a.identity.email, "subject": "a", "observed_at": now.unix_timestamp(),
+                "rate_limits": {
+                    "five_hour": {"used_percentage": 5, "resets_at": now.unix_timestamp() + 3600},
+                    "seven_day": {"used_percentage": 5, "resets_at": now.unix_timestamp() + 7200}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        app.provider_refresh_usage(AiProvider::Claude, false)
+            .unwrap();
+        assert_eq!(
+            store
+                .get(&app.env.kind, record.id)
+                .unwrap()
+                .unwrap()
+                .cached_usage,
+            Some(cached.clone())
+        );
+        let fixture = ReviewAdapter {
+            live: std::sync::Mutex::new([a].into()),
+            fetched: std::sync::Mutex::new([cached.clone()].into()),
+        };
+        let output = app
+            .provider_usage_with_adapter(&fixture, None, &dir)
+            .unwrap();
+        assert_eq!(output.usage, cached);
+        assert!(fixture.fetched.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn provider_review_omitted_known_model_cap_preserves_cache_as_stale() {
         let (_temp, app) = review_app();
         let store = app.provider_store();
@@ -2028,6 +2088,46 @@ mod tests {
                 .windows
                 .iter()
                 .any(|w| w.key == "seven_day_opus" && w.used_percent == Some(100))
+        );
+    }
+
+    #[test]
+    fn live_display_keeps_monthly_spending_without_renewing_its_freshness() {
+        let mut previous = usage(ProviderUsageStatus::Ok, None);
+        previous.fetched_at = time::OffsetDateTime::UNIX_EPOCH;
+        previous.windows = vec![ProviderUsageWindowView {
+            key: "extra_usage".into(),
+            used_percent: Some(25),
+            ..Default::default()
+        }];
+        let mut local = usage(ProviderUsageStatus::Ok, Some("Claude Code statusline"));
+        local.fetched_at = time::OffsetDateTime::now_utc();
+        local.windows = vec![ProviderUsageWindowView {
+            key: "five_hour".into(),
+            used_percent: Some(42),
+            ..Default::default()
+        }];
+        let display = local_quota_display(local, Some(&previous));
+        assert_eq!(display.fetched_at, previous.fetched_at);
+        assert_eq!(display.status, ProviderUsageStatus::Stale);
+        assert!(
+            display
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains(&previous.fetched_at.to_string())
+        );
+        assert!(
+            display
+                .windows
+                .iter()
+                .any(|w| w.key == "extra_usage" && w.used_percent == Some(25))
+        );
+        assert!(
+            display
+                .windows
+                .iter()
+                .any(|w| w.key == "five_hour" && w.used_percent == Some(42))
         );
     }
 

@@ -2503,12 +2503,6 @@ final class AccountStore: ObservableObject {
         } catch {
             if !silently { claudeErrorMessage = error.localizedDescription }
         }
-        if let auto = try? await cli.decode(
-            ProviderAutoSwitchOutput.self,
-            arguments: ["providers", "auto-switch", "claude", "--status"]
-        ) {
-            claudeAutoSwitch = auto
-        }
     }
 
     func refreshClaudeUsage(force: Bool) {
@@ -2540,12 +2534,6 @@ final class AccountStore: ObservableObject {
         } catch {
             claudeErrorMessage = error.localizedDescription
         }
-        if !localOnly, let auto = try? await cli.decode(
-            ProviderAutoSwitchOutput.self,
-            arguments: ["providers", "auto-switch", "claude", "--status"]
-        ) {
-            claudeAutoSwitch = auto
-        }
     }
 
     func saveLiveClaudeAccount() {
@@ -2574,11 +2562,7 @@ final class AccountStore: ObservableObject {
             guard !isSwitchingClaude, !isBusyForActions, !isSwitching, !isSigningInLiveClaude else { return }
             isSwitchingClaude = true
             defer { isSwitchingClaude = false }
-            let interrupted = await Task.detached(priority: .utility) {
-                ClaudeSessionContinuity.recentInterruptedSession(requireRateLimit: false)
-            }.value
             do {
-                if usesClaudeDesktop { _ = try await requireClaudeDesktopLogin(id) }
                 let output: ProviderActivateOutput = try await cli.decode(
                     ProviderActivateOutput.self,
                     arguments: ["providers", "activate", id.uuidString]
@@ -2588,19 +2572,6 @@ final class AccountStore: ObservableObject {
                     "Đã đổi đăng nhập CLI sang \(output.account.email). Đóng phiên CLI cũ; kiểm tra /status trong phiên mới. Desktop cần đăng nhập riêng.",
                     "CLI login changed to \(output.account.email). Close the old CLI session; check /status in the new one. Desktop needs a separate sign-in."
                 )
-                do { _ = try await switchClaudeDesktopIfNeeded(id, email: output.account.email) }
-                catch { claudeErrorMessage = error.localizedDescription }
-                if !usesClaudeDesktop,
-                   UserDefaults.standard.object(forKey: "claude_roster_auto_resume") as? Bool != false {
-                    do {
-                        if let interrupted {
-                            try await ClaudeSessionContinuity.resume(interrupted, automaticallyContinue: false,
-                                                                     expectedEmail: output.account.email)
-                        } else {
-                            try await ClaudeSessionContinuity.openResumePicker(expectedEmail: output.account.email)
-                        }
-                    } catch { claudeErrorMessage = error.localizedDescription }
-                }
             } catch {
                 claudeErrorMessage = error.localizedDescription
             }
@@ -2855,26 +2826,17 @@ final class AccountStore: ObservableObject {
             }
         }
         claudeMonitorTask = Task { [weak self] in
+            UserDefaults.standard.set(false, forKey: "claude_roster_auto_resume")
+            UserDefaults.standard.set(false, forKey: "claude_roster_switch_desktop")
+            let _: ProviderAutoSwitchOutput? = try? await self?.cli.decode(
+                ProviderAutoSwitchOutput.self,
+                arguments: ["providers", "auto-switch", "claude", "--disable"])
             var apiGate = PassiveRefreshGate(interval: 60)
-            var autoSwitchGate = PassiveRefreshGate(interval: 60)
             while !Task.isCancelled {
-                // `enabled` lives in CLI settings — fetch status first so the
-                // loop knows it without the tab ever being opened.
+                // Claude is monitoring-only: detect login and refresh quota;
+                // never decide, apply a switch, or resume a conversation.
                 let refreshAPI = apiGate.request()
                 if refreshAPI { await self?.detectClaudeLoginAsync() }
-                if refreshAPI && self?.claudeAutoSwitch == nil {
-                    if let auto = try? await self?.cli.decode(
-                        ProviderAutoSwitchOutput.self,
-                        arguments: ["providers", "auto-switch", "claude", "--status"]
-                    ) {
-                        self?.claudeAutoSwitch = auto
-                    }
-                }
-                if autoSwitchGate.request() && self?.claudeAutoSwitch?.enabled == true
-                    && self?.claudeLiveAuthStatus?.subscriptionEmail != nil
-                    && self?.isSigningInLiveClaude != true {
-                    await self?.claudeAutoSwitchTick()
-                }
                 if self?.claudeTabOpened == true || self?.claudeNotchMonitoringActive == true {
                     if refreshAPI && self?.claudeLiveAuthStatus?.subscriptionEmail != nil
                         && self?.isSigningInLiveClaude != true {

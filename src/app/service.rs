@@ -49,15 +49,18 @@ where
             .and_then(|bundle| match_saved_account(&saved_accounts, &bundle.identity))
             .map(|account| account.id);
         let codex_model = codex::read_configured_model(&self.env.codex_root);
+        let process_warnings = crate::process::detect_running_codex_processes();
+        let activity = crate::codex_activity::summarize(&self.env.codex_root, &process_warnings);
         Ok(StatusOutput {
             environment: self.env.kind.clone(),
             codex_root: self.env.codex_root.display().to_string(),
             current_account: live.map(|bundle| bundle.identity),
             current_account_saved_id: current_saved_id,
             saved_accounts: saved_accounts.len(),
-            process_warnings: crate::process::detect_running_codex_processes(),
+            process_warnings,
             vibe_usage: crate::vibe_usage::load_cached(&self.env.app_data_dir),
             codex_model,
+            activity: Some(activity),
         })
     }
 
@@ -1106,6 +1109,24 @@ where
             &self.env.codex_root.join("sessions"),
             time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc()),
         )
+    }
+
+    pub fn quota_history(
+        &self,
+        account_id: Option<Uuid>,
+    ) -> Result<crate::quota_history::QuotaHistoryOutput> {
+        let account_id = match account_id {
+            Some(id) => id,
+            None => self
+                .status()?
+                .current_account_saved_id
+                .ok_or_else(|| anyhow::anyhow!("no active saved account for quota history"))?,
+        };
+        Ok(crate::quota_history::load_samples(
+            &self.env.app_data_dir,
+            account_id,
+            time::OffsetDateTime::now_utc(),
+        ))
     }
 
     pub fn set_account_label(&self, account_id: Uuid, custom_label: Option<String>) -> Result<()> {

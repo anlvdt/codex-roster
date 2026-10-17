@@ -6,6 +6,7 @@ struct AutomationSettingsView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @State private var confirmingFullBackupRestore = false
+    @AppStorage(RosterDisplayPreferences.resetAsClockKey) private var resetAsClock = false
 
     var body: some View {
         ScrollView {
@@ -124,6 +125,20 @@ struct AutomationSettingsView: View {
                     Text(language.text(
                         "Rê vào notch rồi dừng ~0,3s để mở (rê ngang qua sẽ không mở) · ⌃⌥R hoặc Esc đóng.",
                         "Hover and pause ~0.3s to open (drive-by sweeps won’t) · ⌃⌥R or Esc to close."
+                    ))
+                    .font(RosterSecondaryChrome.caption)
+                    .foregroundStyle(.secondary)
+
+                    Toggle(
+                        language.text(
+                            "Hiện giờ reset (thay vì đếm ngược)",
+                            "Show reset as clock time (instead of countdown)"
+                        ),
+                        isOn: $resetAsClock
+                    )
+                    Text(language.text(
+                        "Ví dụ 03:20 hoặc mai 01:00 trên notch thay vì ↺ 3H.",
+                        "e.g. 03:20 or tmrw 01:00 on the notch instead of ↺ 3H."
                     ))
                     .font(RosterSecondaryChrome.caption)
                     .foregroundStyle(.secondary)

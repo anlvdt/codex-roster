@@ -36,6 +36,32 @@ final class GitHubUpdater: ObservableObject {
     nonisolated private static let maximumArchiveBytes = 128 * 1024 * 1024
     private var automaticCheckTask: Task<Void, Never>?
 
+    /// Marker the install helper waits for after relaunch. Written once the new
+    /// process reaches a healthy UI state; missing after 5 minutes → rollback.
+    nonisolated static func updateHealthyMarkerURL() -> URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        return support
+            .appendingPathComponent("com.codexroster.codex-roster", isDirectory: true)
+            .appendingPathComponent("update-healthy", isDirectory: false)
+    }
+
+    /// Call after launch when the app is visibly running so a pending update
+    /// helper can drop the previous.app backup instead of rolling back.
+    nonisolated static func markUpdateHealthy() {
+        let marker = updateHealthyMarkerURL()
+        do {
+            try FileManager.default.createDirectory(
+                at: marker.deletingLastPathComponent(),
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try "ok\n".write(to: marker, atomically: true, encoding: .utf8)
+        } catch {
+            // Best-effort — a missed marker only risks keeping the previous backup longer.
+        }
+    }
+
     func startAutomaticChecks(currentVersion: String) {
         guard automaticCheckTask == nil else { return }
         automaticCheckTask = Task { [weak self] in
@@ -122,6 +148,7 @@ final class GitHubUpdater: ObservableObject {
         let helper = stagingDirectory.appendingPathComponent("install-update.sh")
         let appProcessID = ProcessInfo.processInfo.processIdentifier
         let backupBundle = installDirectory.appendingPathComponent(".Codex Roster.previous.app")
+        let healthyMarker = updateHealthyMarkerURL()
         let bundledTrayPattern = installedApp
             .appendingPathComponent("Contents/MacOS/codex-roster")
             .path + " tray"
@@ -156,12 +183,30 @@ final class GitHubUpdater: ObservableObject {
           /bin/mv \(shellQuote(backupBundle.path)) \(shellQuote(installedApp.path))
           exit 1
         fi
+        /bin/rm -f \(shellQuote(healthyMarker.path))
         if ! /usr/bin/open \(shellQuote(installedApp.path)); then
           /bin/rm -rf \(shellQuote(installedApp.path))
           /bin/mv \(shellQuote(backupBundle.path)) \(shellQuote(installedApp.path))
           /usr/bin/open \(shellQuote(installedApp.path))
           exit 1
         fi
+        # Wait up to 5 minutes for the new build to mark itself healthy.
+        # If it never does, roll back to the previous bundle (Clawd-style).
+        i=0
+        while [ "$i" -lt 300 ]; do
+          if [ -f \(shellQuote(healthyMarker.path)) ]; then
+            /bin/rm -rf \(shellQuote(backupBundle.path))
+            /bin/rm -f \(shellQuote(healthyMarker.path))
+            exit 0
+          fi
+          sleep 1
+          i=$((i + 1))
+        done
+        echo "update health check timed out; rolling back"
+        /bin/rm -rf \(shellQuote(installedApp.path))
+        /bin/mv \(shellQuote(backupBundle.path)) \(shellQuote(installedApp.path))
+        /usr/bin/open \(shellQuote(installedApp.path))
+        exit 1
         """
         try script.write(to: helper, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)

@@ -301,6 +301,9 @@ final class AccountStore: ObservableObject {
     @Published private(set) var accounts: [SavedAccount] = []
     @Published private(set) var autoStartUsageWindows = false
     @Published private(set) var tokenUsage: TokenUsageSummary?
+    @Published private(set) var quotaHistory: QuotaHistoryOutput?
+    /// Increments when a 5-hour (or weekly) quota reset is confirmed — drives notch pulse.
+    @Published private(set) var quotaResetPulse: UInt = 0
     @Published private(set) var resetOutlook: ResetOutlook?
     @Published private(set) var resetTimeline: [ResetTimelineEvent]?
     @Published private(set) var resetJuice: ResetJuice?
@@ -405,6 +408,15 @@ final class AccountStore: ObservableObject {
             accountSortMode = .quotaThenPlan
             defaults.set(AccountSortMode.quotaThenPlan.rawValue, forKey: accountSortModeKey)
             defaults.set(true, forKey: accountSortModeV2Key)
+        }
+        NotificationCenter.default.addObserver(
+            forName: .codexRosterQuotaResetPulse,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.noteQuotaResetPulse()
+            }
         }
     }
 
@@ -2419,6 +2431,25 @@ final class AccountStore: ObservableObject {
         }
     }
 
+    func refreshQuotaHistory(silently: Bool = false) {
+        Task {
+            do {
+                var arguments = ["quota-history"]
+                if let id = accounts.first(where: \.isActive)?.id {
+                    arguments.append(id.uuidString)
+                }
+                arguments.append("--json")
+                quotaHistory = try await cli.decode(QuotaHistoryOutput.self, arguments: arguments)
+            } catch {
+                if !silently { errorMessage = error.localizedDescription }
+            }
+        }
+    }
+
+    func noteQuotaResetPulse() {
+        quotaResetPulse &+= 1
+    }
+
     func refreshResetOutlook(silently: Bool = false) {
         guard !isLoadingResetOutlook else { return }
         isLoadingResetOutlook = true
@@ -2495,6 +2526,7 @@ final class AccountStore: ObservableObject {
         } else {
             self.autoSwitchWhenExhausted = loadedAutoSwitch.enabled
         }
+        refreshQuotaHistory(silently: true)
     }
 
     private func checkAutoSwitchWhenExhausted() async {
@@ -3612,19 +3644,22 @@ struct StatusOutput: Decodable {
     let processWarnings: [RunningProcess]
     let vibeUsage: VibeUsageSummary?
     let codexModel: String?
+    let activity: CodexActivitySummary?
 
     init(
         currentAccount: AccountIdentity?,
         currentAccountSavedId: UUID? = nil,
         processWarnings: [RunningProcess],
         vibeUsage: VibeUsageSummary? = nil,
-        codexModel: String? = nil
+        codexModel: String? = nil,
+        activity: CodexActivitySummary? = nil
     ) {
         self.currentAccount = currentAccount
         self.currentAccountSavedId = currentAccountSavedId
         self.processWarnings = processWarnings
         self.vibeUsage = vibeUsage
         self.codexModel = codexModel
+        self.activity = activity
     }
 }
 
@@ -4189,6 +4224,8 @@ private enum ResetNotifier {
             ),
             body: detail
         )
+        // Soft notch pulse — observed on the main AccountStore via notification center.
+        NotificationCenter.default.post(name: .codexRosterQuotaResetPulse, object: nil)
     }
 
     private static func confirmedResetChanges(

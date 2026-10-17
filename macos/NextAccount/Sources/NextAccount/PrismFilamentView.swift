@@ -9,6 +9,7 @@ struct PrismFilamentView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(RosterDisplayPreferences.resetAsClockKey) private var resetAsClock = false
 
     let quota: NotchQuotaSnapshot
     var diameter: CGFloat = 20
@@ -16,6 +17,8 @@ struct PrismFilamentView: View {
     var notchWidth: CGFloat = 185
     var earWidth: CGFloat = 126
     var compactHeight: CGFloat = 32
+
+    @State private var resetPulseScale: CGFloat = 1
 
     private var fivePercent: Int? {
         quota.fivePercent
@@ -38,7 +41,14 @@ struct PrismFilamentView: View {
     }
 
     private var isRunning: Bool {
-        quota.providerName == "Codex" && store.hasRunningCodexProcesses
+        if let activity = store.status?.activity {
+            return activity.working > 0
+        }
+        return quota.providerName == "Codex" && store.hasRunningCodexProcesses
+    }
+
+    private var isWaiting: Bool {
+        (store.status?.activity?.waiting ?? 0) > 0
     }
 
     private var fiveTint: Color {
@@ -169,10 +179,15 @@ struct PrismFilamentView: View {
     private var leftEarWing: some View {
         HStack(spacing: 3.5) {
             // Live energy / activity indicator
-            Text("⚡")
+            Text(isWaiting ? "?" : "⚡")
                 .font(PrismTheme.fontBodyCompactBold)
-                .foregroundStyle(fiveTint)
-                .shadow(color: fiveTint.opacity(isRunning ? 0.85 : 0), radius: isRunning ? 3.5 : 0)
+                .foregroundStyle(isWaiting ? PrismTheme.warning : fiveTint)
+                .shadow(
+                    color: (isWaiting ? PrismTheme.warning : fiveTint)
+                        .opacity(isRunning || isWaiting ? 0.85 : 0),
+                    radius: isRunning || isWaiting ? 3.5 : 0
+                )
+                .scaleEffect(resetPulseScale)
                 .fixedSize()
 
             // 5H Quota
@@ -197,6 +212,14 @@ struct PrismFilamentView: View {
                         .lineLimit(1)
                         .fixedSize()
                 }
+            }
+
+            if let caption = quota.verification.compactCaption(in: language.language) {
+                Text(caption)
+                    .font(PrismTheme.fontMicro)
+                    .foregroundStyle(PrismTheme.warning.opacity(0.9))
+                    .lineLimit(1)
+                    .fixedSize()
             }
 
             // 5H Reset Countdown (or Plan Tag if full)
@@ -229,7 +252,26 @@ struct PrismFilamentView: View {
         .frame(width: earWidth, height: compactHeight, alignment: .center)
         .background(leftEarBackground)
         .overlay(leftEarBorder)
-        .help("\(quota.providerName): \(quota.displayName ?? language.text("Chưa có phiên", "No session"))")
+        .help(leftEarHelp)
+        .onChange(of: store.quotaResetPulse) { _, _ in
+            withAnimation(.easeOut(duration: 0.18)) { resetPulseScale = 1.35 }
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.55).delay(0.12)) {
+                resetPulseScale = 1
+            }
+        }
+    }
+
+    private var leftEarHelp: String {
+        var parts = [
+            "\(quota.providerName): \(quota.displayName ?? language.text("Chưa có phiên", "No session"))"
+        ]
+        if let caption = quota.verification.caption(in: language.language) {
+            parts.append(caption)
+        }
+        if let activity = store.status?.activity, activity.hasSignal {
+            parts.append(activity.compactLabel)
+        }
+        return parts.joined(separator: " · ")
     }
 
     // MARK: - Right Ear Wing (Flanking Right of Camera Notch)
@@ -357,21 +399,7 @@ struct PrismFilamentView: View {
     }
 
     private func compactReset(_ date: Date) -> String {
-        let diff = date.timeIntervalSince(Date())
-        guard diff > 0 else {
-            return language.text("CHỜ", "PENDING")
-        }
-        let seconds = Int(diff)
-        let days = seconds / 86400
-        let hours = (seconds % 86400) / 3600
-        if days > 0 {
-            return "\(days)D"
-        } else if hours > 0 {
-            return "\(hours)H"
-        } else {
-            let minutes = max(1, (seconds % 3600) / 60)
-            return "\(minutes)M"
-        }
+        ResetClockFormat.compact(date, asClock: resetAsClock, language: language.language)
     }
 }
 

@@ -78,6 +78,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { _ in
             NotificationCenter.default.post(name: .showDashboard, object: nil)
         }
+        // Signal a pending self-update helper that this launch is healthy so it
+        // can discard `.Codex Roster.previous.app` instead of rolling back.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            GitHubUpdater.markUpdateHealthy()
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -519,6 +524,13 @@ struct TokenUsageOverview: View {
             Text(language.text("Thống kê token theo các phiên sử dụng gần đây.", "Token activity from recent sessions."))
                 .font(RosterSecondaryChrome.callout)
                 .foregroundStyle(.secondary)
+            CodexActivityStrip(activity: store.status?.activity)
+
+            if let history = store.quotaHistory, !history.samples.isEmpty {
+                QuotaHistorySparkline(samples: history.samples)
+                    .padding(.vertical, 4)
+            }
+
             if let summary = store.tokenUsage {
                 VStack(alignment: .leading, spacing: 14) {
                     if let vibe = store.status?.vibeUsage {
@@ -568,6 +580,7 @@ struct TokenUsageOverview: View {
                         Spacer()
                         Button(language.text("Cập nhật token", "Refresh tokens")) {
                             store.refreshTokenUsage()
+                            store.refreshQuotaHistory()
                         }
                         .controlSize(.small)
                         .disabled(store.isLoadingTokenUsage)
@@ -662,7 +675,18 @@ private struct TokenUsageDetails: View {
                 TokenUsageRanking(title: language.text("Theo model", "By model"), entries: summary.byModel, showBars: true)
             }
             if !summary.byProject.isEmpty {
-                TokenUsageRanking(title: language.text("Theo dự án", "By project"), entries: summary.byProject, showBars: false)
+                TokenUsageRanking(
+                    title: language.text("Dự án đốt quota (ước lượng)", "Projects burning quota (estimate)"),
+                    entries: summary.byProject,
+                    showBars: true,
+                    limit: 6
+                )
+                Text(language.text(
+                    "Ước lượng từ transcript cục bộ — không phải số official rate-limit.",
+                    "Estimated from local transcripts — not official rate-limit figures."
+                ))
+                .font(RosterSecondaryChrome.micro)
+                .foregroundStyle(.secondary)
             }
         }
         .padding(14)
@@ -693,9 +717,11 @@ private struct TokenUsageRanking: View {
     let title: String
     let entries: [TokenUsageBreakdown]
     var showBars: Bool = false
+    var limit: Int? = nil
 
     private var ranked: [TokenUsageBreakdown] {
-        Array(entries.sorted { $0.tokens > $1.tokens }.prefix(showBars ? 6 : 3))
+        let cap = limit ?? (showBars ? 6 : 3)
+        return Array(entries.sorted { $0.tokens > $1.tokens }.prefix(cap))
     }
 
     private var maxTokens: UInt64 {

@@ -145,6 +145,8 @@ final class RosterConsoleSelection: ObservableObject {
 extension Notification.Name {
     /// Open (or raise) the roster console and select a tab. `object` is `RosterConsoleTab.rawValue`.
     static let openRosterConsole = Notification.Name("codexRoster.openRosterConsole")
+    /// Confirmed quota window reset — soft pulse on the notch energy indicator.
+    static let codexRosterQuotaResetPulse = Notification.Name("codexRoster.quotaResetPulse")
 }
 
 /// Present the single secondary hub above the notch and select a tab.

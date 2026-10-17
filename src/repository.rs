@@ -572,7 +572,7 @@ where
         account.subject = identity.subject.clone();
         account.name = identity.name.clone();
         account.plan_label = identity.plan_label.clone();
-        account.cached_usage = usage;
+        account.cached_usage = usage.clone();
         account.cached_usage_error = None;
         let metadata = account.clone();
         self.secret_store
@@ -580,6 +580,15 @@ where
         self.index_store.save_index(&index)?;
         if write_backup {
             self.maybe_write_automatic_full_backup(environment);
+        }
+        // Best-effort quota history sample — never fails the snapshot write.
+        if let Some(usage) = usage {
+            let _ = crate::quota_history::record_sample(
+                &self.data_dir,
+                account_id,
+                &usage,
+                OffsetDateTime::now_utc(),
+            );
         }
         Ok(metadata)
     }

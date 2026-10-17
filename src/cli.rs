@@ -190,6 +190,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Official rate-limit remaining % samples for the last ~7 days.
+    QuotaHistory {
+        account_id: Option<Uuid>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Run the optional VibeCafe usage collector for Codex and other AI tools.
     VibeUsage {
         #[command(subcommand)]
@@ -1002,6 +1008,25 @@ pub fn run() -> Result<()> {
                 print_json(&output)?;
             } else {
                 print_token_usage_summary(&output);
+            }
+            Ok(())
+        }
+        Some(Command::QuotaHistory { account_id, json }) => {
+            let output = app.quota_history(account_id)?;
+            if json {
+                print_json(&output)?;
+            } else {
+                println!(
+                    "Quota history samples: {} (account {:?})",
+                    output.samples.len(),
+                    output.account_id
+                );
+                for sample in output.samples.iter().rev().take(12) {
+                    println!(
+                        "  minute={} 5h={} wk={}",
+                        sample.minute, sample.five_remaining, sample.week_remaining
+                    );
+                }
             }
             Ok(())
         }

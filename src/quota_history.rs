@@ -164,20 +164,8 @@ mod tests {
         let id = Uuid::new_v4();
         let now = OffsetDateTime::now_utc();
         record_sample(dir.path(), id, &usage(80, 60), now).unwrap();
-        record_sample(
-            dir.path(),
-            id,
-            &usage(80, 60),
-            now + Duration::minutes(2),
-        )
-        .unwrap();
-        record_sample(
-            dir.path(),
-            id,
-            &usage(70, 60),
-            now + Duration::minutes(3),
-        )
-        .unwrap();
+        record_sample(dir.path(), id, &usage(80, 60), now + Duration::minutes(2)).unwrap();
+        record_sample(dir.path(), id, &usage(70, 60), now + Duration::minutes(3)).unwrap();
         let out = load_samples(dir.path(), id, now + Duration::minutes(3));
         assert_eq!(out.samples.len(), 2);
         assert_eq!(out.samples[0].five_remaining, 80);
@@ -189,13 +177,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let id = Uuid::new_v4();
         let now = OffsetDateTime::now_utc();
-        record_sample(
-            dir.path(),
-            id,
-            &usage(90, 90),
-            now - Duration::days(10),
-        )
-        .unwrap();
+        record_sample(dir.path(), id, &usage(90, 90), now - Duration::days(10)).unwrap();
         record_sample(dir.path(), id, &usage(50, 40), now).unwrap();
         let out = load_samples(dir.path(), id, now);
         assert_eq!(out.samples.len(), 1);

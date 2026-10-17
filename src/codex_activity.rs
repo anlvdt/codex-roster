@@ -42,10 +42,7 @@ pub struct CodexActivitySummary {
     pub entries: Vec<ActivityEntry>,
 }
 
-pub fn summarize(
-    codex_root: &Path,
-    processes: &[RunningCodexProcess],
-) -> CodexActivitySummary {
+pub fn summarize(codex_root: &Path, processes: &[RunningCodexProcess]) -> CodexActivitySummary {
     let desktop_running = processes.iter().any(|p| {
         matches!(p.origin.as_deref(), Some("desktop") | Some("plugin"))
             || p.role.eq_ignore_ascii_case("desktop")

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## v0.5.0 - 2026-10-17
+
+### Changed
+
+- Restore **Codex Roster** as a Codex-only product: remove Claude UI, enrollment, continuity, and notch companions.
+- Keep OpenAI / Codex multi-account switching, session longevity, and auto-switch behavior.
+
+### Added
+
+- **7-day quota history sparkline** from official rate-limit samples (`quota-history` CLI + Status chart).
+- **Live Codex activity strip** (working / waiting / idle) on Status and the notch deck.
+- Settings toggle to show reset times as a **clock** instead of a countdown.
+- Clearer **stale/cache** badges when quota data is older than ~10 minutes.
+- Stronger **top projects burn** ranking (local transcript estimate).
+- Soft notch **pulse** when a quota window reset is confirmed.
+- Self-update **health rollback**: if a new build never marks itself healthy within 5 minutes, restore the previous app bundle.
+
+### Fixed
+
+- Bump `rustls` to 0.23.46 for current RustSec advisories.
+
 ## v0.4.9 - 2026-10-08
 
 ### Added

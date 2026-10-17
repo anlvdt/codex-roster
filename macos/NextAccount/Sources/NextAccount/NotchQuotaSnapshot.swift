@@ -4,57 +4,42 @@ enum NotchQuotaVerification: Equatable {
     case verified
     case cached
     case unverified
-
-    init(claude account: ProviderAccount?) {
-        if account?.hasFreshUsage == true {
-            self = .verified
-        } else if account?.usage != nil {
-            self = .cached
-        } else {
-            self = .unverified
-        }
-    }
+    /// Last successful numbers kept, but the poll is older than the freshness window.
+    case stale(ageSeconds: Int)
 
     func caption(in language: AppLanguage) -> String? {
         switch self {
-        case .verified: nil
-        case .cached: language == .vietnamese ? "Cache · chưa xác minh" : "Cached · unverified"
-        case .unverified: language == .vietnamese ? "Chưa xác minh" : "Unverified"
+        case .verified:
+            return nil
+        case .cached:
+            return language == .vietnamese ? "Cache · chưa xác minh" : "Cached · unverified"
+        case .unverified:
+            return language == .vietnamese ? "Chưa xác minh" : "Unverified"
+        case .stale(let age):
+            let minutes = max(1, age / 60)
+            return language == .vietnamese
+                ? "Stale · \(minutes)p trước"
+                : "Stale · \(minutes)m ago"
         }
     }
-}
 
-/// A second live agent reduced to its 5-hour reading. Shown only while both
-/// Desktop apps are running; the focused agent keeps its full telemetry.
-struct NotchCompanionQuota: Equatable {
-    let screen: NotchScreen
-    let shortName: String
-    let fivePercent: Int?
-    let fiveResetDate: Date?
-    let planLabel: String?
-    let displayName: String?
-    let verification: NotchQuotaVerification
-
-    init?(codex account: SavedAccount?) {
-        guard let account, let fivePercent = account.usage?.fiveHour?.displayRemainingPercent else { return nil }
-        screen = .codex
-        shortName = "Codex"
-        self.fivePercent = fivePercent
-        fiveResetDate = account.usage?.fiveHour?.resetAt.value
-        planLabel = account.planLabel
-        displayName = account.displayName
-        verification = account.usageError == nil ? .verified : .cached
+    /// Dense notch-ear label (avoid clipping the 126pt wing).
+    func compactCaption(in language: AppLanguage) -> String? {
+        switch self {
+        case .verified:
+            return nil
+        case .cached:
+            return language == .vietnamese ? "cache" : "cache"
+        case .unverified:
+            return "?"
+        case .stale:
+            return "stale"
+        }
     }
 
-    init?(claude account: ProviderAccount?) {
-        guard let account, let fivePercent = account.window("five_hour")?.remainingPercent else { return nil }
-        screen = .claude
-        shortName = "Claude"
-        self.fivePercent = fivePercent
-        fiveResetDate = account.window("five_hour")?.resetAt?.value
-        planLabel = account.planLabel
-        displayName = account.displayName
-        verification = NotchQuotaVerification(claude: account)
+    var isStale: Bool {
+        if case .stale = self { return true }
+        return false
     }
 }
 
@@ -69,6 +54,10 @@ struct NotchQuotaSnapshot {
     let planLabel: String?
     let displayName: String?
     let verification: NotchQuotaVerification
+    let fetchedAt: Date?
+
+    /// Treat usage older than this as stale for the notch badge.
+    static let staleAfterSeconds: TimeInterval = 10 * 60
 
     init(codex account: SavedAccount?) {
         providerName = "Codex"
@@ -79,19 +68,17 @@ struct NotchQuotaSnapshot {
         bankedCount = account?.bankedResetCount ?? 0
         planLabel = account?.planLabel
         displayName = account?.displayName
-        verification = account?.usage == nil ? .unverified : (account?.usageError == nil ? .verified : .cached)
-    }
-
-    init(claude account: ProviderAccount?) {
-        providerName = "Claude Code"
-        fivePercent = account?.window("five_hour")?.remainingPercent
-        weekPercent = account?.window("seven_day")?.remainingPercent
-        fiveResetDate = account?.window("five_hour")?.resetAt?.value
-        weeklyResetDate = account?.window("seven_day")?.resetAt?.value
-        bankedCount = 0
-        planLabel = account?.planLabel
-        displayName = account?.displayName
-        verification = NotchQuotaVerification(claude: account)
+        fetchedAt = account?.usage?.fetchedAt?.value
+        if account?.usage == nil {
+            verification = .unverified
+        } else if let fetchedAt,
+                  Date().timeIntervalSince(fetchedAt) > Self.staleAfterSeconds {
+            verification = .stale(ageSeconds: Int(Date().timeIntervalSince(fetchedAt)))
+        } else if account?.usageError == nil {
+            verification = .verified
+        } else {
+            verification = .cached
+        }
     }
 }
 

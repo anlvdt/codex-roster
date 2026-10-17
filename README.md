@@ -1,12 +1,12 @@
-# AgentDock
+# Codex Roster
 
-Formerly **Codex Roster**. AgentDock manages Codex and Claude accounts, quota and session continuity from the macOS menu bar/notch. Existing storage, Keychain and CLI identifiers are retained.
+Codex Roster manages Codex accounts, quota and session continuity from the macOS menu bar/notch. Existing storage, Keychain and CLI identifiers are retained.
 
 Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex.
 
 [English](#english) · [Tiếng Việt](#tiếng-việt)
 
-> AgentDock is a local-first, independent macOS app for managing Codex and Claude accounts and quota. It is not affiliated with, endorsed by, or reviewed by OpenAI.
+> Codex Roster is a local-first, independent macOS app for managing Codex accounts and quota. It is not affiliated with, endorsed by, or reviewed by OpenAI.
 
 > “Codex”, “ChatGPT”, “OpenAI”, and related marks belong to OpenAI and are used only to describe compatibility. See the [OpenAI brand guidelines](https://openai.com/brand/).
 
@@ -17,7 +17,6 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
 ### What it does
 
 - Save, label, archive, restore, and safely switch OpenAI / Codex account snapshots.
-- Inspect, save, restore, switch, and monitor supported Claude Code, Cursor, and Grok Build accounts through the provider CLI. Provider snapshots are stored separately from the legacy OpenAI roster so identical emails cannot collide across providers.
 - Show the active account's quota in the MacBook notch and account quota/reset state in the sidebar.
 - Launch the OpenAI browser sign-in flow without reading passwords, verification codes, or browser cookies.
 - **Add account** offers an explicit choice at add time:
@@ -31,7 +30,7 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
 
 ### Quota and automatic switching
 
-`GPT Free`, `GPT Plus`, and `GPT Pro` identify the ChatGPT plan. They do not imply a fixed Codex quota. AgentDock displays the quota/reset windows returned for the signed-in account.
+`GPT Free`, `GPT Plus`, and `GPT Pro` identify the ChatGPT plan. They do not imply a fixed Codex quota. Codex Roster displays the quota/reset windows returned for the signed-in account.
 
 Codex exposes two independent usage windows: `primary_window` is the rolling **5-hour** allowance and `secondary_window` is the **weekly** allowance. Roster labels and displays both instead of collapsing them into one percentage. An account is immediately usable only while every reported window still has quota; a healthy 5-hour window does not override an exhausted weekly limit, and vice versa.
 
@@ -61,13 +60,13 @@ The sidebar signals, the Overview banner, and the account board all read from th
 
 macOS may show a dialog such as:
 
-> `codex-roster` / `AgentDock` / `codex_roster-<hash>` wants to use your confidential information stored in **"com.codexroster.app"** in your keychain.
+> `codex-roster` / `Codex Roster` / `codex_roster-<hash>` wants to use your confidential information stored in **"com.codexroster.app"** in your keychain.
 
-That is expected. AgentDock keeps only a local encryption key for saved snapshots and automatic backups in the Keychain item `com.codexroster.app`. The helper CLI inside the app (and local `cargo test` / `cargo run` binaries, which may appear as `codex_roster-<hash>`) must read that item to decrypt sessions on this Mac. The dialog is from macOS, not a third-party login page.
+That is expected. Codex Roster keeps only a local encryption key for saved snapshots and automatic backups in the Keychain item `com.codexroster.app`. The helper CLI inside the app (and local `cargo test` / `cargo run` binaries, which may appear as `codex_roster-<hash>`) must read that item to decrypt sessions on this Mac. The dialog is from macOS, not a third-party login page.
 
 - Choose **Allow** or **Always Allow** after confirming the Keychain item name is `com.codexroster.app`.
 - **Deny** leaves saved sessions/backups encrypted and unreadable until access is granted.
-- AgentDock never asks for your OpenAI password through this dialog; enter your Mac login Keychain password only if macOS requests it.
+- Codex Roster never asks for your OpenAI password through this dialog; enter your Mac login Keychain password only if macOS requests it.
 
 Never share a snapshot file, password, browser cookie, access token, or refresh token.
 
@@ -84,7 +83,7 @@ Never share a snapshot file, password, browser cookie, access token, or refresh 
 
 ### Install and run
 
-Download the latest macOS ZIP from [Releases](https://github.com/anlvdt/codex-roster/releases), unzip it, and move **AgentDock.app** to Applications. macOS may require you to approve the first launch because the application is independently distributed.
+Download the latest macOS ZIP from [Releases](https://github.com/anlvdt/codex-roster/releases), unzip it, and move **CodexRoster.app** to Applications. macOS may require you to approve the first launch because the application is independently distributed.
 
 The notch panel checks stable GitHub Releases at launch and every six hours. When an update is available, select **Update** there; the ZIP's GitHub SHA-256 digest is verified before the app replaces itself and reopens.
 
@@ -92,26 +91,16 @@ Build locally:
 
 ```sh
 zsh scripts/build-macos-app.sh
-open "build/AgentDock.app"
+open "build/CodexRoster.app"
 ```
 
 ### Platform
 
-macOS only. AgentDock is a native macOS app; the crate builds and ships for macOS (Apple Silicon and Intel). Windows and Linux support has been removed.
+macOS only. Codex Roster is a native macOS app; the crate builds and ships for macOS (Apple Silicon and Intel). Windows and Linux support has been removed.
 
 ### CLI
 
 The app bundles `codex-roster` and always uses it. For unbundled development runs (e.g. `swift run`), set `CODEX_ROSTER_CLI_PATH` to an absolute path to another build; it is ignored when the bundled binary exists.
-
-The existing top-level commands continue to manage the OpenAI / Codex roster. Multi-provider commands live under `providers` and currently support `open_ai`/`openai`/`codex`, `claude`/`anthropic`, `cursor`, and `grok`/`xai` aliases. Claude Code and Cursor expose official usage windows when their local credentials are available. Grok Build reads its own local auth and reports Build credits separately from xAI API/team billing. Account switching is scoped to the selected provider; cross-provider automatic routing is not enabled.
-
-Claude switching changes the saved **CLI** login. In the macOS app, with resume enabled, a manual switch opens a fresh Terminal process with the most recent local conversation from the last ten minutes, or a resume picker if none is found. Resumed conversations are forked so the original transcript stays intact; a manual switch sends no continuation prompt. Before resuming, the script checks `claude auth status` against the selected email and stops if a shell credential overrides the saved login. Close the previous CLI session and check `/status` in the new one. Proactive auto-switches only update saved credentials; automatic continuation requires a recent quota error.
-
-Claude quota API throttling (HTTP 429) is reported separately from account authentication and quota exhaustion. Roster preserves cached quota as unverified, waits for the server retry interval (five minutes when absent), and retries periodic usage refresh without repeatedly hitting the endpoint.
-
-**Claude Desktop Code uses a separate sign-in.** On macOS, sign in to each account in Desktop once, then use **Save Desktop login** in the matching Roster account menu. Roster checks the Desktop account UUID against the saved CLI account and keeps a separate encrypted local snapshot of Claude auth cookies and OAuth cache. With **Open accounts in Claude Desktop** enabled (the default for all accounts), switching quits Desktop gracefully if needed, saves the previous login, restores the selected login, and opens the app even if it was closed. It does not open a CLI Terminal session in this mode. A manual switch with a missing Desktop login opens Desktop for enrollment and leaves the selected CLI credential unchanged; background auto-switch waits for a saved Desktop login. It preserves unrelated cookies, settings, and Code history. Missing snapshots, schema changes, or a failure to quit are reported rather than silently claiming a switch. Expired Desktop logins still require signing in and saving again.
-
-With resume enabled, Roster hands Desktop's last focused local Code session back in the background without a Terminal window using the official `claude --desktop --resume <id>` (Claude Code 2.1.285 or newer). This resumes the saved engine transcript in the selected account; unlike CLI resume, Desktop handoff does not fork it or send a prompt. Remote and archived sessions are excluded. Desktop Chat conversations remain with their original account. Check the account shown in Desktop before continuing; restoring local login state is not a server authentication check. See [Claude sessions](https://code.claude.com/docs/en/sessions) and [Desktop authentication troubleshooting](https://code.claude.com/docs/en/desktop#403-or-authentication-errors-in-the-code-tab).
 
 ```text
 codex-roster status [--json]
@@ -132,18 +121,13 @@ codex-roster vibe-usage [init|sync|summary|status]
 codex-roster reset-outlook [--json]
 codex-roster open-ai-status [--json]
 
-codex-roster providers status [--json]
-codex-roster providers list [--provider PROVIDER] [--json]
-codex-roster providers save PROVIDER [--json]
-codex-roster providers activate ACCOUNT_ID [--json]
-codex-roster providers usage PROVIDER [ACCOUNT_ID] [--json]
 ```
 
 ### Privacy, status, and credits
 
 Saved account data remains on this Mac. OpenAI Status and Codex Reset outlook requests (codex-resets.com / codex-reset.com) never include account credentials, identifiers, saved sessions, or quota data. The 24h/48h values are public-signal forecast scores, not statistical probabilities. Public reset posts are advisory; authenticated per-account quota returned by Codex remains the source of truth. Read [OpenAI's current ChatGPT and Codex pricing documentation](https://learn.chatgpt.com/docs/pricing) for plan and usage policy.
 
-AgentDock is MIT licensed. It is maintained by [LE AN (@anlvdt)](https://github.com/anlvdt). See [AUTHORS.md](AUTHORS.md) and [CREDITS.md](CREDITS.md) for original-foundation, research, and license attribution.
+Codex Roster is MIT licensed. It is maintained by [LE AN (@anlvdt)](https://github.com/anlvdt). See [AUTHORS.md](AUTHORS.md) and [CREDITS.md](CREDITS.md) for original-foundation, research, and license attribution.
 
 ### Validation
 
@@ -159,7 +143,6 @@ swift build --package-path macos/NextAccount
 ### Ứng dụng làm gì
 
 - Lưu, đặt tên, lưu trữ, khôi phục và chuyển an toàn các phiên tài khoản OpenAI / Codex.
-- Qua CLI provider, có thể kiểm tra, lưu, khôi phục, chuyển và theo dõi tài khoản Claude Code, Cursor và Grok Build. Snapshot của các provider này được lưu tách khỏi roster OpenAI cũ để cùng một email ở nhiều provider không bị đụng nhau.
 - Hiển thị quota tài khoản đang dùng tại notch MacBook; hiển thị quota và thời điểm reset ở sidebar.
 - Mở luồng đăng nhập thiết bị OpenAI mà không đọc mật khẩu, mã xác thực hay cookie trình duyệt.
 - **Thêm tài khoản** hỏi rõ lựa chọn lúc thêm:
@@ -172,7 +155,7 @@ swift build --package-path macos/NextAccount
 
 ### Quota và tự động chuyển
 
-`GPT Free`, `GPT Plus`, `GPT Pro` là nhãn gói ChatGPT, không phải quota Codex cố định. AgentDock hiển thị quota/thời điểm reset thực tế được trả về cho tài khoản đang đăng nhập.
+`GPT Free`, `GPT Plus`, `GPT Pro` là nhãn gói ChatGPT, không phải quota Codex cố định. Codex Roster hiển thị quota/thời điểm reset thực tế được trả về cho tài khoản đang đăng nhập.
 
 Codex trả về hai cửa sổ sử dụng độc lập: `primary_window` là quota cuốn chiếu **5 giờ**, còn `secondary_window` là quota **tuần**. Roster hiển thị và gắn nhãn riêng cho cả hai thay vì gộp thành một phần trăm. Tài khoản chỉ dùng được ngay khi mọi cửa sổ được trả về đều còn quota; quota 5 giờ còn không thể bù cho quota tuần đã hết và ngược lại.
 
@@ -202,13 +185,13 @@ Tín hiệu ở sidebar, thanh gợi ý và bảng trạng thái đều đọc t
 
 macOS có thể hiện hộp thoại kiểu:
 
-> `codex-roster` / `AgentDock` / `codex_roster-<hash>` muốn dùng thông tin bảo mật trong **"com.codexroster.app"** trên keychain của bạn.
+> `codex-roster` / `Codex Roster` / `codex_roster-<hash>` muốn dùng thông tin bảo mật trong **"com.codexroster.app"** trên keychain của bạn.
 
-Đây là hành vi bình thường. AgentDock chỉ lưu khóa mã hóa cục bộ cho snapshot và bản sao lưu tự động trong mục Keychain `com.codexroster.app`. CLI đi kèm app (và binary `cargo test` / `cargo run` khi phát triển, đôi khi hiện tên `codex_roster-<hash>`) cần đọc mục đó để giải mã phiên trên chính máy này. Hộp thoại do macOS hiện, không phải trang đăng nhập bên thứ ba.
+Đây là hành vi bình thường. Codex Roster chỉ lưu khóa mã hóa cục bộ cho snapshot và bản sao lưu tự động trong mục Keychain `com.codexroster.app`. CLI đi kèm app (và binary `cargo test` / `cargo run` khi phát triển, đôi khi hiện tên `codex_roster-<hash>`) cần đọc mục đó để giải mã phiên trên chính máy này. Hộp thoại do macOS hiện, không phải trang đăng nhập bên thứ ba.
 
 - Chọn **Allow** hoặc **Always Allow** sau khi xác nhận tên mục Keychain là `com.codexroster.app`.
 - **Deny** sẽ khiến phiên/bản sao lưu đã mã hóa không đọc được cho đến khi được cấp quyền.
-- AgentDock không hỏi mật khẩu OpenAI qua hộp thoại này; chỉ nhập mật khẩu Keychain đăng nhập của Mac nếu macOS yêu cầu.
+- Codex Roster không hỏi mật khẩu OpenAI qua hộp thoại này; chỉ nhập mật khẩu Keychain đăng nhập của Mac nếu macOS yêu cầu.
 
 Không gửi file snapshot, mật khẩu backup, cookie trình duyệt, access token hay refresh token cho bất kỳ ai.
 
@@ -225,7 +208,7 @@ Không gửi file snapshot, mật khẩu backup, cookie trình duyệt, access t
 
 ### Cài đặt và chạy
 
-Tải ZIP macOS mới nhất từ [Releases](https://github.com/anlvdt/codex-roster/releases), giải nén rồi kéo **AgentDock.app** vào Applications. Lần mở đầu, macOS có thể yêu cầu bạn cho phép vì ứng dụng được phát hành độc lập.
+Tải ZIP macOS mới nhất từ [Releases](https://github.com/anlvdt/codex-roster/releases), giải nén rồi kéo **CodexRoster.app** vào Applications. Lần mở đầu, macOS có thể yêu cầu bạn cho phép vì ứng dụng được phát hành độc lập.
 
 Bảng notch tự kiểm tra GitHub Releases ổn định khi khởi động và mỗi sáu giờ. Khi có bản mới, chọn **Cập nhật** tại đó; ứng dụng xác thực SHA-256 do GitHub công bố trước khi tự thay thế và mở lại.
 
@@ -233,35 +216,19 @@ Tự build:
 
 ```sh
 zsh scripts/build-macos-app.sh
-open "build/AgentDock.app"
+open "build/CodexRoster.app"
 ```
 
 ### Nền tảng
 
-Chỉ macOS. AgentDock là ứng dụng macOS native; crate build và phát hành cho macOS (Apple Silicon và Intel). Hỗ trợ Windows và Linux đã được gỡ bỏ.
+Chỉ macOS. Codex Roster là ứng dụng macOS native; crate build và phát hành cho macOS (Apple Silicon và Intel). Hỗ trợ Windows và Linux đã được gỡ bỏ.
 
-### CLI đa provider
+### CLI
 
-Các lệnh cấp cao hiện có vẫn quản lý roster OpenAI / Codex. Nhóm `providers` hỗ trợ alias `open_ai`/`openai`/`codex`, `claude`/`anthropic`, `cursor`, và `grok`/`xai`. Claude Code và Cursor đọc credential cục bộ do chính ứng dụng đó quản lý để lấy usage chính thức. Grok Build đọc auth riêng và hiển thị credit của Grok Build tách biệt với billing xAI API/team. Việc chuyển tài khoản chỉ diễn ra trong đúng provider; chưa bật tự động định tuyến chéo provider.
-
-Chuyển Claude đổi đăng nhập **CLI đã lưu**. Trong app macOS, khi bật tiếp tục phiên, chuyển thủ công mở Terminal mới với hội thoại cục bộ gần nhất trong 10 phút, hoặc danh sách chọn phiên nếu không tìm thấy. Hội thoại được mở thành bản sao để giữ nguyên transcript gốc; chuyển thủ công không tự gửi prompt. Script kiểm tra `claude auth status` với email đã chọn và dừng nếu có credential trong shell ghi đè đăng nhập. Đóng phiên CLI cũ và kiểm tra `/status` ở phiên mới. Auto-switch chủ động chỉ cập nhật đăng nhập đã lưu; tự tiếp tục hội thoại chỉ khi phát hiện lỗi hết quota gần đây.
-
-Lỗi API quota HTTP 429 được báo riêng với lỗi đăng nhập hoặc hết quota. Roster giữ quota cache ở trạng thái chưa xác minh, chờ khoảng thử lại do server trả về (mặc định 5 phút) và lấy lại quota định kỳ.
-
-**Tab Code của Claude Desktop đăng nhập riêng.** Trên macOS, đăng nhập từng tài khoản trong Desktop một lần, rồi chọn **Lưu đăng nhập Desktop** trong menu của tài khoản tương ứng ở Roster. Roster đối chiếu UUID Desktop với tài khoản CLI đã lưu và mã hóa snapshot cookie đăng nhập cùng OAuth cache vào kho riêng trên máy. Khi bật **Mở tài khoản trong Claude Desktop** (mặc định cho mọi tài khoản), app đóng Desktop bình thường nếu cần, lưu đăng nhập cũ, khôi phục đăng nhập đã chọn rồi mở Desktop cả khi app đang đóng; không mở phiên CLI trong Terminal. Nếu chưa lưu đăng nhập Desktop, chuyển thủ công mở app để bạn đăng nhập và giữ nguyên credential CLI; tự chuyển sẽ chờ đăng nhập Desktop được lưu. App giữ nguyên cookie khác, cài đặt và lịch sử Code. Thiếu snapshot, thay đổi schema hoặc không đóng được app sẽ được báo lỗi. Nếu đăng nhập hết hạn, cần đăng nhập lại và lưu lại.
-
-Khi bật tiếp tục phiên, Roster dùng `claude --desktop --resume <id>` chính thức (Claude Code 2.1.285 trở lên) để mở phiên Code local được focus gần nhất. Đây là tiếp tục transcript đã lưu với tài khoản mới; Desktop không fork phiên và không tự gửi prompt. Bỏ qua phiên remote và archived. Chat Desktop vẫn thuộc tài khoản ban đầu. Kiểm tra tài khoản hiển thị trong Desktop trước khi tiếp tục; khôi phục dữ liệu đăng nhập cục bộ chưa xác minh được đăng nhập với server. Xem [quản lý phiên Claude](https://code.claude.com/docs/en/sessions) và [xử lý đăng nhập Desktop](https://code.claude.com/docs/en/desktop#403-or-authentication-errors-in-the-code-tab).
-
-```text
-codex-roster providers status [--json]
-codex-roster providers list [--provider PROVIDER] [--json]
-codex-roster providers save PROVIDER [--json]
-codex-roster providers activate ACCOUNT_ID [--json]
-codex-roster providers usage PROVIDER [ACCOUNT_ID] [--json]
-```
+App đi kèm `codex-roster` để quản lý tài khoản Codex. Các lệnh `status`, `list`, `save`, `usage`, `activate`, `auto-switch` và `auto-resume-session` chỉ phục vụ Codex.
 
 ### Riêng tư, trạng thái và ghi nhận
 
 Dữ liệu tài khoản lưu trên máy Mac. Kiểm tra OpenAI Status và Codex Reset outlook (codex-resets.com / codex-reset.com) không gửi credential, định danh tài khoản, phiên đã lưu hay dữ liệu quota. Giá trị 24h/48h là điểm dự báo từ tín hiệu công khai, không phải xác suất thống kê. Bài đăng reset công khai chỉ là tín hiệu tham khảo; quota có xác thực do Codex trả về cho từng tài khoản vẫn là nguồn xác nhận cuối cùng. Xem [tài liệu pricing và usage chính thức của ChatGPT/Codex](https://learn.chatgpt.com/docs/pricing) để biết chính sách gói và quota mới nhất.
 
-AgentDock dùng giấy phép MIT, được duy trì bởi [LE AN (@anlvdt)](https://github.com/anlvdt). Xem [AUTHORS.md](AUTHORS.md) và [CREDITS.md](CREDITS.md) để biết ghi nhận tác giả, nguồn tham khảo và ranh giới giấy phép.
+Codex Roster dùng giấy phép MIT, được duy trì bởi [LE AN (@anlvdt)](https://github.com/anlvdt). Xem [AUTHORS.md](AUTHORS.md) và [CREDITS.md](CREDITS.md) để biết ghi nhận tác giả, nguồn tham khảo và ranh giới giấy phép.

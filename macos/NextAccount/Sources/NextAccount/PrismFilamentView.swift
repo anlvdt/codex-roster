@@ -9,16 +9,16 @@ struct PrismFilamentView: View {
     @EnvironmentObject private var store: AccountStore
     @EnvironmentObject private var language: LanguageStore
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(RosterDisplayPreferences.resetAsClockKey) private var resetAsClock = false
 
     let quota: NotchQuotaSnapshot
-    /// Both agents' readings keyed to their ears (Codex = left ear, Claude = right).
-    /// Non-nil only when both Desktop apps run and both snapshots have data.
-    var dualQuotas: (codex: NotchCompanionQuota, claude: NotchCompanionQuota)? = nil
     var diameter: CGFloat = 20
     var compact: Bool = true
     var notchWidth: CGFloat = 185
     var earWidth: CGFloat = 126
     var compactHeight: CGFloat = 32
+
+    @State private var resetPulseScale: CGFloat = 1
 
     private var fivePercent: Int? {
         quota.fivePercent
@@ -41,7 +41,14 @@ struct PrismFilamentView: View {
     }
 
     private var isRunning: Bool {
-        quota.providerName == "Codex" && store.hasRunningCodexProcesses
+        if let activity = store.status?.activity {
+            return activity.working > 0
+        }
+        return quota.providerName == "Codex" && store.hasRunningCodexProcesses
+    }
+
+    private var isWaiting: Bool {
+        (store.status?.activity?.waiting ?? 0) > 0
     }
 
     private var fiveTint: Color {
@@ -59,26 +66,7 @@ struct PrismFilamentView: View {
     }
 
     var body: some View {
-        if let dual = dualQuotas {
-            HStack(spacing: 0) {
-                NotchAgentEar(
-                    quota: dual.codex,
-                    earSide: .leading,
-                    earWidth: earWidth,
-                    compactHeight: compactHeight,
-                    showEarShape: notchWidth > 0
-                )
-                Spacer(minLength: 0)
-                    .frame(width: physicalNotchClearance)
-                NotchAgentEar(
-                    quota: dual.claude,
-                    earSide: .trailing,
-                    earWidth: earWidth,
-                    compactHeight: compactHeight,
-                    showEarShape: notchWidth > 0
-                )
-            }
-        } else if notchWidth > 0 {
+        if notchWidth > 0 {
             // Hardware Notch Mode: Hugs left and right of the physical camera notch tightly
             HStack(spacing: 0) {
                 leftEarWing
@@ -191,10 +179,15 @@ struct PrismFilamentView: View {
     private var leftEarWing: some View {
         HStack(spacing: 3.5) {
             // Live energy / activity indicator
-            Text("⚡")
+            Text(isWaiting ? "?" : "⚡")
                 .font(PrismTheme.fontBodyCompactBold)
-                .foregroundStyle(fiveTint)
-                .shadow(color: fiveTint.opacity(isRunning ? 0.85 : 0), radius: isRunning ? 3.5 : 0)
+                .foregroundStyle(isWaiting ? PrismTheme.warning : fiveTint)
+                .shadow(
+                    color: (isWaiting ? PrismTheme.warning : fiveTint)
+                        .opacity(isRunning || isWaiting ? 0.85 : 0),
+                    radius: isRunning || isWaiting ? 3.5 : 0
+                )
+                .scaleEffect(resetPulseScale)
                 .fixedSize()
 
             // 5H Quota
@@ -219,6 +212,14 @@ struct PrismFilamentView: View {
                         .lineLimit(1)
                         .fixedSize()
                 }
+            }
+
+            if let caption = quota.verification.compactCaption(in: language.language) {
+                Text(caption)
+                    .font(PrismTheme.fontMicro)
+                    .foregroundStyle(PrismTheme.warning.opacity(0.9))
+                    .lineLimit(1)
+                    .fixedSize()
             }
 
             // 5H Reset Countdown (or Plan Tag if full)
@@ -251,7 +252,26 @@ struct PrismFilamentView: View {
         .frame(width: earWidth, height: compactHeight, alignment: .center)
         .background(leftEarBackground)
         .overlay(leftEarBorder)
-        .help("\(quota.providerName): \(quota.displayName ?? language.text("Chưa có phiên", "No session"))")
+        .help(leftEarHelp)
+        .onChange(of: store.quotaResetPulse) { _, _ in
+            withAnimation(.easeOut(duration: 0.18)) { resetPulseScale = 1.35 }
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.55).delay(0.12)) {
+                resetPulseScale = 1
+            }
+        }
+    }
+
+    private var leftEarHelp: String {
+        var parts = [
+            "\(quota.providerName): \(quota.displayName ?? language.text("Chưa có phiên", "No session"))"
+        ]
+        if let caption = quota.verification.caption(in: language.language) {
+            parts.append(caption)
+        }
+        if let activity = store.status?.activity, activity.hasSignal {
+            parts.append(activity.compactLabel)
+        }
+        return parts.joined(separator: " · ")
     }
 
     // MARK: - Right Ear Wing (Flanking Right of Camera Notch)
@@ -379,21 +399,7 @@ struct PrismFilamentView: View {
     }
 
     private func compactReset(_ date: Date) -> String {
-        let diff = date.timeIntervalSince(Date())
-        guard diff > 0 else {
-            return language.text("CHỜ", "PENDING")
-        }
-        let seconds = Int(diff)
-        let days = seconds / 86400
-        let hours = (seconds % 86400) / 3600
-        if days > 0 {
-            return "\(days)D"
-        } else if hours > 0 {
-            return "\(hours)H"
-        } else {
-            let minutes = max(1, (seconds % 3600) / 60)
-            return "\(minutes)M"
-        }
+        ResetClockFormat.compact(date, asClock: resetAsClock, language: language.language)
     }
 }
 
@@ -404,149 +410,7 @@ enum NotchEarSide {
     case leading, trailing
 }
 
-struct NotchAgentEar: View {
-    @EnvironmentObject private var language: LanguageStore
-    let quota: NotchCompanionQuota
-    let earSide: NotchEarSide
-    let earWidth: CGFloat
-    let compactHeight: CGFloat
-    /// True on notched displays (ear shape hugs the bezel); false → capsule.
-    let showEarShape: Bool
 
-    private var fiveTint: Color { PrismTheme.quotaTint(percent: quota.fivePercent) }
-
-    private var earShape: UnevenRoundedRectangle {
-        earSide == .leading
-            ? UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 10, bottomTrailingRadius: 0, topTrailingRadius: 0, style: .circular)
-            : UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 0, bottomTrailingRadius: 10, topTrailingRadius: 0, style: .circular)
-    }
-
-    private var borderGradient: LinearGradient {
-        earSide == .leading
-            ? LinearGradient(
-                stops: [
-                    .init(color: PrismTheme.highlightSoft, location: 0.0),
-                    .init(color: PrismTheme.surfaceSoft, location: 0.5),
-                    .init(color: Color.clear, location: 0.85)
-                ],
-                startPoint: .leading, endPoint: .trailing)
-            : LinearGradient(
-                stops: [
-                    .init(color: Color.clear, location: 0.15),
-                    .init(color: PrismTheme.surfaceSoft, location: 0.5),
-                    .init(color: PrismTheme.highlightSoft, location: 1.0)
-                ],
-                startPoint: .leading, endPoint: .trailing)
-    }
-
-    private var contents: some View {
-        HStack(spacing: 4) {
-            Text("⚡")
-                .font(PrismTheme.fontBodyCompactBold)
-                .foregroundStyle(fiveTint)
-                .shadow(color: fiveTint.opacity(0.85), radius: 3.5)
-                .fixedSize()
-
-            Text(quota.shortName)
-                .font(PrismTheme.fontCaptionBold)
-                .foregroundStyle(PrismTheme.textBright)
-                .lineLimit(1)
-                .fixedSize()
-
-            if let p = quota.fivePercent {
-                Text("\(p)%")
-                    .font(PrismTheme.fontMetricDense)
-                    .monospacedDigit()
-                    .foregroundStyle(fiveTint)
-                    .lineLimit(1)
-                    .fixedSize()
-            } else {
-                Text("—")
-                    .font(PrismTheme.fontBody)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .fixedSize()
-            }
-
-            if let reset = quota.fiveResetDate, reset > Date() {
-                let resetTint = PrismTheme.resetProximityTint(resetAt: reset, kind: .fiveHour)
-                HStack(spacing: 2) {
-                    Text("↺")
-                        .font(PrismTheme.fontCaptionBold)
-                        .foregroundStyle(resetTint.opacity(0.72))
-                        .fixedSize()
-                    Text(compactReset(reset))
-                        .font(PrismTheme.fontBodySemibold)
-                        .foregroundStyle(resetTint)
-                        .lineLimit(1)
-                        .fixedSize()
-                }
-            } else if let plan = quota.planLabel, !plan.isEmpty {
-                Text(plan.uppercased())
-                    .font(PrismTheme.fontChip)
-                    .foregroundStyle(fiveTint.opacity(0.85))
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1.5)
-                    .background(Capsule().fill(fiveTint.opacity(0.12)))
-                    .fixedSize()
-            }
-        }
-    }
-
-    var body: some View {
-        contents
-            .padding(.horizontal, 10)
-            .frame(width: earWidth, height: compactHeight, alignment: .center)
-            .background(showEarShape ? AnyShape(earShape).fill(Color.black) : AnyShape(Capsule()).fill(Color.black))
-            .overlay(showEarShape ? AnyView(earShape.strokeBorder(borderGradient, lineWidth: 0.5)) : AnyView(Capsule().strokeBorder(LinearGradient(colors: [PrismTheme.highlight, PrismTheme.surfacePanel], startPoint: .top, endPoint: .bottom), lineWidth: 0.5)))
-            .help(quota.displayName ?? language.text("Chưa có phiên", "No session"))
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(language.text(
-                "\(quota.shortName): 5 giờ còn \(quota.fivePercent.map { "\($0)%" } ?? "chưa có dữ liệu")",
-                "\(quota.shortName): 5-hour remaining \(quota.fivePercent.map { "\($0)%" } ?? "no data")"
-            ))
-    }
-
-    private func compactReset(_ date: Date) -> String {
-        let diff = date.timeIntervalSince(Date())
-        guard diff > 0 else { return language.text("CHỜ", "PENDING") }
-        let seconds = Int(diff)
-        let days = seconds / 86400
-        let hours = (seconds % 86400) / 3600
-        if days > 0 { return "\(days)D" }
-        if hours > 0 { return "\(hours)H" }
-        return "\(max(1, (seconds % 3600) / 60))M"
-    }
-}
-
-struct NotchCompanionChip: View {
-    @EnvironmentObject private var language: LanguageStore
-    let companion: NotchCompanionQuota
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                Text(companion.shortName)
-                    .font(PrismTheme.fontCaptionBold)
-                    .foregroundStyle(PrismTheme.textBright)
-                Text(companion.fivePercent.map { "\($0)%" } ?? "—")
-                    .font(PrismTheme.fontMetricDense)
-                    .monospacedDigit()
-                    .foregroundStyle(PrismTheme.quotaTint(percent: companion.fivePercent))
-            }
-            .fixedSize()
-            .padding(.horizontal, 8)
-            .frame(height: NotchRosterLayout.screenSwitcherHeight)
-            .background(PrismTheme.surfaceSoft, in: Capsule())
-        }
-        .buttonStyle(.plain)
-        .accessibilityHint(language.text("Mở màn hình agent này", "Open this agent's screen"))
-    }
-}
-
-/// Amber banked-reset count chip shared by notch ears and roster cards.
-/// Display-only — never implies auto-redeem.
 struct PrismBankedResetCountBadge: View {
     enum Style {
         /// Dense notch ear: icon + bold digit + micro "BR" label in a capsule.

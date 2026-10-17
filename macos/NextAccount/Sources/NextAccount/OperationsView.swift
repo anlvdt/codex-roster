@@ -49,7 +49,6 @@ struct OperationsView: View {
             store.refreshResetOutlook(silently: true)
             store.refreshResetTimeline(silently: true)
             store.refreshResetJuice(silently: true)
-            store.refreshProviderStatus(silently: true)
         }
     }
 

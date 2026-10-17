@@ -529,6 +529,7 @@ struct PrismQuickSwitchDeck: View {
                     // (skips deferred/login rows; never prove_saved_session_refresh).
                     store.refreshUsage(scope: .allSaved)
                     store.refreshTokenUsage(silently: true)
+                    store.refreshQuotaHistory(silently: true)
                     store.refreshResetOutlook(silently: true)
                     store.refreshResetTimeline(silently: true)
                     store.refreshResetJuice(silently: true)
@@ -554,6 +555,25 @@ struct PrismQuickSwitchDeck: View {
                     "Refresh all account quotas (access token only)"
                 ))
                 .accessibilityLabel(language.text("Làm mới tất cả", "Refresh all"))
+            }
+
+            if let activity = store.status?.activity, activity.hasSignal {
+                HStack(spacing: 6) {
+                    Image(systemName: "waveform.path.ecg")
+                        .font(PrismTheme.fontCaption)
+                        .foregroundStyle(activity.working > 0 ? PrismTheme.accent : .secondary)
+                    Text(language.text("Phiên", "Sessions"))
+                        .font(PrismTheme.fontCaption)
+                        .foregroundStyle(.secondary)
+                    Text(activity.compactLabel)
+                        .font(PrismTheme.fontCaption.monospacedDigit())
+                        .foregroundStyle(PrismTheme.textBright)
+                    Spacer(minLength: 0)
+                }
+                .help(language.text(
+                    "▶ đang chạy · ? chờ bạn · ○ idle",
+                    "▶ working · ? waiting · ○ idle"
+                ))
             }
 
             if let summary = store.tokenUsage {

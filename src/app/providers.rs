@@ -135,6 +135,84 @@ where
         })
     }
 
+    pub fn provider_sync_claude(&self, email: &str) -> Result<ProviderListOutput> {
+        self.provider_sync_claude_with_adapter(email, adapter(AiProvider::Claude))
+    }
+
+    fn provider_sync_claude_with_adapter(
+        &self,
+        email: &str,
+        provider_adapter: &dyn ProviderAdapter,
+    ) -> Result<ProviderListOutput> {
+        let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
+        let live = provider_adapter.read_live_auth(&self.env)?;
+        if provider_adapter.provider() != AiProvider::Claude
+            || !crate::provider::claude::has_oauth_token(&live.snapshot)
+            || email.trim().is_empty()
+            || live.identity.email == crate::provider::claude::UNKNOWN_EMAIL
+            || !live.identity.email.eq_ignore_ascii_case(email.trim())
+        {
+            bail!("Claude CLI login does not match the verified signed-in account");
+        }
+        let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        let store = self.provider_store();
+        if let Some(record) =
+            store.find_matching(&self.env.kind, AiProvider::Claude, &live.identity)?
+        {
+            let (_, snapshot) = store.load_snapshot(&self.env.kind, record.id)?;
+            if snapshot != live.snapshot {
+                preserve_claude_api_cooldown(
+                    &self.env.home_dir,
+                    &record,
+                    time::OffsetDateTime::now_utc(),
+                )?;
+                let auth_error = record.requires_login()
+                    || record.consecutive_auth_failures > 0
+                    || record.cached_usage_error.as_deref().is_some_and(|error| {
+                        error.contains("HTTP 401")
+                            || error.contains("HTTP 403")
+                            || error.contains("claude_cli_auth_missing")
+                            || error.contains("OAuth access token not found")
+                    });
+                if auth_error {
+                    store.save_for_record(
+                        &self.env.kind,
+                        record.id,
+                        &live.identity,
+                        &live.snapshot,
+                    )?;
+                } else {
+                    store.save_rotated_snapshot(
+                        &self.env.kind,
+                        record.id,
+                        &snapshot,
+                        &live.snapshot,
+                    )?;
+                }
+            }
+        } else {
+            store.save(
+                &self.env.kind,
+                AiProvider::Claude,
+                &live.identity,
+                &live.snapshot,
+            )?;
+        }
+        let mut accounts = Vec::new();
+        for record in store.list(&self.env.kind, Some(AiProvider::Claude))? {
+            let (_, snapshot) = store.load_snapshot(&self.env.kind, record.id)?;
+            let mut view = record.view(record.identity.matches(&live.identity));
+            view.activation_block_reason = record.activation_block_reason(Some(&snapshot));
+            view.can_activate = view.activation_block_reason.is_none();
+            accounts.push(view);
+        }
+        Ok(ProviderListOutput {
+            environment: self.env.kind.clone(),
+            provider: Some(AiProvider::Claude),
+            accounts,
+        })
+    }
+
     pub fn provider_save_current(&self, provider: AiProvider) -> Result<ProviderSaveOutput> {
         if provider == AiProvider::OpenAi {
             let output = self.save_current()?;
@@ -385,6 +463,17 @@ where
                 &identity,
                 time::OffsetDateTime::now_utc(),
             )
+            && saved_record
+                .as_ref()
+                .and_then(|record| record.cached_usage.as_ref())
+                .is_none_or(|cached| {
+                    usage.fetched_at > cached.fetched_at
+                        || (usage.fetched_at == cached.fetched_at
+                            && cached
+                                .detail
+                                .as_deref()
+                                .is_some_and(|detail| detail.starts_with("Claude Code statusline")))
+                })
         {
             return Ok(ProviderUsageOutput {
                 environment: self.env.kind.clone(),
@@ -566,6 +655,26 @@ where
         Ok(record.view(is_active))
     }
 
+    /// Read the zero-network Claude Code feed for display. Never refresh tokens
+    /// or call the subscription API on this fast polling path.
+    pub fn provider_local_claude_usage(&self) -> Result<ProviderListOutput> {
+        let mut list = self.provider_list(Some(AiProvider::Claude))?;
+        let dir = crate::claude_quota_bridge::config_dir(&self.env.home_dir);
+        let now = time::OffsetDateTime::now_utc();
+        for account in &mut list.accounts {
+            let identity = crate::model::DisplayIdentity {
+                email: account.email.clone(),
+                subject: account.subject.clone(),
+                name: account.name.clone(),
+                plan_label: account.plan_label.clone(),
+            };
+            if let Some(local) = crate::claude_quota_bridge::read_usage(&dir, &identity, now) {
+                account.usage = Some(local_quota_display(local, account.usage.as_ref()));
+            }
+        }
+        Ok(list)
+    }
+
     pub fn provider_refresh_usage(
         &self,
         provider: AiProvider,
@@ -601,6 +710,10 @@ where
                     &record.identity,
                     time::OffsetDateTime::now_utc(),
                 )
+                && record
+                    .cached_usage
+                    .as_ref()
+                    .is_none_or(|cached| usage.fetched_at > cached.fetched_at)
             {
                 let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
                 store.record_usage(&self.env.kind, record.id, usage)?;
@@ -617,15 +730,11 @@ where
                 continue;
             }
             let stale = force
-                || record.cached_usage.as_ref().is_none_or(|usage| {
-                    let now = time::OffsetDateTime::now_utc();
-                    now - usage.fetched_at > time::Duration::minutes(15)
-                        || usage.windows.iter().any(|window| {
-                            window
-                                .reset_at
-                                .is_some_and(|reset| usage.fetched_at < reset && reset <= now)
-                        })
-                });
+                || quota_refresh_due(
+                    record.cached_usage.as_ref(),
+                    is_live,
+                    time::OffsetDateTime::now_utc(),
+                );
             if !stale {
                 continue;
             }
@@ -661,7 +770,11 @@ where
                 let _ = store.record_usage_error(&self.env.kind, record.id, error.to_string());
             }
         }
-        self.provider_list(Some(provider))
+        if provider == AiProvider::Claude {
+            self.provider_local_claude_usage()
+        } else {
+            self.provider_list(Some(provider))
+        }
     }
 
     pub(crate) fn provider_store(&self) -> ProviderAccountStore<LocalSecretStore> {
@@ -942,6 +1055,63 @@ fn legacy_usage_to_provider(usage: AccountUsageView) -> ProviderUsageView {
     }
 }
 
+/// Active account telemetry follows the two-minute selection freshness budget;
+/// inactive accounts retain the lower-cost background interval.
+fn quota_refresh_due(
+    usage: Option<&ProviderUsageView>,
+    active: bool,
+    now: time::OffsetDateTime,
+) -> bool {
+    let interval = if active {
+        time::Duration::minutes(2)
+    } else {
+        time::Duration::minutes(15)
+    };
+    usage.is_none_or(|usage| {
+        now - usage.fetched_at >= interval
+            || usage.windows.iter().any(|window| {
+                window
+                    .reset_at
+                    .is_some_and(|reset| usage.fetched_at < reset && reset <= now)
+            })
+    })
+}
+
+/// Local aggregate updates may be shown alongside old model caps and spending, but the
+/// combined snapshot must never become verified evidence for auto-switching.
+fn local_quota_display(
+    mut local: ProviderUsageView,
+    previous: Option<&ProviderUsageView>,
+) -> ProviderUsageView {
+    if let Some(previous) = previous.filter(|usage| usage.fetched_at >= local.fetched_at) {
+        return previous.clone();
+    }
+    if let Some(previous) = previous.filter(|usage| {
+        !crate::claude_quota_bridge::covers_known_limits(Some(usage))
+            || usage
+                .windows
+                .iter()
+                .any(|window| window.key == "extra_usage")
+    }) {
+        local.windows.extend(
+            previous
+                .windows
+                .iter()
+                .filter(|window| {
+                    window.key.starts_with("seven_day_") || window.key == "extra_usage"
+                })
+                .cloned(),
+        );
+        local.status = ProviderUsageStatus::Stale;
+        local.detail = Some(format!(
+            "Claude Code statusline aggregates observed at {}; supplemental limits and spending last checked at {} (OAuth refresh pending)",
+            local.fetched_at, previous.fetched_at
+        ));
+        local.fetched_at = previous.fetched_at;
+    }
+    local
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1053,6 +1223,216 @@ mod tests {
             })
             .collect();
         quota
+    }
+
+    #[test]
+    fn sync_claude_detects_new_login_and_preserves_unchanged_record() {
+        let (_root, app) = review_app();
+        let bundle = review_bundle("synced", "token-one");
+        let fixture = ReviewAdapter {
+            live: std::sync::Mutex::new(
+                [
+                    review_bundle("synced", "token-one"),
+                    review_bundle("synced", "token-one"),
+                ]
+                .into(),
+            ),
+            fetched: std::sync::Mutex::new([].into()),
+        };
+        let output = app
+            .provider_sync_claude_with_adapter("SYNCED@example.com", &fixture)
+            .unwrap();
+        assert_eq!(output.accounts.len(), 1);
+        assert!(output.accounts[0].is_active);
+        let id = output.accounts[0].id;
+        let store = app.provider_store();
+        store
+            .record_usage(&app.env.kind, id, review_quota(20))
+            .unwrap();
+        store
+            .record_usage_error(
+                &app.env.kind,
+                id,
+                "Claude usage endpoint returned HTTP 429; retry after 600 seconds".into(),
+            )
+            .unwrap();
+        let before = store.get(&app.env.kind, id).unwrap().unwrap();
+        app.provider_sync_claude_with_adapter("synced@example.com", &fixture)
+            .unwrap();
+        let after = store.get(&app.env.kind, id).unwrap().unwrap();
+        assert_eq!(before.updated_at, after.updated_at);
+        assert_eq!(before.cached_usage_error, after.cached_usage_error);
+        assert_eq!(before.cached_usage, after.cached_usage);
+        assert_eq!(
+            store.load_snapshot(&app.env.kind, id).unwrap().1,
+            bundle.snapshot
+        );
+    }
+
+    #[test]
+    fn sync_claude_rotates_known_credentials_without_losing_quota_or_label() {
+        let (_root, app) = review_app();
+        let old = review_bundle("synced", "token-one");
+        let new = review_bundle("synced", "token-two");
+        let store = app.provider_store();
+        let (record, _) = store
+            .save(
+                &app.env.kind,
+                AiProvider::Claude,
+                &old.identity,
+                &old.snapshot,
+            )
+            .unwrap();
+        store
+            .set_label(&app.env.kind, record.id, Some("Work".into()))
+            .unwrap();
+        store
+            .record_usage(&app.env.kind, record.id, review_quota(20))
+            .unwrap();
+        store
+            .record_usage_error(
+                &app.env.kind,
+                record.id,
+                "Claude usage endpoint returned HTTP 429; retry after 600 seconds".into(),
+            )
+            .unwrap();
+        let fixture = ReviewAdapter {
+            live: std::sync::Mutex::new([review_bundle("synced", "token-two")].into()),
+            fetched: std::sync::Mutex::new([].into()),
+        };
+        let output = app
+            .provider_sync_claude_with_adapter("synced@example.com", &fixture)
+            .unwrap();
+        assert_eq!(output.accounts.len(), 1);
+        assert_eq!(output.accounts[0].id, record.id);
+        let saved = store.get(&app.env.kind, record.id).unwrap().unwrap();
+        assert_eq!(saved.custom_label.as_deref(), Some("Work"));
+        assert!(saved.cached_usage.is_some());
+        assert!(saved.cached_usage_error.as_deref().unwrap().contains("429"));
+        assert_eq!(
+            store.load_snapshot(&app.env.kind, record.id).unwrap().1,
+            new.snapshot
+        );
+        assert!(
+            crate::claude_quota_bridge::api_cooldown(
+                &crate::claude_quota_bridge::config_dir(&app.env.home_dir),
+                record.id,
+                time::OffsetDateTime::now_utc()
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn sync_claude_rejects_unverified_identity_and_missing_credentials() {
+        let (_root, app) = review_app();
+        let saved = review_bundle("saved", "saved-token");
+        let store = app.provider_store();
+        let (record, _) = store
+            .save(
+                &app.env.kind,
+                AiProvider::Claude,
+                &saved.identity,
+                &saved.snapshot,
+            )
+            .unwrap();
+        let mut missing = review_bundle("synced", "token");
+        missing.snapshot.files.clear();
+        let mut unknown = review_bundle("synced", "token");
+        unknown.identity.email = crate::provider::claude::UNKNOWN_EMAIL.into();
+        for bundle in [missing, unknown, review_bundle("wrong", "token")] {
+            let fixture = ReviewAdapter {
+                live: std::sync::Mutex::new([bundle].into()),
+                fetched: std::sync::Mutex::new([].into()),
+            };
+            assert!(
+                app.provider_sync_claude_with_adapter("synced@example.com", &fixture)
+                    .is_err()
+            );
+            assert_eq!(
+                store
+                    .list(&app.env.kind, Some(AiProvider::Claude))
+                    .unwrap()
+                    .len(),
+                1
+            );
+            let (after, snapshot) = store.load_snapshot(&app.env.kind, record.id).unwrap();
+            assert_eq!(after.updated_at, record.updated_at);
+            assert_eq!(snapshot, saved.snapshot);
+        }
+    }
+
+    #[test]
+    fn sync_claude_changed_credentials_clear_missing_auth_error() {
+        for error in [
+            "claude_cli_auth_missing: sign in",
+            "Claude OAuth access token not found",
+        ] {
+            let (_root, app) = review_app();
+            let old = review_bundle("synced", "old-token");
+            let store = app.provider_store();
+            let (record, _) = store
+                .save(
+                    &app.env.kind,
+                    AiProvider::Claude,
+                    &old.identity,
+                    &old.snapshot,
+                )
+                .unwrap();
+            store
+                .record_usage_error(&app.env.kind, record.id, error.into())
+                .unwrap();
+            let fixture = ReviewAdapter {
+                live: std::sync::Mutex::new([review_bundle("synced", "new-token")].into()),
+                fetched: std::sync::Mutex::new([].into()),
+            };
+            app.provider_sync_claude_with_adapter("synced@example.com", &fixture)
+                .unwrap();
+            assert!(
+                store
+                    .get(&app.env.kind, record.id)
+                    .unwrap()
+                    .unwrap()
+                    .cached_usage_error
+                    .is_none(),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn sync_claude_changed_credentials_recover_login_error() {
+        let (_root, app) = review_app();
+        let old = review_bundle("synced", "old-token");
+        let store = app.provider_store();
+        let (record, _) = store
+            .save(
+                &app.env.kind,
+                AiProvider::Claude,
+                &old.identity,
+                &old.snapshot,
+            )
+            .unwrap();
+        store
+            .record_usage(&app.env.kind, record.id, review_quota(20))
+            .unwrap();
+        store
+            .record_usage_error(
+                &app.env.kind,
+                record.id,
+                format!("{LOGIN_REQUIRED_ERROR_PREFIX}: expired token"),
+            )
+            .unwrap();
+        let fixture = ReviewAdapter {
+            live: std::sync::Mutex::new([review_bundle("synced", "new-token")].into()),
+            fetched: std::sync::Mutex::new([].into()),
+        };
+        app.provider_sync_claude_with_adapter("synced@example.com", &fixture)
+            .unwrap();
+        let after = store.get(&app.env.kind, record.id).unwrap().unwrap();
+        assert!(!after.requires_login());
+        assert_eq!(after.id, record.id);
+        assert!(after.cached_usage.is_some());
     }
 
     #[test]
@@ -1373,6 +1753,124 @@ mod tests {
     }
 
     #[test]
+    fn older_valid_local_observation_cannot_replace_newer_oauth() {
+        let (_temp, app) = review_app();
+        let store = app.provider_store();
+        let a = review_bundle("a", "fixture-token");
+        let (record, _) = store
+            .save(&app.env.kind, AiProvider::Claude, &a.identity, &a.snapshot)
+            .unwrap();
+        let cached = review_quota(80);
+        store
+            .record_usage(&app.env.kind, record.id, cached.clone())
+            .unwrap();
+        let dir = app.env.home_dir.join(".claude");
+        std::fs::create_dir_all(dir.join("roster-usage")).unwrap();
+        let now = time::OffsetDateTime::now_utc();
+        std::fs::write(
+            dir.join("roster-usage/session.json"),
+            serde_json::json!({
+                "email": a.identity.email, "subject": "a", "observed_at": now.unix_timestamp() - 30,
+                "rate_limits": {
+                    "five_hour": {"used_percentage": 5, "resets_at": now.unix_timestamp() + 3600},
+                    "seven_day": {"used_percentage": 5, "resets_at": now.unix_timestamp() + 7200}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let local = crate::claude_quota_bridge::read_usage(&dir, &a.identity, now).unwrap();
+        store
+            .record_usage(&app.env.kind, record.id, local.clone())
+            .unwrap();
+        let local_fixture = ReviewAdapter {
+            live: std::sync::Mutex::new([review_bundle("a", "fixture-token")].into()),
+            fetched: std::sync::Mutex::new([].into()),
+        };
+        let equal = app
+            .provider_usage_with_adapter(&local_fixture, None, &dir)
+            .unwrap();
+        assert_eq!(equal.usage.fetched_at, local.fetched_at);
+        store
+            .record_usage(&app.env.kind, record.id, cached.clone())
+            .unwrap();
+        let fixture = ReviewAdapter {
+            live: std::sync::Mutex::new([a].into()),
+            fetched: std::sync::Mutex::new([review_quota(90)].into()),
+        };
+        let output = app
+            .provider_usage_with_adapter(&fixture, None, &dir)
+            .unwrap();
+        assert_eq!(output.usage.windows[0].used_percent, Some(90));
+        let after = store.get(&app.env.kind, record.id).unwrap().unwrap();
+        assert_eq!(
+            after.cached_usage.as_ref().unwrap().windows[0].used_percent,
+            Some(90)
+        );
+        app.provider_refresh_usage(AiProvider::Claude, false)
+            .unwrap();
+        let after = store.get(&app.env.kind, record.id).unwrap().unwrap();
+        assert_eq!(
+            after.cached_usage.as_ref().unwrap().windows[0].used_percent,
+            Some(90)
+        );
+    }
+
+    #[test]
+    fn newer_local_observation_cannot_erase_monthly_spending() {
+        let (_temp, app) = review_app();
+        let store = app.provider_store();
+        let a = review_bundle("a", "fixture-token");
+        let (record, _) = store
+            .save(&app.env.kind, AiProvider::Claude, &a.identity, &a.snapshot)
+            .unwrap();
+        let mut cached = review_quota(80);
+        cached.fetched_at -= time::Duration::seconds(30);
+        cached.windows.push(ProviderUsageWindowView {
+            key: "extra_usage".into(),
+            used_percent: Some(25),
+            ..Default::default()
+        });
+        store
+            .record_usage(&app.env.kind, record.id, cached.clone())
+            .unwrap();
+        let dir = app.env.home_dir.join(".claude");
+        std::fs::create_dir_all(dir.join("roster-usage")).unwrap();
+        let now = time::OffsetDateTime::now_utc();
+        std::fs::write(
+            dir.join("roster-usage/session.json"),
+            serde_json::json!({
+                "email": a.identity.email, "subject": "a", "observed_at": now.unix_timestamp(),
+                "rate_limits": {
+                    "five_hour": {"used_percentage": 5, "resets_at": now.unix_timestamp() + 3600},
+                    "seven_day": {"used_percentage": 5, "resets_at": now.unix_timestamp() + 7200}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        app.provider_refresh_usage(AiProvider::Claude, false)
+            .unwrap();
+        assert_eq!(
+            store
+                .get(&app.env.kind, record.id)
+                .unwrap()
+                .unwrap()
+                .cached_usage,
+            Some(cached.clone())
+        );
+        let fixture = ReviewAdapter {
+            live: std::sync::Mutex::new([a].into()),
+            fetched: std::sync::Mutex::new([cached.clone()].into()),
+        };
+        let output = app
+            .provider_usage_with_adapter(&fixture, None, &dir)
+            .unwrap();
+        assert_eq!(output.usage, cached);
+        assert!(fixture.fetched.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn provider_review_omitted_known_model_cap_preserves_cache_as_stale() {
         let (_temp, app) = review_app();
         let store = app.provider_store();
@@ -1544,6 +2042,93 @@ mod tests {
             cached_usage_error: error.map(str::to_owned),
             consecutive_auth_failures: 0,
         }
+    }
+
+    #[test]
+    fn active_quota_refreshes_after_two_minutes_while_inactive_is_less_frequent() {
+        let now = time::OffsetDateTime::now_utc();
+        let mut cached = usage(ProviderUsageStatus::Ok, None);
+        cached.fetched_at = now - time::Duration::seconds(119);
+        assert!(!quota_refresh_due(Some(&cached), true, now));
+        cached.fetched_at = now - time::Duration::seconds(120);
+        assert!(quota_refresh_due(Some(&cached), true, now));
+        assert!(!quota_refresh_due(Some(&cached), false, now));
+        cached.fetched_at = now - time::Duration::minutes(15);
+        assert!(quota_refresh_due(Some(&cached), false, now));
+        assert!(quota_refresh_due(None, true, now));
+    }
+
+    #[test]
+    fn live_display_keeps_model_caps_and_does_not_renew_their_freshness() {
+        let mut previous = usage(ProviderUsageStatus::Ok, None);
+        previous.fetched_at = time::OffsetDateTime::UNIX_EPOCH;
+        previous.windows = vec![ProviderUsageWindowView {
+            key: "seven_day_opus".into(),
+            used_percent: Some(100),
+            ..Default::default()
+        }];
+        let mut local = usage(ProviderUsageStatus::Ok, Some("Claude Code statusline"));
+        local.fetched_at = time::OffsetDateTime::now_utc();
+        local.windows = vec![ProviderUsageWindowView {
+            key: "five_hour".into(),
+            used_percent: Some(42),
+            ..Default::default()
+        }];
+        let display = local_quota_display(local, Some(&previous));
+        assert_eq!(display.fetched_at, previous.fetched_at);
+        assert_eq!(display.status, ProviderUsageStatus::Stale);
+        assert!(
+            display
+                .windows
+                .iter()
+                .any(|w| w.key == "five_hour" && w.used_percent == Some(42))
+        );
+        assert!(
+            display
+                .windows
+                .iter()
+                .any(|w| w.key == "seven_day_opus" && w.used_percent == Some(100))
+        );
+    }
+
+    #[test]
+    fn live_display_keeps_monthly_spending_without_renewing_its_freshness() {
+        let mut previous = usage(ProviderUsageStatus::Ok, None);
+        previous.fetched_at = time::OffsetDateTime::UNIX_EPOCH;
+        previous.windows = vec![ProviderUsageWindowView {
+            key: "extra_usage".into(),
+            used_percent: Some(25),
+            ..Default::default()
+        }];
+        let mut local = usage(ProviderUsageStatus::Ok, Some("Claude Code statusline"));
+        local.fetched_at = time::OffsetDateTime::now_utc();
+        local.windows = vec![ProviderUsageWindowView {
+            key: "five_hour".into(),
+            used_percent: Some(42),
+            ..Default::default()
+        }];
+        let display = local_quota_display(local, Some(&previous));
+        assert_eq!(display.fetched_at, previous.fetched_at);
+        assert_eq!(display.status, ProviderUsageStatus::Stale);
+        assert!(
+            display
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains(&previous.fetched_at.to_string())
+        );
+        assert!(
+            display
+                .windows
+                .iter()
+                .any(|w| w.key == "extra_usage" && w.used_percent == Some(25))
+        );
+        assert!(
+            display
+                .windows
+                .iter()
+                .any(|w| w.key == "five_hour" && w.used_percent == Some(42))
+        );
     }
 
     #[test]

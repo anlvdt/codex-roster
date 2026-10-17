@@ -36,6 +36,32 @@ final class GitHubUpdater: ObservableObject {
     nonisolated private static let maximumArchiveBytes = 128 * 1024 * 1024
     private var automaticCheckTask: Task<Void, Never>?
 
+    /// Marker the install helper waits for after relaunch. Written once the new
+    /// process reaches a healthy UI state; missing after 5 minutes → rollback.
+    nonisolated static func updateHealthyMarkerURL() -> URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        return support
+            .appendingPathComponent("com.codexroster.codex-roster", isDirectory: true)
+            .appendingPathComponent("update-healthy", isDirectory: false)
+    }
+
+    /// Call after launch when the app is visibly running so a pending update
+    /// helper can drop the previous.app backup instead of rolling back.
+    nonisolated static func markUpdateHealthy() {
+        let marker = updateHealthyMarkerURL()
+        do {
+            try FileManager.default.createDirectory(
+                at: marker.deletingLastPathComponent(),
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try "ok\n".write(to: marker, atomically: true, encoding: .utf8)
+        } catch {
+            // Best-effort — a missed marker only risks keeping the previous backup longer.
+        }
+    }
+
     func startAutomaticChecks(currentVersion: String) {
         guard automaticCheckTask == nil else { return }
         automaticCheckTask = Task { [weak self] in
@@ -106,11 +132,11 @@ final class GitHubUpdater: ObservableObject {
             if !helperStarted { try? FileManager.default.removeItem(at: stagingDirectory) }
         }
         guard installedApp.pathExtension == "app" else {
-            throw UpdaterError(AppLanguage.text("Cần cài AgentDock dưới dạng app bundle trước khi tự cập nhật.", "AgentDock must be installed as an app bundle before it can update itself."))
+            throw UpdaterError(AppLanguage.text("Cần cài Codex Roster dưới dạng app bundle trước khi tự cập nhật.", "Codex Roster must be installed as an app bundle before it can update itself."))
         }
         let installDirectory = installedApp.deletingLastPathComponent()
         guard FileManager.default.isWritableFile(atPath: installDirectory.path) else {
-            throw UpdaterError(AppLanguage.text("AgentDock không có quyền cập nhật \(installedApp.path). Hãy chuyển app vào thư mục Applications có quyền ghi rồi thử lại.", "AgentDock does not have permission to update \(installedApp.path). Move it to a writable Applications folder and try again."))
+            throw UpdaterError(AppLanguage.text("Codex Roster không có quyền cập nhật \(installedApp.path). Hãy chuyển app vào thư mục Applications có quyền ghi rồi thử lại.", "Codex Roster does not have permission to update \(installedApp.path). Move it to a writable Applications folder and try again."))
         }
 
         let updateBundle = try stageUpdate(extractedApp: extractedApp, installedApp: installedApp)
@@ -121,7 +147,8 @@ final class GitHubUpdater: ObservableObject {
         }
         let helper = stagingDirectory.appendingPathComponent("install-update.sh")
         let appProcessID = ProcessInfo.processInfo.processIdentifier
-        let backupBundle = installDirectory.appendingPathComponent(".AgentDock.previous.app")
+        let backupBundle = installDirectory.appendingPathComponent(".Codex Roster.previous.app")
+        let healthyMarker = updateHealthyMarkerURL()
         let bundledTrayPattern = installedApp
             .appendingPathComponent("Contents/MacOS/codex-roster")
             .path + " tray"
@@ -156,12 +183,30 @@ final class GitHubUpdater: ObservableObject {
           /bin/mv \(shellQuote(backupBundle.path)) \(shellQuote(installedApp.path))
           exit 1
         fi
+        /bin/rm -f \(shellQuote(healthyMarker.path))
         if ! /usr/bin/open \(shellQuote(installedApp.path)); then
           /bin/rm -rf \(shellQuote(installedApp.path))
           /bin/mv \(shellQuote(backupBundle.path)) \(shellQuote(installedApp.path))
           /usr/bin/open \(shellQuote(installedApp.path))
           exit 1
         fi
+        # Wait up to 5 minutes for the new build to mark itself healthy.
+        # If it never does, roll back to the previous bundle (Clawd-style).
+        i=0
+        while [ "$i" -lt 300 ]; do
+          if [ -f \(shellQuote(healthyMarker.path)) ]; then
+            /bin/rm -rf \(shellQuote(backupBundle.path))
+            /bin/rm -f \(shellQuote(healthyMarker.path))
+            exit 0
+          fi
+          sleep 1
+          i=$((i + 1))
+        done
+        echo "update health check timed out; rolling back"
+        /bin/rm -rf \(shellQuote(installedApp.path))
+        /bin/mv \(shellQuote(backupBundle.path)) \(shellQuote(installedApp.path))
+        /usr/bin/open \(shellQuote(installedApp.path))
+        exit 1
         """
         try script.write(to: helper, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
@@ -248,7 +293,7 @@ final class GitHubUpdater: ObservableObject {
             options: [.skipsHiddenFiles]
         )
         guard let app = entries.first(where: { $0.pathExtension == "app" }) else {
-            throw UpdaterError(AppLanguage.text("File ZIP cập nhật không chứa AgentDock.app.", "The update ZIP did not contain AgentDock.app."))
+            throw UpdaterError(AppLanguage.text("File ZIP cập nhật không chứa Codex Roster.app.", "The update ZIP did not contain Codex Roster.app."))
         }
         let bundle = Bundle(url: app)
         guard bundle?.bundleIdentifier == "com.codexroster.app",
@@ -263,7 +308,7 @@ final class GitHubUpdater: ObservableObject {
 
     nonisolated static func stageUpdate(extractedApp: URL, installedApp: URL) throws -> URL {
         let updateBundle = installedApp.deletingLastPathComponent()
-            .appendingPathComponent(".AgentDock.update-\(UUID().uuidString).app")
+            .appendingPathComponent(".Codex Roster.update-\(UUID().uuidString).app")
         do {
             try FileManager.default.copyItem(at: extractedApp, to: updateBundle)
             try verifyCodeSignature(of: updateBundle, matching: installedApp)

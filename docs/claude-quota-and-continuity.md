@@ -61,3 +61,28 @@ or manual abort supersedes that error. Before queueing, Roster performs another
 read-only discovery and checks the exact thread is still eligible. Bare mid-flight
 cuts without a quota error require manual continuation. This also rejects old
 pending captures from earlier app versions.
+
+## Live refresh behavior
+
+The app reads connected local quota every ten seconds while the Claude tab or notch is enabled. OAuth fallback checks run every minute and refresh the active account after two minutes; inactive accounts retain fifteen-minute caching. New local aggregates can be displayed with older model caps, but that combined view stays unverified and does not renew model freshness. See the [2026-10-08 audit](claude-quota-audit-2026-10-08.md) for findings, source research, and limits.
+
+## Automatic login detection
+
+AgentDock checks Claude Code's official `auth status` at launch, on opening the Claude surface, and every minute. Only a subscription login (`loggedIn: true`, `authMethod: claude.ai`, nonempty email) is synchronized into the encrypted roster. New accounts and rotated credentials are detected without pressing Save; unchanged credentials cause no writes. Synchronization validates the live credential email against the verified status and does not refresh tokens or restore credentials. Known quota, labels, and HTTP 429 cooldowns survive synchronization.
+
+The app connects the local quota bridge automatically, preserving the existing statusline and backing up settings. An installer failure leaves OAuth fallback available. Existing Claude Code processes need to be restarted before reading changed statusline settings.
+
+If signed out, the app shows **Not signed in**, keeps old quota identified as cached, and provides **Sign in** on the Claude surface. That button opens Claude's browser authentication for the live CLI; after completion the app detects and saves the account automatically. It never opens authentication in the background. User authentication is still required; account credentials cannot be inferred from a saved email or Desktop login. Credential-changing account actions and auto-switch pause during this sign-in flow.
+
+**Live** requires official authentication matching the account and fresh, error-free quota. Selected roster rows are labeled **Selected** rather than implying live telemetry. Automatic API polling pauses while signed out; local observation remains independent.
+
+## Claude monitoring-only surface
+
+Claude's macOS surface contains quota and reset telemetry, with account sign-in for connecting data. Automation settings, automatic switching, automatic session resumption, Desktop switching, and manual Switch controls have been removed from this surface. On startup AgentDock disables the persisted Claude auto-switch setting and previous auto-resume/Desktop preferences. The background monitor only reads local quota, detects login, synchronizes credentials, and refreshes OAuth quota. Codex automation is unchanged.
+
+The quota panel shows five-hour and weekly percentages and reset times. The monthly field is Claude's `extra_usage` spending cap when supplied, not a monthly token allowance. A missing monthly field is unknown. No verified Claude banked-reset field is supplied by the current subscription/local feed; its display explicitly says no data available and never borrows Codex reset announcements or counters.
+### Separate quota connections
+
+Per-account Sign in/Reconnect now enrolls through a private `CLAUDE_CONFIG_DIR` and matching macOS Keychain namespace. After verifying the selected email, AgentDock imports the credential snapshot into its encrypted roster and removes the temporary enrollment state. It does not replace the default Terminal login. Other saved accounts can refresh quota without replacing the default CLI session; each account still respects its API cooldown. The account matching the current default CLI identity continues to use and synchronize that live credential. Independent credential lineages for the same email are not provided by this fix.
+
+“Signed in to CLI” identifies the current default session. “Connection saved · unverified” identifies a stored quota connection whose current validity is not confirmed, and “Sign-in required” indicates a rejected credential. A stored connection is not proof of a concurrent default CLI session. See [Claude's multiple-account authentication documentation](https://code.claude.com/docs/en/authentication#log-in-with-multiple-accounts).

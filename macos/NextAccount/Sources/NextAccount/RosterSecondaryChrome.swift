@@ -95,7 +95,6 @@ struct LanguagePreferencePicker: View {
 enum RosterConsoleTab: String, CaseIterable, Identifiable {
     case settings
     case operations
-    case claude
     case about
     case exportBackup
     case importBackup
@@ -111,8 +110,6 @@ enum RosterConsoleTab: String, CaseIterable, Identifiable {
             language.text("Cài đặt", "Settings")
         case .operations:
             language.text("Vận hành", "Operations")
-        case .claude:
-            language.text("Claude Code", "Claude Code")
         case .about:
             language.text("Giới thiệu", "About")
         case .exportBackup:
@@ -126,7 +123,6 @@ enum RosterConsoleTab: String, CaseIterable, Identifiable {
         switch self {
         case .settings: "gearshape"
         case .operations: "wrench.and.screwdriver"
-        case .claude: "brain.head.profile"
         case .about: "info.circle"
         case .exportBackup: "square.and.arrow.up"
         case .importBackup: "square.and.arrow.down"
@@ -149,6 +145,8 @@ final class RosterConsoleSelection: ObservableObject {
 extension Notification.Name {
     /// Open (or raise) the roster console and select a tab. `object` is `RosterConsoleTab.rawValue`.
     static let openRosterConsole = Notification.Name("codexRoster.openRosterConsole")
+    /// Confirmed quota window reset — soft pulse on the notch energy indicator.
+    static let codexRosterQuotaResetPulse = Notification.Name("codexRoster.quotaResetPulse")
 }
 
 /// Present the single secondary hub above the notch and select a tab.

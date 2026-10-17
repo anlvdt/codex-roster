@@ -256,6 +256,9 @@ pub struct StatusOutput {
     pub vibe_usage: Option<crate::vibe_usage::VibeUsageSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codex_model: Option<String>,
+    /// Live Desktop/CLI activity strip (working / waiting / idle).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity: Option<crate::codex_activity::CodexActivitySummary>,
 }
 
 #[derive(Clone, Debug, Serialize)]

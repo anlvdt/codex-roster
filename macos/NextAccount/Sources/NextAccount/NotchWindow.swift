@@ -64,32 +64,6 @@ enum NotchExpansionState: Equatable {
     case fullyExpanded
 }
 
-enum NotchScreen: CaseIterable {
-    case codex
-    case claude
-
-    var title: String {
-        switch self {
-        case .codex: return "Codex"
-        case .claude: return "Claude Code"
-        }
-    }
-
-    var shortTitle: String {
-        switch self {
-        case .codex: return "Codex"
-        case .claude: return "Claude"
-        }
-    }
-
-    var other: NotchScreen {
-        switch self {
-        case .codex: return .claude
-        case .claude: return .codex
-        }
-    }
-}
-
 enum RosterLauncherDestination {
     case notch
     case settings
@@ -99,7 +73,7 @@ enum RosterLauncherDestination {
     }
 }
 
-/// All-In-One Panoramic Floating Notch Console for AgentDock.
+/// All-In-One Panoramic Floating Notch Console for Codex Roster.
 /// Drops down from the camera notch, then blooms out symmetrically to both left and right wings.
 struct NotchWindowView: View {
     @EnvironmentObject private var store: AccountStore
@@ -112,18 +86,12 @@ struct NotchWindowView: View {
     @State private var expansionState: NotchExpansionState = .collapsed
     @State private var hoverTask: Task<Void, Never>?
     @State private var collapseTask: Task<Void, Never>?
-    @State private var isClaudeQuotaGuidePresented = false
-    @State private var isClaudeInteractionPresented = false
     @State private var windowShrinkTask: Task<Void, Never>?
     @State private var keyMonitors: [Any] = []
     @State private var isWindowExpanded = false
     @State private var geometry: NotchGeometry = .detect()
-    @State private var notchScreen: NotchScreen = .codex
     @State private var rosterFilter: RosterListFilter = .all
     @State private var quotaClock = Date()
-    @State private var bothAgentsRunning = ChatGPTDesktop.isRunning && ClaudeDesktop.isRunning
-    @State private var horizontalScroll: CGFloat = 0
-    @State private var lastScreenSwipeAt: TimeInterval = 0
 
     // Sheet presentation states directly inside the Notch Console
     @State private var auxiliarySheetActive = false
@@ -141,9 +109,9 @@ struct NotchWindowView: View {
     private var notchWidth: CGFloat { geometry.cameraWidth }
     private var compactWidth: CGFloat {
         if hasNotch { return geometry.physicalClearance + 2 * earWidth }
-        return dualEarQuotas == nil ? nonNotchCompactWidth : 2 * earWidth
+        return nonNotchCompactWidth
     }
-    private var screenSwitcherWidth: CGFloat { companionQuota == nil ? 156 : 274 }
+    private var screenSwitcherWidth: CGFloat { 156 }
     private let miniDiameter: CGFloat = 20
 
     private var activeAccount: SavedAccount? {
@@ -160,12 +128,6 @@ struct NotchWindowView: View {
     }
 
     private var expandedPanelHeight: CGFloat {
-        if notchScreen == .claude {
-            return ClaudeRosterView.notchDeckHeight(
-                accountCount: store.claudeAccounts.count,
-                hasQuotaCaption: ClaudeRosterView.notchShowsQuotaCaption(account: store.claudeAccounts.first(where: \.isActive)),
-                hasMessage: store.claudeSwitchMessage != nil)
-        }
         return NotchRosterLayout.deckHeight(
             sectionCounts: rosterSectionCounts,
             expanded: isRosterExpanded,
@@ -286,7 +248,6 @@ struct NotchWindowView: View {
             store.refreshTokenUsage(silently: true)
             store.refreshResetOutlook(silently: true)
             store.refreshOpenAIStatus(silently: true)
-            store.refreshProviderStatus(silently: true)
             store.ensureAutomaticFullBackup()
             updater.startAutomaticChecks(currentVersion: AppInfo.shortVersion)
             NotchGlobalHotKey.shared.registerIfNeeded()
@@ -367,27 +328,17 @@ struct NotchWindowView: View {
                 geometry = measured
             }
         }
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didLaunchApplicationNotification)) { _ in
-            bothAgentsRunning = ChatGPTDesktop.isRunning && ClaudeDesktop.isRunning
-        }
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didTerminateApplicationNotification)) { _ in
-            bothAgentsRunning = ChatGPTDesktop.isRunning && ClaudeDesktop.isRunning
-        }
-        .onChange(of: bothAgentsRunning, initial: true) { _, running in
-            store.setClaudeNotchMonitoring(running)
-        }
         .onReceive(Timer.publish(every: 30, on: .main, in: .common).autoconnect()) { now in
             // Freshness can expire even when the backend has published no new data.
             quotaClock = now
         }
         .onDisappear {
-            store.setClaudeNotchMonitoring(false)
             hoverTask?.cancel()
             collapseTask?.cancel()
             windowShrinkTask?.cancel()
             removeKeyMonitors()
         }
-        .alert("AgentDock", isPresented: Binding(
+        .alert("Codex Roster", isPresented: Binding(
             get: { store.errorMessage != nil },
             set: { if !$0 { store.errorMessage = nil } }
         )) {
@@ -412,7 +363,6 @@ struct NotchWindowView: View {
         } label: {
             PrismFilamentView(
                 quota: compactQuota,
-                dualQuotas: dualEarQuotas,
                 diameter: miniDiameter,
                 compact: true,
                 notchWidth: hasNotch ? notchWidth : 0,
@@ -424,19 +374,8 @@ struct NotchWindowView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .contentShape(Rectangle())
                 .overlay(alignment: .bottomLeading) {
-                    if let dual = dualEarQuotas {
-                        verificationBadge(dual.codex.verification)
-                            .frame(width: earWidth)
-                    } else {
-                        verificationBadge(compactQuota.verification)
-                            .frame(width: hasNotch ? earWidth : compactWidth)
-                    }
-                }
-                .overlay(alignment: .bottomTrailing) {
-                    if let dual = dualEarQuotas {
-                        verificationBadge(dual.claude.verification)
-                            .frame(width: earWidth)
-                    }
+                    verificationBadge(compactQuota.verification)
+                        .frame(width: hasNotch ? earWidth : compactWidth)
                 }
         }
         .buttonStyle(.plain)
@@ -447,146 +386,20 @@ struct NotchWindowView: View {
     // MARK: - Expanded Dropdown Content
     private var expandedDropdownContent: some View {
         ZStack(alignment: .top) {
-            ZStack(alignment: .top) {
-                if notchScreen == .codex {
-                    MenuBarView(notchNavigationWidth: screenSwitcherWidth, rosterFilter: $rosterFilter)
-                        .transition(.asymmetric(
-                            insertion: .offset(x: -18).combined(with: .opacity),
-                            removal: .opacity
-                        ))
-                } else {
-                    ClaudeRosterView(notchLayout: true, notchNavigationWidth: screenSwitcherWidth, onQuotaGuidePresentationChanged: { shown in
-                        isClaudeQuotaGuidePresented = shown
-                        collapseTask?.cancel()
-                    }, onInteractionPresentationChanged: { shown in
-                        isClaudeInteractionPresented = shown
-                        collapseTask?.cancel()
-                        if shown && !isExpanded { expand() }
-                    })
-                        .transition(.asymmetric(
-                            insertion: .offset(x: 18).combined(with: .opacity),
-                            removal: .opacity
-                        ))
-                }
-            }
-            // Only page opacity/translation animate. Native window sizing and
-            // navigation chrome use the destination layout immediately.
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: notchScreen)
-            notchScreenSwitcher
+            MenuBarView(notchNavigationWidth: screenSwitcherWidth, rosterFilter: $rosterFilter)
+            Text("Codex")
+                .font(PrismTheme.fontCaptionBold)
+                .frame(width: screenSwitcherWidth, height: NotchRosterLayout.screenSwitcherHeight)
+                .background(PrismTheme.surfacePanel.opacity(0.94), in: Capsule())
                 .padding(.top, compactHeight + NotchRosterLayout.screenSwitcherTopInset)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .clipped()
-        .contentShape(Rectangle())
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 28)
-                .onEnded { gesture in
-                    let x = gesture.predictedEndTranslation.width
-                    let y = gesture.predictedEndTranslation.height
-                    guard abs(x) > 55, abs(x) > abs(y) * 1.25 else { return }
-                    switchNotchScreen(x < 0 ? .claude : .codex)
-                }
-        )
-    }
-
-    private var notchScreenSwitcher: some View {
-        HStack(spacing: 8) {
-            Button {
-                switchNotchScreen(.codex)
-            } label: {
-                Image(systemName: "chevron.left")
-                    .frame(width: 28, height: NotchRosterLayout.screenSwitcherHeight)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(notchScreen == .codex ? PrismTheme.textTertiary : PrismTheme.textBright)
-            .disabled(notchScreen == .codex)
-            .accessibilityLabel(language.text("Màn hình Codex", "Codex screen"))
-
-            Text(notchScreen.title)
-                .font(PrismTheme.fontCaptionBold)
-                .foregroundStyle(PrismTheme.textBright)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity)
-
-            if let companion = companionQuota {
-                NotchCompanionChip(companion: companion) {
-                    switchNotchScreen(companion.screen)
-                }
-                .overlay(alignment: .bottom) {
-                    verificationBadge(companion.verification)
-                        .offset(y: 6)
-                        .allowsHitTesting(false)
-                }
-            }
-
-            Button {
-                switchNotchScreen(.claude)
-            } label: {
-                Image(systemName: "chevron.right")
-                    .frame(width: 28, height: NotchRosterLayout.screenSwitcherHeight)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(notchScreen == .claude ? PrismTheme.textTertiary : PrismTheme.textBright)
-            .disabled(notchScreen == .claude)
-            .accessibilityLabel(language.text("Màn hình Claude Code", "Claude Code screen"))
-        }
-        .frame(width: screenSwitcherWidth, height: NotchRosterLayout.screenSwitcherHeight)
-        .background(PrismTheme.surfacePanel.opacity(0.94), in: Capsule())
-    }
-
-    private func switchNotchScreen(_ target: NotchScreen) {
-        guard notchScreen != target else { return }
-        // Do not animate the entire window/grid height when changing providers.
-        notchScreen = target
-    }
-
-    private func handleNotchScroll(_ event: NSEvent) {
-        guard isExpanded, event.momentumPhase.isEmpty else { return }
-        let x = event.scrollingDeltaX
-        let y = event.scrollingDeltaY
-        if event.phase.contains(.began) { horizontalScroll = 0 }
-        guard abs(x) > abs(y) * 1.25 else { return }
-        let now = ProcessInfo.processInfo.systemUptime
-        guard now - lastScreenSwipeAt > 0.55 else { return }
-        horizontalScroll += x * (event.hasPreciseScrollingDeltas ? 1 : 32)
-        guard abs(horizontalScroll) >= 35 else { return }
-        switchNotchScreen(horizontalScroll > 0 ? .claude : .codex)
-        lastScreenSwipeAt = now
-        horizontalScroll = 0
     }
 
     private var compactQuota: NotchQuotaSnapshot {
         _ = quotaClock
-        switch notchScreen {
-        case .codex: return NotchQuotaSnapshot(codex: activeAccount)
-        case .claude: return NotchQuotaSnapshot(claude: store.claudeAccounts.first(where: \.isActive))
-        }
-    }
-
-    /// The other agent's 5-hour reading, only while both Desktop apps are open
-    /// and that agent's quota data exists.
-    private var companionQuota: NotchCompanionQuota? {
-        _ = quotaClock
-        guard bothAgentsRunning else { return nil }
-        switch notchScreen.other {
-        case .codex:
-            return NotchCompanionQuota(codex: activeAccount)
-        case .claude:
-            return NotchCompanionQuota(claude: store.claudeAccounts.first(where: \.isActive))
-        }
-    }
-
-    /// Both agents' readings keyed to their fixed notch ears (Codex = left).
-    /// Only non-nil when both Desktop apps are running and both snapshots have data.
-    private var dualEarQuotas: (codex: NotchCompanionQuota, claude: NotchCompanionQuota)? {
-        _ = quotaClock
-        guard bothAgentsRunning,
-              let codex = NotchCompanionQuota(codex: activeAccount),
-              let claude = NotchCompanionQuota(claude: store.claudeAccounts.first(where: \.isActive))
-        else { return nil }
-        return (codex, claude)
+        return NotchQuotaSnapshot(codex: activeAccount)
     }
 
     private var compactAccessibilityLabel: String {
@@ -599,18 +412,10 @@ struct NotchWindowView: View {
         let bankedText = banked > 0
             ? language.text(", \(banked) lượt banked reset", ", \(banked) banked resets available")
             : ""
-        let companionText = companionQuota.map { companion in
-            let value = companion.fivePercent.map { "\($0)%" } ?? language.text("chưa có", "no data")
-            let verification = companion.verification.caption(in: language.language).map { " (\($0))" } ?? ""
-            return language.text(
-                " \(companion.shortName) cũng đang mở, 5 giờ còn \(value)\(verification).",
-                " \(companion.shortName) is also open, 5-hour \(value)\(verification)."
-            )
-        } ?? ""
         let verification = quota.verification.caption(in: language.language).map { " (\($0))" } ?? ""
         return language.text(
-            "\(quota.providerName): 5 giờ còn \(fiveText), tuần còn \(weekText)\(bankedText)\(verification).\(companionText) Mở AgentDock.",
-            "\(quota.providerName): 5-hour \(fiveText), weekly \(weekText)\(bankedText)\(verification).\(companionText) Open AgentDock."
+            "\(quota.providerName): 5 giờ còn \(fiveText), tuần còn \(weekText)\(bankedText)\(verification). Mở Codex Roster.",
+            "\(quota.providerName): 5-hour \(fiveText), weekly \(weekText)\(bankedText)\(verification). Open Codex Roster."
         )
     }
 
@@ -664,10 +469,10 @@ struct NotchWindowView: View {
                 }
             }
         } else if isExpanded {
-            guard !isPinnedLive, !isClaudeQuotaGuidePresented, !isClaudeInteractionPresented else { return }
+            guard !isPinnedLive else { return }
             collapseTask = Task { @MainActor in
                 try? await Task.sleep(for: Self.hoverCollapseGrace)
-                guard !Task.isCancelled, !isClaudeQuotaGuidePresented, !isClaudeInteractionPresented else { return }
+                guard !Task.isCancelled, !isPinnedLive else { return }
                 collapse()
             }
         }
@@ -686,7 +491,6 @@ struct NotchWindowView: View {
     }
 
     private func collapse() {
-        guard !isClaudeQuotaGuidePresented, !isClaudeInteractionPresented else { return }
         hoverTask?.cancel()
         collapseTask?.cancel()
         windowShrinkTask?.cancel()
@@ -710,19 +514,11 @@ struct NotchWindowView: View {
     private func installKeyMonitors() {
         guard keyMonitors.isEmpty else { return }
         if let local = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { event in
-            guard event.window?.identifier?.rawValue == "notch",
-                  event.keyCode == 53, !isClaudeQuotaGuidePresented, !isClaudeInteractionPresented else { return event }
+            guard event.window?.identifier?.rawValue == "notch", event.keyCode == 53 else { return event }
             Task { @MainActor in collapse() }
             return nil
         }) {
             keyMonitors.append(local)
-        }
-        if let scroll = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel, handler: { event in
-            guard event.window?.identifier?.rawValue == "notch" else { return event }
-            Task { @MainActor in handleNotchScroll(event) }
-            return event
-        }) {
-            keyMonitors.append(scroll)
         }
     }
 

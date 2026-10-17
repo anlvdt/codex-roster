@@ -136,7 +136,7 @@ struct BackupTransferPane: View {
     private func chooseExportDestination() -> URL? {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [UTType(filenameExtension: "codexroster")!]
-        panel.nameFieldStringValue = "AgentDock Backup.codexroster"
+        panel.nameFieldStringValue = "Codex Roster Backup.codexroster"
         return panel.runModal() == .OK ? panel.url : nil
     }
 

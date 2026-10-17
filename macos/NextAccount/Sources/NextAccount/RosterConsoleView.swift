@@ -104,10 +104,6 @@ struct RosterConsoleView: View {
             OperationsView()
                 .environmentObject(store)
                 .environmentObject(language)
-        case .claude:
-            ClaudeRosterView()
-                .environmentObject(store)
-                .environmentObject(language)
         case .about:
             AboutView()
                 .environmentObject(language)

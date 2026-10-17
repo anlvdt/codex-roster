@@ -1083,6 +1083,7 @@ mod tests {
             process_warnings: Vec::new(),
             vibe_usage: None,
             codex_model: None,
+            activity: None,
         }
     }
 
@@ -1386,6 +1387,7 @@ mod tests {
             process_warnings: Vec::new(),
             vibe_usage: None,
             codex_model: None,
+            activity: None,
         };
         let menu = build_menu(
             InteractiveMode::Persistent,

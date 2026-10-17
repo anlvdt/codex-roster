@@ -10,8 +10,8 @@ fi
 
 "$root_dir/scripts/build-macos-app.sh"
 
-app_root="$root_dir/build/AgentDock.app"
-archive="$root_dir/build/AgentDock-${version}-macos.zip"
+app_root="$root_dir/build/CodexRoster.app"
+archive="$root_dir/build/CodexRoster-${version}-macos.zip"
 rm -f "$archive"
 ditto -c -k --keepParent "$app_root" "$archive"
 

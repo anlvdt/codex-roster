@@ -88,3 +88,25 @@ Rà lại 24 điểm then chốt sau các vòng CLI/TUI, housekeeping và B còn
 ## 6. Hạng mục audit còn lại (chưa triển khai)
 
 Xem bảng "Còn lại" trong [IMPLEMENTATION-STATUS.md](IMPLEMENTATION-STATUS.md). Tại thời điểm đóng goal, danh sách còn lại chỉ gồm **giới hạn môi trường**: (1) không có agent Orca thứ ba để review độc lập vì mọi provider cạn quota; (2) chưa có integration test đầu-cuối cho một lần apply thành công; (3) `swift test` cần Xcode nên chỉ CI chạy. Mọi hạng mục P0/P1/P2 và các tính năng P3 khả thi trong audit đã được triển khai kèm bằng chứng.
+
+---
+
+## Kiểm chứng trên dữ liệu thật — 2026-10-18 (điều tra `—` quota)
+
+**Bối cảnh:** panel Roster hiển thị 3 tài khoản `@utc2eduvn.onmicrosoft.com` (Adam Taylor, John Thomas, Kevin Clark) với `5h —` và `7d —`.
+
+**Nguyên nhân gốc (do ChatGPT Desktop trả về, không phải suy đoán):**
+`error_code: account_deactivated` — *"You do not have an account because it has been deleted or deactivated"* (request_id `b0e6f27d-…`). Ba tài khoản này **đã bị OpenAI vô hiệu hoá**; access token lưu từ 06/10 đã hết hạn và refresh token không thể đổi phiên nữa. Roster không thể tự phát hiện điều này vì thiết kế **không** xoay refresh token của tài khoản không hoạt động — nên nó chỉ biết `access_token_unauthorized`.
+
+**Hai lỗi thật phát hiện trong quá trình điều tra và đã sửa:**
+
+| Lỗi | Bằng chứng | Sửa |
+|---|---|---|
+| **Helper Electron của Desktop bị xếp là "live CLI"** — `codex (renderer)` / `codex (service)` không khớp `is_codex_bin_name`, nên mọi tiến trình Desktop bị coi là phiên CLI đang chạy → `activate` trả `activation_blocked_by_cli` mà `--force` **không thể** vượt. Hệ quả: CLI không thể switch khi ChatGPT Desktop đang chạy (đúng triệu chứng người dùng gặp ban đầu). | `activate --json` trên máy thật: 16 tiến trình `origin=desktop` nhưng 13 tiến trình bị gắn nhãn "CLI session" | `is_codex_bin_name` nhận dạng `codex (<role>)`; `exec-server` được coi là background server; test `desktop_electron_helpers_are_skippable_not_live_cli`. Sau fix: `activation_blocked_by_desktop` (force được, đúng ngữ nghĩa) |
+| **`account_deactivated` không được phân loại** — tài khoản đã chết vẫn trông như "có thể phục hồi", vẫn nằm trong pool auto-switch và vẫn được quét usage | ChatGPT Desktop trả `account_deactivated` khi refresh | `usage_error_account_deactivated()`; đưa vào `usage_error_blocks_activation` (loại khỏi candidate + bỏ qua khi quét), nhãn "Account deactivated", thông báo có hướng dẫn archive/re-login; test `deactivated_accounts_are_terminal_not_retryable` |
+
+**Kiểm chứng `refresh-usage` (theo yêu cầu):** chạy 0,77s, chỉ probe **1** tài khoản (active), bỏ qua **19** (6 cache còn mới, 13 lỗi AT deferred — trong đó có 3 tài khoản trên). Không đổi phiên: active trước/sau giống nhau, `~/.codex/auth.json` không bị ghi.
+
+**Sự cố phát sinh và khắc phục:** activate Adam Taylor (để lấy quota) đưa tài khoản đã bị vô hiệu hoá vào phiên live → ChatGPT Desktop hiện "Authentication Error / account_deactivated". Đã khôi phục ngay phiên cũ: `activate 52fc072e-…` (ellisususanr733@googlemail.com) → xác minh `usage` trả `Plus, 5h 100%, 7d 100%, source=live_access_token`.
+
+**Trạng thái cuối:** phiên live = `ellisususanr733@googlemail.com` (Plus, hoạt động); ChatGPT Desktop chạy lại; 3 tài khoản trên nên được **archive** (không xoá) vì không thể phục hồi nếu OpenAI đã vô hiệu hoá.

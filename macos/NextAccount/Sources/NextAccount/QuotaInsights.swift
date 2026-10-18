@@ -67,6 +67,20 @@ enum ResetClockFormat {
         return countdownLabel(date, language: language)
     }
 
+    /// Hour without minutes, e.g. "6 PM" (en) / "18 giờ" (vi).
+    ///
+    /// `Date.FormatStyle(date: .omitted, time: .shortened).hour()` looks like it
+    /// drops minutes but keeps them ("6:03 PM"): the `.shortened` time style sets
+    /// the minute field, and `.hour()` only adds the hour. A default style with
+    /// `.hour()` really is hour-only.
+    private static func hourOnly(_ date: Date, language: AppLanguage) -> String {
+        date.formatted(
+            Date.FormatStyle(date: .omitted, time: .omitted)
+                .hour(.defaultDigits(amPM: .abbreviated))
+                .locale(language.locale)
+        )
+    }
+
     /// Shorter label for the fixed-width notch ears (146pt total, ~126pt of
     /// content). Minutes are noise once the reset is more than a day away, so
     /// drop them: "Sun 6:00 AM" -> "Sun 6 PM". Without this the weekly label was
@@ -83,12 +97,7 @@ enum ResetClockFormat {
         let weekday = date.formatted(
             Date.FormatStyle().weekday(.abbreviated).locale(language.locale)
         )
-        let hour = date.formatted(
-            Date.FormatStyle(date: .omitted, time: .shortened)
-                .hour()
-                .locale(language.locale)
-        )
-        return "\(weekday) \(hour)"
+        return "\(weekday) \(hourOnly(date, language: language))"
     }
 
     /// Last-resort label for the ears: the hour alone for a reset within a day,
@@ -100,11 +109,7 @@ enum ResetClockFormat {
         }
         let calendar = Calendar.current
         if calendar.isDateInToday(date) || calendar.isDateInTomorrow(date) {
-            return date.formatted(
-                Date.FormatStyle(date: .omitted, time: .shortened)
-                    .hour()
-                    .locale(language.locale)
-            )
+            return hourOnly(date, language: language)
         }
         return date.formatted(
             Date.FormatStyle().weekday(.abbreviated).locale(language.locale)

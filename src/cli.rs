@@ -1485,6 +1485,44 @@ where
         });
     }
 
+    // Account-list backups are the last line of defence for metadata.json, so a
+    // stalled or failing backup must be visible here (audit R2/A2).
+    let backup_dir = data_dir.join("account-list-backups");
+    let newest_backup = std::fs::read_dir(&backup_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("metadata-"))
+        .filter_map(|entry| entry.metadata().ok()?.modified().ok())
+        .max();
+    let (backup_status, backup_detail) = match newest_backup {
+        Some(modified) => {
+            let age = std::time::SystemTime::now()
+                .duration_since(modified)
+                .unwrap_or_default();
+            let hours = age.as_secs() / 3600;
+            if hours > 24 {
+                (
+                    "warn",
+                    format!("newest account-list backup is {hours}h old"),
+                )
+            } else {
+                ("ok", format!("newest account-list backup is {hours}h old"))
+            }
+        }
+        None => ("warn", "no account-list backup yet".to_owned()),
+    };
+    checks.push(DoctorCheck {
+        id: "account_list_backup".to_owned(),
+        status: backup_status.to_owned(),
+        detail: backup_detail,
+        hint: (backup_status == "warn").then(|| {
+            "Save or edit an account to trigger a new backup; check disk space and permissions."
+                .to_owned()
+        }),
+    });
+
     let auth_path = env.codex_root.join("auth.json");
     let auth_status = if auth_path.is_file() { "ok" } else { "warn" };
     checks.push(DoctorCheck {

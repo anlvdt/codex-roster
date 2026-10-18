@@ -44,6 +44,10 @@ Nhánh: `main`. Chưa push `origin`. Chưa xoá dữ liệu người dùng.
 | **A2 — Nốt phần phụ** | Cap config VibeCafe 64 KiB + response 2 MiB (bounded read, không buffer file lạ); cache VibeCafe ghi atomic 0600; `doctor` thêm check **`account_list_backup`** (tuổi backup danh sách tài khoản, warn nếu chưa có hoặc >24h) để backup lỗi không còn im lặng | `d5feeef` | test `config_reader_rejects_oversized_files`; `doctor` chạy thật: `[ok] account_list_backup newest account-list backup is 1h old` |
 | **I18N-1** | Rà toàn bộ literal hiển thị không qua `language.text`: **0 chuỗi tiếng Anh lộ** (2 hit là tên riêng attribution). Các leak audit nêu (watchdog login, export success, About) đã được bản địa hoá ở các vòng trước | — | ghi trong [VERIFICATION.md](VERIFICATION.md) §4b |
 
+| **A2 — Cảnh báo backup vào JSON** | Cảnh báo backup thất bại được ghi nhớ trong process và phơi ra `status --json` qua `warnings[]` (additive, ẩn khi rỗng); tự xoá khi backup kế tiếp thành công | `cf7c4e3` | test `a_failed_account_list_backup_is_recorded_for_status_json` (chặn backup bằng file cùng tên thư mục); `status --json` không có `warnings` khi mọi thứ bình thường |
+| **A3 — `add-account-status`** | Trả thêm `state` (`pending`/`none`), `codex_root`, `hint`; human output nói rõ bước tiếp theo và credentials đã đổi chưa | `1d576d4` | chạy thật: `{"active":false,"state":"none","hint":"Start one with …","contract_version":1}` |
+| **F wave 2 — Runway bar** | `QuotaRunwayBar`: so `time_to_empty` với thời gian tới reset của cửa sổ 5h → "dự báo cạn trước khi reset" (cam) / "đủ tới lúc reset" (xanh) / "chưa đủ mẫu" (mờ) | `ec07cf7` | `swift build` pass |
+
 **Verification độc lập:** xem [VERIFICATION.md](VERIFICATION.md) — gate đầy đủ với `--all-features` (449 test), decode hợp đồng Rust↔Swift bằng binary thật, 29/29 điểm audit then chốt PASS, và 1 gate CI (`check-auth-switch-safety.sh`) đã được sửa sau khi verification phát hiện fail.
 
 **Gate hiện tại:** `cargo fmt --check` pass · `cargo clippy --all-targets -- -D warnings` pass · **447 test pass, 0 fail, 2 ignored** · `swift build --package-path macos/NextAccount` pass · `scripts/build-macos-app.sh` pass.
@@ -54,14 +58,12 @@ Nhánh: `main`. Chưa push `origin`. Chưa xoá dữ liệu người dùng.
 
 | # | Hạng mục | Trạng thái |
 |---|---|---|
-| 1 | Đưa cảnh báo backup thất bại vào JSON `warnings[]` của lệnh ghi (hiện đã có ở `doctor` + stderr) | Chưa làm — mức ưu tiên thấp |
-| 2 | `add-account-status` chi tiết hơn (hiện trả `active`/`auth_changed`) | Chưa làm — mức ưu tiên thấp |
-| 3 | F/G wave 2: HUD/thanh dự báo nâng cao, gợi ý hành động theo ngữ cảnh | Một phần (forecast đã hiển thị trong deck) |
-| 4 | Review độc lập bởi **agent khác** (Orca worker) | Không thực hiện được: mọi provider Orca cạn quota; verification do Lead tự chạy và ghi rõ giới hạn |
-| 5 | Integration test đầu-cuối cho một lần apply thành công (đường saga) | Chưa có; đã ghi nhận trung thực |
-| 6 | Test Swift trong CI (`swift test`) | Không chạy được trên máy CLT-only; CI `macos-latest` sẽ chạy |
+| 1 | Review độc lập bởi **agent khác** (Orca worker) | Không thực hiện được: mọi provider Orca cạn quota; verification do Lead tự chạy, đã ghi rõ giới hạn trong [VERIFICATION.md](VERIFICATION.md) §5 |
+| 2 | Integration test đầu-cuối cho một lần apply thành công (đường saga) | Chưa có; đã ghi nhận trung thực |
+| 3 | Test Swift trong CI (`swift test`) | Không chạy được trên máy CLT-only; CI `macos-latest` sẽ chạy |
+| 4 | HUD/gợi ý hành động nâng cao hơn nữa (ngoài runway bar + caption hiện có) | Ngoài phạm vi audit đề xuất |
 
-Đã xong và không còn trong danh sách: Light Mode console + role màu ngữ nghĩa, a11y toggle/switch/hit-target, freshness chip, notification loop 15s, archived filter, update badge + xác nhận, empty-state loading gate, i18n sweep, TUI search/paging, `list --all` + giờ reset địa phương, housekeeping `.cas-*`/`preserved-metadata-*`, cap VibeCafe, check backup trong `doctor`.
+Mọi hạng mục P0/P1/P2 và các tính năng thuật toán P3 khả thi trong audit đều đã được triển khai và có bằng chứng; các mục còn lại ở trên là giới hạn môi trường hoặc phần mở rộng ngoài đề xuất.
 
 ## 3. Vì sao Lead làm trực tiếp thay vì worker Orca
 

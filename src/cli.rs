@@ -974,6 +974,8 @@ pub fn run() -> Result<()> {
                     detail: None,
                     banked_reset_count: 0,
                     session_resume: None,
+                    usage_unknown: false,
+                    warnings: Vec::new(),
                 }
             } else {
                 app.auto_switch_with_candidate(apply, account_id, force)?

@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::backup::{read_encrypted, write_encrypted};
@@ -10,7 +11,7 @@ use crate::model::{
     AccountUsageView, AccountView, ActivateOutput, AutoSwitchOutput, DeleteOutput, DisplayIdentity,
     LegacyRecoveryOutput, ListOutput, RunningCodexProcess, SaveAction, SaveOutput,
     SavedAccountMetadata, SnapshotBlob, StatusOutput, TokenUsageSummaryOutput, UsageOutput,
-    UsageSource,
+    UsageSource, UsageWindowView,
 };
 use crate::operation_lock::{AuthLock, AutoSwitchLock, OperationLock};
 use crate::repository::SnapshotRepository;
@@ -122,6 +123,8 @@ where
             detail: None,
             banked_reset_count: 0,
             session_resume: None,
+            usage_unknown: false,
+            warnings: Vec::new(),
         })
     }
 
@@ -1529,6 +1532,8 @@ fn auto_switch_output(
         detail,
         banked_reset_count: 0,
         session_resume: None,
+        usage_unknown: false,
+        warnings: Vec::new(),
     }
 }
 
@@ -2785,9 +2790,9 @@ mod tests {
                 plan_label: Some(plan.to_owned()),
                 subscription_active_until: None,
                 luna_reserve: None,
-            five_hour_known: false,
-            weekly_known: false,
-        }),
+                five_hour_known: false,
+                weekly_known: false,
+            }),
             usage_error: None,
         };
         let active = account("Plus", 0, true);
@@ -3444,9 +3449,9 @@ mod tests {
                 plan_label: Some(plan.to_owned()),
                 subscription_active_until: None,
                 luna_reserve: None,
-            five_hour_known: false,
-            weekly_known: false,
-        }),
+                five_hour_known: false,
+                weekly_known: false,
+            }),
             usage_error: None,
         };
         let active = account("active@example.com", "Plus", 0, true);
@@ -3524,9 +3529,9 @@ mod tests {
                     plan_label: Some(plan.to_owned()),
                     subscription_active_until: None,
                     luna_reserve: None,
-            five_hour_known: false,
-            weekly_known: false,
-        }),
+                    five_hour_known: false,
+                    weekly_known: false,
+                }),
                 usage_error: None,
             };
         let active = account("active@example.com", "Plus", 0, 0, true);
@@ -3798,9 +3803,9 @@ mod tests {
                 plan_label: None,
                 subscription_active_until: None,
                 luna_reserve: None,
-            five_hour_known: false,
-            weekly_known: false,
-        }),
+                five_hour_known: false,
+                weekly_known: false,
+            }),
         )
         .expect("replace");
         repo.record_usage_error(
@@ -3863,9 +3868,9 @@ mod tests {
                 plan_label: None,
                 subscription_active_until: None,
                 luna_reserve: None,
-            five_hour_known: false,
-            weekly_known: false,
-        }),
+                five_hour_known: false,
+                weekly_known: false,
+            }),
         )
         .expect("replace");
         repo.record_usage_error(

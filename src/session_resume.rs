@@ -92,10 +92,7 @@ pub fn take_last_warnings() -> Vec<String> {
 }
 
 fn push_warning(message: impl Into<String>) {
-    if let Ok(mut guard) = LAST_WARNINGS
-        .get_or_init(|| Mutex::new(Vec::new()))
-        .lock()
-    {
+    if let Ok(mut guard) = LAST_WARNINGS.get_or_init(|| Mutex::new(Vec::new())).lock() {
         let message = message.into();
         if !guard.iter().any(|existing| existing == &message) {
             guard.push(message);
@@ -104,10 +101,7 @@ fn push_warning(message: impl Into<String>) {
 }
 
 fn clear_warnings() {
-    if let Ok(mut guard) = LAST_WARNINGS
-        .get_or_init(|| Mutex::new(Vec::new()))
-        .lock()
-    {
+    if let Ok(mut guard) = LAST_WARNINGS.get_or_init(|| Mutex::new(Vec::new())).lock() {
         guard.clear();
     }
 }
@@ -580,10 +574,10 @@ fn discover_interrupted_sessions_at(
                      ORDER BY COALESCE(recency_at_ms, updated_at_ms, 0) DESC
                      LIMIT ?2",
                 ) {
-                    Ok(mut stmt) => match stmt.query_map(
-                        rusqlite::params![floor_ms, DISCOVERY_SQL_LIMIT],
-                        |row| row.get::<_, Option<String>>(0),
-                    ) {
+                    Ok(mut stmt) => match stmt
+                        .query_map(rusqlite::params![floor_ms, DISCOVERY_SQL_LIMIT], |row| {
+                            row.get::<_, Option<String>>(0)
+                        }) {
                         Ok(rows) => {
                             db_available = true;
                             candidates.extend(rows.flatten().flatten().map(PathBuf::from));
@@ -1323,7 +1317,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_capture_replaces_stale_pending_and_disabled_consumes_batch() {
+    fn empty_capture_replaces_stale_pending_and_disabled_preserves_batch() {
         let temp = tempdir().unwrap();
         let root = temp.path().join("codex");
         let app = temp.path().join("app");
@@ -1335,8 +1329,9 @@ mod tests {
         );
         let account = Uuid::new_v4();
         capture_pending_continue(&app, &root, account).unwrap();
+        // Disabled must not consume the queue: no hint, but the batch survives.
         assert!(take_pending_continue_hint(&app, false).unwrap().is_none());
-        assert!(take_pending_continue_hint(&app, true).unwrap().is_none());
+        assert!(take_pending_continue_hint(&app, true).unwrap().is_some());
         capture_pending_continue(&app, &root, account).unwrap();
         append_event(&path, serde_json::json!({"type":"task_complete"}));
         capture_pending_continue(&app, &root, account).unwrap();
@@ -1359,9 +1354,10 @@ mod tests {
                 &path,
                 serde_json::json!({"type":"task_complete", "error":{"codex_error_info":"usage_limit_exceeded"}}),
             );
+            let now_ms = OffsetDateTime::now_utc().unix_timestamp() * 1000;
             conn.execute(
-                "INSERT INTO threads VALUES (?1, ?2, 'user', 1, 1)",
-                rusqlite::params![path.to_str().unwrap(), archived],
+                "INSERT INTO threads VALUES (?1, ?2, 'user', ?3, ?3)",
+                rusqlite::params![path.to_str().unwrap(), archived, now_ms],
             )
             .unwrap();
         }

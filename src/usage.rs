@@ -320,9 +320,7 @@ struct UsageResponse {
     individual_limit: Option<SpendControlLimit>,
     rate_limit_reset_credits: Option<UsageResetCreditsSummary>,
     luna_reserve: Option<LunaReserveView>,
-            five_hour_known: false,
-            weekly_known: false,
-        }
+}
 
 impl<'de> Deserialize<'de> for UsageResponse {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -648,7 +646,7 @@ impl UsageResponse {
             .and_then(|limits| limits.secondary_window.as_ref())
             .map(window_view)
             .transpose()?;
-        
+
         Ok(AccountUsageView {
             source,
             fetched_at: now,

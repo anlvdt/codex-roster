@@ -78,7 +78,7 @@ struct OperationsView: View {
                 HStack(spacing: 10) {
                     Image(systemName: "checkmark.seal.fill")
                         .font(RosterSecondaryChrome.iconLarge)
-                        .foregroundStyle(PrismTheme.emerald)
+                        .foregroundStyle(PrismTheme.statusOK)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(language.text("Không có việc khẩn", "Nothing urgent"))
                             .font(RosterSecondaryChrome.section)
@@ -92,7 +92,7 @@ struct OperationsView: View {
                     Spacer(minLength: 0)
                 }
                 .padding(14)
-                .background(PrismTheme.emerald.opacity(0.10), in: RoundedRectangle(cornerRadius: RosterSecondaryChrome.cardRadius))
+                .background(PrismTheme.statusOK.opacity(0.10), in: RoundedRectangle(cornerRadius: RosterSecondaryChrome.cardRadius))
             }
         }
     }
@@ -108,8 +108,8 @@ struct OperationsView: View {
             Text(language.text("Tóm tắt danh bạ", "Roster snapshot"))
                 .font(RosterSecondaryChrome.section)
             HStack(spacing: 8) {
-                opsChip(language.text("Sẵn sàng \(ready)", "Ready \(ready)"), tint: PrismTheme.emerald)
-                opsChip(language.text("Đăng nhập \(needsLogin)", "Login \(needsLogin)"), tint: needsLogin > 0 ? PrismTheme.amber : PrismTheme.titanium)
+                opsChip(language.text("Sẵn sàng \(ready)", "Ready \(ready)"), tint: PrismTheme.statusOK)
+                opsChip(language.text("Đăng nhập \(needsLogin)", "Login \(needsLogin)"), tint: needsLogin > 0 ? PrismTheme.statusWarn : PrismTheme.labelSecondary)
                 opsChip(language.text("Nghỉ \(resting)", "Resting \(resting)"), tint: PrismTheme.titanium)
                 if banked > 0 {
                     opsChip(language.text("Dự phòng \(banked)", "Banked \(banked)"), tint: PrismTheme.warning)

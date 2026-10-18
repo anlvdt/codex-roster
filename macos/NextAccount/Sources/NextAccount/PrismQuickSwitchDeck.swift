@@ -1053,11 +1053,15 @@ struct PrismQuickSwitchDeck: View {
                         .font(PrismTheme.fontBodyCompactBold)
                 }
             }
+            // Visual stays 26pt; the hit target is raised to the 28pt minimum
+            // recommended for pointer targets (audit A11Y-5).
             .frame(width: 26, height: 26)
             .background(
                 Circle()
                     .fill(active ? PrismTheme.accent.opacity(0.9) : PrismTheme.surfaceFill)
             )
+            .frame(minWidth: 28, minHeight: 28)
+            .contentShape(Rectangle())
             .foregroundStyle(active ? PrismTheme.textOnAccent : Color.primary)
         }
         .buttonStyle(.plain)
@@ -1394,6 +1398,11 @@ private struct PrismCompactAccountCard: View {
                         .fill(PrismTheme.accent)
                 )
         }
+        // "Switch" alone is ambiguous with several rows on screen (audit A11Y-2).
+        .accessibilityLabel(language.text(
+            "Đổi sang \(accountForContextMenuAction(in: store.accounts, capturedID: targetID)?.displayName ?? "")",
+            "Switch to \(accountForContextMenuAction(in: store.accounts, capturedID: targetID)?.displayName ?? "")"
+        ))
         .buttonStyle(.plain)
         .pointingHandCursor()
         .disabled(store.isBusyForActions || store.isWorking)

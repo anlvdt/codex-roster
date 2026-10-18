@@ -7,10 +7,14 @@ Per-item status and evidence: [IMPLEMENTATION-STATUS.md](docs/audit-2026-10-18/I
 
 ### Added
 
-- `doctor` command: local diagnostics (paths, key-file modes, lock state, staged auth-recovery leftovers, OAuth callback ports, cached-usage age) with `--json` and a redacted `--bundle` report.
+- `doctor` command: local diagnostics (paths, key-file modes, lock state, staged auth-recovery leftovers, OAuth callback ports, cached-usage age, account-list backup age) with `--json` and a redacted `--bundle` report.
+- `quota-forecast` command: EWMA burn rate, time-to-empty and a 95% interval per window, with a confidence level.
 - `schema` command: describes the `--json` contract, including the exit-code taxonomy.
 - Versioned JSON contract: every `--json` output carries `"contract_version": 1`; failures print `{"contract_version":1,"error":{"code","message","hint"}}` and exit with a class-specific code (2 usage, 3 login/blocked, 4 lock timeout, 5 no account, 6 network, 7 keychain).
 - Menu-bar item (`CR`) with Open notch / Console / Settings / About / Quit, plus standard `⌘,` Settings and About commands, so the app is reachable when the notch is disabled.
+- Notch deck shows the **burn-rate forecast** (`cạn sau ~X`, confidence) with a **runway bar** comparing it to the reset deadline, and suggests switching before a window is forecast to run dry.
+- Console shows CLI **status warnings** (for example a failing account-list backup) as a dismissible banner.
+- Swift test coverage for the forecast formatting, runway math and archived filter.
 - Delete confirmation dialog naming the account; the active account can no longer be deleted from the UI or the store.
 - `scripts/clean-local-artifacts.sh` for reclaiming local build output (dry-run by default).
 - Universal macOS bundle build via `UNIVERSAL=1`, and a tag-triggered release workflow that fails closed unless signing/notarization secrets are present.

@@ -1139,6 +1139,8 @@ mod tests {
             plan_label: None,
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         });
 
         let label = render_account_label(
@@ -1177,6 +1179,8 @@ mod tests {
             plan_label: None,
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         });
         list.accounts[0].usage_error = Some("Login required: Codex auth expired.".to_owned());
 
@@ -1212,6 +1216,8 @@ mod tests {
             plan_label: None,
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         });
         list.accounts[0].usage_error =
             Some("Usage unavailable: failed to query Codex usage".to_owned());

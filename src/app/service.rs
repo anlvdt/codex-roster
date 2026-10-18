@@ -1552,6 +1552,12 @@ fn window_is_depleted(remaining_percent: u8) -> bool {
     remaining_percent <= EXHAUSTED_REMAINING_PERCENT
 }
 
+/// Returns true if the window has not yet expired. A window with reset_at in
+/// the past is stale and must not be used for decision-making.
+fn window_is_current(window: &UsageWindowView, now: OffsetDateTime) -> bool {
+    window.reset_at > now
+}
+
 fn is_exhausted_for_switch(usage: Option<&AccountUsageView>) -> bool {
     if has_usable_credits(usage) {
         return false;
@@ -2242,6 +2248,8 @@ mod tests {
             plan_label: Some("Plus".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
         repo.replace_snapshot_without_backup(
             &env.kind,
@@ -2341,6 +2349,8 @@ mod tests {
             plan_label: None,
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
 
         assert!(is_exhausted_for_switch(Some(&usage)));
@@ -2368,6 +2378,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
         assert!(is_exhausted_for_switch(Some(&weekly_dead)));
         assert!(!is_usable_for_switch(Some(&weekly_dead)));
@@ -2524,6 +2536,8 @@ mod tests {
             plan_label: plan.map(str::to_owned),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
         let account = |roster: Option<&str>, usage_plan: Option<&str>| crate::model::AccountView {
             id: Uuid::new_v4(),
@@ -2589,6 +2603,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
 
         let exhausted = usage(0, None);
@@ -2653,6 +2669,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
         assert!(is_exhausted_for_switch(Some(&depleted)));
         assert!(!is_usable_for_switch(Some(&depleted)));
@@ -2690,6 +2708,8 @@ mod tests {
             plan_label: Some(plan.to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
         let account = |email: &str, plan: &str, reset_count: i64| AccountView {
             id: Uuid::new_v4(),
@@ -2765,7 +2785,9 @@ mod tests {
                 plan_label: Some(plan.to_owned()),
                 subscription_active_until: None,
                 luna_reserve: None,
-            }),
+            five_hour_known: false,
+            weekly_known: false,
+        }),
             usage_error: None,
         };
         let active = account("Plus", 0, true);
@@ -2812,6 +2834,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
         let exhausted = AccountView {
             id: Uuid::new_v4(),
@@ -2876,6 +2900,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
         let stale_exhausted = AccountUsageView {
             fetched_at: now - time::Duration::minutes(11),
@@ -2891,6 +2917,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
 
         assert!(exhausted_cached_usage_skips_probe(
@@ -2937,6 +2965,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
         let save = |email: &str, minutes_ago: i64| {
             let identity = DisplayIdentity {
@@ -3144,6 +3174,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
         let seed_usage = |fetched_at: OffsetDateTime| {
             app.repository
@@ -3210,6 +3242,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
         let deferred = AccountView {
             id: Uuid::new_v4(),
@@ -3244,6 +3278,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         });
 
         assert!(usage_error_is_deferred_access_token_refresh(
@@ -3292,6 +3328,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
         let candidate = AccountView {
             id: Uuid::new_v4(),
@@ -3325,6 +3363,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         });
 
         assert!(fresh_usable_paid_cached_auto_switch_candidate(
@@ -3344,6 +3384,8 @@ mod tests {
             plan_label: Some("Free".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         });
         assert!(!fresh_usable_paid_cached_auto_switch_candidate(
             &free, &active, &settings, now
@@ -3361,6 +3403,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         });
         assert!(!fresh_usable_paid_cached_auto_switch_candidate(
             &stale, &active, &settings, now
@@ -3400,7 +3444,9 @@ mod tests {
                 plan_label: Some(plan.to_owned()),
                 subscription_active_until: None,
                 luna_reserve: None,
-            }),
+            five_hour_known: false,
+            weekly_known: false,
+        }),
             usage_error: None,
         };
         let active = account("active@example.com", "Plus", 0, true);
@@ -3478,7 +3524,9 @@ mod tests {
                     plan_label: Some(plan.to_owned()),
                     subscription_active_until: None,
                     luna_reserve: None,
-                }),
+            five_hour_known: false,
+            weekly_known: false,
+        }),
                 usage_error: None,
             };
         let active = account("active@example.com", "Plus", 0, 0, true);
@@ -3602,6 +3650,8 @@ mod tests {
             plan_label: None,
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
 
         assert!(!cached_usage_is_fresh(Some(&usage), now));
@@ -3626,6 +3676,8 @@ mod tests {
             plan_label: None,
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
 
         assert!(!cached_usage_is_fresh(Some(&usage), now));
@@ -3648,6 +3700,8 @@ mod tests {
             plan_label: None,
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
 
         assert!(cached_usage_is_fresh(Some(&usage), now));
@@ -3744,7 +3798,9 @@ mod tests {
                 plan_label: None,
                 subscription_active_until: None,
                 luna_reserve: None,
-            }),
+            five_hour_known: false,
+            weekly_known: false,
+        }),
         )
         .expect("replace");
         repo.record_usage_error(
@@ -3807,7 +3863,9 @@ mod tests {
                 plan_label: None,
                 subscription_active_until: None,
                 luna_reserve: None,
-            }),
+            five_hour_known: false,
+            weekly_known: false,
+        }),
         )
         .expect("replace");
         repo.record_usage_error(

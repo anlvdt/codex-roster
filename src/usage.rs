@@ -320,7 +320,9 @@ struct UsageResponse {
     individual_limit: Option<SpendControlLimit>,
     rate_limit_reset_credits: Option<UsageResetCreditsSummary>,
     luna_reserve: Option<LunaReserveView>,
-}
+            five_hour_known: false,
+            weekly_known: false,
+        }
 
 impl<'de> Deserialize<'de> for UsageResponse {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -634,21 +636,26 @@ impl UsageResponse {
                     })
             });
         let credit_limit = self.individual_limit.as_ref().and_then(credit_limit_view);
+        let five_hour = self
+            .rate_limit
+            .as_ref()
+            .and_then(|limits| limits.primary_window.as_ref())
+            .map(window_view)
+            .transpose()?;
+        let weekly = self
+            .rate_limit
+            .as_ref()
+            .and_then(|limits| limits.secondary_window.as_ref())
+            .map(window_view)
+            .transpose()?;
+        
         Ok(AccountUsageView {
             source,
             fetched_at: now,
-            five_hour: self
-                .rate_limit
-                .as_ref()
-                .and_then(|limits| limits.primary_window.as_ref())
-                .map(window_view)
-                .transpose()?,
-            weekly: self
-                .rate_limit
-                .as_ref()
-                .and_then(|limits| limits.secondary_window.as_ref())
-                .map(window_view)
-                .transpose()?,
+            five_hour_known: five_hour.is_some(),
+            weekly_known: weekly.is_some(),
+            five_hour,
+            weekly,
             credits: credits_view(self.credits, credit_limit, workspace_balance),
             banked_resets,
             plan_label,

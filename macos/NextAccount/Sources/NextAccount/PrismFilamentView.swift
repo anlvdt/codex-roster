@@ -92,7 +92,7 @@ struct PrismFilamentView: View {
                     .foregroundStyle(fiveTint)
                     .fixedSize()
                     .accessibilityHidden(true)
-                Text("5H")
+                Text(quota.primaryLabel)
                     .font(PrismTheme.fontBodySemibold)
                     .foregroundStyle(PrismTheme.textBright)
                     .fixedSize()
@@ -110,54 +110,60 @@ struct PrismFilamentView: View {
                 }
             }
 
-            Rectangle()
-                .fill(PrismTheme.highlight)
-                .frame(width: 1, height: 12)
+            // Free/Go plans have no weekly limit: the divider, the weekly column
+            // and its reset countdown are omitted instead of showing "Wk —".
+            if quota.showsWeekly {
+                Rectangle()
+                    .fill(PrismTheme.highlight)
+                    .frame(width: 1, height: 12)
 
-            // Weekly Quota
-            HStack(spacing: 3) {
-                Text(language.text("Tuần", "Wk"))
-                    .font(PrismTheme.fontBodySemibold)
-                    .foregroundStyle(PrismTheme.textBright)
-                    .fixedSize()
-                if let weekPercent {
-                    Text("\(weekPercent)%")
-                        .font(PrismTheme.fontMetricDense)
-                        .monospacedDigit()
-                        .foregroundStyle(weekTint)
+                HStack(spacing: 3) {
+                    Text(language.text("Tuần", "Wk"))
+                        .font(PrismTheme.fontBodySemibold)
+                        .foregroundStyle(PrismTheme.textBright)
                         .fixedSize()
-                } else {
-                    Text("—")
-                        .font(PrismTheme.fontBody)
-                        .foregroundStyle(.secondary)
-                        .fixedSize()
+                    if let weekPercent {
+                        Text("\(weekPercent)%")
+                            .font(PrismTheme.fontMetricDense)
+                            .monospacedDigit()
+                            .foregroundStyle(weekTint)
+                            .fixedSize()
+                    } else {
+                        Text("—")
+                            .font(PrismTheme.fontBody)
+                            .foregroundStyle(.secondary)
+                            .fixedSize()
+                    }
                 }
-            }
 
-            // Banked Reset / Reset Countdown
-            if bankedCount > 0 {
-                PrismBankedResetCountBadge(
-                    count: bankedCount,
-                    style: .filament,
-                    helpText: language.text(
-                        "\(bankedCount) lượt banked reset có thể dùng trong Codex",
-                        "\(bankedCount) banked resets available in Codex"
+                // Banked Reset / Reset Countdown
+                if bankedCount > 0 {
+                    PrismBankedResetCountBadge(
+                        count: bankedCount,
+                        style: .filament,
+                        helpText: language.text(
+                            "\(bankedCount) lượt banked reset có thể dùng trong Codex",
+                            "\(bankedCount) banked resets available in Codex"
+                        )
                     )
-                )
-            } else if let weeklyResetDate {
-                let resetTint = PrismTheme.resetProximityTint(resetAt: weeklyResetDate, kind: .weekly)
-                HStack(spacing: 2) {
-                    Text("↺")
-                        .font(PrismTheme.fontCaptionBold)
-                        .foregroundStyle(resetTint.opacity(0.72))
-                        .fixedSize()
-                    EarResetLabel(
-                        date: weeklyResetDate,
-                        asClock: resetAsClock,
-                        language: language,
-                        font: PrismTheme.fontBodySemibold,
-                        tint: resetTint
+                } else if let weeklyResetDate {
+                    let resetTint = PrismTheme.resetProximityTint(
+                        resetAt: weeklyResetDate,
+                        kind: .weekly
                     )
+                    HStack(spacing: 2) {
+                        Text("↺")
+                            .font(PrismTheme.fontCaptionBold)
+                            .foregroundStyle(resetTint.opacity(0.72))
+                            .fixedSize()
+                        EarResetLabel(
+                            date: weeklyResetDate,
+                            asClock: resetAsClock,
+                            language: language,
+                            font: PrismTheme.fontBodySemibold,
+                            tint: resetTint
+                        )
+                    }
                 }
             }
         }
@@ -203,7 +209,7 @@ struct PrismFilamentView: View {
 
             // 5H Quota
             HStack(spacing: 2.5) {
-                Text(language.text("5H", "5H"))
+                Text(quota.primaryLabel)
                     .font(PrismTheme.fontBodySemibold)
                     .foregroundStyle(PrismTheme.textBright)
                     .lineLimit(1)
@@ -290,59 +296,68 @@ struct PrismFilamentView: View {
     // MARK: - Right Ear Wing (Flanking Right of Camera Notch)
     private var rightEarWing: some View {
         HStack(spacing: 4) {
-            // Weekly Quota
-            HStack(spacing: 2.5) {
-                Text(language.text("Tuần", "Wk"))
-                    .font(PrismTheme.fontBodySemibold)
-                    .foregroundStyle(PrismTheme.textBright)
-                    .lineLimit(1)
-                    .fixedSize()
-
-                if let weekPercent {
-                    Text("\(weekPercent)%")
-                        .font(PrismTheme.fontMetricDense)
-                        .monospacedDigit()
-                        .foregroundStyle(weekTint)
+            // Free/Go plans have no weekly limit: the whole weekly group is
+            // omitted rather than rendered as an empty "Wk —".
+            if quota.showsWeekly {
+                HStack(spacing: 2.5) {
+                    Text(language.text("Tuần", "Wk"))
+                        .font(PrismTheme.fontBodySemibold)
+                        .foregroundStyle(PrismTheme.textBright)
                         .lineLimit(1)
                         .fixedSize()
-                } else {
-                    Text("—")
-                        .font(PrismTheme.fontBody)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .fixedSize()
-                }
-            }
 
-            // Banked Reset / Reset Countdown
-            if bankedCount > 0 {
-                PrismBankedResetCountBadge(
-                    count: bankedCount,
-                    style: .filament,
-                    helpText: language.text(
-                        "\(bankedCount) lượt banked reset có thể dùng",
-                        "\(bankedCount) banked resets available"
-                    )
-                )
-            } else if let weeklyResetDate {
-                let resetTint = PrismTheme.resetProximityTint(resetAt: weeklyResetDate, kind: .weekly)
-                HStack(spacing: 2) {
-                    Text("↺")
-                        .font(PrismTheme.fontCaptionBold)
-                        .foregroundStyle(resetTint.opacity(0.72))
-                        .fixedSize()
+                    if let weekPercent {
+                        Text("\(weekPercent)%")
+                            .font(PrismTheme.fontMetricDense)
+                            .monospacedDigit()
+                            .foregroundStyle(weekTint)
+                            .lineLimit(1)
+                            .fixedSize()
+                    } else {
+                        Text("—")
+                            .font(PrismTheme.fontBody)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                }
 
-                    // Degrades to a shorter form instead of clipping
-                    // ("Sun 6:00 A") — notch overflow fix.
-                    EarResetLabel(
-                        date: weeklyResetDate,
-                        asClock: resetAsClock,
-                        language: language,
-                        font: PrismTheme.fontBodySemibold,
-                        tint: resetTint
+                // Banked Reset / Reset Countdown
+                if bankedCount > 0 {
+                    PrismBankedResetCountBadge(
+                        count: bankedCount,
+                        style: .filament,
+                        helpText: language.text(
+                            "\(bankedCount) lượt banked reset có thể dùng",
+                            "\(bankedCount) banked resets available"
+                        )
+                    )
+                } else if let weeklyResetDate {
+                    let resetTint = PrismTheme.resetProximityTint(
+                        resetAt: weeklyResetDate,
+                        kind: .weekly
+                    )
+                    HStack(spacing: 2) {
+                        Text("↺")
+                            .font(PrismTheme.fontCaptionBold)
+                            .foregroundStyle(resetTint.opacity(0.72))
+                            .fixedSize()
+
+                        // Degrades to a shorter form instead of clipping
+                        // ("Sun 6:00 A") — notch overflow fix.
+                        EarResetLabel(
+                            date: weeklyResetDate,
+                            asClock: resetAsClock,
+                            language: language,
+                            font: PrismTheme.fontBodySemibold,
+                            tint: resetTint
+                        )
+                    }
+                    .help(
+                        quota.weeklyResetDate?
+                            .formatted(date: .abbreviated, time: .shortened) ?? ""
                     )
                 }
-                .help(quota.weeklyResetDate?.formatted(date: .abbreviated, time: .shortened) ?? "")
             }
         }
         .padding(.leading, 12)

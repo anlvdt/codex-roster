@@ -48,6 +48,10 @@ struct NotchQuotaSnapshot {
     let providerName: String
     let fivePercent: Int?
     let weekPercent: Int?
+    /// Short label for the primary window: 5H on Plus/Pro, 1M on Free/Go.
+    let primaryLabel: String
+    /// False for Free/Go plans, which have no weekly limit.
+    let showsWeekly: Bool
     let fiveResetDate: Date?
     let weeklyResetDate: Date?
     let bankedCount: Int
@@ -63,6 +67,8 @@ struct NotchQuotaSnapshot {
         providerName = "Codex"
         fivePercent = account?.usage?.fiveHour?.displayRemainingPercent
         weekPercent = account?.usage?.weekly?.displayRemainingPercent
+        primaryLabel = account?.usage?.primaryWindowLabel ?? "5H"
+        showsWeekly = account?.usage?.showsWeeklyWindow ?? true
         fiveResetDate = account?.usage?.fiveHour?.resetAt.value
         weeklyResetDate = account?.usage?.weekly?.resetAt.value
         bankedCount = account?.bankedResetCount ?? 0

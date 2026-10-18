@@ -4874,7 +4874,8 @@ struct SavedAccount: Identifiable, Decodable {
         case 0: return "pro"
         case 1: return "plus"
         case 2: return "team"
-        case 3: return "free"
+        case 3: return "edu"
+        case 4: return "free"
         default: return "other"
         }
     }
@@ -4908,9 +4909,15 @@ struct SavedAccount: Identifiable, Decodable {
         if plan.contains("team") || plan.contains("business") || plan.contains("enterprise") {
             return 2
         }
-        if plan.contains("free") || plan.contains("go") { return 3 }
-        if plan.isEmpty { return 5 }
-        return 4
+        // Education plans (K12, Edu, Campus…) used to fall through to "Other"
+        // because only pro/plus/team/free were recognised.
+        if plan.contains("edu") || plan.contains("k12") || plan.contains("school")
+            || plan.contains("campus") {
+            return 3
+        }
+        if plan.contains("free") || plan.contains("go") { return 4 }
+        if plan.isEmpty { return 6 }
+        return 5
     }
 
     /// Explicit Free/Go label for UI chips — empty/unknown plans stay unlabeled.
@@ -5062,7 +5069,7 @@ enum NotchRosterLayout {
 
     /// Plan-band section sizes in switchboard display order (non-empty only).
     static func planSectionAccountCounts(from accounts: [SavedAccount]) -> [Int] {
-        let groupOrder = ["pro", "plus", "team", "other", "free"]
+        let groupOrder = ["pro", "plus", "team", "edu", "other", "free"]
         let grouped = Dictionary(grouping: accounts, by: \.planGroupKey)
         return groupOrder.compactMap { key in
             guard let list = grouped[key], !list.isEmpty else { return nil }
@@ -5228,6 +5235,14 @@ struct AccountUsage: Decodable {
     /// `monthly`. Free/Go plans have no weekly limit and only a monthly one, so
     /// their primary window must not be labelled "5h".
     let primaryWindowKind: String?
+
+    /// Free/Go plans have no weekly limit, so the weekly column must not be
+    /// rendered for them: it only ever showed an empty "7d —" bar. A Plus/Pro
+    /// account with a transiently missing weekly window still shows the column.
+    var showsWeeklyWindow: Bool {
+        if weekly != nil { return true }
+        return primaryWindowLabel != "1M"
+    }
 
     /// Label for the primary window, derived from its span when the field is
     /// missing (caches written before the field existed).

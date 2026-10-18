@@ -173,3 +173,34 @@ import Testing
     )
     #expect(explicitMonthly.primaryWindowLabel == "1M")
 }
+
+/// K12/Edu plans used to fall into the "Other" band because only pro/plus/team/
+/// free/go were recognised by the plan-band grouping.
+@Test func educationPlansGetTheirOwnBandInsteadOfOther() {
+    func account(plan: String?) -> SavedAccount {
+        SavedAccount(
+            id: UUID(),
+            provider: "open_ai",
+            email: "person@example.com",
+            name: nil,
+            customLabel: nil,
+            planLabel: plan,
+            environment: "macos",
+            isActive: false,
+            archived: false,
+            usage: nil,
+            usageError: nil
+        )
+    }
+    #expect(account(plan: "K12").planGroupKey == "edu")
+    #expect(account(plan: "k12").planGroupKey == "edu")
+    #expect(account(plan: "Edu").planGroupKey == "edu")
+    #expect(account(plan: "Campus").planGroupKey == "edu")
+    #expect(account(plan: "Plus").planGroupKey == "plus")
+    #expect(account(plan: "Pro").planGroupKey == "pro")
+    #expect(account(plan: "Team").planGroupKey == "team")
+    #expect(account(plan: "Free").planGroupKey == "free")
+    #expect(account(plan: "Go").planGroupKey == "free")
+    #expect(account(plan: "Mystery Tier").planGroupKey == "other")
+    #expect(account(plan: nil).planGroupKey == "other")
+}

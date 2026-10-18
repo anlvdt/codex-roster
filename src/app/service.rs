@@ -618,7 +618,7 @@ where
                 "automatic switch did not take effect; the previous account was restored"
             ));
         }
-        txn = crate::switch_txn::advance(
+        crate::switch_txn::advance(
             &self.env.app_data_dir,
             &txn,
             crate::switch_txn::SwitchPhase::Verified,

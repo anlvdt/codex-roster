@@ -111,11 +111,16 @@ enum RosterListFilter: Equatable {
     case all
     case triage(AccountTriage)
     case deferredUnverified
+    /// Archived rows are hidden from the default list (and from counts) but stay
+    /// findable behind their own chip (audit IA-3).
+    case archived
 
     func matches(_ account: SavedAccount) -> Bool {
         switch self {
         case .all:
-            return true
+            return !account.archived
+        case .archived:
+            return account.archived
         case .triage(let bucket):
             return account.triage == bucket
         case .deferredUnverified:

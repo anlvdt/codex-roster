@@ -39,6 +39,8 @@ struct PrismQuickSwitchDeck: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @AppStorage("codex_roster_notch_pinned_live") private var isPinnedLive = false
+    /// Update waiting for an explicit confirmation (audit IA-4).
+    @State private var pendingUpdateInstall: GitHubUpdater.Update?
     @AppStorage(NotchRosterLayout.rosterExpandedKey) private var isRosterExpanded = false
 
     var openSettings: () -> Void = {}
@@ -159,6 +161,25 @@ struct PrismQuickSwitchDeck: View {
         .animation(reduceMotion ? nil : PrismTheme.snapSpring, value: filteredAccounts.count)
         .animation(reduceMotion ? nil : PrismTheme.snapSpring, value: hasNextActionCaption)
         .animation(reduceMotion ? nil : PrismTheme.snapSpring, value: rosterColumnCount)
+        .confirmationDialog(
+            language.text("Cài bản cập nhật?", "Install update?"),
+            isPresented: Binding(
+                get: { pendingUpdateInstall != nil },
+                set: { if !$0 { pendingUpdateInstall = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button(language.text("Cài và mở lại", "Install and relaunch"), role: .destructive) {
+                pendingUpdateInstall = nil
+                updater.installAvailableUpdate()
+            }
+            Button(language.text("Hủy", "Cancel"), role: .cancel) { pendingUpdateInstall = nil }
+        } message: {
+            Text(language.text(
+                "Codex Roster \(pendingUpdateInstall?.version ?? "") sẽ được tải và thay thế bản đang chạy.",
+                "Codex Roster \(pendingUpdateInstall?.version ?? "") will be downloaded and replace the running app."
+            ))
+        }
     }
 
     /// Compact “what to do next” line — omitted when all-clear (no mid-deck gap;
@@ -810,6 +831,13 @@ struct PrismQuickSwitchDeck: View {
                 if store.accounts.contains(where: { $0.triage == .needsAction }) {
                     filterTab(label: language.text("Cần xử lý", "Needs action"), filter: .triage(.needsAction))
                 }
+                let archivedCount = store.accounts.filter(\.archived).count
+                if archivedCount > 0 {
+                    filterTab(
+                        label: language.text("Đã cất \(archivedCount)", "Archived \(archivedCount)"),
+                        filter: .archived
+                    )
+                }
 
                 toolbarIconButton(
                     systemName: isRosterExpanded
@@ -905,6 +933,17 @@ struct PrismQuickSwitchDeck: View {
                         .font(PrismTheme.fontBodyCompactBold)
                         .frame(width: 26, height: 26)
                         .background(Circle().fill(PrismTheme.surfaceFill))
+                        .overlay(alignment: .topTrailing) {
+                            // A quiet dot so an available update is discoverable
+                            // without opening the menu (audit IA-4).
+                            if case .available = updater.state {
+                                Circle()
+                                    .fill(PrismTheme.statusInfo)
+                                    .frame(width: 6, height: 6)
+                                    .offset(x: 1, y: -1)
+                                    .accessibilityHidden(true)
+                            }
+                        }
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
@@ -1013,7 +1052,9 @@ struct PrismQuickSwitchDeck: View {
             EmptyView()
         }
         if RosterUpdateMenuAction.resolve(state) == .install, case .available(let update) = state {
-            Button { updater.installAvailableUpdate() } label: {
+            // Installing replaces the running app: confirm and name the version
+            // instead of starting immediately from a menu item (audit IA-4).
+            Button { pendingUpdateInstall = update } label: {
                 Label(language.text("Cài bản \(update.version)", "Install \(update.version)"), systemImage: "arrow.down.app")
             }
             .disabled(updater.state.isBusy)

@@ -883,17 +883,45 @@ fn discover_from_state_db(codex_root: &Path) -> Result<Option<DiscoveredSession>
     }))
 }
 
+/// Day directories to scan, newest first: the local date ladder plus the UTC
+/// ladder, de-duplicated. A writer and a reader in different offsets can
+/// otherwise disagree about which day directory is "today" (audit P2).
+fn session_day_dates(
+    local_today: time::Date,
+    utc_today: time::Date,
+    lookback_days: i64,
+) -> Vec<time::Date> {
+    let mut dates: Vec<time::Date> = Vec::new();
+    for day_offset in 0..=lookback_days {
+        for base in [local_today, utc_today] {
+            let Some(date) = base.checked_sub(time::Duration::days(day_offset)) else {
+                continue;
+            };
+            if !dates.contains(&date) {
+                dates.push(date);
+            }
+        }
+    }
+    dates
+}
+
 fn discover_latest_user_session(codex_root: &Path) -> Result<Option<DiscoveredSession>> {
     let sessions_root = codex_root.join("sessions");
     if !sessions_root.is_dir() {
         return Ok(None);
     }
     let mut best: Option<DiscoveredSession> = None;
-    let today = OffsetDateTime::now_utc().date();
-    for day_offset in 0..=LOOKBACK_DAYS {
-        let Some(date) = today.checked_sub(time::Duration::days(day_offset)) else {
-            continue;
-        };
+    // Codex writes `sessions/YYYY/MM/DD` using the machine's local date, while
+    // the CLI may be running with a different offset than the writer. Sweep
+    // both the local and UTC date ladders so a day directory is never missed
+    // near midnight or under a large UTC offset (audit P2).
+    let now_odt = OffsetDateTime::now_utc();
+    let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    for date in session_day_dates(
+        now_odt.to_offset(local_offset).date(),
+        now_odt.date(),
+        LOOKBACK_DAYS,
+    ) {
         let day_dir = sessions_root
             .join(format!("{:04}", date.year()))
             .join(format!("{:02}", date.month() as u8))
@@ -1018,6 +1046,22 @@ mod tests {
             .join(format!("{:04}", today.year()))
             .join(format!("{:02}", today.month() as u8))
             .join(format!("{:02}", today.day()))
+    }
+
+    #[test]
+    fn session_day_ladder_covers_local_and_utc_dates_newest_first() {
+        let utc_today =
+            time::Date::from_calendar_date(2026, time::Month::October, 18).expect("utc date");
+        let local_today =
+            time::Date::from_calendar_date(2026, time::Month::October, 19).expect("local date");
+        let dates = session_day_dates(local_today, utc_today, 1);
+        assert_eq!(dates[0], local_today, "local (newest) date first");
+        assert!(dates.contains(&utc_today), "utc date still covered");
+        assert_eq!(
+            dates.len(),
+            3,
+            "19, 18, 17 with lookback 1 and no duplicates"
+        );
     }
 
     #[test]

@@ -2793,6 +2793,34 @@ final class AccountStore: ObservableObject {
         menuInteractionUntil.map { $0 > Date() } ?? false
     }
 
+    /// Turns raw CLI stderr into an actionable, localized message for the
+    /// activation-blocking errors the guard emits. The process list the CLI
+    /// prints after the machine prefix is preserved as details. Unknown errors
+    /// pass through unchanged.
+    static func friendlyErrorMessage(_ raw: String) -> String {
+        if raw.contains("activation_blocked_by_cli:") {
+            let details = raw
+                .components(separatedBy: "\n")
+                .drop(while: { !$0.hasPrefix("activation_blocked_by_cli:") })
+                .dropFirst()
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let head = AppLanguage.text(
+                "Không thể chuyển tài khoản: đang có phiên Codex CLI chạy.",
+                "Cannot switch accounts: a Codex CLI session is running.")
+            let advice = AppLanguage.text(
+                "Hãy đóng (Ctrl-C) các phiên Codex CLI được liệt kê rồi thử lại. ChatGPT/Codex Desktop có thể xử lý bằng --force.",
+                "Close (Ctrl-C) the listed Codex CLI sessions and retry. ChatGPT/Codex Desktop can be handled with --force.")
+            return details.isEmpty ? "\(head)\n\n\(advice)" : "\(head)\n\n\(details)\n\n\(advice)"
+        }
+        if raw.contains("activation_blocked_by_desktop:") {
+            return AppLanguage.text(
+                "Không thể chuyển tài khoản: ChatGPT/Codex Desktop đang chạy. Hãy thoát Desktop rồi thử lại, hoặc dùng --force để Roster tự đóng và mở lại.",
+                "Cannot switch accounts: ChatGPT/Codex Desktop is running. Quit it and retry, or use --force to let Roster close and relaunch it.")
+        }
+        return raw
+    }
+
     private func run(switching: Bool = false, _ operation: @escaping @MainActor () async throws -> Void) {
         guard !isBusyForActions else { return }
         isWorking = true
@@ -2807,12 +2835,13 @@ final class AccountStore: ObservableObject {
             do {
                 try await operation()
             } catch {
-                errorMessage = error.localizedDescription
+                let message = Self.friendlyErrorMessage(error.localizedDescription)
+                errorMessage = message
                 if case .waiting = newAccountLoginState {
-                    newAccountLoginState = .failed(error.localizedDescription)
+                    newAccountLoginState = .failed(message)
                     clearPendingLoginFlags()
                 } else if case .saving = newAccountLoginState {
-                    newAccountLoginState = .failed(error.localizedDescription)
+                    newAccountLoginState = .failed(message)
                 }
             }
         }

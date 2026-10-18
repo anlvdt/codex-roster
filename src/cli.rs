@@ -719,13 +719,22 @@ pub fn run() -> Result<()> {
                             .iter()
                             .any(|process| !crate::process::is_force_skippable_process(process))
                         {
-                            bail!(
-                                "Codex CLI is still running. Close those processes first; `--force` cannot override a live CLI session."
+                            let report = app.activation_blocking_report(force);
+                            let mut message = String::from(
+                                "activation_blocked_by_cli: a live Codex CLI session is running and `--force` cannot override it",
                             );
+                            for line in crate::process::format_blocking_report(&report) {
+                                message.push('\n');
+                                message.push_str(&line);
+                            }
+                            message.push_str(
+                                "\nClose the listed Codex CLI session(s) (Ctrl-C in the terminal running `codex`) and retry.",
+                            );
+                            bail!(message);
                         }
                         if !force {
                             bail!(
-                                "ChatGPT/Codex Desktop is still running. Close it first or rerun `activate` with `--force` after quitting Desktop."
+                                "activation_blocked_by_desktop: ChatGPT/Codex Desktop is still running. Quit it first, or rerun `activate --force` to let Roster close and relaunch it."
                             );
                         }
                     } else if !warnings.is_empty() && force && !json {

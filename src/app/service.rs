@@ -300,6 +300,21 @@ where
         ranked.sort_by_key(|candidate| {
             std::cmp::Reverse(switch_quota_score(candidate.usage.as_ref()))
         });
+        // A live Codex CLI session cannot be switched past: apply would refuse
+        // after the GUI already quit Desktop, bouncing the session in a loop.
+        // Report `waiting_for_processes` instead of `ready` (audit S1).
+        let preflight = self.activation_blocking_report(true);
+        if preflight.has_live_cli() {
+            return Ok(auto_switch_output(
+                enabled,
+                "waiting_for_processes",
+                Some(active.id),
+                None,
+                None,
+                Some(crate::process::format_blocking_report(&preflight).join("; ")),
+            ));
+        }
+
         // Never tell the GUI to quit ChatGPT on a cache-only guess. A stale
         // >0% window on the only other row (often the same exhausted identity)
         // would otherwise close Desktop every 10s and bounce the session.
@@ -1010,6 +1025,14 @@ where
 
     pub fn activation_blocking_warnings(&self, allow_desktop: bool) -> Vec<RunningCodexProcess> {
         crate::process::processes_blocking_activation(allow_desktop, &self.env.codex_root)
+    }
+
+    /// Blocking decision with reasons, for actionable CLI/GUI messages.
+    pub fn activation_blocking_report(
+        &self,
+        allow_desktop: bool,
+    ) -> crate::process::BlockingReport {
+        crate::process::blocking_report(allow_desktop, &self.env.codex_root)
     }
 
     pub fn refresh_saved_usage_cache(&self) -> Result<()> {

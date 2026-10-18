@@ -53,7 +53,8 @@ The sidebar signals, the Overview banner, and the account board all read from th
 ### Backup and recovery
 
 - **File → Export backup…** creates a password-encrypted `.codexroster` file for transfer or off-device storage. The password is never stored by the app.
-- The app automatically retains the latest five full local snapshot backups. They are encrypted with a random key held in this Mac's Keychain, so they can restore saved sessions on this same Mac.
+- The app automatically retains the latest five full local snapshot backups. They are encrypted with a random key stored in a `0600` file inside the app data directory (`keys/local-snapshot-key-v1.key`, `keys/automatic-backup-key-v1.key`), with a redundant Keychain copy used as a migration source, so they can restore saved sessions on this same Mac.
+- **What that protects:** off-device exposure (a copied backup file is useless without the key) and other macOS users. **What it does not protect:** a process already running as your macOS user, which can read the key file and the snapshots. Treat the app data directory as sensitive, and prefer the password-encrypted export for anything that leaves this Mac.
 - Use **Automation → Restore saved sessions** after local data loss. This replaces the current roster after confirmation.
 
 #### macOS Keychain prompt
@@ -62,10 +63,10 @@ macOS may show a dialog such as:
 
 > `codex-roster` / `Codex Roster` / `codex_roster-<hash>` wants to use your confidential information stored in **"com.codexroster.app"** in your keychain.
 
-That is expected. Codex Roster keeps only a local encryption key for saved snapshots and automatic backups in the Keychain item `com.codexroster.app`. The helper CLI inside the app (and local `cargo test` / `cargo run` binaries, which may appear as `codex_roster-<hash>`) must read that item to decrypt sessions on this Mac. The dialog is from macOS, not a third-party login page.
+That is expected. Codex Roster keeps the local encryption key for saved snapshots and automatic backups in a private key file, and keeps a redundant copy in the Keychain item `com.codexroster.app` (used to migrate keys from older builds). The helper CLI inside the app (and local `cargo test` / `cargo run` binaries, which may appear as `codex_roster-<hash>`) may read that item while migrating. The dialog is from macOS, not a third-party login page.
 
 - Choose **Allow** or **Always Allow** after confirming the Keychain item name is `com.codexroster.app`.
-- **Deny** leaves saved sessions/backups encrypted and unreadable until access is granted.
+- **Deny** is safe when the key file already exists: the app reads the file first. Deny it and, if a migration is pending, older snapshots stay encrypted until access is granted.
 - Codex Roster never asks for your OpenAI password through this dialog; enter your Mac login Keychain password only if macOS requests it.
 
 Never share a snapshot file, password, browser cookie, access token, or refresh token.
@@ -193,7 +194,8 @@ Tín hiệu ở sidebar, thanh gợi ý và bảng trạng thái đều đọc t
 ### Sao lưu và khôi phục
 
 - **Tệp → Xuất bản sao lưu…** tạo file `.codexroster` được mã hóa bằng mật khẩu để chuyển máy hoặc lưu trữ ngoài máy. App không lưu mật khẩu này.
-- Ứng dụng tự giữ năm bản sao đầy đủ gần nhất trên máy. Chúng được mã hóa bằng khóa ngẫu nhiên trong Keychain của máy Mac này, vì vậy có thể khôi phục lại phiên đã lưu trên chính máy đó.
+- Ứng dụng tự giữ năm bản sao đầy đủ gần nhất trên máy. Chúng được mã hóa bằng khóa ngẫu nhiên lưu trong **file riêng tư `0600`** trong thư mục dữ liệu ứng dụng (`keys/local-snapshot-key-v1.key`, `keys/automatic-backup-key-v1.key`), kèm một bản sao dự phòng trong Keychain dùng để migrate từ bản cũ, vì vậy có thể khôi phục lại phiên đã lưu trên chính máy đó.
+- **Điều được bảo vệ:** file sao lưu bị copy ra ngoài vẫn vô dụng nếu không có khóa, và người dùng macOS khác. **Điều không được bảo vệ:** một tiến trình đang chạy dưới cùng tài khoản macOS của bạn — nó đọc được cả file khóa lẫn snapshot. Hãy coi thư mục dữ liệu ứng dụng là nhạy cảm, và dùng bản export có mật khẩu cho mọi thứ rời khỏi máy này.
 - Dùng **Tự động hóa → Khôi phục phiên sao lưu** khi dữ liệu cục bộ gặp lỗi. Thao tác sẽ yêu cầu xác nhận trước khi thay roster hiện tại.
 
 #### Thông báo Keychain trên macOS
@@ -202,7 +204,7 @@ macOS có thể hiện hộp thoại kiểu:
 
 > `codex-roster` / `Codex Roster` / `codex_roster-<hash>` muốn dùng thông tin bảo mật trong **"com.codexroster.app"** trên keychain của bạn.
 
-Đây là hành vi bình thường. Codex Roster chỉ lưu khóa mã hóa cục bộ cho snapshot và bản sao lưu tự động trong mục Keychain `com.codexroster.app`. CLI đi kèm app (và binary `cargo test` / `cargo run` khi phát triển, đôi khi hiện tên `codex_roster-<hash>`) cần đọc mục đó để giải mã phiên trên chính máy này. Hộp thoại do macOS hiện, không phải trang đăng nhập bên thứ ba.
+Đây là hành vi bình thường. Codex Roster lưu khóa mã hóa cục bộ cho snapshot và bản sao lưu tự động trong file khóa riêng tư, và giữ một bản sao dự phòng trong mục Keychain `com.codexroster.app` (dùng để migrate khóa từ bản cũ). CLI đi kèm app (và binary `cargo test` / `cargo run` khi phát triển, đôi khi hiện tên `codex_roster-<hash>`) có thể đọc mục đó khi migrate. Hộp thoại do macOS hiện, không phải trang đăng nhập bên thứ ba.
 
 - Chọn **Allow** hoặc **Always Allow** sau khi xác nhận tên mục Keychain là `com.codexroster.app`.
 - **Deny** sẽ khiến phiên/bản sao lưu đã mã hóa không đọc được cho đến khi được cấp quyền.

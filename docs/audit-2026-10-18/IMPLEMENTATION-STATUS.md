@@ -38,6 +38,9 @@ Nhánh: `main`. Chưa push `origin`. Chưa xoá dữ liệu người dùng.
 | **F — Forecast lên UI** | `QuotaForecastOutput`/`QuotaWindowForecast` trong Swift + `AccountStore.quotaForecast` + dòng "cạn sau ~X (CI …) · confidence …" dưới gauge trong deck; refresh kèm quota-history | `2b59d71` | decode hợp đồng bằng chương trình Swift độc lập trên JSON thật của binary (xem [VERIFICATION.md](VERIFICATION.md) §2) |
 | **A2 — Housekeeping** | Cap `preserved-metadata-*.json` (giữ 20 mới nhất, idempotent) và dọn thư mục `.cas-backup-*`/`.cas-restore-*` bỏ hoang (>1 giờ) ngay khi bắt đầu activation dưới auth lock; cả hai best-effort, không bao giờ làm hỏng restore/activate | `e140385`, `a6903d2` | test `preserved_metadata_copies_are_capped`, `stale_recovery_dirs_are_pruned_but_fresh_and_unrelated_ones_are_kept`; **449 test pass** |
 
+| **A3 — CLI/TUI** | `list` human: hiện **label**, **plan**, `[archived]`, và **giờ reset theo múi giờ máy** (trước chỉ ngày UTC); cờ **`--all`** để gồm archived + dòng nhắc "(N archived hidden)"; TUI: **PgUp/PgDn**, **Home/End (g/G)**, **`/` tìm kiếm** (khớp không phân biệt hoa thường, nhảy tới dòng đầu tiên) + cập nhật dòng hướng dẫn phím | `cb6b602`, `d2aba9a` | test `account_summary_shows_label_plan_and_state`, `search_matches_case_insensitively_and_ignores_empty_queries`; `list --help` có `--all`; output thật hiện `reset 2026-10-18 16:03:28.0` theo giờ máy |
+| **B — Empty state (FLOW-8)** | `hasLoadedAccounts` + hàng "Đang tải danh sách tài khoản…" thay vì màn "Chưa có tài khoản" sai trong lúc load đầu | commit mới | `swift build` pass |
+
 **Verification độc lập:** xem [VERIFICATION.md](VERIFICATION.md) — gate đầy đủ với `--all-features` (449 test), decode hợp đồng Rust↔Swift bằng binary thật, 29/29 điểm audit then chốt PASS, và 1 gate CI (`check-auth-switch-safety.sh`) đã được sửa sau khi verification phát hiện fail.
 
 **Gate hiện tại:** `cargo fmt --check` pass · `cargo clippy --all-targets -- -D warnings` pass · **447 test pass, 0 fail, 2 ignored** · `swift build --package-path macos/NextAccount` pass · `scripts/build-macos-app.sh` pass.
@@ -49,7 +52,7 @@ Nhánh: `main`. Chưa push `origin`. Chưa xoá dữ liệu người dùng.
 | # | Hạng mục | Ghi chú |
 |---|---|---|
 | 2 | A2 phần còn lại: đưa cảnh báo backup vào JSON `warnings[]`, cap config VibeCafe | Phần lớn đã xong |
-| 3 | A3 phần còn lại: `list` human (label/archived/local reset + `--all`), TUI search/Home/End/PgUp, `add-account-status` chi tiết | Help + safety đã xong |
+| 3 | A3 phần còn lại: `add-account-status` chi tiết hơn | list human + TUI search/paging đã xong |
 | 4 | B phần còn lại: Light Mode token (VIS-1), a11y label/toggle/reduce-motion, freshness chip (QTA-1), notification loop 15s, archived filter, update badge | Đã xong menu-bar/`⌘,`/xoá/hover/passive refresh |
 | 5 | B phần còn lại: Light Mode cho các sheet khác, i18n leaks còn sót, feedback cho các thao tác khác, empty-state loading gate | Phần lớn B đã xong |
 | 6 | F/G wave 2: HUD/thanh dự báo nâng cao, gợi ý hành động, review độc lập bởi agent khác | Forecast đã lên UI; verification đã có báo cáo riêng |

@@ -225,6 +225,7 @@ where
             ));
         };
         let now = time::OffsetDateTime::now_utc();
+        let settings = load_settings(&self.env.app_data_dir)?;
         // No current known window and no usable credits means the live probe
         // failed (for example an expired access token, which Roster deliberately
         // does not refresh) or the cached windows already reset. Say so instead
@@ -246,7 +247,14 @@ where
             output.usage_unknown = true;
             return Ok(output);
         }
-        if !is_exhausted_for_switch(active.usage.as_ref(), now) {
+        // An idle account (no rollout write in the last ~20s) is the only safe
+        // moment for a proactive switch: moving mid-turn would strand a turn on
+        // an account that is about to be swapped away (audit U2).
+        let activity = crate::codex_activity::summarize(&self.env.codex_root, &[]);
+        let activity_idle = activity.working == 0 && activity.waiting == 0;
+        let proactive =
+            proactive_switch_allowed(active.usage.as_ref(), &settings, activity_idle, now);
+        if !is_exhausted_for_switch(active.usage.as_ref(), now) && !proactive {
             return Ok(auto_switch_output(
                 enabled,
                 "active_has_quota",
@@ -257,7 +265,19 @@ where
             ));
         }
 
-        let settings = load_settings(&self.env.app_data_dir)?;
+        // Minimum dwell between automatic switches, on both the reactive and the
+        // proactive path: without it an exhausted roster can bounce A→B→C→A every
+        // poll (audit S5/U2).
+        if !dwell_satisfied(&settings, now) {
+            return Ok(auto_switch_output(
+                enabled,
+                "waiting_for_dwell",
+                Some(active.id),
+                None,
+                None,
+                Some("Waiting for the minimum dwell between automatic switches.".to_owned()),
+            ));
+        }
         let candidates = self.repository.list_accounts(&self.env.kind)?;
         let mut usable_candidate_ids = HashSet::new();
         for candidate in candidates.iter().filter(|candidate| {
@@ -1986,6 +2006,51 @@ pub fn switch_score_breakdown(
     })
 }
 
+/// Minimum dwell between two automatic switches, applied to the reactive and
+/// proactive paths alike so A→B→C→A thrash cannot happen (audit S5/U2).
+fn dwell_satisfied(settings: &crate::settings::AppSettings, now: OffsetDateTime) -> bool {
+    match settings.last_auto_switch_at {
+        Some(last) => {
+            now - last >= time::Duration::minutes(settings.auto_switch_dwell_minutes as i64)
+        }
+        None => true,
+    }
+}
+
+/// Opt-in proactive trigger: switch before the 5-hour window is empty, but only
+/// when the account is idle, the weekly window is healthy, and the dwell has
+/// elapsed. Any missing signal means "do not switch" — the reactive path still
+/// handles the exhausted case.
+fn proactive_switch_allowed(
+    usage: Option<&AccountUsageView>,
+    settings: &crate::settings::AppSettings,
+    idle: bool,
+    now: OffsetDateTime,
+) -> bool {
+    if !settings.auto_switch_proactive || !idle || !dwell_satisfied(settings, now) {
+        return false;
+    }
+    let Some(usage) = usage else {
+        return false;
+    };
+    let Some(five) = usage
+        .five_hour
+        .as_ref()
+        .filter(|window| window_is_current(window, now))
+    else {
+        return false;
+    };
+    let Some(weekly) = usage
+        .weekly
+        .as_ref()
+        .filter(|window| window_is_current(window, now))
+    else {
+        return false;
+    };
+    five.remaining_percent <= settings.auto_switch_threshold_percent
+        && weekly.remaining_percent >= settings.auto_switch_weekly_floor_percent
+}
+
 /// Deterministic candidate order: score, then plan, then the least recently
 /// activated account, then id. The last two make ties stable across runs so a
 /// flip-flop between equal accounts cannot happen (audit U5).
@@ -2795,6 +2860,91 @@ mod tests {
             }),
             usage_error: None,
         }
+    }
+
+    fn proactive_settings() -> crate::settings::AppSettings {
+        crate::settings::AppSettings {
+            auto_switch_proactive: true,
+            ..crate::settings::AppSettings::default()
+        }
+    }
+
+    #[test]
+    fn proactive_switch_stays_off_unless_enabled() {
+        let now = OffsetDateTime::now_utc();
+        // 3% left is inside the default 5% threshold, but the feature is opt-in.
+        let usage = usage_with(Some(window_view(3, 1)), Some(window_view(50, 48)), None, 1);
+        let settings = crate::settings::AppSettings::default();
+        assert!(!proactive_switch_allowed(
+            Some(&usage),
+            &settings,
+            true,
+            now
+        ));
+        assert!(proactive_switch_allowed(
+            Some(&usage),
+            &proactive_settings(),
+            true,
+            now
+        ));
+    }
+
+    #[test]
+    fn proactive_switch_requires_an_idle_account() {
+        let now = OffsetDateTime::now_utc();
+        let usage = usage_with(Some(window_view(3, 1)), Some(window_view(50, 48)), None, 1);
+        assert!(!proactive_switch_allowed(
+            Some(&usage),
+            &proactive_settings(),
+            false,
+            now
+        ));
+    }
+
+    #[test]
+    fn proactive_switch_respects_threshold_and_weekly_floor() {
+        let now = OffsetDateTime::now_utc();
+        let settings = proactive_settings();
+        // Above the 5% threshold: no proactive switch.
+        let healthy = usage_with(Some(window_view(40, 1)), Some(window_view(50, 48)), None, 1);
+        assert!(!proactive_switch_allowed(
+            Some(&healthy),
+            &settings,
+            true,
+            now
+        ));
+        // Below the threshold but the weekly window is nearly spent: refuse.
+        let thin_week = usage_with(Some(window_view(3, 1)), Some(window_view(10, 48)), None, 1);
+        assert!(!proactive_switch_allowed(
+            Some(&thin_week),
+            &settings,
+            true,
+            now
+        ));
+        // Unknown windows never trigger it.
+        assert!(!proactive_switch_allowed(None, &settings, true, now));
+    }
+
+    #[test]
+    fn dwell_blocks_a_second_switch_until_it_elapses() {
+        let now = OffsetDateTime::now_utc();
+        let mut settings = proactive_settings();
+        assert!(dwell_satisfied(&settings, now), "no previous switch");
+        settings.last_auto_switch_at = Some(now - time::Duration::minutes(5));
+        assert!(
+            !dwell_satisfied(&settings, now),
+            "default dwell is 10 minutes"
+        );
+        let usage = usage_with(Some(window_view(3, 1)), Some(window_view(50, 48)), None, 1);
+        assert!(!proactive_switch_allowed(
+            Some(&usage),
+            &settings,
+            true,
+            now
+        ));
+        settings.last_auto_switch_at = Some(now - time::Duration::minutes(11));
+        assert!(dwell_satisfied(&settings, now));
+        assert!(proactive_switch_allowed(Some(&usage), &settings, true, now));
     }
 
     #[test]

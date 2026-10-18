@@ -15,3 +15,7 @@ task_plan.md
 # Agent tooling state
 .pi/
 .freebuff/
+
+# Local python tooling used by contrib scripts
+.venv/
+**/__pycache__/

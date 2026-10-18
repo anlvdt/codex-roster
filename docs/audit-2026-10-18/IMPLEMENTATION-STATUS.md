@@ -48,6 +48,8 @@ Nhánh: `main`. Chưa push `origin`. Chưa xoá dữ liệu người dùng.
 | **A3 — `add-account-status`** | Trả thêm `state` (`pending`/`none`), `codex_root`, `hint`; human output nói rõ bước tiếp theo và credentials đã đổi chưa | `1d576d4` | chạy thật: `{"active":false,"state":"none","hint":"Start one with …","contract_version":1}` |
 | **F wave 2 — Runway bar** | `QuotaRunwayBar`: so `time_to_empty` với thời gian tới reset của cửa sổ 5h → "dự báo cạn trước khi reset" (cam) / "đủ tới lúc reset" (xanh) / "chưa đủ mẫu" (mờ) | `ec07cf7` | `swift build` pass |
 
+| **A2 — Cảnh báo backup lên UI** | App decode `status.warnings[]` (contract v1) và hiện banner cảnh báo trong Console, có nút đóng (ẩn tới lần poll status kế tiếp) | `5b26657` | `swift build` pass |
+
 **Verification độc lập:** xem [VERIFICATION.md](VERIFICATION.md) — gate đầy đủ với `--all-features` (449 test), decode hợp đồng Rust↔Swift bằng binary thật, 29/29 điểm audit then chốt PASS, và 1 gate CI (`check-auth-switch-safety.sh`) đã được sửa sau khi verification phát hiện fail.
 
 **Gate hiện tại:** `cargo fmt --check` pass · `cargo clippy --all-targets -- -D warnings` pass · **447 test pass, 0 fail, 2 ignored** · `swift build --package-path macos/NextAccount` pass · `scripts/build-macos-app.sh` pass.

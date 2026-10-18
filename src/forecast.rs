@@ -199,13 +199,8 @@ pub fn forecast_window(
 /// `5h: còn 8% · cạn sau ~22 phút (CI 14–35) · confidence medium`.
 pub fn describe_window(window: &WindowForecast, vietnamese: bool) -> String {
     let label = match window.window.as_str() {
-        "five_hour" => {
-            if vietnamese {
-                "5h"
-            } else {
-                "5h"
-            }
-        }
+        // Both languages use "5h"; only the weekly label differs.
+        "five_hour" => "5h",
         _ => {
             if vietnamese {
                 "tuần"

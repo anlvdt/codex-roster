@@ -67,10 +67,13 @@ struct ReloginPresentationQueue {
     mutating func cancelPending() { pendingIDs.removeAll() }
 }
 
+@MainActor
 private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var showDashboardObserver: NSObjectProtocol?
+    private var statusItem: NSStatusItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        installStatusItem()
         showDashboardObserver = DistributedNotificationCenter.default().addObserver(
             forName: .requestShowDashboard,
             object: nil,
@@ -85,16 +88,76 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Permanent menu-bar entry point. The notch is the primary surface, but
+    /// when it is disabled (or a display has no notch) it was the only way into
+    /// Settings or Quit (audit IA-1).
+    private func installStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.title = "CR"
+        item.button?.toolTip = "Codex Roster"
+        let menu = NSMenu()
+        menu.addItem(
+            withTitle: AppLanguage.text("Mở bảng điều khiển", "Open notch"),
+            action: #selector(openNotch),
+            keyEquivalent: ""
+        )
+        menu.addItem(
+            withTitle: AppLanguage.text("Bảng điều khiển Roster", "Roster Console"),
+            action: #selector(openConsole),
+            keyEquivalent: ""
+        )
+        menu.addItem(.separator())
+        menu.addItem(
+            withTitle: AppLanguage.text("Cài đặt…", "Settings…"),
+            action: #selector(openSettings),
+            keyEquivalent: ","
+        )
+        menu.addItem(
+            withTitle: AppLanguage.text("Giới thiệu", "About"),
+            action: #selector(openAbout),
+            keyEquivalent: ""
+        )
+        menu.addItem(.separator())
+        menu.addItem(
+            withTitle: AppLanguage.text("Thoát Codex Roster", "Quit Codex Roster"),
+            action: #selector(quitApp),
+            keyEquivalent: "q"
+        )
+        for menuItem in menu.items where menuItem.action != nil {
+            menuItem.target = self
+        }
+        item.menu = menu
+        statusItem = item
+    }
+
+    @objc private func openNotch() {
+        NotificationCenter.default.post(name: .showDashboard, object: nil)
+    }
+
+    @objc private func openConsole() {
+        RosterConsolePresenter.request(.operations)
+    }
+
+    @objc private func openSettings() {
+        RosterConsolePresenter.request(.settings)
+    }
+
+    @objc private func openAbout() {
+        RosterConsolePresenter.request(.about)
+    }
+
+    @objc private func quitApp() {
+        NSApp.terminate(nil)
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         NotificationCenter.default.post(name: .showDashboard, object: nil)
         return true
     }
 
-    deinit {
-        if let showDashboardObserver {
-            DistributedNotificationCenter.default().removeObserver(showDashboardObserver)
-        }
-    }
+    // The distributed observer lives for the whole process: AppDelegate is
+    // owned by the app for its lifetime, so there is nothing to tear down and a
+    // nonisolated deinit cannot touch main-actor state.
 }
 
 private let dashboardCardFill = AnyShapeStyle(.ultraThinMaterial)
@@ -190,6 +253,17 @@ struct CodexRosterApp: App {
         .windowResizability(.contentSize)
         .defaultPosition(.top)
         .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button(language.text("Cài đặt…", "Settings…")) {
+                    RosterConsolePresenter.request(.settings)
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
+            CommandGroup(replacing: .appInfo) {
+                Button(language.text("Giới thiệu Codex Roster", "About Codex Roster")) {
+                    RosterConsolePresenter.request(.about)
+                }
+            }
             CommandGroup(replacing: .newItem) {
                 Button(language.text("Thêm tài khoản…", "Add account…")) {
                     NotificationCenter.default.post(name: .showAddAccount, object: nil)

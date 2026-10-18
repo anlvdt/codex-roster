@@ -2112,7 +2112,37 @@ final class AccountStore: ObservableObject {
         }
     }
 
+    /// Row awaiting an explicit delete confirmation (audit FLOW-1).
+    @Published var pendingDeleteAccount: SavedAccount?
+
+    /// Deleting is destructive and cannot be undone from the UI, so ask first.
+    /// The active account is refused outright: the roster would lose the row
+    /// while `~/.codex` still holds that login.
+    func requestDelete(_ account: SavedAccount) {
+        guard !account.isActive else {
+            errorMessage = AppLanguage.text(
+                "Không thể xóa tài khoản đang dùng. Hãy chuyển sang tài khoản khác trước.",
+                "The active account cannot be deleted. Switch to another account first."
+            )
+            return
+        }
+        pendingDeleteAccount = account
+    }
+
+    func confirmPendingDelete() {
+        guard let account = pendingDeleteAccount else { return }
+        pendingDeleteAccount = nil
+        delete(account)
+    }
+
     func delete(_ account: SavedAccount) {
+        guard !account.isActive else {
+            errorMessage = AppLanguage.text(
+                "Không thể xóa tài khoản đang dùng. Hãy chuyển sang tài khoản khác trước.",
+                "The active account cannot be deleted. Switch to another account first."
+            )
+            return
+        }
         run {
             _ = try await self.cli.data(arguments: ["delete", account.id.uuidString, "--json"])
             try await self.load()

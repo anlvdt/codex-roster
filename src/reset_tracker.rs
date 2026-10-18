@@ -252,6 +252,10 @@ fn fetch_resets_list() -> Result<ResetsListResponse> {
     get_json(RESETS_LIST_ENDPOINT, "Codex Resets list API")
 }
 
+/// Public reset feeds are untrusted input: bound the body before parsing so a
+/// hostile or broken feed cannot exhaust memory (audit S5).
+const MAX_FEED_BYTES: u64 = 2 * 1024 * 1024;
+
 fn get_json<T: for<'de> Deserialize<'de>>(url: &str, label: &str) -> Result<T> {
     let mut response = ureq::get(url)
         .header("User-Agent", USER_AGENT)
@@ -266,6 +270,8 @@ fn get_json<T: for<'de> Deserialize<'de>>(url: &str, label: &str) -> Result<T> {
     }
     response
         .body_mut()
+        .with_config()
+        .limit(MAX_FEED_BYTES)
         .read_json::<T>()
         .with_context(|| format!("failed to decode the {label} response"))
 }
@@ -590,6 +596,21 @@ pub fn fetch_reset_juice() -> Result<ResetJuice> {
     bail!("Codex Resets does not publish effort tiers.")
 }
 
+/// Newest-first ordering by the *parsed* instant, not the RFC3339 string: two
+/// announcements with different offsets compare wrongly as strings (audit R1).
+/// Events whose timestamp cannot be parsed sort last, then by id descending.
+fn compare_announcements_newest_first(
+    left: (&str, &str),
+    right: (&str, &str),
+) -> std::cmp::Ordering {
+    let left_at = parse_event_time(left.0);
+    let right_at = parse_event_time(right.0);
+    right_at
+        .cmp(&left_at)
+        .then_with(|| right.0.cmp(left.0))
+        .then_with(|| right.1.cmp(left.1))
+}
+
 fn parse_event_time(value: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok()
 }
@@ -620,10 +641,10 @@ fn process_reset_events(
         })
         .collect::<Vec<_>>();
     eligible_events.sort_by(|left, right| {
-        right
-            .announced_at
-            .cmp(&left.announced_at)
-            .then_with(|| right.id.cmp(&left.id))
+        compare_announcements_newest_first(
+            (&left.announced_at, &left.id),
+            (&right.announced_at, &right.id),
+        )
     });
     eligible_events.truncate(MAX_SEEN_EVENT_IDS);
 
@@ -715,11 +736,32 @@ fn record_seen_event_ids(state: &mut NotificationState, events: &[&ResetEvent]) 
 fn write_notification_state(path: &Path, state: &NotificationState) -> Result<()> {
     let bytes =
         serde_json::to_vec_pretty(state).context("failed to encode reset notification state")?;
-    fs::write(path, bytes).with_context(|| format!("failed to write {}", path.display()))
+    crate::file_store::atomic_write(path, &bytes, 0o600)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn announcements_sort_by_instant_not_string() {
+        use super::compare_announcements_newest_first;
+        use std::cmp::Ordering;
+        // 10:00+07:00 is 03:00Z, i.e. EARLIER than 04:00Z, even though the
+        // string "2026-10-18T10:00:00+07:00" sorts after "2026-10-18T04:00:00Z".
+        let earlier_local = ("2026-10-18T10:00:00+07:00", "a");
+        let later_utc = ("2026-10-18T04:00:00Z", "b");
+        assert_eq!(
+            compare_announcements_newest_first(earlier_local, later_utc),
+            Ordering::Greater,
+            "later UTC instant must sort first"
+        );
+        // Unparsable timestamps sort last, newest parsable first.
+        let unparsable = ("not-a-date", "c");
+        assert_eq!(
+            compare_announcements_newest_first(earlier_local, unparsable),
+            Ordering::Less
+        );
+    }
+
     use super::*;
 
     fn recent_list_fixture() -> ResetsListResponse {

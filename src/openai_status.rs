@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 const SUMMARY_ENDPOINT: &str = "https://status.openai.com/api/v2/summary.json";
+/// Third-party feeds are untrusted input: never let one stream unbounded
+/// memory into the CLI process (audit S5).
+const MAX_FEED_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct OpenAiStatus {
@@ -55,6 +58,8 @@ pub fn fetch_openai_status() -> Result<OpenAiStatus> {
     }
     let summary = response
         .body_mut()
+        .with_config()
+        .limit(MAX_FEED_BYTES)
         .read_json::<SummaryResponse>()
         .context("failed to decode OpenAI Status")?;
     let mut seen_components = HashSet::new();

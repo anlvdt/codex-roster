@@ -361,7 +361,7 @@ where
         // never spend it or switch to a still-exhausted account silently. Return
         // a distinct state so the UI can explain exactly why monitoring did not
         // switch while keeping the normal paid/quota path fully automatic.
-        let active_banked_reset_count = banked_reset_count(active.usage.as_ref());
+        let active_banked_reset_count = banked_reset_count(active.usage.as_ref(), now);
         let banked_reset_candidate = if active_banked_reset_count > 0 {
             Some((active.clone(), active_banked_reset_count))
         } else {
@@ -373,7 +373,7 @@ where
                 .map(|candidate| {
                     (
                         candidate.clone(),
-                        banked_reset_count(candidate.usage.as_ref()),
+                        banked_reset_count(candidate.usage.as_ref(), now),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -533,7 +533,14 @@ where
         settings.last_auto_switch_at = Some(now);
         settings.last_auto_switch_target = Some(candidate.id);
         settings.last_auto_switch_from = Some(active.id);
-        save_settings(&self.env.app_data_dir, &settings)?;
+        let mut bookkeeping_warnings = Vec::new();
+        if let Err(error) = save_settings(&self.env.app_data_dir, &settings) {
+            // The credential swap already succeeded. Report the switch with a
+            // warning instead of failing and losing cooldown/resume (audit S7).
+            bookkeeping_warnings.push(format!(
+                "session switched, but auto-switch cooldown bookkeeping failed: {error:#}"
+            ));
+        }
         let mut output = auto_switch_output(
             enabled,
             "switched",
@@ -543,12 +550,16 @@ where
             None,
         );
         let auto_resume_enabled = settings.auto_resume_session;
-        output.session_resume = crate::session_resume::take_pending_continue_hint(
+        match crate::session_resume::take_pending_continue_hint(
             &self.env.app_data_dir,
             auto_resume_enabled,
-        )
-        .ok()
-        .flatten();
+        ) {
+            Ok(hint) => output.session_resume = hint,
+            Err(error) => bookkeeping_warnings.push(format!(
+                "session switched, but the resume hint could not be read: {error:#}"
+            )),
+        }
+        output.warnings = bookkeeping_warnings;
         Ok(output)
     }
 
@@ -1706,7 +1717,7 @@ fn has_usable_credits(usage: Option<&AccountUsageView>) -> bool {
         })
 }
 
-fn banked_reset_count(usage: Option<&AccountUsageView>) -> i64 {
+fn banked_reset_count(usage: Option<&AccountUsageView>, now: OffsetDateTime) -> i64 {
     usage
         .and_then(|usage| usage.banked_resets.as_ref())
         .map(|resets| {
@@ -1716,6 +1727,8 @@ fn banked_reset_count(usage: Option<&AccountUsageView>) -> i64 {
                 .unwrap_or(&[])
                 .iter()
                 .filter(|credit| credit.status.eq_ignore_ascii_case("available"))
+                // Expired credits are not redeemable (audit Q6).
+                .filter(|credit| credit.expires_at.is_none_or(|expires| expires > now))
                 .count() as i64;
             resets.available_count.max(0).max(from_credits)
         })
@@ -1737,7 +1750,7 @@ fn is_banked_reset_fallback_candidate(
             .is_some_and(usage_error_blocks_activation)
         && !is_usable_for_switch(candidate.usage.as_ref(), now)
         && !is_free_plan(candidate)
-        && banked_reset_count(candidate.usage.as_ref()) > 0
+        && banked_reset_count(candidate.usage.as_ref(), now) > 0
         && !is_in_auto_switch_cooldown(settings, candidate.id, now)
 }
 
@@ -2905,7 +2918,7 @@ mod tests {
 
         assert!(is_exhausted_for_switch(candidate.usage.as_ref(), now));
         assert!(!is_usable_for_switch(candidate.usage.as_ref(), now));
-        assert_eq!(banked_reset_count(candidate.usage.as_ref()), 1);
+        assert_eq!(banked_reset_count(candidate.usage.as_ref(), now), 1);
         assert!(is_banked_reset_fallback_candidate(
             &candidate, &active, &settings, now
         ));

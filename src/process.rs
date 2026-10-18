@@ -171,10 +171,9 @@ fn select_blocking(
         }
         let skippable = kind != BlockKind::CliInteractive;
         let holds_auth = holders.is_some_and(|set| set.contains(&process.pid));
-        // Fail closed: an unverifiable scan keeps skippable processes blocking.
-        let blocks = if !allow_desktop {
-            true
-        } else if !scan_known {
+        // Without --force everything blocks; with --force an unverifiable scan
+        // still fails closed, so only a verified scan may skip a process.
+        let blocks = if !allow_desktop || !scan_known {
             true
         } else {
             !skippable || holds_auth

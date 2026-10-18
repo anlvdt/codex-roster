@@ -266,6 +266,16 @@ enum Command {
         #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Reclaim space from data left behind by removed features (dry-run by default).
+    Cleanup {
+        #[arg(
+            long,
+            help = "Delete the listed directories instead of only reporting them"
+        )]
+        apply: bool,
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+    },
     /// Report local diagnostics (paths, keys, locks, ports) for support.
     Doctor {
         #[arg(long, help = "Print machine-readable JSON")]
@@ -1362,6 +1372,45 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::Cleanup { apply, json }) => {
+            let report = collect_cleanup_report(&app.env().app_data_dir, apply);
+            if json {
+                print_json(&report)?;
+            } else {
+                if report.candidates.is_empty() {
+                    println!("Nothing to clean in {}.", app.env().app_data_dir.display());
+                } else {
+                    for candidate in &report.candidates {
+                        println!(
+                            "  {:>8}  {}{}",
+                            human_bytes(candidate.bytes),
+                            candidate.path,
+                            if candidate.removed == Some(true) {
+                                "  (removed)"
+                            } else {
+                                ""
+                            }
+                        );
+                    }
+                    println!(
+                        "{}: {} across {} item(s).",
+                        if apply { "Removed" } else { "Reclaimable" },
+                        human_bytes(report.reclaimable_bytes),
+                        report.candidates.len()
+                    );
+                }
+                if !report.review_only.is_empty() {
+                    println!("Review manually (never deleted automatically):");
+                    for item in &report.review_only {
+                        println!("  {:>8}  {}", human_bytes(item.bytes), item.path);
+                    }
+                }
+                if !apply && !report.candidates.is_empty() {
+                    println!("Dry run. Re-run with --apply to delete the items above.");
+                }
+            }
+            Ok(())
+        }
         Some(Command::Doctor { json, bundle }) => {
             let output = collect_doctor_output(&app)?;
             if bundle {
@@ -1444,6 +1493,132 @@ fn backup_password(password_stdin: bool) -> Result<String> {
             .with_prompt("Backup password")
             .interact()
             .context("failed to read backup password")
+    }
+}
+
+/// Directories left behind by features that no longer exist in the product.
+/// Deleting them is safe, but it is still the user's data, so `cleanup` only
+/// removes them with an explicit `--apply` (audit P0-13).
+const CLEANUP_CANDIDATES: &[(&str, &str)] = &[
+    (
+        "chatgpt-web-profiles",
+        "Electron profile cache from the removed web-view feature",
+    ),
+    (
+        "codex-account-switcher-menubar",
+        "binary from the removed menu-bar prototype",
+    ),
+];
+
+/// Reported for the user to inspect, never deleted automatically: these may
+/// hold recovery points or audit history someone still wants.
+const CLEANUP_REVIEW_ONLY: &[(&str, &str)] = &[
+    (
+        "protected-recovery-points",
+        "recovery points kept by an older build",
+    ),
+    ("activity.jsonl", "activity log from an older build"),
+];
+
+fn path_bytes(path: &std::path::Path) -> u64 {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if metadata.is_file() {
+        return metadata.len();
+    }
+    if !metadata.is_dir() {
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| path_bytes(&entry.path()))
+        .sum()
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+#[derive(serde::Serialize)]
+struct CleanupItem {
+    path: String,
+    name: String,
+    bytes: u64,
+    reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    removed: Option<bool>,
+}
+
+#[derive(serde::Serialize)]
+struct CleanupReport {
+    applied: bool,
+    reclaimable_bytes: u64,
+    candidates: Vec<CleanupItem>,
+    review_only: Vec<CleanupItem>,
+}
+
+/// Build the cleanup report. `apply` deletes only the allow-listed candidates.
+fn collect_cleanup_report(app_data_dir: &std::path::Path, apply: bool) -> CleanupReport {
+    let mut candidates = Vec::new();
+    let mut reclaimable = 0u64;
+    for (name, why) in CLEANUP_CANDIDATES {
+        let path = app_data_dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let bytes = path_bytes(&path);
+        let mut removed = None;
+        if apply {
+            let deleted =
+                std::fs::remove_dir_all(&path).is_ok() || std::fs::remove_file(&path).is_ok();
+            removed = Some(deleted);
+            if deleted {
+                reclaimable += bytes;
+            }
+        } else {
+            reclaimable += bytes;
+        }
+        candidates.push(CleanupItem {
+            path: path.display().to_string(),
+            name: (*name).to_owned(),
+            bytes,
+            reason: (*why).to_owned(),
+            removed,
+        });
+    }
+    let review_only = CLEANUP_REVIEW_ONLY
+        .iter()
+        .filter_map(|(name, why)| {
+            let path = app_data_dir.join(name);
+            path.exists().then(|| CleanupItem {
+                path: path.display().to_string(),
+                name: (*name).to_owned(),
+                bytes: path_bytes(&path),
+                reason: (*why).to_owned(),
+                removed: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    CleanupReport {
+        applied: apply,
+        reclaimable_bytes: reclaimable,
+        candidates,
+        review_only,
     }
 }
 
@@ -2364,6 +2539,30 @@ mod tests {
         assert_eq!(classify_error(&anyhow!("the keychain key is missing")).0, 7);
         let (code, kind, _) = classify_error(&anyhow!("something unexpected"));
         assert_eq!((code, kind), (1, "error"));
+    }
+
+    #[test]
+    fn cleanup_reports_without_deleting_and_applies_only_the_allow_list() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cache = temp.path().join("chatgpt-web-profiles");
+        std::fs::create_dir_all(cache.join("nested")).expect("cache dir");
+        std::fs::write(cache.join("nested/blob"), vec![0u8; 2048]).expect("blob");
+        let keep = temp.path().join("protected-recovery-points");
+        std::fs::create_dir_all(&keep).expect("recovery dir");
+        std::fs::write(keep.join("point.json"), b"{}").expect("point");
+
+        let dry = collect_cleanup_report(temp.path(), false);
+        assert!(!dry.applied);
+        assert_eq!(dry.candidates.len(), 1);
+        assert!(dry.reclaimable_bytes >= 2048);
+        assert!(cache.exists(), "a dry run must never delete anything");
+        assert_eq!(dry.review_only.len(), 1, "recovery points are reported");
+
+        let applied = collect_cleanup_report(temp.path(), true);
+        assert!(applied.applied);
+        assert!(!cache.exists(), "apply removes the allow-listed cache");
+        assert!(keep.exists(), "review-only items are never deleted");
+        assert_eq!(applied.candidates[0].removed, Some(true));
     }
 
     #[test]

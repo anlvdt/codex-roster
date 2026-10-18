@@ -25,7 +25,10 @@ Nhánh: `main`. Chưa push `origin`. Chưa xoá dữ liệu người dùng.
 | **Thuật toán (E2 phần 1)** | **`src/forecast.rs`**: burn-rate EWMA (α=0.3, variance α=0.2), bỏ reset/Δmẫu quá gần, `TTE = remaining/b`, CI95 = `TTE·(1±1.96·cv)`, confidence high/medium/low theo số mẫu + cv + tuổi mẫu; lệnh **`quota-forecast [ACCOUNT_ID] [--json]`**; **scoring v2** `score = 1000·weekly + five + plan_bonus + reset_bonus − freshness_penalty + banked_bonus` kèm breakdown giải thích trong `auto-switch --json`; tie-break tất định `(score, plan_rank, last_activated_at, id)`; **proactive threshold + hysteresis + dwell + weekly floor** (mặc định tắt) và dwell cho cả đường reactive (`waiting_for_dwell`) | `8ee91c9`, `fbf625f`, `62f7003` | 8 test `forecast` (burn đều/giật/reset/1 mẫu/0 burn/ngoài cửa sổ/hồi quy); 5 test scoring (monotonic, breakdown, ineligible, tie-break, golden 5 account); 4 test proactive/dwell; **440 test pass** |
 | **Tuning (E2 phần 2)** | Harness mô phỏng có seed (`cargo test simulate_reactive -- --ignored --nocapture`) so sánh Reactive vs Threshold; tài liệu [ALGORITHM-TUNING.md](ALGORITHM-TUNING.md) ghi công thức, bảng mô phỏng và **giới hạn bằng chứng** | `405456b` | Reactive: 2,0 turn lỗi + 66s gián đoạn/ngày; threshold 5–15%: 0 turn lỗi + 16s, cùng số switch; threshold 20%: 7,6 switch + 60,8s → chọn 5% |
 
-**Gate hiện tại:** `cargo fmt --check` pass · `cargo clippy --all-targets -- -D warnings` pass · **440 test pass, 0 fail, 2 ignored** · `swift build --package-path macos/NextAccount` pass · `scripts/build-macos-app.sh` pass.
+| **Switch saga bền vững (E2.5)** | `src/switch_txn.rs`: file `switch-txn.json` (0600, atomic) với phase `decided → captured → auth_swapped → verified → done/rolled_back`, `txn_id`, from/to, `started_at`, `attempt`; tích hợp vào đường apply: ghi ý định **trước khi** đổi auth, rollback khi activate lỗi, **verify danh tính live** sau khi swap (chỉ rollback khi live trỏ về account cũ; auth không đọc được = không kết luận), clear khi xong; `reconcile` lúc vào apply để chốt/dọn txn của lần chạy trước (idempotent, txn >5 phút bị coi là bỏ); `in_flight_for_pair` chặn switch trùng | `c706a2f`, `7af4a5b` | 5 test `switch_txn` (phase+clear, crash ở mọi phase + reconcile hai lần cho cùng kết quả, txn cũ bị bỏ và không chặn, live không xác định → dọn, file hỏng không gây lỗi); **445 test pass**, không hồi quy |
+| **macOS UX (B, phần 3)** | About không còn quảng cáo "tìm kiếm / lọc trạng thái / sắp xếp / thao tác hàng loạt" (UI không có) — mô tả lại đúng danh sách sắp theo quota còn lại | `3f1071d` | `swift build` pass |
+
+**Gate hiện tại:** `cargo fmt --check` pass · `cargo clippy --all-targets -- -D warnings` pass · **445 test pass, 0 fail, 2 ignored** · `swift build --package-path macos/NextAccount` pass · `scripts/build-macos-app.sh` pass.
 
 **Orca:** Codex chạy được 1 task nhỏ rồi **cạn hạn mức tháng đến 17/11/2026** (`You've hit your usage limit`); worker D đã được `worker-stop` + `worker-release` sạch và phần D do Lead hoàn thành. Các provider khác vẫn cạn (Claude 22/10, Cursor 11/12/2026, OpenCode/Muse sai model, antigravity/zcode fail).
 
@@ -37,8 +40,9 @@ Nhánh: `main`. Chưa push `origin`. Chưa xoá dữ liệu người dùng.
 | 2 | A2 phần còn lại: đưa cảnh báo backup vào JSON `warnings[]`, cap `preserved-metadata-*`, dọn `.cas-backup-*` cũ, cap config VibeCafe | Phần lõi đã xong |
 | 3 | A3 phần còn lại: `list` human (label/archived/local reset + `--all`), TUI search/Home/End/PgUp, `add-account-status` chi tiết | Help + safety đã xong |
 | 4 | B phần còn lại: Light Mode token (VIS-1), a11y label/toggle/reduce-motion, freshness chip (QTA-1), notification loop 15s, archived filter, update badge | Đã xong menu-bar/`⌘,`/xoá/hover/passive refresh |
-| 5 | E2 phần còn lại: **durable switch saga (U6)** — file `switch-txn.json` với phase/rollback/idempotent resume | Chưa bắt đầu |
+| 5 | B phần còn lại: feedback layer/toast, Light Mode token, a11y label + reduce-motion, freshness chip (QTA-1), notification loop 15s, archived filter, update badge | About đã sửa; phần lớn còn lại |
 | 6 | F/G: Swift wave 2 (HUD, dự báo, gợi ý) + verification độc lập | Chưa bắt đầu |
+| 7 | Giới hạn đã biết: chưa có integration test cho một lần apply thành công (đường saga được phủ bởi test module + hồi quy toàn bộ suite) | Ghi nhận trung thực |
 
 ## 3. Vì sao Lead làm trực tiếp thay vì worker Orca
 

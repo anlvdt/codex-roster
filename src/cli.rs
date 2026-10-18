@@ -29,7 +29,8 @@ use crate::usage::{usage_error_label, usage_error_requires_login};
     name = crate::CLI_NAME,
     author,
     version,
-    about = "Manage Codex accounts across the CLI and IDE"
+    about = "Manage Codex accounts across the CLI and IDE",
+    after_help = "EXAMPLES:\n  codex-roster list --json\n  codex-roster activate <ACCOUNT_ID>\n  codex-roster tui\n\nAll commands accept --json for machine-readable output; the macOS app consumes it."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -38,12 +39,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Show environment, the live account, saved-account count and process warnings.
     Status {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// List saved accounts with cached quota (archived rows included).
     List {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     #[cfg(feature = "external-providers")]
@@ -52,73 +55,87 @@ enum Command {
         #[command(subcommand)]
         command: Option<ProviderCommand>,
     },
+    /// Save the current live Codex session as a roster account.
     Save {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Start an isolated login for a new account without touching the live session.
     BeginAddAccount {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Import the account created by `begin-add-account` into the roster.
     SaveAddedAccount {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Discard a pending add-account login and its temporary CODEX_HOME.
     CancelAddAccount {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Report whether the pending add-account login produced credentials.
     AddAccountStatus {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Show quota for one account, or for the active account when no id is given.
     Usage {
         account_id: Option<Uuid>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Re-query the active account plus any stale saved accounts (staleness-aware).
     RefreshUsage {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Switch the live Codex session to a saved account.
     Activate {
         account_id: Option<Uuid>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Ignore ChatGPT/Codex Desktop leftovers (never a live Codex CLI session)"
+        )]
         force: bool,
     },
     /// Enable Luna Reserve (gpt-5.6-luna) for the active account or a specific account.
     EnableLunaReserve {
         account_id: Option<Uuid>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Delete a saved account and its encrypted snapshot.
     Delete {
         account_id: Option<Uuid>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Hide an account from the roster, or restore it with --restore.
     Archive {
         account_id: Uuid,
-        #[arg(long)]
+        #[arg(long, help = "Restore the account instead of archiving it")]
         restore: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Write an encrypted backup bundle to OUTPUT.
     Export {
         output: PathBuf,
-        #[arg(long)]
+        #[arg(long, help = "Read the backup password from stdin (max 4 KiB)")]
         password_stdin: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Restore accounts from an encrypted backup bundle.
     Import {
         input: PathBuf,
-        #[arg(long)]
+        #[arg(long, help = "Read the backup password from stdin (max 4 KiB)")]
         password_stdin: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Import account(s) from Codex auth.json, a Roster snapshot JSON, or a plaintext backup bundle.
@@ -127,21 +144,25 @@ enum Command {
         /// Optional display label (single-account auth.json / snapshot only).
         #[arg(long)]
         label: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Restore roster metadata from the newest automatic account-list backup.
     RestoreAccountListBackup {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Restore the full encrypted backup over the current roster.
     RestoreFullBackup {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Write an automatic full backup now instead of waiting for the next schedule.
     CreateAutomaticFullBackup {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Keep Codex usage windows fresh in the background.
     AutoStartUsageWindows {
         #[arg(long, conflicts_with = "disable")]
         enable: bool,
@@ -149,7 +170,7 @@ enum Command {
         disable: bool,
         #[arg(long)]
         run: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Remember Codex rollout cwd/session on switch; reopen thread after activate.
@@ -161,9 +182,10 @@ enum Command {
         /// Discover interrupted / quota-blocked threads (same-account recovery).
         #[arg(long, conflicts_with_all = ["enable", "disable"])]
         continue_interrupted: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Inspect or change automatic switching when quota is exhausted.
     AutoSwitch {
         #[arg(long, conflicts_with_all = ["disable", "apply", "status"])]
         enable: bool,
@@ -179,21 +201,23 @@ enum Command {
         force: bool,
         #[arg(long)]
         status: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Recover accounts from legacy snapshot formats.
     RecoverLegacySnapshots {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Summarise local Codex token usage and estimated cost.
     TokenUsage {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Official rate-limit remaining % samples for the last ~7 days.
     QuotaHistory {
         account_id: Option<Uuid>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Run the optional VibeCafe usage collector for Codex and other AI tools.
@@ -203,38 +227,42 @@ enum Command {
     },
     /// Global Codex Reset outlook (codex-resets.com status).
     ResetOutlook {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Return newly published Codex reset events once, for desktop notifications
     /// (codex-resets.com status/list + forecast official_signal).
     ResetEvents {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Return recent reset announcements from codex-resets.com.
     ResetTimeline {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Deprecated: Codex Resets does not publish service status history.
+    #[command(hide = true)]
     ResetStatusHistory {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Deprecated: Codex Resets does not publish effort tiers.
+    #[command(hide = true)]
     ResetJuice {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Show the public OpenAI Status summary.
     OpenAiStatus {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Set or clear the custom label of a saved account.
     SetLabel {
         account_id: Uuid,
         label: String,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
 }
@@ -261,7 +289,7 @@ enum ProviderCommand {
     SyncClaude {
         #[arg(long)]
         email: String,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Save or restore a matching Claude Desktop login while Desktop is closed.
@@ -269,49 +297,52 @@ enum ProviderCommand {
         account_id: Uuid,
         #[arg(long, conflicts_with = "restore")]
         save: bool,
-        #[arg(long)]
+        #[arg(long, help = "Restore the account instead of archiving it")]
         restore: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Show live availability, identity, capabilities, and saved-account counts.
     Status {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// List saved accounts, optionally scoped to one provider.
     List {
         #[arg(long, value_parser = parse_ai_provider)]
         provider: Option<AiProvider>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Save the provider's currently authenticated account.
     Save {
         #[arg(value_parser = parse_ai_provider)]
         provider: AiProvider,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Activate a saved account. The provider is inferred from the account ID.
     Activate {
         account_id: Uuid,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Delete a saved external-provider account and its stored snapshot.
     Delete {
         account_id: Uuid,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Ignore ChatGPT/Codex Desktop leftovers (never a live Codex CLI session)"
+        )]
         force: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Set or clear a saved external-provider account's custom label.
     SetLabel {
         account_id: Uuid,
         label: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Refresh cached usage for all saved accounts of one provider.
@@ -323,7 +354,7 @@ enum ProviderCommand {
         /// Read Claude Code local quota only; never contact the usage API.
         #[arg(long)]
         local_only: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Fetch provider usage for the live account or a saved account ID.
@@ -331,7 +362,7 @@ enum ProviderCommand {
         #[arg(value_parser = parse_ai_provider)]
         provider: AiProvider,
         account_id: Option<Uuid>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Decide or apply a Claude account auto-switch, and manage its policy.
@@ -361,7 +392,7 @@ enum ProviderCommand {
         cooldown: Option<u64>,
         #[arg(long, value_parser = parse_claude_auto_switch_strategy)]
         strategy: Option<ClaudeAutoSwitchStrategy>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
 }

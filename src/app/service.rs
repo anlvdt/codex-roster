@@ -197,6 +197,26 @@ where
             ));
         }
         let _auto_switch_lock = AutoSwitchLock::acquire(&self.env.app_data_dir)?;
+        // Finish or discard whatever a previous run left in flight before making
+        // another decision (audit U6).
+        match crate::switch_txn::reconcile(
+            &self.env.app_data_dir,
+            time::OffsetDateTime::now_utc(),
+            self.live_saved_account_id().unwrap_or(None),
+        )? {
+            crate::switch_txn::ReconcileOutcome::Completed(phase) => {
+                eprintln!(
+                    "recovered an interrupted account switch (phase {phase:?}); treating it as applied"
+                );
+                let _ = crate::switch_txn::clear(&self.env.app_data_dir);
+            }
+            crate::switch_txn::ReconcileOutcome::RolledBack => {
+                eprintln!(
+                    "recovered an interrupted account switch; the previous account is still live"
+                );
+            }
+            _ => {}
+        }
         // Apply reuses the prior decision when possible — avoid a second Keychain/network
         // fan-out that unlocks the keychain and blocks ChatGPT relaunch.
         if apply {
@@ -537,6 +557,11 @@ where
                 Some("Close Codex and ChatGPT before automatic switching.".to_owned()),
             ));
         }
+        // Durable saga: record the intent on disk before the first mutation so a
+        // crash leaves a recoverable trace instead of a half-applied switch
+        // (audit U6).
+        let mut txn =
+            crate::switch_txn::begin(&self.env.app_data_dir, active.id, candidate.id, now)?;
         // Freeze the live thread that hit usage limits BEFORE swapping auth.
         // Shared ~/.codex keeps that thread; the new account's quota pays for
         // the next turns. Do not use the target account's old workspace hint.
@@ -545,11 +570,59 @@ where
             &self.env.codex_root,
             active.id,
         );
-        let _activated = if force {
-            self.activate_with_expected_active(candidate.id, true, Some(active.id))?
+        txn = crate::switch_txn::advance(
+            &self.env.app_data_dir,
+            &txn,
+            crate::switch_txn::SwitchPhase::Captured,
+        )?;
+        let activated = if force {
+            self.activate_with_expected_active(candidate.id, true, Some(active.id))
         } else {
-            self.activate_if_active_matches(candidate.id, active.id)?
+            self.activate_if_active_matches(candidate.id, active.id)
         };
+        let _activated = match activated {
+            Ok(activated) => activated,
+            Err(error) => {
+                // The swap did not complete: record the rollback and clean up so
+                // the next poll is not blocked by a phantom transaction.
+                let _ = crate::switch_txn::advance(
+                    &self.env.app_data_dir,
+                    &txn,
+                    crate::switch_txn::SwitchPhase::RolledBack,
+                );
+                let _ = crate::switch_txn::clear(&self.env.app_data_dir);
+                return Err(error);
+            }
+        };
+        txn = crate::switch_txn::advance(
+            &self.env.app_data_dir,
+            &txn,
+            crate::switch_txn::SwitchPhase::AuthSwapped,
+        )?;
+        // Verify the live session really is the target. An unreadable auth file
+        // is inconclusive (not a failure); a live session that maps to another
+        // saved account means the swap did not land and must be reverted.
+        let live_after_swap = self.live_saved_account_id().unwrap_or(None);
+        if let Some(live) = live_after_swap
+            && live != candidate.id
+            && live == active.id
+        {
+            let _ = self.activate_with_expected_active(active.id, true, None);
+            let _ = crate::switch_txn::advance(
+                &self.env.app_data_dir,
+                &txn,
+                crate::switch_txn::SwitchPhase::RolledBack,
+            );
+            let _ = crate::switch_txn::clear(&self.env.app_data_dir);
+            return Err(anyhow::anyhow!(
+                "automatic switch did not take effect; the previous account was restored"
+            ));
+        }
+        txn = crate::switch_txn::advance(
+            &self.env.app_data_dir,
+            &txn,
+            crate::switch_txn::SwitchPhase::Verified,
+        )?;
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         let mut settings = load_settings(&self.env.app_data_dir)?;
         settings.last_auto_switch_at = Some(now);
@@ -583,6 +656,9 @@ where
             )),
         }
         output.warnings = bookkeeping_warnings;
+        // The switch is fully applied and recorded: drop the transaction so the
+        // next run starts clean.
+        let _ = crate::switch_txn::clear(&self.env.app_data_dir);
         Ok(output)
     }
 
@@ -1092,6 +1168,15 @@ where
             warnings,
             session_resume,
         })
+    }
+
+    /// Which saved account the live `~/.codex` session currently maps to.
+    fn live_saved_account_id(&self) -> Result<Option<Uuid>> {
+        let Some(live) = codex::try_read_live_auth_bundle(&self.env)? else {
+            return Ok(None);
+        };
+        let accounts = self.repository.list_accounts(&self.env.kind)?;
+        Ok(match_saved_account(&accounts, &live.identity).map(|account| account.id))
     }
 
     fn refresh_current_saved_account_before_activation(&self) -> Result<Option<Uuid>> {

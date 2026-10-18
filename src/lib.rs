@@ -23,6 +23,7 @@ pub mod reset_tracker;
 pub mod secrets;
 pub mod session_resume;
 pub mod settings;
+pub mod switch_txn;
 mod time_display;
 pub mod token_usage;
 pub mod usage;

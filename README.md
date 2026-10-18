@@ -25,7 +25,7 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
 - Close and relaunch ChatGPT/Codex Desktop after a confirmed account switch.
 - Refresh local Codex token statistics, public OpenAI Status, and the public [Codex Reset outlook](https://codex-resets.com/) (with forecast probabilities from [codex-reset.com](https://codex-reset.com/)).
 - Sync usage to [VibeCafe](https://vibecafe.ai/) via the optional [`@vibe-cafe/vibe-usage`](https://github.com/vibe-cafe/vibe-usage) collector; its token and estimated-cost statistics remain separate from OpenAI quota/banked-reset credits.
-- When VibeCafe is configured, Roster automatically syncs every 30 minutes and shows the official 7-day API totals (tokens, estimated cost, sessions, and active time) in Status.
+- When VibeCafe is configured, Roster automatically syncs every 30 minutes and shows the official 7-day API totals (tokens, estimated cost, sessions, and active time) in Status. The collector is fetched through `npx` from a pinned version (`@vibe-cafe/vibe-usage@0.13.2`); set `CODEX_ROSTER_VIBE_USAGE_BIN` to an absolute path of a pre-installed collector to avoid the runtime download entirely.
 - Offer Vietnamese and English; the UI follows the Mac language by default, with an explicit Tiếng Việt / English switch.
 
 ### Quota and automatic switching
@@ -166,7 +166,7 @@ bash scripts/build-macos-app.sh
   - **Thêm & chuyển** — luồng cũ: sao lưu phiên live, `codex login` vào `~/.codex` (có thể đóng Desktop nếu cổng 1455/1457 bận), để credential mới làm phiên đang dùng.
 - Đóng rồi mở lại ChatGPT/Codex Desktop sau khi bạn xác nhận chuyển tài khoản.
 - Theo dõi token Codex cục bộ, trạng thái công khai OpenAI và [Codex Reset outlook](https://codex-resets.com/) (xác suất forecast từ [codex-reset.com](https://codex-reset.com/)).
-- Nếu đã cấu hình VibeCafe qua collector tùy chọn [`@vibe-cafe/vibe-usage`](https://github.com/vibe-cafe/vibe-usage), Roster tự đồng bộ mỗi 30 phút và hiển thị thống kê API chính thức trong Status: token, chi phí ước tính, số phiên và thời gian hoạt động trong 7 ngày; các thống kê này tách biệt với quota/banked reset credit của OpenAI.
+- Nếu đã cấu hình VibeCafe qua collector tùy chọn [`@vibe-cafe/vibe-usage`](https://github.com/vibe-cafe/vibe-usage) (tải qua `npx` với phiên bản ghim `@vibe-cafe/vibe-usage@0.13.2`; đặt `CODEX_ROSTER_VIBE_USAGE_BIN` tới binary có sẵn để không phải tải lúc chạy), Roster tự đồng bộ mỗi 30 phút và hiển thị thống kê API chính thức trong Status: token, chi phí ước tính, số phiên và thời gian hoạt động trong 7 ngày; các thống kê này tách biệt với quota/banked reset credit của OpenAI.
 - Hỗ trợ Tiếng Việt và English; mặc định là Tiếng Việt.
 
 ### Quota và tự động chuyển

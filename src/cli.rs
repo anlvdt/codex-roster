@@ -2262,22 +2262,21 @@ fn print_token_usage_summary(output: &TokenUsageSummaryOutput) {
 }
 
 fn run_vibe_usage(command: VibeUsageCommand) -> Result<()> {
-    let mut args = vec![
-        "--yes".to_owned(),
-        crate::vibe_usage::VIBE_USAGE_NPM_SPEC.to_owned(),
-    ];
-    match command {
-        VibeUsageCommand::Init => args.push("init".to_owned()),
-        VibeUsageCommand::Sync => args.push("sync".to_owned()),
-        VibeUsageCommand::Summary { days } => {
-            args.extend(["summary".to_owned(), "--days".to_owned(), days.to_string()]);
-        }
-        VibeUsageCommand::Status => args.push("status".to_owned()),
+    // A vendored collector (CODEX_ROSTER_VIBE_USAGE_BIN) avoids the runtime
+    // `npx` download entirely; otherwise the pinned npm spec is fetched.
+    let subcommand = match command {
+        VibeUsageCommand::Init => "init",
+        VibeUsageCommand::Sync => "sync",
+        VibeUsageCommand::Summary { .. } => "summary",
+        VibeUsageCommand::Status => "status",
+    };
+    let mut process = crate::vibe_usage::collector_command(subcommand);
+    if let VibeUsageCommand::Summary { days } = command {
+        process.args(["--days", &days.to_string()]);
     }
-    let status = ProcessCommand::new("npx")
-        .args(args)
+    let status = process
         .status()
-        .context("failed to launch npx; install Node.js 20+ to use `vibe-usage`")?;
+        .context("failed to launch the VibeCafe collector; install Node.js 20+, or point CODEX_ROSTER_VIBE_USAGE_BIN at a local copy")?;
     if !status.success() {
         bail!("vibe-usage exited with status {status}");
     }

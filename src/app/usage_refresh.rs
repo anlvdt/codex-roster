@@ -103,8 +103,7 @@ pub fn spawn_vibe_usage_worker(env: AppEnv) {
                         }
                         continue;
                     }
-                    let sync_ok = std::process::Command::new("npx")
-                        .args(["--yes", crate::vibe_usage::VIBE_USAGE_NPM_SPEC, "sync"])
+                    let sync_ok = crate::vibe_usage::collector_command("sync")
                         .status()
                         .is_ok_and(|status| status.success());
                     if VIBE_USAGE_STOP.is_stopped() {

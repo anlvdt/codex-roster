@@ -322,6 +322,9 @@ pub struct AutoSwitchOutput {
     /// when bookkeeping failed but the switch itself succeeded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Present once a candidate was scored (apply/status), explaining the pick.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_switch_score: Option<SwitchScoreBreakdown>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -395,6 +398,19 @@ pub struct RunningCodexProcess {
     /// "desktop" (ChatGPT/Codex.app/plugin) or "cli". Optional for older tests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+}
+
+/// Why one candidate outranks another. Exposed in `auto-switch --json` so the
+/// choice is explainable instead of a bare number (audit U5).
+#[derive(Clone, Debug, Serialize)]
+pub struct SwitchScoreBreakdown {
+    pub score: i64,
+    pub quota_component: i64,
+    pub plan_bonus: i64,
+    pub reset_bonus: i64,
+    pub freshness_penalty: i64,
+    pub banked_bonus: i64,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Serialize)]

@@ -1110,6 +1110,7 @@ pub fn run() -> Result<()> {
                     session_resume: None,
                     usage_unknown: false,
                     warnings: Vec::new(),
+                    candidate_switch_score: None,
                 }
             } else {
                 app.auto_switch_with_candidate(apply, account_id, force)?

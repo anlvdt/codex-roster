@@ -398,6 +398,33 @@ pub struct RunningCodexProcess {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct WindowForecast {
+    /// `five_hour` | `weekly`
+    pub window: String,
+    pub remaining_percent: f64,
+    pub burn_per_minute: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_to_empty_minutes: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_low_minutes: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_high_minutes: Option<f64>,
+    /// `high` | `medium` | `low`
+    pub confidence: String,
+    pub sample_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct QuotaForecastOutput {
+    pub account_id: Option<Uuid>,
+    pub generated_at: OffsetDateTime,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub five_hour: Option<WindowForecast>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weekly: Option<WindowForecast>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct DoctorCheck {
     pub id: String,
     /// `ok` | `warn` | `fail`

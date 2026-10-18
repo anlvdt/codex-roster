@@ -258,6 +258,12 @@ enum Command {
         #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Estimate when each quota window runs out, from recorded samples.
+    QuotaForecast {
+        account_id: Option<Uuid>,
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+    },
     /// Report local diagnostics (paths, keys, locks, ports) for support.
     Doctor {
         #[arg(long, help = "Print machine-readable JSON")]
@@ -1259,6 +1265,24 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::QuotaForecast { account_id, json }) => {
+            let output = app.quota_forecast(account_id)?;
+            if json {
+                print_json(&output)?;
+            } else {
+                let windows = [output.five_hour.as_ref(), output.weekly.as_ref()];
+                if windows.iter().all(|window| window.is_none()) {
+                    println!(
+                        "No cached quota for that account yet; run `codex-roster refresh-usage` first."
+                    );
+                } else {
+                    for window in windows.into_iter().flatten() {
+                        println!("{}", crate::forecast::describe_window(window, true));
+                    }
+                }
+            }
+            Ok(())
+        }
         Some(Command::Doctor { json, bundle }) => {
             let output = collect_doctor_output(&app)?;
             if bundle {
@@ -1539,7 +1563,7 @@ Errors print {\"contract_version\":1,\"error\":{\"code\",\"message\",\"hint\"}} 
 Exit codes: 0 ok, 2 usage, 3 login/blocked, 4 lock timeout, 5 no account, 6 network, 7 keychain, 8 unsupported.";
     match command {
         None => format!(
-            "{envelope}\n\nCommands with typed JSON output: status, list, usage, refresh-usage, activate, delete, archive, export, import, restore-full-backup, auto-switch, auto-start-usage-windows, auto-resume-session, token-usage, quota-history, reset-outlook, doctor."
+            "{envelope}\n\nCommands with typed JSON output: status, list, usage, refresh-usage, activate, delete, archive, export, import, restore-full-backup, auto-switch, auto-start-usage-windows, auto-resume-session, token-usage, quota-history, quota-forecast, reset-outlook, doctor."
         ),
         Some(name) => {
             let fields = match name {
@@ -1556,6 +1580,9 @@ Exit codes: 0 ok, 2 usage, 3 login/blocked, 4 lock timeout, 5 no account, 6 netw
                 "doctor" => "version, checks[] (id, status, detail, hint?)",
                 "token-usage" => "totals, by_day, by_project",
                 "quota-history" => "account_id, samples[] (minute, five_remaining, week_remaining)",
+                "quota-forecast" => {
+                    "account_id, generated_at, five_hour?, weekly? (window, remaining_percent, burn_per_minute, time_to_empty_minutes, ci_low_minutes, ci_high_minutes, confidence, sample_count)"
+                }
                 _ => {
                     "unknown command; run `codex-roster schema` for the envelope and supported commands"
                 }

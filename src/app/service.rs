@@ -563,6 +563,60 @@ where
         Ok(output)
     }
 
+    /// Burn-rate forecast for one account's windows, from recorded samples.
+    ///
+    /// Uses cached quota (no network) and the local `quota_history` series, so it
+    /// is safe to call from the UI or a script at any time.
+    pub fn quota_forecast(
+        &self,
+        account_id: Option<Uuid>,
+    ) -> Result<crate::model::QuotaForecastOutput> {
+        let list = self.list()?;
+        let account = match account_id {
+            Some(id) => list
+                .accounts
+                .iter()
+                .find(|account| account.id == id)
+                .ok_or_else(|| anyhow::anyhow!("no saved account matches that id"))?,
+            None => list
+                .accounts
+                .iter()
+                .find(|account| account.is_active)
+                .ok_or_else(|| anyhow::anyhow!("no active account; pass an account id"))?,
+        };
+        let now = time::OffsetDateTime::now_utc();
+        let now_minute = now.unix_timestamp() / 60;
+        let samples =
+            crate::quota_history::load_samples(&self.env.app_data_dir, account.id, now).samples;
+        let usage = account.usage.as_ref();
+        let five = usage
+            .and_then(|usage| usage.five_hour.as_ref())
+            .map(|window| f64::from(window.remaining_percent));
+        let weekly = usage
+            .and_then(|usage| usage.weekly.as_ref())
+            .map(|window| f64::from(window.remaining_percent));
+        Ok(crate::model::QuotaForecastOutput {
+            account_id: Some(account.id),
+            generated_at: now,
+            five_hour: five.and_then(|remaining| {
+                crate::forecast::forecast_window(
+                    &samples,
+                    crate::forecast::WindowKind::FiveHour,
+                    remaining,
+                    now_minute,
+                )
+            }),
+            weekly: weekly.and_then(|remaining| {
+                crate::forecast::forecast_window(
+                    &samples,
+                    crate::forecast::WindowKind::Weekly,
+                    remaining,
+                    now_minute,
+                )
+            }),
+        })
+    }
+
     fn revalidated_auto_switch_candidate(
         &self,
         candidate_id: Uuid,

@@ -9,6 +9,7 @@ pub mod codex;
 pub mod codex_activity;
 pub mod env;
 pub mod file_store;
+pub mod forecast;
 pub mod identity;
 pub mod model;
 pub mod openai_status;

@@ -83,8 +83,13 @@ if grep -F -A 2 'UsageSource::SavedAccessToken,' \
   exit 1
 fi
 
-grep -F -q '"auth_changed": app.add_account_session_auth_changed()?' \
-  "$root_dir/src/cli.rs"
+# `add-account-status` must keep reporting whether the login changed the live
+# credentials; the exact expression may move, the reported field may not.
+if ! grep -F -q '"auth_changed": auth_changed,' "$root_dir/src/cli.rs" \
+  || ! grep -F -q 'app.add_account_session_auth_changed()?' "$root_dir/src/cli.rs"; then
+  echo "add-account-status must report auth_changed from add_account_session_auth_changed()." >&2
+  exit 1
+fi
 
 if grep -F -n 'Command::new("codex")' \
   "$root_dir/src/app/auto_start.rs"; then

@@ -202,7 +202,9 @@ pub fn fetch_usage(target: UsageTarget) -> Result<(UsageOutput, SnapshotBlob), F
 
 pub fn usage_error_message(error: &anyhow::Error) -> String {
     let rendered = format!("{error:#}");
-    if usage_error_requires_login(&rendered) {
+    if usage_error_account_deactivated(&rendered) {
+        "Account deactivated [account_deactivated]: OpenAI reports this account was deleted or deactivated, so it can no longer sign in. Log in with a working account, or archive this one.".to_owned()
+    } else if usage_error_requires_login(&rendered) {
         match usage_error_reason_code(&rendered) {
             "server_session_revoked" => "Login required [server_session_revoked]: OpenAI ended this OAuth session. Log in with this account again, then refresh/save it.".to_owned(),
             "refresh_token_rejected" => "Login required [refresh_token_rejected]: OpenAI rejected the saved refresh token. Log in with this account again, then refresh/save it.".to_owned(),
@@ -220,7 +222,9 @@ pub fn usage_error_message(error: &anyhow::Error) -> String {
 }
 
 pub fn usage_error_label(error: &str) -> &'static str {
-    if usage_error_requires_login(error) {
+    if usage_error_account_deactivated(error) {
+        "Account deactivated"
+    } else if usage_error_requires_login(error) {
         "Login required"
     } else if usage_error_requires_local_recovery(error) {
         "Local recovery required"
@@ -243,6 +247,20 @@ pub fn usage_error_requires_login(error: &str) -> bool {
                 || error.contains("sign in")))
 }
 
+/// True when OpenAI reports the account itself is gone (`account_deactivated`).
+///
+/// This is terminal for the saved login: the refresh token can no longer mint a
+/// session, so refreshing, retrying or switching *to* this account cannot help.
+/// Seen in practice when ChatGPT Desktop answers a refresh with
+/// "You do not have an account because it has been deleted or deactivated".
+pub fn usage_error_account_deactivated(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("account_deactivated")
+        || error.contains("has been deleted or deactivated")
+        || error.contains("account has been deleted")
+        || error.contains("account is deactivated")
+}
+
 pub fn usage_error_requires_local_recovery(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     error.contains("local recovery required")
@@ -252,7 +270,13 @@ pub fn usage_error_requires_local_recovery(error: &str) -> bool {
 }
 
 pub fn usage_error_blocks_activation(error: &str) -> bool {
-    usage_error_requires_login(error) || usage_error_requires_local_recovery(error)
+    // A deactivated account must never be an auto-switch candidate and must be
+    // skipped by usage sweeps: its refresh token is dead, so every probe fails
+    // and switching to it breaks the live session (see the account_deactivated
+    // report from ChatGPT Desktop).
+    usage_error_requires_login(error)
+        || usage_error_requires_local_recovery(error)
+        || usage_error_account_deactivated(error)
 }
 
 pub fn usage_error_is_deferred_access_token_refresh(error: &str) -> bool {
@@ -1653,6 +1677,25 @@ mod tests {
             changed: false,
         };
         assert!(needs_proactive_refresh(&auth));
+    }
+
+    #[test]
+    fn deactivated_accounts_are_terminal_not_retryable() {
+        // The exact text ChatGPT Desktop surfaces for a deleted account.
+        let desktop = "error usage authentication failed (401): account_deactivated";
+        assert!(super::usage_error_account_deactivated(desktop));
+        assert!(super::usage_error_account_deactivated(
+            "You do not have an account because it has been deleted or deactivated."
+        ));
+        assert!(!super::usage_error_account_deactivated(
+            "Usage unavailable [access_token_unauthorized]: OpenAI rejected the current access token"
+        ));
+        // Terminal: never a switch candidate, never mass-probed.
+        assert!(super::usage_error_blocks_activation(desktop));
+        assert_eq!(super::usage_error_label(desktop), "Account deactivated");
+        let message = super::usage_error_message(&anyhow::anyhow!("{desktop}"));
+        assert!(message.contains("account_deactivated"), "{message}");
+        assert!(message.contains("archive"), "{message}");
     }
 
     #[test]

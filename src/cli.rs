@@ -1,6 +1,5 @@
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
-use std::process::Command as ProcessCommand;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};

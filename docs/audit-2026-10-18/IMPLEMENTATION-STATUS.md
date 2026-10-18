@@ -57,6 +57,39 @@ Nhánh: `main`. Chưa push `origin`. Chưa xoá dữ liệu người dùng.
 | **P1-10 — bỏ phụ thuộc `npx` lúc chạy** | `CODEX_ROSTER_VIBE_USAGE_BIN` cho phép trỏ tới collector đã cài sẵn (mặc định vẫn dùng spec ghim `@vibe-cafe/vibe-usage@0.13.2`); README ghi rõ | `f240299`, `62bfefb` | test `collector_command_prefers_a_vendored_binary` |
 | **F/G — gợi ý hành động + test Swift** | `NextAction.switchBeforeDry`: gợi ý chuyển khi forecast (đủ tin cậy) nói cửa sổ 5h cạn trước reset và có account Ready; thêm `QuotaForecastUITests.swift` (forecast summary, runway math, archived filter) cho CI | `d5f0a47`, `6bcb4cb`, `fa8d1f9` | `swift build` pass; file test Swift parse sạch (máy CLT-only không chạy được `swift test`) |
 
+### 1b. Kết quả review đối kháng (3 subagent độc lập, vòng cuối)
+
+Ba subagent được gọi song song với phạm vi tách biệt: (1) review đối kháng read-only, (2) viết integration test cho đường apply, (3) kiểm chứng hợp đồng JSON bằng chương trình Swift độc lập. Kết quả:
+
+| Finding | Mức | Xử lý |
+|---|---|---|
+| `usage_unknown` không có consumer → app coi "quota unknown" là "quota đã hồi" và resume phiên sai | **High** | Rust trả **status riêng `usage_unknown`**; Swift decode `usageUnknown` + case riêng, không thông báo "đã hồi", giữ cờ recovery cho lần hồi thật |
+| Guard mù với phiên `codex` là **ancestor** (agent shell chạy `codex-roster activate`) | **High** | Bỏ loại trừ ancestor; chỉ bỏ qua chính tiến trình roster (`should_examine_process`) + test |
+| Credits không có hạn dùng → treo auto-switch vĩnh viễn | **High** | `has_usable_credits(usage, now)` yêu cầu quan sát ≤ 30 phút; 2 test (credits thường + unlimited) |
+| `schema --json` là chuỗi trần, thiếu `contract_version` | Med | Bọc thành object `{command, document}` — chạy thật: `contract_version: 1` |
+| `delete --json` thiếu ID vẫn mở menu, exit 0, không JSON | Med | Cùng guard như `activate`: bail usage error + non-TTY hint — chạy thật: exit 2 + envelope |
+| Xoá tài khoản đang dùng chỉ bị chặn ở UI (Rust không chặn) | Med | `App::delete` từ chối account đang live (test dùng fixture của subagent 2) |
+| `in_flight_for_pair` là dead code; manual `activate` ngoài saga | Med | Ghi nhận: chỉ auto-switch nằm trong saga; `AutoSwitchLock` + recheck danh tính là guard thực tế (tài liệu đã sửa claim) |
+| Capture resume-hint lỗi bị nuốt (`let _ =`) | Med | Lỗi nay vào `warnings[]` |
+| Load đầu thất bại → treo "Đang tải…" vĩnh viễn | Med | `didFailInitialLoad` + hàng "Không tải được… [Thử lại]" |
+| `.triage`/`.deferredUnverified` không loại archived | Med | Sửa `matches` để mọi filter (trừ `.archived`) bỏ qua archived |
+| `config.toml` ghi bằng `fs::write` không atomic | Low | Chuyển sang `atomic_write` 0600 |
+| `schema auto-resume-session` mô tả field không tồn tại | Low | Sửa text theo DTO thật |
+| Credits-only pick không có breakdown | Low | `switch_score_breakdown` trả breakdown với lý do `credits` |
+| `parse_user_session_meta` cap theo **số dòng**, không theo byte | Low | **Chưa sửa** — ghi nhận; mọi đường đọc rollout khác đã bound theo byte |
+| `Verified` được ghi khi verify không kết luận được | Low | **Chưa sửa** — cần race giữa restore và check; đã ghi nhận |
+| `five_hour_known`/`weekly_known` chỉ được ghi, không đọc | Low | **Chưa sửa** — unknown-ness suy ra từ `Option`; ghi nhận là nợ kỹ thuật |
+
+**Integration test (subagent 2):** `auto_switch_apply_completes_the_durable_switch_saga_end_to_end` — chạy thật `auto_switch_with_candidate(true, …)` trên temp env, 3 case: thành công (bắt được `switch-txn.json` ở phase `captured` **trước khi** auth bị đổi, rồi file được xoá), bookkeeping lỗi vẫn `switched` + warnings, và swap lỗi để lại `Err` + không còn txn.
+
+**Kiểm chứng hợp đồng (subagent 3):** decode mọi output `--json` an toàn bằng Swift độc lập — **0 lỗi decode**; các defect hợp đồng nêu trên đã sửa; `providers status` không tồn tại trong build mặc định (feature tắt).
+
+### 1c. Cài đặt app local (theo yêu cầu)
+
+- Build: `bash scripts/build-macos-app.sh` → `build/CodexRoster.app` (arm64, ad-hoc signed, `codesign --verify` PASS).
+- Thay thế: `/Applications/CodexRoster.app` được thay bằng bundle mới; **bản cũ giữ nguyên** tại `/Applications/CodexRoster.app.backup-20261018-134547` (không xoá).
+- Xác minh sau cài: `codesign --verify` PASS; CLI trong bundle `doctor` **14/14 ok**; app chạy (pid 15621), tự gọi CLI mới (`refresh-usage`, `create-automatic-full-backup`), không có crash report; `status --json` → contract 1, 20 tài khoản.
+
 **Verification độc lập:** xem [VERIFICATION.md](VERIFICATION.md) — gate đầy đủ với `--all-features` (449 test), decode hợp đồng Rust↔Swift bằng binary thật, 29/29 điểm audit then chốt PASS, và 1 gate CI (`check-auth-switch-safety.sh`) đã được sửa sau khi verification phát hiện fail.
 
 **Gate hiện tại:** `cargo fmt --check` pass · `cargo clippy --all-targets -- -D warnings` pass · **447 test pass, 0 fail, 2 ignored** · `swift build --package-path macos/NextAccount` pass · `scripts/build-macos-app.sh` pass.

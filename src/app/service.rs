@@ -587,11 +587,18 @@ where
         // Freeze the live thread that hit usage limits BEFORE swapping auth.
         // Shared ~/.codex keeps that thread; the new account's quota pays for
         // the next turns. Do not use the target account's old workspace hint.
-        let _ = crate::session_resume::capture_pending_continue(
+        let mut bookkeeping_warnings = Vec::new();
+        if let Err(error) = crate::session_resume::capture_pending_continue(
             &self.env.app_data_dir,
             &self.env.codex_root,
             active.id,
-        );
+        ) {
+            // A timed-out index lock used to be discarded, so the interrupted
+            // thread was silently never resumed (review finding 8).
+            bookkeeping_warnings.push(format!(
+                "session switched, but the interrupted thread could not be recorded: {error:#}"
+            ));
+        }
         txn = crate::switch_txn::advance(
             &self.env.app_data_dir,
             &txn,
@@ -650,7 +657,6 @@ where
         settings.last_auto_switch_at = Some(now);
         settings.last_auto_switch_target = Some(candidate.id);
         settings.last_auto_switch_from = Some(active.id);
-        let mut bookkeeping_warnings = Vec::new();
         if let Err(error) = save_settings(&self.env.app_data_dir, &settings) {
             // The credential swap already succeeded. Report the switch with a
             // warning instead of failing and losing cooldown/resume (audit S7).
@@ -2080,9 +2086,14 @@ pub fn switch_score_breakdown(
     now: OffsetDateTime,
 ) -> Option<crate::model::SwitchScoreBreakdown> {
     let quota = switch_quota_score(account.usage.as_ref(), now);
-    if quota < 0 {
+    if quota < 0 && !is_usable_for_switch(account.usage.as_ref(), now) {
         return None;
     }
+    // A credits-only account is usable with no quota score; still explain it
+    // instead of omitting the breakdown for exactly the unusual pick
+    // (review finding 14).
+    let quota = quota.max(0);
+    let credits_only = quota == 0;
     let plan_bonus = match plan_rank(plan_for_auto_switch(account)) {
         2 => PLAN_BONUS_PRO,
         1 => PLAN_BONUS_PLUS,
@@ -2109,7 +2120,11 @@ pub fn switch_score_breakdown(
         0
     };
     let score = i64::from(quota) + plan_bonus + reset_bonus - freshness_penalty + banked_bonus;
-    let mut reasons = vec![format!("quota {quota}")];
+    let mut reasons = if credits_only {
+        vec!["credits".to_owned()]
+    } else {
+        vec![format!("quota {quota}")]
+    };
     if plan_bonus > 0 {
         reasons.push(format!("plan +{plan_bonus}"));
     }

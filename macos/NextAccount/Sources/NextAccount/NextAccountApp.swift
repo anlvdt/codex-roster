@@ -355,6 +355,9 @@ enum NextAction {
         if let active,
            let candidate = ready.first,
            let forecast = store.quotaForecast?.fiveHour,
+           // A low-confidence estimate (few samples, erratic burn) must not
+           // trigger a suggestion; the runway bar treats it the same way.
+           forecast.confidence != "low",
            let timeToEmpty = forecast.timeToEmptyMinutes,
            let resetAt = active.usage?.fiveHour?.resetAt.value
         {

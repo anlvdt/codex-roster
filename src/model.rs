@@ -438,6 +438,7 @@ pub struct WindowForecast {
 #[derive(Clone, Debug, Serialize)]
 pub struct QuotaForecastOutput {
     pub account_id: Option<Uuid>,
+    #[serde(with = "time::serde::rfc3339")]
     pub generated_at: OffsetDateTime,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub five_hour: Option<WindowForecast>,
@@ -686,8 +687,11 @@ pub struct ProviderAccountView {
     pub plan_label: Option<String>,
     pub environment: EnvironmentKind,
     pub is_active: bool,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_activated_at: Option<OffsetDateTime>,
     pub usage: Option<ProviderUsageView>,
     pub usage_error: Option<String>,

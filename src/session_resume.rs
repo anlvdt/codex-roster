@@ -714,35 +714,76 @@ fn rollout_needs_continue(path: &Path) -> Result<bool> {
 }
 
 fn rollout_continuation_state(path: &Path) -> Result<Option<ContinuationState>> {
+    let metadata = fs::metadata(path)?;
+    let size = metadata.len();
+    let cache_key = metadata.modified().ok().map(|modified| RolloutCacheKey {
+        path: path.to_path_buf(),
+        len: size,
+        modified,
+    });
+    if let Some(key) = cache_key.as_ref()
+        && let Some(cached) = rollout_cache_get(key)
+    {
+        ROLLOUT_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+        return Ok(cached);
+    }
+
     let mut file = File::open(path)?;
-    let size = file.metadata()?.len();
-    let start = size.saturating_sub(512 * 1024);
+    let tail_start = size.saturating_sub(ROLLOUT_TAIL_BYTES);
+    let mut state = read_rollout_state_window(&mut file, tail_start)?;
+    if state.is_none() && tail_start > 0 {
+        // A long turn can start before the tail. Widen once, still bounded:
+        // never stream the whole rollout on the hot `status` path (audit P1).
+        let extended_start = size.saturating_sub(ROLLOUT_MAX_SCAN_BYTES);
+        if extended_start < tail_start {
+            state = read_rollout_state_window(&mut file, extended_start)?;
+        }
+    }
+    if let Some(key) = cache_key {
+        rollout_cache_put(key, state);
+    }
+    Ok(state)
+}
+
+/// Read from `start` to EOF (the caller chooses the bounded window), skip a
+/// partial first line when starting mid-file, and return the newest lifecycle
+/// state found. Counts bytes read so tests can prove the bound holds.
+fn read_rollout_state_window(file: &mut File, start: u64) -> Result<Option<ContinuationState>> {
     file.seek(SeekFrom::Start(start))?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
+    ROLLOUT_BYTES_READ.fetch_add(bytes.len() as u64, Ordering::Relaxed);
     let text = String::from_utf8_lossy(&bytes);
-    let lines: Vec<_> = text
-        .lines()
-        .enumerate()
-        .filter(|(i, _)| start == 0 || *i > 0)
-        .map(|(_, line)| line)
-        .collect();
-    if let Some(state) = lines.into_iter().rev().find_map(continuation_state) {
-        return Ok(Some(state));
-    }
-    if start > 0 {
-        // A long turn may start before the tail. Stream older records without
-        // retaining conversation content; the latest lifecycle event wins.
-        let reader = BufReader::new(File::open(path)?);
-        let mut state = None;
-        for line in reader.lines() {
-            if let Some(next) = continuation_state(&line?) {
-                state = Some(next);
-            }
+    let mut state = None;
+    for (index, line) in text.lines().enumerate() {
+        if start > 0 && index == 0 {
+            continue; // may be a partial record
         }
-        return Ok(state);
+        if let Some(next) = continuation_state(line) {
+            state = Some(next);
+        }
     }
-    Ok(None)
+    Ok(state)
+}
+
+fn rollout_cache_get(key: &RolloutCacheKey) -> Option<Option<ContinuationState>> {
+    ROLLOUT_STATE_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(key).copied())
+}
+
+fn rollout_cache_put(key: RolloutCacheKey, state: Option<ContinuationState>) {
+    let cache = ROLLOUT_STATE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut guard) = cache.lock() {
+        // Small bounded cache: the hot path only inspects a few rollouts per
+        // discovery, so clearing on overflow keeps memory predictable.
+        if guard.len() >= 512 {
+            guard.clear();
+        }
+        guard.insert(key, state);
+    }
 }
 
 fn continuation_state(line: &str) -> Option<ContinuationState> {
@@ -1046,6 +1087,41 @@ mod tests {
             .join(format!("{:04}", today.year()))
             .join(format!("{:02}", today.month() as u8))
             .join(format!("{:02}", today.day()))
+    }
+
+    #[test]
+    fn rollout_reads_are_bounded_and_cached() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("codex");
+        let path = day_dir(&root).join("rollout-long.jsonl");
+        write_rollout(&path, "long", temp.path().to_str().unwrap(), "user");
+        // Pad the rollout well past the scan bound with records that are not
+        // lifecycle events, so an unbounded read would be visible in the counter.
+        for _ in 0..2000 {
+            append_event(
+                &path,
+                serde_json::json!({"type":"event_msg","payload":{"type":"token_count"}}),
+            );
+        }
+        append_event(
+            &path,
+            serde_json::json!({"type":"task_complete", "error":{"codex_error_info":"usage_limit_exceeded"}}),
+        );
+
+        reset_rollout_read_counters();
+        let state = rollout_continuation_state(&path).unwrap();
+        assert!(state.is_some(), "latest lifecycle event is in the tail");
+        let read = rollout_bytes_read();
+        assert!(
+            read <= ROLLOUT_MAX_SCAN_BYTES,
+            "read {read} bytes, bound is {ROLLOUT_MAX_SCAN_BYTES}"
+        );
+
+        reset_rollout_read_counters();
+        let cached = rollout_continuation_state(&path).unwrap();
+        assert!(cached.is_some());
+        assert_eq!(rollout_bytes_read(), 0, "second call must hit the cache");
+        assert_eq!(rollout_cache_hits(), 1);
     }
 
     #[test]

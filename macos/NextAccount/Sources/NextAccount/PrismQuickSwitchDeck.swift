@@ -114,7 +114,7 @@ struct PrismQuickSwitchDeck: View {
 
     private var orderedRosterAccounts: [SavedAccount] {
         let grouped = Dictionary(grouping: filteredAccounts, by: \.planGroupKey)
-        return ["pro", "plus", "team", "other", "free"].flatMap {
+        return ["pro", "plus", "team", "edu", "other", "free"].flatMap {
             store.sortedAccounts(grouped[$0] ?? [])
         }
     }
@@ -1132,6 +1132,7 @@ struct PrismQuickSwitchDeck: View {
         case "pro": return language.text("Pro", "Pro")
         case "plus": return language.text("Plus", "Plus")
         case "team": return language.text("Team / Business", "Team / Business")
+        case "edu": return language.text("Edu / K12", "Edu / K12")
         case "free": return language.text("Free / Go", "Free / Go")
         default: return language.text("Khác", "Other")
         }
@@ -1273,8 +1274,13 @@ private struct PrismCompactAccountCard: View {
             }
             HStack(spacing: 16) {
                 HStack(spacing: 16) {
-                    quotaLabel("5h", percent: quota)
-                    quotaLabel("7d", percent: week)
+                    // Free/Go plans have no weekly limit and only a monthly one,
+                    // so the primary window is labelled by what it really is.
+                    quotaLabel(account.usage?.primaryWindowLabel ?? "5h", percent: quota)
+                    // Free/Go have no weekly limit: showing "7d —" was noise.
+                    if account.usage?.showsWeeklyWindow ?? true {
+                        quotaLabel("7d", percent: week)
+                    }
                 }
                 .frame(maxWidth: .infinity)
 

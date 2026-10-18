@@ -3,6 +3,7 @@ import Testing
 @testable import CodexRoster
 
 /// Forecast and runway math surfaced in the notch deck (audit E2/F wave 2).
+///
 /// The expected strings are the implementation's real output: `humanize` only
 /// switches to hours at 120 minutes, so 100 minutes reads "100m", not "1h 40m".
 @Test func forecastSummaryFormatsEstimateAndConfidence() {
@@ -34,6 +35,7 @@ import Testing
     #expect(long.summary(vietnamese: false) == "empty in ~2h 30m (CI 2h–4h) · confidence medium")
     #expect(long.summary(vietnamese: true) == "cạn sau ~2 giờ 30 phút (CI 2 giờ–4 giờ) · độ tin cậy medium")
 
+    // No confidence interval: the interval segment is omitted entirely.
     let bare = QuotaWindowForecast(
         window: "five_hour",
         remainingPercent: 60,
@@ -119,4 +121,120 @@ import Testing
     #expect(!RosterListFilter.all.matches(archived), "archived rows stay out of the default list")
     #expect(RosterListFilter.archived.matches(archived))
     #expect(!RosterListFilter.archived.matches(active))
+
+    // The archived chip is `.triage(.archived)`: it must keep matching archived
+    // rows. A blanket `!archived` guard on every triage bucket silently emptied
+    // that chip (CI caught it).
+    #expect(RosterListFilter.triage(.archived).matches(archived))
+    #expect(!RosterListFilter.triage(.archived).matches(active))
+    #expect(RosterListFilter.triage(.active).matches(active))
+    #expect(!RosterListFilter.triage(.active).matches(archived))
+    #expect(!RosterListFilter.triage(.ready).matches(archived), "archived rows must not reappear under Ready")
+}
+
+/// Notch ear labels must degrade instead of clipping (the ears are 146pt wide).
+@Test func earCompactDropsMinutesOnceTheResetIsFarAway() {
+    let calendar = Calendar.current
+    let far = calendar.date(byAdding: .day, value: 3, to: Date())!
+    let farLabel = ResetClockFormat.earCompact(far, asClock: true, language: .english)
+    #expect(!farLabel.contains(":"), "a reset days away should not spend width on minutes: \(farLabel)")
+
+    let soon = Date().addingTimeInterval(2 * 3600)
+    let soonLabel = ResetClockFormat.earCompact(soon, asClock: true, language: .english)
+    #expect(soonLabel.contains(":"), "a reset within the day keeps its exact time: \(soonLabel)")
+
+    // Countdown mode is unaffected: it is already short ("3D", "12M").
+    #expect(ResetClockFormat.earCompact(far, asClock: false, language: .english).count <= 4)
+}
+
+@Test func minimalEarLabelIsShorterThanTheShortForm() {
+    let calendar = Calendar.current
+    let far = calendar.date(byAdding: .day, value: 3, to: Date())!
+    let minimal = ResetClockFormat.minimal(far, asClock: true, language: .english)
+    let short = ResetClockFormat.earCompact(far, asClock: true, language: .english)
+    #expect(minimal.count < short.count, "the last-resort label must be shorter: \(minimal) vs \(short)")
+
+    let soon = Date().addingTimeInterval(3600)
+    let soonMinimal = ResetClockFormat.minimal(soon, asClock: true, language: .english)
+    let soonFull = ResetClockFormat.compact(soon, asClock: true, language: .english)
+    #expect(soonMinimal.count <= soonFull.count)
+}
+
+/// Free/Go plans have no weekly limit and only a monthly one, so the primary
+/// window must not be labelled "5h" (the roster used to mislabel it).
+@Test func freeMonthlyPrimaryWindowIsLabelledMonthly() {
+    let fetched = RustDate(value: Date())
+    let monthly = UsageWindow(
+        remainingPercent: 0,
+        resetAt: RustDate(value: Date().addingTimeInterval(30 * 86_400))
+    )
+    let usage = AccountUsage(
+        fetchedAt: fetched,
+        fiveHour: monthly,
+        weekly: nil,
+        credits: nil,
+        bankedResets: nil,
+        subscriptionActiveUntil: nil,
+        lunaReserve: nil,
+        primaryWindowKind: nil   // older cache: derive it from the span
+    )
+    #expect(usage.primaryWindowLabel == "1M")
+
+    let fiveHourly = AccountUsage(
+        fetchedAt: fetched,
+        fiveHour: UsageWindow(
+            remainingPercent: 80,
+            resetAt: RustDate(value: Date().addingTimeInterval(4 * 3_600))
+        ),
+        weekly: nil,
+        credits: nil,
+        bankedResets: nil,
+        subscriptionActiveUntil: nil,
+        lunaReserve: nil,
+        primaryWindowKind: "five_hour"
+    )
+    #expect(fiveHourly.primaryWindowLabel == "5h")
+
+    let explicitMonthly = AccountUsage(
+        fetchedAt: fetched,
+        fiveHour: monthly,
+        weekly: nil,
+        credits: nil,
+        bankedResets: nil,
+        subscriptionActiveUntil: nil,
+        lunaReserve: nil,
+        primaryWindowKind: "monthly"
+    )
+    #expect(explicitMonthly.primaryWindowLabel == "1M")
+}
+
+/// K12/Edu plans used to fall into the "Other" band because only pro/plus/team/
+/// free/go were recognised by the plan-band grouping.
+@Test func educationPlansGetTheirOwnBandInsteadOfOther() {
+    func account(plan: String?) -> SavedAccount {
+        SavedAccount(
+            id: UUID(),
+            provider: "open_ai",
+            email: "person@example.com",
+            name: nil,
+            customLabel: nil,
+            planLabel: plan,
+            environment: "macos",
+            isActive: false,
+            archived: false,
+            usage: nil,
+            usageError: nil
+        )
+    }
+    #expect(account(plan: "K12").planGroupKey == "edu")
+    #expect(account(plan: "k12").planGroupKey == "edu")
+    #expect(account(plan: "Edu").planGroupKey == "edu")
+    #expect(account(plan: "Campus").planGroupKey == "edu")
+    #expect(account(plan: "Plus").planGroupKey == "plus")
+    #expect(account(plan: "Pro").planGroupKey == "pro")
+    #expect(account(plan: "Team").planGroupKey == "team")
+    #expect(account(plan: "Free").planGroupKey == "free")
+    #expect(account(plan: "Go").planGroupKey == "free")
+    #expect(account(plan: "Mystery Tier").planGroupKey == "other")
+    #expect(account(plan: nil).planGroupKey == "other")
 }

@@ -87,11 +87,12 @@ struct PrismFilamentView: View {
         HStack(spacing: 8) {
             // 5H Quota with live energy icon
             HStack(spacing: 3) {
-                Text("⚡")
+                Image(systemName: "bolt.fill")
                     .font(PrismTheme.fontBodyCompactBold)
                     .foregroundStyle(fiveTint)
                     .fixedSize()
-                Text("5H")
+                    .accessibilityHidden(true)
+                Text(quota.primaryLabel)
                     .font(PrismTheme.fontBodySemibold)
                     .foregroundStyle(PrismTheme.textBright)
                     .fixedSize()
@@ -109,51 +110,60 @@ struct PrismFilamentView: View {
                 }
             }
 
-            Rectangle()
-                .fill(PrismTheme.highlight)
-                .frame(width: 1, height: 12)
+            // Free/Go plans have no weekly limit: the divider, the weekly column
+            // and its reset countdown are omitted instead of showing "Wk —".
+            if quota.showsWeekly {
+                Rectangle()
+                    .fill(PrismTheme.highlight)
+                    .frame(width: 1, height: 12)
 
-            // Weekly Quota
-            HStack(spacing: 3) {
-                Text(language.text("Tuần", "Wk"))
-                    .font(PrismTheme.fontBodySemibold)
-                    .foregroundStyle(PrismTheme.textBright)
-                    .fixedSize()
-                if let weekPercent {
-                    Text("\(weekPercent)%")
-                        .font(PrismTheme.fontMetricDense)
-                        .monospacedDigit()
-                        .foregroundStyle(weekTint)
-                        .fixedSize()
-                } else {
-                    Text("—")
-                        .font(PrismTheme.fontBody)
-                        .foregroundStyle(.secondary)
-                        .fixedSize()
-                }
-            }
-
-            // Banked Reset / Reset Countdown
-            if bankedCount > 0 {
-                PrismBankedResetCountBadge(
-                    count: bankedCount,
-                    style: .filament,
-                    helpText: language.text(
-                        "\(bankedCount) lượt banked reset có thể dùng trong Codex",
-                        "\(bankedCount) banked resets available in Codex"
-                    )
-                )
-            } else if let weeklyResetDate {
-                let resetTint = PrismTheme.resetProximityTint(resetAt: weeklyResetDate, kind: .weekly)
-                HStack(spacing: 2) {
-                    Text("↺")
-                        .font(PrismTheme.fontCaptionBold)
-                        .foregroundStyle(resetTint.opacity(0.72))
-                        .fixedSize()
-                    Text(compactReset(weeklyResetDate))
+                HStack(spacing: 3) {
+                    Text(language.text("Tuần", "Wk"))
                         .font(PrismTheme.fontBodySemibold)
-                        .foregroundStyle(resetTint)
+                        .foregroundStyle(PrismTheme.textBright)
                         .fixedSize()
+                    if let weekPercent {
+                        Text("\(weekPercent)%")
+                            .font(PrismTheme.fontMetricDense)
+                            .monospacedDigit()
+                            .foregroundStyle(weekTint)
+                            .fixedSize()
+                    } else {
+                        Text("—")
+                            .font(PrismTheme.fontBody)
+                            .foregroundStyle(.secondary)
+                            .fixedSize()
+                    }
+                }
+
+                // Banked Reset / Reset Countdown
+                if bankedCount > 0 {
+                    PrismBankedResetCountBadge(
+                        count: bankedCount,
+                        style: .filament,
+                        helpText: language.text(
+                            "\(bankedCount) lượt banked reset có thể dùng trong Codex",
+                            "\(bankedCount) banked resets available in Codex"
+                        )
+                    )
+                } else if let weeklyResetDate {
+                    let resetTint = PrismTheme.resetProximityTint(
+                        resetAt: weeklyResetDate,
+                        kind: .weekly
+                    )
+                    HStack(spacing: 2) {
+                        Text("↺")
+                            .font(PrismTheme.fontCaptionBold)
+                            .foregroundStyle(resetTint.opacity(0.72))
+                            .fixedSize()
+                        EarResetLabel(
+                            date: weeklyResetDate,
+                            asClock: resetAsClock,
+                            language: language,
+                            font: PrismTheme.fontBodySemibold,
+                            tint: resetTint
+                        )
+                    }
                 }
             }
         }
@@ -178,21 +188,28 @@ struct PrismFilamentView: View {
     // MARK: - Left Ear Wing (Flanking Left of Camera Notch)
     private var leftEarWing: some View {
         HStack(spacing: 3.5) {
-            // Live energy / activity indicator
-            Text(isWaiting ? "?" : "⚡")
-                .font(PrismTheme.fontBodyCompactBold)
-                .foregroundStyle(isWaiting ? PrismTheme.warning : fiveTint)
-                .shadow(
-                    color: (isWaiting ? PrismTheme.warning : fiveTint)
-                        .opacity(isRunning || isWaiting ? 0.85 : 0),
-                    radius: isRunning || isWaiting ? 3.5 : 0
-                )
-                .scaleEffect(resetPulseScale)
-                .fixedSize()
+            // Live activity indicator. It used to be a literal "?" that read as a
+            // broken glyph, and it was drawn even when nothing was running —
+            // stealing width the reset label needs. Now: symbols, and only when
+            // there is activity to report.
+            if isRunning || isWaiting {
+                Image(systemName: isWaiting ? "hourglass" : "bolt.fill")
+                    .font(PrismTheme.fontBodyCompactBold)
+                    .foregroundStyle(isWaiting ? PrismTheme.warning : fiveTint)
+                    .shadow(
+                        color: (isWaiting ? PrismTheme.warning : fiveTint).opacity(0.85),
+                        radius: 3.5
+                    )
+                    .scaleEffect(resetPulseScale)
+                    .fixedSize()
+                    .accessibilityLabel(isWaiting
+                        ? language.text("Codex đang chờ", "Codex is waiting")
+                        : language.text("Codex đang chạy", "Codex is working"))
+            }
 
             // 5H Quota
             HStack(spacing: 2.5) {
-                Text(language.text("5H", "5H"))
+                Text(quota.primaryLabel)
                     .font(PrismTheme.fontBodySemibold)
                     .foregroundStyle(PrismTheme.textBright)
                     .lineLimit(1)
@@ -231,11 +248,13 @@ struct PrismFilamentView: View {
                         .foregroundStyle(resetTint.opacity(0.72))
                         .fixedSize()
 
-                    Text(compactReset(fiveResetDate))
-                        .font(PrismTheme.fontBodySemibold)
-                        .foregroundStyle(resetTint)
-                        .lineLimit(1)
-                        .fixedSize()
+                    EarResetLabel(
+                        date: fiveResetDate,
+                        asClock: resetAsClock,
+                        language: language,
+                        font: PrismTheme.fontBodySemibold,
+                        tint: resetTint
+                    )
                 }
                 .help(quota.fiveResetDate?.formatted(date: .abbreviated, time: .shortened) ?? "")
             } else if let plan = quota.planLabel, !plan.isEmpty {
@@ -277,55 +296,68 @@ struct PrismFilamentView: View {
     // MARK: - Right Ear Wing (Flanking Right of Camera Notch)
     private var rightEarWing: some View {
         HStack(spacing: 4) {
-            // Weekly Quota
-            HStack(spacing: 2.5) {
-                Text(language.text("Tuần", "Wk"))
-                    .font(PrismTheme.fontBodySemibold)
-                    .foregroundStyle(PrismTheme.textBright)
-                    .lineLimit(1)
-                    .fixedSize()
-
-                if let weekPercent {
-                    Text("\(weekPercent)%")
-                        .font(PrismTheme.fontMetricDense)
-                        .monospacedDigit()
-                        .foregroundStyle(weekTint)
-                        .lineLimit(1)
-                        .fixedSize()
-                } else {
-                    Text("—")
-                        .font(PrismTheme.fontBody)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .fixedSize()
-                }
-            }
-
-            // Banked Reset / Reset Countdown
-            if bankedCount > 0 {
-                PrismBankedResetCountBadge(
-                    count: bankedCount,
-                    style: .filament,
-                    helpText: language.text(
-                        "\(bankedCount) lượt banked reset có thể dùng",
-                        "\(bankedCount) banked resets available"
-                    )
-                )
-            } else if let weeklyResetDate {
-                let resetTint = PrismTheme.resetProximityTint(resetAt: weeklyResetDate, kind: .weekly)
-                HStack(spacing: 2) {
-                    Text("↺")
-                        .font(PrismTheme.fontCaptionBold)
-                        .foregroundStyle(resetTint.opacity(0.72))
-                        .fixedSize()
-
-                    Text(compactReset(weeklyResetDate))
+            // Free/Go plans have no weekly limit: the whole weekly group is
+            // omitted rather than rendered as an empty "Wk —".
+            if quota.showsWeekly {
+                HStack(spacing: 2.5) {
+                    Text(language.text("Tuần", "Wk"))
                         .font(PrismTheme.fontBodySemibold)
-                        .foregroundStyle(resetTint)
+                        .foregroundStyle(PrismTheme.textBright)
                         .lineLimit(1)
                         .fixedSize()
+
+                    if let weekPercent {
+                        Text("\(weekPercent)%")
+                            .font(PrismTheme.fontMetricDense)
+                            .monospacedDigit()
+                            .foregroundStyle(weekTint)
+                            .lineLimit(1)
+                            .fixedSize()
+                    } else {
+                        Text("—")
+                            .font(PrismTheme.fontBody)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
                 }
-                .help(quota.weeklyResetDate?.formatted(date: .abbreviated, time: .shortened) ?? "")
+
+                // Banked Reset / Reset Countdown
+                if bankedCount > 0 {
+                    PrismBankedResetCountBadge(
+                        count: bankedCount,
+                        style: .filament,
+                        helpText: language.text(
+                            "\(bankedCount) lượt banked reset có thể dùng",
+                            "\(bankedCount) banked resets available"
+                        )
+                    )
+                } else if let weeklyResetDate {
+                    let resetTint = PrismTheme.resetProximityTint(
+                        resetAt: weeklyResetDate,
+                        kind: .weekly
+                    )
+                    HStack(spacing: 2) {
+                        Text("↺")
+                            .font(PrismTheme.fontCaptionBold)
+                            .foregroundStyle(resetTint.opacity(0.72))
+                            .fixedSize()
+
+                        // Degrades to a shorter form instead of clipping
+                        // ("Sun 6:00 A") — notch overflow fix.
+                        EarResetLabel(
+                            date: weeklyResetDate,
+                            asClock: resetAsClock,
+                            language: language,
+                            font: PrismTheme.fontBodySemibold,
+                            tint: resetTint
+                        )
+                    }
+                    .help(
+                        quota.weeklyResetDate?
+                            .formatted(date: .abbreviated, time: .shortened) ?? ""
+                    )
+                }
             }
         }
         .padding(.leading, 12)
@@ -401,6 +433,12 @@ struct PrismFilamentView: View {
     private func compactReset(_ date: Date) -> String {
         ResetClockFormat.compact(date, asClock: resetAsClock, language: language.language)
     }
+
+    /// Ear-sized label: the ears are a fixed 146pt, so a far-away weekly reset
+    /// uses the shorter form (weekday + hour) instead of being clipped.
+    private func earReset(_ date: Date) -> String {
+        ResetClockFormat.earCompact(date, asClock: resetAsClock, language: language.language)
+    }
 }
 
 /// One notch ear in dual-agent mode: agent name, 5-hour percent, plan label,
@@ -410,6 +448,37 @@ enum NotchEarSide {
     case leading, trailing
 }
 
+
+/// Reset label that degrades instead of clipping inside the fixed-width ears.
+///
+/// The ears are 146pt wide, so "Wk 100% ↺ Sun 6:00 AM" cannot fit. `ViewThatFits`
+/// picks the first form that fits: full -> short (weekday + hour) -> minimal
+/// (hour or weekday alone) -> nothing (the ↺ glyph and the tooltip remain).
+struct EarResetLabel: View {
+    let date: Date
+    let asClock: Bool
+    let language: LanguageStore
+    let font: Font
+    let tint: Color
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            text(ResetClockFormat.compact(date, asClock: asClock, language: language.language))
+            text(ResetClockFormat.earCompact(date, asClock: asClock, language: language.language))
+            text(ResetClockFormat.minimal(date, asClock: asClock, language: language.language))
+            text("")
+        }
+        .lineLimit(1)
+        .allowsTightening(true)
+    }
+
+    private func text(_ value: String) -> some View {
+        Text(value)
+            .font(font)
+            .foregroundStyle(tint)
+            .fixedSize(horizontal: true, vertical: false)
+    }
+}
 
 struct PrismBankedResetCountBadge: View {
     enum Style {

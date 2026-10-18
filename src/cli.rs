@@ -265,6 +265,22 @@ enum Command {
         #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// List saved accounts that are dead or look dead, with the commands to remove them (read-only).
+    DeadAccounts {
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+        #[arg(
+            long,
+            help = "Exchange each inactive account's refresh token to prove whether its grant still exists (consumes rotating tokens; never touches the live account)"
+        )]
+        deep: bool,
+        #[arg(
+            long,
+            default_value_t = 14,
+            help = "Days without a successful usage fetch before an auth failure counts as suspect"
+        )]
+        stale_days: i64,
+    },
     /// Reclaim space from data left behind by removed features (dry-run by default).
     Cleanup {
         #[arg(
@@ -1383,6 +1399,19 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::DeadAccounts {
+            json,
+            stale_days,
+            deep,
+        }) => {
+            let report = app.dead_accounts(stale_days, deep)?;
+            if json {
+                print_json(&report)?;
+            } else {
+                print_dead_account_report(&report);
+            }
+            Ok(())
+        }
         Some(Command::Cleanup { apply, json }) => {
             let report = collect_cleanup_report(&app.env().app_data_dir, apply);
             if json {
@@ -1589,6 +1618,52 @@ struct CleanupReport {
 }
 
 /// Build the cleanup report. `apply` deletes only the allow-listed candidates.
+/// Human rendering for `dead-accounts`. Nothing is removed here: the report only
+/// proposes commands, and it explains why absent windows are not evidence.
+fn print_dead_account_report(report: &crate::model::DeadAccountReport) {
+    if report.deep_checked > 0 {
+        println!(
+            "Deep check: exchanged {} refresh token(s); {} grant(s) still alive.",
+            report.deep_checked, report.deep_alive
+        );
+    }
+    let total = report.confirmed.len() + report.grant_rejected.len() + report.suspects.len();
+    if total == 0 {
+        println!("No dead or suspect accounts found.");
+        return;
+    }
+    for (title, entries) in [
+        ("Confirmed deactivated by OpenAI", &report.confirmed),
+        (
+            "Grant rejected: the saved refresh token is dead, a fresh login is required",
+            &report.grant_rejected,
+        ),
+        (
+            "Suspect: auth keeps failing and nothing was fetched recently",
+            &report.suspects,
+        ),
+    ] {
+        if entries.is_empty() {
+            continue;
+        }
+        println!("\n{title} ({})", entries.len());
+        for entry in entries {
+            let label = entry.name.clone().unwrap_or_else(|| entry.email.clone());
+            let plan = entry.plan_label.as_deref().unwrap_or("unknown plan");
+            println!(
+                "  · {label} <{}> [{plan}]{}",
+                entry.email,
+                if entry.is_active { " (active)" } else { "" }
+            );
+            println!("      reason: {} — {}", entry.reason, entry.detail);
+            for command in &entry.suggested_commands {
+                println!("      {command}");
+            }
+        }
+    }
+    println!("\nNote: {}", report.note);
+}
+
 fn collect_cleanup_report(app_data_dir: &std::path::Path, apply: bool) -> CleanupReport {
     let mut candidates = Vec::new();
     let mut reclaimable = 0u64;
@@ -1871,7 +1946,7 @@ Errors print {\"contract_version\":1,\"error\":{\"code\",\"message\",\"hint\"}} 
 Exit codes: 0 ok, 2 usage, 3 login/blocked, 4 lock timeout, 5 no account, 6 network, 7 keychain, 8 unsupported.";
     match command {
         None => format!(
-            "{envelope}\n\nCommands with typed JSON output: status, list, save, usage, refresh-usage, activate, delete, archive, export, import, import-json, restore-account-list-backup, restore-full-backup, create-automatic-full-backup, auto-switch, auto-start-usage-windows, auto-resume-session, token-usage, quota-history, quota-forecast, reset-outlook, reset-events, reset-timeline, open-ai-status, add-account-status, set-label, enable-luna-reserve, doctor."
+            "{envelope}\n\nCommands with typed JSON output: status, list, save, usage, refresh-usage, activate, delete, archive, export, import, import-json, restore-account-list-backup, restore-full-backup, create-automatic-full-backup, auto-switch, auto-start-usage-windows, auto-resume-session, token-usage, quota-history, quota-forecast, reset-outlook, reset-events, reset-timeline, open-ai-status, add-account-status, set-label, enable-luna-reserve, doctor, dead-accounts, cleanup."
         ),
         Some(name) => {
             let fields = match name {
@@ -1890,6 +1965,12 @@ Exit codes: 0 ok, 2 usage, 3 login/blocked, 4 lock timeout, 5 no account, 6 netw
                 "add-account-status" => "active, auth_changed, state, codex_root, hint",
                 "open-ai-status" => "indicator, description, updated_at, codex_components[]",
                 "auto-start-usage-windows" => "enabled, poll_seconds",
+                "dead-accounts" => {
+                    "generated_at, stale_after_days, deep_checked, deep_alive, confirmed[] (account_id, name, email, plan_label, archived, is_active, reason, detail, last_usage_at?, suggested_commands[]), grant_rejected[], suspects[], note"
+                }
+                "cleanup" => {
+                    "apply, reclaimable_bytes, items[] (path, name, bytes, reason, removed?), review_only[]"
+                }
                 "auto-resume-session" => {
                     "enabled (--continue-interrupted returns a SessionResumeHint: enabled, account_id, session_id, cwd, additional_sessions[])"
                 }
@@ -2001,7 +2082,7 @@ fn render_account_summary(account: &AccountView) -> String {
         let mut rendered_window = false;
         if let Some(usage) = &account.usage {
             for (label, window) in [
-                ("5h", usage.five_hour.as_ref()),
+                (usage.primary_window_label(), usage.five_hour.as_ref()),
                 ("weekly", usage.weekly.as_ref()),
             ] {
                 let Some(window) = window else { continue };
@@ -2451,6 +2532,7 @@ mod tests {
             last_activated_at: None,
             archived: false,
             usage: Some(crate::model::AccountUsageView {
+                primary_window_kind: None,
                 source: crate::model::UsageSource::LiveAccessToken,
                 fetched_at: now,
                 // 1% is the "exhausted" sentinel; the CLI must not print it raw
@@ -2500,6 +2582,7 @@ mod tests {
             last_activated_at: None,
             archived: true,
             usage: Some(crate::model::AccountUsageView {
+                primary_window_kind: None,
                 source: crate::model::UsageSource::LiveAccessToken,
                 fetched_at: now,
                 five_hour: Some(crate::model::UsageWindowView {

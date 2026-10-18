@@ -341,7 +341,7 @@ fn account_usage_labels(account: &AccountView) -> (String, String) {
         let mut remaining = Vec::new();
         let mut resets = Vec::new();
         for (label, window) in [
-            ("5h", usage.five_hour.as_ref()),
+            (usage.primary_window_label(), usage.five_hour.as_ref()),
             ("Weekly", usage.weekly.as_ref()),
         ] {
             let Some(window) = window else { continue };
@@ -1271,6 +1271,10 @@ mod tests {
             .replace_date(time::Date::from_calendar_date(2099, time::Month::May, 12).unwrap())
             .replace_time(time::Time::from_hms(13, 56, 0).unwrap());
         list.accounts[0].usage = Some(AccountUsageView {
+            // The fixture's reset date is far in the future, so state the kind
+            // explicitly; this test is about rendering the reset time, not about
+            // deriving the label from the span.
+            primary_window_kind: Some("five_hour".to_owned()),
             source: UsageSource::SavedAccessToken,
             fetched_at: OffsetDateTime::UNIX_EPOCH,
             five_hour: Some(UsageWindowView {
@@ -1311,6 +1315,7 @@ mod tests {
         let id = Uuid::new_v4();
         let mut list = sample_list(id, false);
         list.accounts[0].usage = Some(AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: OffsetDateTime::UNIX_EPOCH,
             five_hour: None,
@@ -1348,6 +1353,7 @@ mod tests {
         let id = Uuid::new_v4();
         let mut list = sample_list(id, false);
         list.accounts[0].usage = Some(AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: OffsetDateTime::UNIX_EPOCH,
             five_hour: None,

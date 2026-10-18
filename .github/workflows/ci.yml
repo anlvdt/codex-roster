@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - main
+  # Lets a maintainer re-run the suite on demand (`gh workflow run ci.yml`).
+  workflow_dispatch:
   # New advisories appear without any code change, so re-audit weekly.
   schedule:
     - cron: "17 6 * * 1"

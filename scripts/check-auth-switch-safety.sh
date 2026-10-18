@@ -68,14 +68,40 @@ if grep -F -q 'refresh_snapshot_if_access_token_stale(&snapshot)' <<<"$activatio
 fi
 
 # prove_saved_session_refresh exchanges single-use RTs. It may live only in
-# src/usage.rs (definition + unit tests). Any call site elsewhere is a footgun.
+# src/usage.rs (definition + unit tests), plus exactly one call site: the
+# explicit `dead-accounts --deep` check. That path is user-invoked, skips the
+# live account, and persists the rotated snapshot immediately; every other call
+# site (and any background sweep) is still a footgun.
 while IFS= read -r match; do
   file="${match%%:*}"
-  if [[ "$file" != "$root_dir/src/usage.rs" ]]; then
-    echo "prove_saved_session_refresh must stay confined to src/usage.rs; found: $match" >&2
-    exit 1
-  fi
+  case "$file" in
+    "$root_dir/src/usage.rs"|"$root_dir/src/app/service.rs") continue ;;
+    *)
+      echo "prove_saved_session_refresh must stay confined to src/usage.rs; found: $match" >&2
+      exit 1
+      ;;
+  esac
 done < <(grep -R -n -F --include='*.rs' 'prove_saved_session_refresh(' "$root_dir/src" || true)
+
+service_file="$root_dir/src/app/service.rs"
+service_calls=$(grep -c -F 'prove_saved_session_refresh(' "$service_file" || true)
+deep_calls=$(awk '/fn deep_check_inactive_accounts/,/^    \}$/' "$service_file" \
+  | grep -c -F 'prove_saved_session_refresh(' || true)
+if [[ "$service_calls" != "1" || "$deep_calls" != "1" ]]; then
+  echo "prove_saved_session_refresh may only be called from deep_check_inactive_accounts (found $service_calls call(s) in service.rs, $deep_calls inside the deep-check function)." >&2
+  exit 1
+fi
+
+# The deep check must be reachable only when the caller asked for it.
+deep_invocations=$(grep -c -F 'self.deep_check_inactive_accounts()' "$service_file" || true)
+if [[ "$deep_invocations" != "1" ]]; then
+  echo "deep_check_inactive_accounts must have exactly one call site (found $deep_invocations)." >&2
+  exit 1
+fi
+if ! grep -B 3 -F 'self.deep_check_inactive_accounts()' "$service_file" | grep -F -q 'if deep {'; then
+  echo "deep_check_inactive_accounts must be gated behind `if deep {` so it never runs in a background path." >&2
+  exit 1
+fi
 
 if grep -F -A 2 'UsageSource::SavedAccessToken,' \
   "$root_dir/src/app/service.rs" | grep -F -q 'true'; then

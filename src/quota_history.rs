@@ -178,6 +178,7 @@ mod tests {
 
     fn usage(five: u8, week: u8) -> AccountUsageView {
         AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::LiveAccessToken,
             fetched_at: OffsetDateTime::now_utc(),
             five_hour: Some(UsageWindowView {

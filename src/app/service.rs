@@ -8,18 +8,19 @@ use crate::backup::{read_encrypted, write_encrypted};
 use crate::codex;
 use crate::env::AppEnv;
 use crate::model::{
-    AccountUsageView, AccountView, ActivateOutput, AutoSwitchOutput, DeleteOutput, DisplayIdentity,
-    LegacyRecoveryOutput, ListOutput, RunningCodexProcess, SaveAction, SaveOutput,
-    SavedAccountMetadata, SnapshotBlob, StatusOutput, TokenUsageSummaryOutput, UsageOutput,
-    UsageSource, UsageWindowView,
+    AccountUsageView, AccountView, ActivateOutput, AutoSwitchOutput, DeadAccountEntry,
+    DeadAccountReport, DeleteOutput, DisplayIdentity, LegacyRecoveryOutput, ListOutput,
+    RunningCodexProcess, SaveAction, SaveOutput, SavedAccountMetadata, SnapshotBlob, StatusOutput,
+    TokenUsageSummaryOutput, UsageOutput, UsageSource, UsageWindowView,
 };
 use crate::operation_lock::{AuthLock, AutoSwitchLock, OperationLock};
 use crate::repository::SnapshotRepository;
 use crate::secrets::SecretStore;
 use crate::settings::{load_settings, save_settings};
 use crate::usage::{
-    FetchUsageError, fetch_usage, usage_error_blocks_activation,
-    usage_error_is_deferred_access_token_refresh, usage_error_message, usage_target_from_snapshot,
+    FetchUsageError, fetch_usage, usage_error_account_deactivated, usage_error_blocks_activation,
+    usage_error_is_deferred_access_token_refresh, usage_error_message, usage_error_requires_login,
+    usage_target_from_snapshot,
 };
 
 const ALLOW_LIVE_TOKEN_REFRESH: bool = false;
@@ -806,6 +807,98 @@ where
             imported_accounts,
             skipped_accounts,
         })
+    }
+
+    /// Read-only report of saved accounts that are dead or look dead.
+    ///
+    /// Nothing is removed: the report carries the exact `archive`/`delete`
+    /// commands so the user decides. A missing 5h/7d window is deliberately NOT
+    /// evidence — Free/Go accounts only carry a monthly limit, so they report no
+    /// weekly window by design.
+    pub fn dead_accounts(&self, stale_days: i64, deep: bool) -> Result<DeadAccountReport> {
+        let (deep_checked, deep_alive) = if deep {
+            self.deep_check_inactive_accounts()?
+        } else {
+            (0, 0)
+        };
+        let now = OffsetDateTime::now_utc();
+        let mut confirmed = Vec::new();
+        let mut grant_rejected = Vec::new();
+        let mut suspects = Vec::new();
+        for account in self.list()?.accounts {
+            let Some((reason, detail)) = classify_dead_account(&account, now, stale_days) else {
+                continue;
+            };
+            let entry = dead_account_entry(account, reason, detail);
+            match reason {
+                DeadAccountReason::Deactivated => confirmed.push(entry),
+                DeadAccountReason::GrantRejected => grant_rejected.push(entry),
+                DeadAccountReason::StaleAuthFailure => suspects.push(entry),
+            }
+        }
+        Ok(DeadAccountReport {
+            generated_at: now,
+            stale_after_days: stale_days,
+            deep_checked,
+            deep_alive,
+            confirmed,
+            grant_rejected,
+            suspects,
+            note: DEAD_ACCOUNT_NOTE.to_owned(),
+        })
+    }
+
+    /// Exchange each inactive account's refresh token once to learn whether its
+    /// grant still exists. Returns `(checked, alive)`.
+    ///
+    /// This is the only way to tell a deactivated account from one that merely
+    /// has not been used for a while. It **consumes the rotating refresh token**,
+    /// so it is explicit (`--deep`), never runs in a background sweep, and the
+    /// rotated snapshot is persisted immediately so a live grant is never lost.
+    /// The account currently live in `~/.codex` is skipped: Codex owns that
+    /// refresh token and rotating it would force a re-login.
+    fn deep_check_inactive_accounts(&self) -> Result<(usize, usize)> {
+        let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
+        let active_id = self.live_saved_account_id()?;
+        let accounts = self.repository.list_accounts(&self.env.kind)?;
+        let mut checked = 0;
+        let mut alive = 0;
+        for account in accounts {
+            // Never touch the live account: Codex owns that refresh token.
+            if account.archived || active_id == Some(account.id) {
+                continue;
+            }
+            let Ok((metadata, snapshot)) =
+                self.repository.load_snapshot(&self.env.kind, account.id)
+            else {
+                continue;
+            };
+            checked += 1;
+            match crate::usage::prove_saved_session_refresh(&snapshot) {
+                Ok(refreshed) => {
+                    // Persist the rotated tokens before anything else: the old
+                    // refresh token is already spent, so dropping the new one
+                    // would strand the account.
+                    let identity = saved_identity(&metadata);
+                    self.repository
+                        .save_snapshot(&self.env.kind, &identity, &refreshed)?;
+                    self.repository.record_usage_error(
+                        &self.env.kind,
+                        account.id,
+                        String::new(),
+                    )?;
+                    alive += 1;
+                }
+                Err(error) => {
+                    let _ = self.repository.record_usage_error(
+                        &self.env.kind,
+                        account.id,
+                        usage_error_message(&error),
+                    );
+                }
+            }
+        }
+        Ok((checked, alive))
     }
 
     pub fn list(&self) -> Result<ListOutput> {
@@ -1916,6 +2009,101 @@ const CREDITS_FRESH_MINUTES: i64 = 30;
 /// True when the account has spendable credits **and** that observation is
 /// recent. Without the age gate a weeks-old `has_credits: true` would suppress
 /// auto-switch forever and make a dead account look usable (review finding 3).
+/// What is deliberately *not* evidence that an account is dead: a missing
+/// 5-hour or weekly window. Free/Go plans have no 7-day limit and only a monthly
+/// one, so their primary window is monthly and `weekly` is legitimately absent.
+pub const DEAD_ACCOUNT_NOTE: &str = "Missing 5h/7d windows are NOT evidence of a dead account: Free/Go plans have no weekly limit and only a monthly one. Only an explicit account_deactivated error is proof.";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeadAccountReason {
+    /// OpenAI explicitly reported the account as deleted/deactivated.
+    Deactivated,
+    /// The refresh token was rejected (`invalid_grant`, session ended): the saved
+    /// grant is dead and only a fresh login can revive it.
+    GrantRejected,
+    /// Auth keeps failing and nothing has been fetched for a long time.
+    StaleAuthFailure,
+}
+
+impl DeadAccountReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Deactivated => "account_deactivated",
+            Self::GrantRejected => "grant_rejected",
+            Self::StaleAuthFailure => "auth_failure_stale",
+        }
+    }
+}
+
+fn classify_dead_account(
+    account: &AccountView,
+    now: OffsetDateTime,
+    stale_days: i64,
+) -> Option<(DeadAccountReason, String)> {
+    if account.archived {
+        return None;
+    }
+    let error = account.usage_error.as_deref().unwrap_or("");
+    if error.is_empty() {
+        return None;
+    }
+    if usage_error_account_deactivated(error) {
+        return Some((DeadAccountReason::Deactivated, error.to_owned()));
+    }
+    // A rejected refresh token is authoritative: the grant is gone.
+    if usage_error_requires_login(error) {
+        return Some((DeadAccountReason::GrantRejected, error.to_owned()));
+    }
+    // A deferred access-token failure is only a hint, and only when the account
+    // has produced nothing for a while. A window that is merely absent never
+    // qualifies (Free/Go have no weekly window by design).
+    if !usage_error_is_deferred_access_token_refresh(error) {
+        return None;
+    }
+    match account.usage.as_ref().map(|usage| now - usage.fetched_at) {
+        None => Some((
+            DeadAccountReason::StaleAuthFailure,
+            "no usage was ever fetched for this account".to_owned(),
+        )),
+        Some(age) if age >= time::Duration::days(stale_days.max(1)) => Some((
+            DeadAccountReason::StaleAuthFailure,
+            format!(
+                "auth has been failing for {} day(s) (last successful fetch: {})",
+                age.whole_days(),
+                account
+                    .usage
+                    .as_ref()
+                    .map(|usage| usage.fetched_at.date().to_string())
+                    .unwrap_or_else(|| "never".to_owned())
+            ),
+        )),
+        Some(_) => None,
+    }
+}
+
+fn dead_account_entry(
+    account: AccountView,
+    reason: DeadAccountReason,
+    detail: String,
+) -> DeadAccountEntry {
+    let account_id = account.id;
+    DeadAccountEntry {
+        account_id,
+        name: account.name.clone(),
+        email: account.email.clone(),
+        plan_label: account.plan_label.clone(),
+        archived: account.archived,
+        is_active: account.is_active,
+        reason: reason.as_str().to_owned(),
+        detail,
+        last_usage_at: account.usage.as_ref().map(|usage| usage.fetched_at),
+        suggested_commands: vec![
+            format!("codex-roster archive {account_id}"),
+            format!("codex-roster delete {account_id}"),
+        ],
+    }
+}
+
 fn has_usable_credits(usage: Option<&AccountUsageView>, now: OffsetDateTime) -> bool {
     let Some(usage) = usage else {
         return false;
@@ -2714,6 +2902,7 @@ mod tests {
         // Fresh cached quota would normally skip, but the regression forced a
         // reprove for deferred accounts even then — ensure that path is gone.
         let fresh_usage = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: OffsetDateTime::now_utc(),
             five_hour: Some(UsageWindowView {
@@ -2827,6 +3016,7 @@ mod tests {
         fetched_minutes_ago: i64,
     ) -> AccountUsageView {
         AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::LiveAccessToken,
             fetched_at: OffsetDateTime::now_utc() - time::Duration::minutes(fetched_minutes_ago),
             five_hour_known: five.is_some(),
@@ -2904,6 +3094,7 @@ mod tests {
     #[test]
     fn auto_switch_requires_every_reported_window_to_be_usable() {
         let usage = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: OffsetDateTime::now_utc(),
             five_hour: Some(UsageWindowView {
@@ -2934,6 +3125,7 @@ mod tests {
     fn auto_switch_weekly_depleted_blocks_leftover_five_hour() {
         let now = OffsetDateTime::now_utc();
         let weekly_dead = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(UsageWindowView {
@@ -3046,6 +3238,109 @@ mod tests {
             balance: balance.to_owned(),
             credit_limit: None,
         }
+    }
+
+    fn dead_candidate(
+        email: &str,
+        plan: &str,
+        error: &str,
+        usage: Option<AccountUsageView>,
+    ) -> AccountView {
+        let now = OffsetDateTime::now_utc();
+        AccountView {
+            id: Uuid::new_v4(),
+            provider: crate::model::AiProvider::OpenAi,
+            email: email.to_owned(),
+            subject: None,
+            name: None,
+            custom_label: None,
+            plan_label: Some(plan.to_owned()),
+            environment: EnvironmentKind::Linux,
+            is_active: false,
+            created_at: now,
+            updated_at: now,
+            last_activated_at: None,
+            archived: false,
+            usage,
+            usage_error: if error.is_empty() {
+                None
+            } else {
+                Some(error.to_owned())
+            },
+        }
+    }
+
+    #[test]
+    fn a_deactivated_account_is_confirmed_while_a_stale_auth_failure_is_only_a_suspect() {
+        let now = OffsetDateTime::now_utc();
+        // Authoritative: OpenAI said the account is gone.
+        let deactivated = dead_candidate(
+            "gone@example.com",
+            "K12",
+            "Account deactivated [account_deactivated]: OpenAI reports this account was deleted or deactivated",
+            None,
+        );
+        assert_eq!(
+            classify_dead_account(&deactivated, now, 14).map(|(reason, _)| reason),
+            Some(DeadAccountReason::Deactivated)
+        );
+
+        // Corroborating only: auth keeps failing and nothing was ever fetched.
+        let stale = dead_candidate(
+            "stale@example.com",
+            "Free",
+            "Usage unavailable [access_token_unauthorized]: OpenAI rejected the current access token, but the saved refresh token was not proven invalid.",
+            None,
+        );
+        assert_eq!(
+            classify_dead_account(&stale, now, 14).map(|(reason, _)| reason),
+            Some(DeadAccountReason::StaleAuthFailure)
+        );
+
+        // Same error but a recent successful fetch: still healthy, not a suspect.
+        let healthy = dead_candidate(
+            "healthy@example.com",
+            "Free",
+            "Usage unavailable [access_token_unauthorized]: OpenAI rejected the current access token, but the saved refresh token was not proven invalid.",
+            Some(usage_with(None, None, None, 5)),
+        );
+        assert!(classify_dead_account(&healthy, now, 14).is_none());
+
+        // Archived accounts are already out of the way.
+        let mut archived = stale.clone();
+        archived.archived = true;
+        assert!(classify_dead_account(&archived, now, 14).is_none());
+    }
+
+    #[test]
+    fn a_free_go_account_with_only_a_monthly_window_is_never_flagged() {
+        let now = OffsetDateTime::now_utc();
+        // Free/Go plans have no weekly limit and only a monthly one, so the
+        // primary window arrives as `five_hour` with a reset a month out and
+        // `weekly` is absent. That must not look like a dead account.
+        let free = dead_candidate(
+            "free@example.com",
+            "Free",
+            "",
+            Some(usage_with(
+                Some(window_view(0, 60 * 24 * 30)),
+                None,
+                None,
+                3,
+            )),
+        );
+        assert!(
+            classify_dead_account(&free, now, 14).is_none(),
+            "a Free account with only a monthly window and no error must not be flagged"
+        );
+        // And with an auth error but a fresh monthly fetch, it is still healthy.
+        let mut errored = free.clone();
+        errored.usage_error = Some(
+            "Usage unavailable [access_token_unauthorized]: OpenAI rejected the current access token"
+                .to_owned(),
+        );
+        assert!(classify_dead_account(&errored, now, 14).is_none());
+        assert!(DEAD_ACCOUNT_NOTE.contains("Free/Go"));
     }
 
     #[test]
@@ -3402,6 +3697,7 @@ mod tests {
     fn auto_switch_uses_usage_plan_not_stale_roster_label() {
         let now = OffsetDateTime::now_utc();
         let usage = |plan: Option<&str>| AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(UsageWindowView {
@@ -3469,6 +3765,7 @@ mod tests {
     fn auto_switch_treats_credits_as_remaining_quota() {
         let now = OffsetDateTime::now_utc();
         let usage = |remaining: u8, credits: Option<crate::model::CreditsView>| AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(UsageWindowView {
@@ -3539,6 +3836,7 @@ mod tests {
         // another request.
         let now = OffsetDateTime::now_utc();
         let depleted = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(UsageWindowView {
@@ -3575,6 +3873,7 @@ mod tests {
     fn auto_switch_reports_banked_resets_without_treating_them_as_spendable_quota() {
         let now = OffsetDateTime::now_utc();
         let usage = |plan: &str, reset_count: i64| AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(UsageWindowView {
@@ -3659,6 +3958,7 @@ mod tests {
             last_activated_at: None,
             archived: false,
             usage: Some(AccountUsageView {
+                primary_window_kind: None,
                 source: UsageSource::SavedAccessToken,
                 fetched_at: now,
                 five_hour: Some(window(remaining)),
@@ -3708,6 +4008,7 @@ mod tests {
             reset_at: now + time::Duration::hours(5),
         };
         let exhausted_usage = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(window(0)),
@@ -3774,6 +4075,7 @@ mod tests {
             reset_at: now + time::Duration::hours(5),
         };
         let recent_exhausted = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now - time::Duration::minutes(2),
             five_hour: Some(window(0)),
@@ -3791,6 +4093,7 @@ mod tests {
             ..recent_exhausted.clone()
         };
         let usable = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now - time::Duration::minutes(2),
             five_hour: Some(window(40)),
@@ -3831,6 +4134,7 @@ mod tests {
         let repo = SnapshotRepository::new(&env.app_data_dir, MemorySecretStore::default());
         let now = OffsetDateTime::now_utc();
         let exhausted_usage = |minutes_ago: i64| AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now - time::Duration::minutes(minutes_ago),
             five_hour: Some(UsageWindowView {
@@ -4040,6 +4344,7 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
         };
         let exhausted_usage = |fetched_at: OffsetDateTime| AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::LiveAccessToken,
             fetched_at,
             five_hour: Some(UsageWindowView {
@@ -4419,6 +4724,7 @@ mod tests {
             reset_at: now + time::Duration::hours(5),
         };
         let usable = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(window(40)),
@@ -4455,6 +4761,7 @@ mod tests {
         active.is_active = true;
         active.usage_error = None;
         active.usage = Some(AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(window(0)),
@@ -4505,6 +4812,7 @@ mod tests {
             reset_at: now + time::Duration::hours(5),
         };
         let usable = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(window(40)),
@@ -4540,6 +4848,7 @@ mod tests {
         active.subject = Some("subject-active".to_owned());
         active.is_active = true;
         active.usage = Some(AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(window(0)),
@@ -4561,6 +4870,7 @@ mod tests {
         let mut free = candidate.clone();
         free.plan_label = Some("Free".to_owned());
         free.usage = Some(AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(window(40)),
@@ -4580,6 +4890,7 @@ mod tests {
         // Stale cache must fall through to a live AT probe.
         let mut stale = candidate.clone();
         stale.usage = Some(AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now - time::Duration::minutes(20),
             five_hour: Some(window(40)),
@@ -4621,6 +4932,7 @@ mod tests {
             last_activated_at: None,
             archived: false,
             usage: Some(AccountUsageView {
+                primary_window_kind: None,
                 source: UsageSource::SavedAccessToken,
                 fetched_at: now,
                 five_hour: Some(window(remaining)),
@@ -4700,6 +5012,7 @@ mod tests {
                 last_activated_at: None,
                 archived: false,
                 usage: Some(AccountUsageView {
+                    primary_window_kind: None,
                     source: UsageSource::SavedAccessToken,
                     fetched_at: now,
                     five_hour: Some(window(remaining)),
@@ -4827,6 +5140,7 @@ mod tests {
     fn cached_exhausted_usage_is_stale_once_the_window_resets() {
         let now = OffsetDateTime::now_utc();
         let usage = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(UsageWindowView {
@@ -4853,6 +5167,7 @@ mod tests {
         // exhausted window must be refetched, not trusted until its old reset_at.
         let now = OffsetDateTime::now_utc();
         let usage = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(UsageWindowView {
@@ -4877,6 +5192,7 @@ mod tests {
     fn cached_usage_with_quota_stays_fresh_within_window() {
         let now = OffsetDateTime::now_utc();
         let usage = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now - time::Duration::minutes(5),
             five_hour: Some(UsageWindowView {
@@ -4975,6 +5291,7 @@ mod tests {
                 files: vec![],
             },
             Some(AccountUsageView {
+                primary_window_kind: None,
                 source: UsageSource::SavedAccessToken,
                 fetched_at: OffsetDateTime::UNIX_EPOCH,
                 five_hour: None,
@@ -5040,6 +5357,7 @@ mod tests {
             &identity,
             &snapshot,
             Some(AccountUsageView {
+                primary_window_kind: None,
                 source: UsageSource::SavedAccessToken,
                 fetched_at: OffsetDateTime::UNIX_EPOCH,
                 five_hour: None,

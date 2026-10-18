@@ -67,6 +67,55 @@ enum ResetClockFormat {
         return countdownLabel(date, language: language)
     }
 
+    /// Hour without minutes, e.g. "6 PM" (en) / "18 giờ" (vi).
+    ///
+    /// `Date.FormatStyle(date: .omitted, time: .shortened).hour()` looks like it
+    /// drops minutes but keeps them ("6:03 PM"): the `.shortened` time style sets
+    /// the minute field, and `.hour()` only adds the hour. A default style with
+    /// `.hour()` really is hour-only.
+    private static func hourOnly(_ date: Date, language: AppLanguage) -> String {
+        date.formatted(
+            Date.FormatStyle(date: .omitted, time: .omitted)
+                .hour(.defaultDigits(amPM: .abbreviated))
+                .locale(language.locale)
+        )
+    }
+
+    /// Shorter label for the fixed-width notch ears (146pt total, ~126pt of
+    /// content). Minutes are noise once the reset is more than a day away, so
+    /// drop them: "Sun 6:00 AM" -> "Sun 6 PM". Without this the weekly label was
+    /// clipped to "Sun 6:00 A".
+    static func earCompact(_ date: Date, asClock: Bool, language: AppLanguage) -> String {
+        guard asClock else {
+            return compact(date, asClock: false, language: language)
+        }
+        let calendar = Calendar.current
+        let isNear = calendar.isDateInToday(date) || calendar.isDateInTomorrow(date)
+        guard !isNear, date.timeIntervalSinceNow > 24 * 3600 else {
+            return compact(date, asClock: true, language: language)
+        }
+        let weekday = date.formatted(
+            Date.FormatStyle().weekday(.abbreviated).locale(language.locale)
+        )
+        return "\(weekday) \(hourOnly(date, language: language))"
+    }
+
+    /// Last-resort label for the ears: the hour alone for a reset within a day,
+    /// otherwise the weekday alone. Used by `ViewThatFits` when even the short
+    /// form does not fit the 146pt ear.
+    static func minimal(_ date: Date, asClock: Bool, language: AppLanguage) -> String {
+        guard asClock else {
+            return compact(date, asClock: false, language: language)
+        }
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) || calendar.isDateInTomorrow(date) {
+            return hourOnly(date, language: language)
+        }
+        return date.formatted(
+            Date.FormatStyle().weekday(.abbreviated).locale(language.locale)
+        )
+    }
+
     private static func countdownLabel(_ date: Date, language: AppLanguage) -> String {
         let diff = date.timeIntervalSince(Date())
         guard diff > 0 else {

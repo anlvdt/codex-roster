@@ -331,6 +331,75 @@ pub struct AccountView {
     pub usage_error: Option<String>,
 }
 
+/// One account proposed for removal by `dead-accounts`.
+impl AccountUsageView {
+    /// Short label for the API's *primary* rate-limit window. It is a 5-hour
+    /// window on Plus/Pro, but Free/Go plans have no weekly limit and only a
+    /// monthly one, so calling that window "5h" was wrong.
+    pub fn primary_window_label(&self) -> &'static str {
+        if let Some(kind) = self.primary_window_kind.as_deref() {
+            return match kind {
+                "monthly" => "monthly",
+                "weekly" => "weekly",
+                _ => "5h",
+            };
+        }
+        // Caches written before this field existed carry no kind, so derive it
+        // from the window's own span instead of mislabelling it "5h".
+        match self.five_hour.as_ref() {
+            Some(window) if window.reset_at - self.fetched_at > time::Duration::days(8) => {
+                "monthly"
+            }
+            Some(window) if window.reset_at - self.fetched_at > time::Duration::hours(6) => {
+                "weekly"
+            }
+            _ => "5h",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DeadAccountEntry {
+    pub account_id: Uuid,
+    pub name: Option<String>,
+    pub email: String,
+    pub plan_label: Option<String>,
+    pub archived: bool,
+    pub is_active: bool,
+    /// `account_deactivated` (OpenAI said the account is gone) or
+    /// `auth_failure_stale` (keeps failing auth with nothing fetched for a while).
+    pub reason: String,
+    pub detail: String,
+    #[serde(with = "time_compat::option")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_usage_at: Option<OffsetDateTime>,
+    /// Commands the user can run. This report never removes anything itself.
+    pub suggested_commands: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DeadAccountReport {
+    #[serde(with = "time_compat")]
+    pub generated_at: OffsetDateTime,
+    pub stale_after_days: i64,
+    /// How many inactive accounts had their refresh token exchanged in this run
+    /// (0 for the default read-only report).
+    pub deep_checked: usize,
+    /// Of those, how many still had a live grant (their error was cleared).
+    pub deep_alive: usize,
+    /// OpenAI explicitly reported these as deleted/deactivated.
+    pub confirmed: Vec<DeadAccountEntry>,
+    /// The saved grant is dead: OpenAI rejected the refresh token, so this
+    /// snapshot can never sign in again without a fresh login.
+    pub grant_rejected: Vec<DeadAccountEntry>,
+    /// Corroborating evidence only: auth keeps failing and nothing was fetched
+    /// for `stale_after_days`. Never proof on its own.
+    pub suspects: Vec<DeadAccountEntry>,
+    /// Explains what is *not* treated as evidence, so a Free/Go account with only
+    /// a monthly limit is never mistaken for a dead one.
+    pub note: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct StatusOutput {
     pub environment: EnvironmentKind,
@@ -639,6 +708,12 @@ pub struct AccountUsageView {
     /// GPT-5.6 Luna reserve pool after primary model exhaustion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub luna_reserve: Option<LunaReserveView>,
+    /// What the API's *primary* rate-limit window actually is, derived from its
+    /// span: `five_hour`, `weekly` or `monthly`. Plus/Pro expose a 5-hour window;
+    /// Free/Go have no weekly limit and only a monthly one, so labelling their
+    /// window "5h" was wrong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_window_kind: Option<String>,
     /// Whether the 5-hour window was present and parsable in the source payload.
     /// Missing fields deserialize as false so old caches force a refetch.
     #[serde(default)]

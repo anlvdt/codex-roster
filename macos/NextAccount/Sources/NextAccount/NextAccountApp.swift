@@ -314,6 +314,9 @@ enum NextAction {
     case signIn([SavedAccount])
     case recover(SavedAccount)
     case retryQuota([SavedAccount])
+    /// The active window is forecast to empty before it resets, and a ready
+    /// account can take over (audit F wave 2).
+    case switchBeforeDry(SavedAccount)
     case allClear(SavedAccount?)
 
     /// Ops drops the banner entirely when nothing needs the user.
@@ -347,6 +350,22 @@ enum NextAction {
         if !signIn.isEmpty { return .signIn(signIn) }
         if let account = recovery.first { return .recover(account) }
         if !transient.isEmpty { return .retryQuota(transient) }
+        // Proactive hint: act before the user hits a wall. Only fires when the
+        // forecast has a real estimate and a ready account exists.
+        if let active,
+           let candidate = ready.first,
+           let forecast = store.quotaForecast?.fiveHour,
+           // A low-confidence estimate (few samples, erratic burn) must not
+           // trigger a suggestion; the runway bar treats it the same way.
+           forecast.confidence != "low",
+           let timeToEmpty = forecast.timeToEmptyMinutes,
+           let resetAt = active.usage?.fiveHour?.resetAt.value
+        {
+            let minutesUntilReset = resetAt.timeIntervalSinceNow / 60
+            if minutesUntilReset > 0, timeToEmpty < minutesUntilReset {
+                return .switchBeforeDry(candidate)
+            }
+        }
         return .allClear(active)
     }
 
@@ -380,6 +399,8 @@ enum NextAction {
             language.text("Khôi phục \(account.displayName)", "Recover \(account.displayName)")
         case .retryQuota(let accounts):
             language.text("Thử lại quota cho \(accounts.count) tài khoản", "Retry quota for \(accounts.count) accounts")
+        case .switchBeforeDry(let account):
+            language.text("Sắp cạn trước khi reset — chuyển sang \(account.displayName)", "Runs dry before reset — switch to \(account.displayName)")
         case .allClear(let active):
             active.map { language.text("Đang dùng \($0.displayName)", "Running on \($0.displayName)") }
                 ?? language.text("Mọi thứ ổn", "Everything is ready")
@@ -424,6 +445,11 @@ enum NextAction {
                 "Không lấy được quota — thường là mạng chập chờn, thử lại là đủ.",
                 "Quota could not be fetched — usually a flaky network; a retry is enough."
             )
+        case .switchBeforeDry(let account):
+            language.text(
+                "Dự báo cửa sổ 5 giờ hiện tại cạn trước khi reset. \(account.displayName) còn \(Self.quotaSummary(account, language: language)).",
+                "The current 5-hour window is forecast to empty before it resets. \(account.displayName) has \(Self.quotaSummary(account, language: language))."
+            )
         case .allClear(let active):
             if let active {
                 language.text(
@@ -452,6 +478,8 @@ enum NextAction {
         case .redeemBankedReset(let account):
             let count = account.bankedResetCount
             return "\(head) · ×\(count)"
+        case .switchBeforeDry(let account):
+            return "\(head) · \(Self.quotaSummary(account, language: language))"
         default:
             return head
         }
@@ -526,6 +554,7 @@ struct NextActionBanner: View {
         case .signIn: "person.crop.circle.badge.exclamationmark"
         case .recover: "externaldrive.badge.exclamationmark"
         case .retryQuota: "wifi.exclamationmark"
+        case .switchBeforeDry: "clock.badge.exclamationmark"
         case .allClear: "checkmark.seal.fill"
         }
     }
@@ -538,6 +567,7 @@ struct NextActionBanner: View {
         case .signIn: .orange
         case .recover: .red
         case .retryQuota: .orange
+        case .switchBeforeDry: .orange
         case .allClear: .green
         }
     }
@@ -551,7 +581,7 @@ struct NextActionBanner: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(store.isWorking)
-        case .switchTo(let account), .redeemBankedReset(let account):
+        case .switchTo(let account), .redeemBankedReset(let account), .switchBeforeDry(let account):
             Button(language.text("Chuyển", "Switch")) {
                 store.activate(account, force: true)
             }

@@ -1,6 +1,5 @@
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
-use std::process::Command as ProcessCommand;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -266,6 +265,16 @@ enum Command {
         #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Reclaim space from data left behind by removed features (dry-run by default).
+    Cleanup {
+        #[arg(
+            long,
+            help = "Delete the listed directories instead of only reporting them"
+        )]
+        apply: bool,
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+    },
     /// Report local diagnostics (paths, keys, locks, ports) for support.
     Doctor {
         #[arg(long, help = "Print machine-readable JSON")]
@@ -427,6 +436,14 @@ pub const CONTRACT_VERSION: u32 = 1;
 pub fn classify_error(error: &anyhow::Error) -> (u8, &'static str, Option<String>) {
     let message = format!("{error:#}");
     let lowered = message.to_ascii_lowercase();
+    if lowered.contains("invalid value")
+        || lowered.contains("unexpected argument")
+        || lowered.contains("unrecognized subcommand")
+        || lowered.contains("invalid subcommand")
+        || lowered.contains("a value is required")
+    {
+        return (2, "usage", None);
+    }
     if lowered.contains("requires account_id")
         || lowered.contains("is required when stdin")
         || lowered.contains("no command given and stdin is not a terminal")
@@ -486,7 +503,22 @@ pub fn classify_error(error: &anyhow::Error) -> (u8, &'static str, Option<String
 }
 
 pub fn run() -> Result<()> {
-    let cli = Cli::parse();
+    // `parse()` exits the process on bad input, which would bypass the JSON
+    // error envelope that `--json` callers rely on. Help/version still print
+    // normally and exit 0.
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            use clap::error::ErrorKind;
+            if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) {
+                error.exit();
+            }
+            return Err(anyhow::anyhow!(error.render().to_string()));
+        }
+    };
     let env = env::detect()?;
     let repository = SnapshotRepository::new(
         &env.app_data_dir,
@@ -813,14 +845,40 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         Some(Command::AddAccountStatus { json }) => {
+            let active = app.add_account_session_active();
+            let auth_changed = app.add_account_session_auth_changed()?;
+            // Say what to do next, not just whether a marker file exists
+            // (audit A3).
             let output = serde_json::json!({
-                "active": app.add_account_session_active(),
-                "auth_changed": app.add_account_session_auth_changed()?,
+                "active": active,
+                "auth_changed": auth_changed,
+                "state": if active { "pending" } else { "none" },
+                "codex_root": app.env().codex_root.display().to_string(),
+                "hint": if active {
+                    "Finish the browser login, then run `codex-roster save-added-account`."
+                } else {
+                    "Start one with `codex-roster begin-add-account`."
+                },
             });
             if json {
                 print_json(&output)?;
+            } else if active {
+                println!(
+                    "Add account session: pending login in {}",
+                    app.env().codex_root.display()
+                );
+                println!(
+                    "Credentials changed: {}",
+                    if auth_changed {
+                        "yes (ready to save)"
+                    } else {
+                        "not yet"
+                    }
+                );
+                println!("Finish the browser login, then run `codex-roster save-added-account`.");
             } else {
-                println!("Add account session: {}", output["active"]);
+                println!("Add account session: none");
+                println!("Start one with `codex-roster begin-add-account`.");
             }
             Ok(())
         }
@@ -930,6 +988,18 @@ pub fn run() -> Result<()> {
             let output = match account_id {
                 Some(account_id) => app.delete(account_id)?,
                 None => {
+                    // Same contract as `activate`: a JSON caller must never end
+                    // up in the interactive menu, and a non-TTY must get an
+                    // actionable hint instead of dialoguer's opaque error
+                    // (review finding 5).
+                    if json {
+                        bail!(
+                            "--json requires ACCOUNT_ID; run `codex-roster list --json` to find ids"
+                        );
+                    }
+                    if !std::io::stdin().is_terminal() {
+                        bail!("ACCOUNT_ID is required when stdin is not a terminal");
+                    }
                     let _ = app.interactive(InteractiveMode::DeleteOnce, false)?;
                     return Ok(());
                 }
@@ -1220,7 +1290,10 @@ pub fn run() -> Result<()> {
         Some(Command::ResetEvents { json }) => {
             let events = crate::reset_tracker::fetch_new_reset_events(&app.env().app_data_dir)?;
             if json {
-                print_json(&events)?;
+                // Wrapped in an object: `print_json` can only attach
+                // `contract_version` to an object, and a bare array left this
+                // one command unversioned (contract v2).
+                print_json(&serde_json::json!({ "events": events }))?;
             } else if events.is_empty() {
                 println!("No new verified global resets.");
             } else {
@@ -1310,6 +1383,45 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::Cleanup { apply, json }) => {
+            let report = collect_cleanup_report(&app.env().app_data_dir, apply);
+            if json {
+                print_json(&report)?;
+            } else {
+                if report.candidates.is_empty() {
+                    println!("Nothing to clean in {}.", app.env().app_data_dir.display());
+                } else {
+                    for candidate in &report.candidates {
+                        println!(
+                            "  {:>8}  {}{}",
+                            human_bytes(candidate.bytes),
+                            candidate.path,
+                            if candidate.removed == Some(true) {
+                                "  (removed)"
+                            } else {
+                                ""
+                            }
+                        );
+                    }
+                    println!(
+                        "{}: {} across {} item(s).",
+                        if apply { "Removed" } else { "Reclaimable" },
+                        human_bytes(report.reclaimable_bytes),
+                        report.candidates.len()
+                    );
+                }
+                if !report.review_only.is_empty() {
+                    println!("Review manually (never deleted automatically):");
+                    for item in &report.review_only {
+                        println!("  {:>8}  {}", human_bytes(item.bytes), item.path);
+                    }
+                }
+                if !apply && !report.candidates.is_empty() {
+                    println!("Dry run. Re-run with --apply to delete the items above.");
+                }
+            }
+            Ok(())
+        }
         Some(Command::Doctor { json, bundle }) => {
             let output = collect_doctor_output(&app)?;
             if bundle {
@@ -1353,7 +1465,12 @@ pub fn run() -> Result<()> {
         Some(Command::Schema { command, json }) => {
             let schema = schema_document(command.as_deref());
             if json {
-                print_json(&schema)?;
+                // Wrapped in an object so `print_json` can attach
+                // `contract_version`; a bare string could not (review finding 4).
+                print_json(&serde_json::json!({
+                    "command": command,
+                    "document": schema,
+                }))?;
             } else {
                 println!("{schema}");
             }
@@ -1392,6 +1509,132 @@ fn backup_password(password_stdin: bool) -> Result<String> {
             .with_prompt("Backup password")
             .interact()
             .context("failed to read backup password")
+    }
+}
+
+/// Directories left behind by features that no longer exist in the product.
+/// Deleting them is safe, but it is still the user's data, so `cleanup` only
+/// removes them with an explicit `--apply` (audit P0-13).
+const CLEANUP_CANDIDATES: &[(&str, &str)] = &[
+    (
+        "chatgpt-web-profiles",
+        "Electron profile cache from the removed web-view feature",
+    ),
+    (
+        "codex-account-switcher-menubar",
+        "binary from the removed menu-bar prototype",
+    ),
+];
+
+/// Reported for the user to inspect, never deleted automatically: these may
+/// hold recovery points or audit history someone still wants.
+const CLEANUP_REVIEW_ONLY: &[(&str, &str)] = &[
+    (
+        "protected-recovery-points",
+        "recovery points kept by an older build",
+    ),
+    ("activity.jsonl", "activity log from an older build"),
+];
+
+fn path_bytes(path: &std::path::Path) -> u64 {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if metadata.is_file() {
+        return metadata.len();
+    }
+    if !metadata.is_dir() {
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| path_bytes(&entry.path()))
+        .sum()
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+#[derive(serde::Serialize)]
+struct CleanupItem {
+    path: String,
+    name: String,
+    bytes: u64,
+    reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    removed: Option<bool>,
+}
+
+#[derive(serde::Serialize)]
+struct CleanupReport {
+    applied: bool,
+    reclaimable_bytes: u64,
+    candidates: Vec<CleanupItem>,
+    review_only: Vec<CleanupItem>,
+}
+
+/// Build the cleanup report. `apply` deletes only the allow-listed candidates.
+fn collect_cleanup_report(app_data_dir: &std::path::Path, apply: bool) -> CleanupReport {
+    let mut candidates = Vec::new();
+    let mut reclaimable = 0u64;
+    for (name, why) in CLEANUP_CANDIDATES {
+        let path = app_data_dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let bytes = path_bytes(&path);
+        let mut removed = None;
+        if apply {
+            let deleted =
+                std::fs::remove_dir_all(&path).is_ok() || std::fs::remove_file(&path).is_ok();
+            removed = Some(deleted);
+            if deleted {
+                reclaimable += bytes;
+            }
+        } else {
+            reclaimable += bytes;
+        }
+        candidates.push(CleanupItem {
+            path: path.display().to_string(),
+            name: (*name).to_owned(),
+            bytes,
+            reason: (*why).to_owned(),
+            removed,
+        });
+    }
+    let review_only = CLEANUP_REVIEW_ONLY
+        .iter()
+        .filter_map(|(name, why)| {
+            let path = app_data_dir.join(name);
+            path.exists().then(|| CleanupItem {
+                path: path.display().to_string(),
+                name: (*name).to_owned(),
+                bytes: path_bytes(&path),
+                reason: (*why).to_owned(),
+                removed: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    CleanupReport {
+        applied: apply,
+        reclaimable_bytes: reclaimable,
+        candidates,
+        review_only,
     }
 }
 
@@ -1623,24 +1866,32 @@ where
 /// drift from the version constant it reports.
 fn schema_document(command: Option<&str>) -> String {
     let envelope = "Every --json output includes \"contract_version\": 1 (additive).\n\
-View timestamps are RFC3339 strings; stored metadata keeps the legacy array form.\n\
+View timestamps are RFC3339 strings (older array-form values are still read).\n\
 Errors print {\"contract_version\":1,\"error\":{\"code\",\"message\",\"hint\"}} to stdout.\n\
 Exit codes: 0 ok, 2 usage, 3 login/blocked, 4 lock timeout, 5 no account, 6 network, 7 keychain, 8 unsupported.";
     match command {
         None => format!(
-            "{envelope}\n\nCommands with typed JSON output: status, list, usage, refresh-usage, activate, delete, archive, export, import, restore-full-backup, auto-switch, auto-start-usage-windows, auto-resume-session, token-usage, quota-history, quota-forecast, reset-outlook, doctor."
+            "{envelope}\n\nCommands with typed JSON output: status, list, save, usage, refresh-usage, activate, delete, archive, export, import, import-json, restore-account-list-backup, restore-full-backup, create-automatic-full-backup, auto-switch, auto-start-usage-windows, auto-resume-session, token-usage, quota-history, quota-forecast, reset-outlook, reset-events, reset-timeline, open-ai-status, add-account-status, set-label, enable-luna-reserve, doctor."
         ),
         Some(name) => {
             let fields = match name {
                 "status" => {
-                    "environment, codex_root, current_account, current_account_saved_id, saved_accounts, process_warnings, vibe_usage?, codex_model?, activity?"
+                    "environment, codex_root, current_account, current_account_saved_id, saved_accounts, process_warnings, vibe_usage?, codex_model?, activity?, warnings[]"
                 }
                 "list" => {
                     "environment, accounts[] (id, email, plan_label, is_active, created_at, updated_at, usage, archived)"
                 }
                 "usage" => "account, usage (five_hour, weekly, credits, banked_resets, plan_label)",
                 "auto-switch" => {
-                    "enabled, status, active_account_id, candidate_account_id, candidate_display_name, detail, banked_reset_count, session_resume?, usage_unknown, warnings[]"
+                    "enabled, status, active_account_id, candidate_account_id, candidate_display_name, detail, banked_reset_count, session_resume?, usage_unknown, warnings[], candidate_switch_score?, next_probe_seconds?"
+                }
+                "reset-events" => "events[] (id, reset_type, announced_at, summary, audience?)",
+                "reset-timeline" => "events[] (id, announced_at, summary, audience?)",
+                "add-account-status" => "active, auth_changed, state, codex_root, hint",
+                "open-ai-status" => "indicator, description, updated_at, codex_components[]",
+                "auto-start-usage-windows" => "enabled, poll_seconds",
+                "auto-resume-session" => {
+                    "enabled (--continue-interrupted returns a SessionResumeHint: enabled, account_id, session_id, cwd, additional_sessions[])"
                 }
                 "doctor" => "version, checks[] (id, status, detail, hint?)",
                 "token-usage" => "totals, by_day, by_project",
@@ -1765,7 +2016,10 @@ fn render_account_summary(account: &AccountView) -> String {
                     );
                     line.push_str(&format!(
                         " [{label} remaining: {}%, reset {} {}]",
-                        window.remaining_percent,
+                        // Depleted windows read as 0% here, matching the app and
+                        // the TUI instead of leaking the raw 1% sentinel
+                        // (audit Q7/P0-4).
+                        crate::model::display_remaining_percent(window),
                         local.date(),
                         local.time(),
                     ));
@@ -2026,22 +2280,21 @@ fn print_token_usage_summary(output: &TokenUsageSummaryOutput) {
 }
 
 fn run_vibe_usage(command: VibeUsageCommand) -> Result<()> {
-    let mut args = vec![
-        "--yes".to_owned(),
-        crate::vibe_usage::VIBE_USAGE_NPM_SPEC.to_owned(),
-    ];
-    match command {
-        VibeUsageCommand::Init => args.push("init".to_owned()),
-        VibeUsageCommand::Sync => args.push("sync".to_owned()),
-        VibeUsageCommand::Summary { days } => {
-            args.extend(["summary".to_owned(), "--days".to_owned(), days.to_string()]);
-        }
-        VibeUsageCommand::Status => args.push("status".to_owned()),
+    // A vendored collector (CODEX_ROSTER_VIBE_USAGE_BIN) avoids the runtime
+    // `npx` download entirely; otherwise the pinned npm spec is fetched.
+    let subcommand = match command {
+        VibeUsageCommand::Init => "init",
+        VibeUsageCommand::Sync => "sync",
+        VibeUsageCommand::Summary { .. } => "summary",
+        VibeUsageCommand::Status => "status",
+    };
+    let mut process = crate::vibe_usage::collector_command(subcommand);
+    if let VibeUsageCommand::Summary { days } = command {
+        process.args(["--days", &days.to_string()]);
     }
-    let status = ProcessCommand::new("npx")
-        .args(args)
+    let status = process
         .status()
-        .context("failed to launch npx; install Node.js 20+ to use `vibe-usage`")?;
+        .context("failed to launch the VibeCafe collector; install Node.js 20+, or point CODEX_ROSTER_VIBE_USAGE_BIN at a local copy")?;
     if !status.success() {
         bail!("vibe-usage exited with status {status}");
     }
@@ -2054,13 +2307,15 @@ fn print_usage_summary(usage: &AccountUsageView) {
     if let Some(five_hour) = &usage.five_hour {
         println!(
             "5h remaining: {}% (reset {})",
-            five_hour.remaining_percent, five_hour.reset_at
+            crate::model::display_remaining_percent(five_hour),
+            five_hour.reset_at
         );
     }
     if let Some(weekly) = &usage.weekly {
         println!(
             "Weekly remaining: {}% (reset {})",
-            weekly.remaining_percent, weekly.reset_at
+            crate::model::display_remaining_percent(weekly),
+            weekly.reset_at
         );
     }
     if let Some(credits) = &usage.credits {
@@ -2170,10 +2425,62 @@ mod codex_only_cli_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{CONTRACT_VERSION, classify_error, render_account_summary, schema_document};
+    use super::{
+        CONTRACT_VERSION, classify_error, collect_cleanup_report, render_account_summary,
+        schema_document,
+    };
     use anyhow::anyhow;
     use time::OffsetDateTime;
     use uuid::Uuid;
+
+    #[test]
+    fn a_depleted_window_reads_as_zero_percent_everywhere() {
+        let now = OffsetDateTime::now_utc();
+        let account = crate::model::AccountView {
+            id: Uuid::new_v4(),
+            provider: crate::model::AiProvider::OpenAi,
+            email: "dry@example.com".to_owned(),
+            subject: None,
+            name: None,
+            custom_label: None,
+            plan_label: Some("Plus".to_owned()),
+            environment: crate::model::EnvironmentKind::Linux,
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+            last_activated_at: None,
+            archived: false,
+            usage: Some(crate::model::AccountUsageView {
+                source: crate::model::UsageSource::LiveAccessToken,
+                fetched_at: now,
+                // 1% is the "exhausted" sentinel; the CLI must not print it raw
+                // while the app shows 0% (audit Q7/P0-4).
+                five_hour: Some(crate::model::UsageWindowView {
+                    used_percent: 99,
+                    remaining_percent: 1,
+                    reset_at: now + time::Duration::hours(1),
+                }),
+                weekly: None,
+                credits: None,
+                banked_resets: None,
+                plan_label: None,
+                subscription_active_until: None,
+                luna_reserve: None,
+                five_hour_known: true,
+                weekly_known: false,
+            }),
+            usage_error: None,
+        };
+        let line = render_account_summary(&account);
+        assert!(
+            line.contains("5h remaining: 0%"),
+            "depleted windows must read 0%, got: {line}"
+        );
+        assert!(
+            !line.contains("remaining: 1%"),
+            "raw sentinel leaked: {line}"
+        );
+    }
 
     #[test]
     fn account_summary_shows_label_plan_and_state() {
@@ -2252,6 +2559,51 @@ mod tests {
         assert_eq!(classify_error(&anyhow!("the keychain key is missing")).0, 7);
         let (code, kind, _) = classify_error(&anyhow!("something unexpected"));
         assert_eq!((code, kind), (1, "error"));
+    }
+
+    #[test]
+    fn cleanup_reports_without_deleting_and_applies_only_the_allow_list() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cache = temp.path().join("chatgpt-web-profiles");
+        std::fs::create_dir_all(cache.join("nested")).expect("cache dir");
+        std::fs::write(cache.join("nested/blob"), vec![0u8; 2048]).expect("blob");
+        let keep = temp.path().join("protected-recovery-points");
+        std::fs::create_dir_all(&keep).expect("recovery dir");
+        std::fs::write(keep.join("point.json"), b"{}").expect("point");
+
+        let dry = collect_cleanup_report(temp.path(), false);
+        assert!(!dry.applied);
+        assert_eq!(dry.candidates.len(), 1);
+        assert!(dry.reclaimable_bytes >= 2048);
+        assert!(cache.exists(), "a dry run must never delete anything");
+        assert_eq!(dry.review_only.len(), 1, "recovery points are reported");
+
+        let applied = collect_cleanup_report(temp.path(), true);
+        assert!(applied.applied);
+        assert!(!cache.exists(), "apply removes the allow-listed cache");
+        assert!(keep.exists(), "review-only items are never deleted");
+        assert_eq!(applied.candidates[0].removed, Some(true));
+    }
+
+    #[test]
+    fn clap_style_failures_classify_as_usage_errors() {
+        // `try_parse` errors now flow through classify_error so `--json` callers
+        // still get the envelope (contract v2).
+        let invalid = anyhow!("error: invalid value 'not-a-uuid' for '[ACCOUNT_ID]'");
+        assert_eq!(classify_error(&invalid).0, 2);
+        let unknown = anyhow!("error: unrecognized subcommand 'nope'");
+        assert_eq!(classify_error(&unknown).0, 2);
+        let missing = anyhow!("error: a value is required for '--json <VALUE>'");
+        assert_eq!(classify_error(&missing).0, 2);
+    }
+
+    #[test]
+    fn schema_covers_the_newer_commands_and_fields() {
+        assert!(schema_document(None).contains("quota-forecast"));
+        assert!(schema_document(None).contains("reset-events"));
+        assert!(schema_document(Some("reset-events")).contains("events[]"));
+        assert!(schema_document(Some("status")).contains("warnings[]"));
+        assert!(schema_document(Some("add-account-status")).contains("state"));
     }
 
     #[test]

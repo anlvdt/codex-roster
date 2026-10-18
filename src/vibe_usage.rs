@@ -51,7 +51,29 @@ pub struct VibeUsageSummary {
     pub estimated_cost_usd: f64,
     pub sessions: usize,
     pub active_seconds: u64,
+    #[serde(with = "crate::model::time_compat")]
     pub fetched_at: OffsetDateTime,
+}
+
+/// Build the collector command for `subcommand`.
+///
+/// Honors `CODEX_ROSTER_VIBE_USAGE_BIN` (absolute path to a pre-installed
+/// collector) so a user can vendor the pinned package instead of letting `npx`
+/// fetch it from the registry at runtime (audit P1-10). Without that variable
+/// the pinned npm spec is used.
+pub fn collector_command(subcommand: &str) -> std::process::Command {
+    match std::env::var_os("CODEX_ROSTER_VIBE_USAGE_BIN") {
+        Some(path) => {
+            let mut command = std::process::Command::new(path);
+            command.arg(subcommand);
+            command
+        }
+        None => {
+            let mut command = std::process::Command::new("npx");
+            command.args(["--yes", VIBE_USAGE_NPM_SPEC, subcommand]);
+            command
+        }
+    }
 }
 
 pub fn is_configured(home_dir: &Path) -> bool {
@@ -167,6 +189,30 @@ fn default_api_url() -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn collector_command_prefers_a_vendored_binary() {
+        // Without the override the pinned npm spec is used through npx.
+        // SAFETY: single-threaded test process; the variable is removed again.
+        unsafe { std::env::remove_var("CODEX_ROSTER_VIBE_USAGE_BIN") };
+        let via_npx = super::collector_command("sync");
+        assert_eq!(via_npx.get_program(), "npx");
+        let args: Vec<_> = via_npx
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, vec!["--yes", super::VIBE_USAGE_NPM_SPEC, "sync"]);
+
+        unsafe { std::env::set_var("CODEX_ROSTER_VIBE_USAGE_BIN", "/opt/vibe-usage") };
+        let vendored = super::collector_command("summary");
+        assert_eq!(vendored.get_program(), "/opt/vibe-usage");
+        let args: Vec<_> = vendored
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, vec!["summary"]);
+        unsafe { std::env::remove_var("CODEX_ROSTER_VIBE_USAGE_BIN") };
+    }
 
     #[test]
     fn config_reader_rejects_oversized_files() {

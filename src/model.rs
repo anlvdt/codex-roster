@@ -193,6 +193,88 @@ where
     Ok(AiProvider::OpenAi)
 }
 
+/// Serde helpers for timestamps that must be **written** as RFC3339 but still
+/// **read** the legacy 9-integer array form that earlier versions wrote into
+/// `metadata.json` (contract v2, audit P0-8/P1-3).
+///
+/// Serializing the array form was the biggest contract inconsistency: every
+/// consumer other than the app's `RustDate` had to special-case it. Writing
+/// RFC3339 makes the documented contract true, and the tolerant reader keeps
+/// existing installs working.
+pub mod time_compat {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use time::OffsetDateTime;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Text(String),
+        Parts(Vec<i64>),
+    }
+
+    fn from_raw<E: serde::de::Error>(raw: Raw) -> Result<OffsetDateTime, E> {
+        match raw {
+            Raw::Text(text) => {
+                OffsetDateTime::parse(&text, &time::format_description::well_known::Rfc3339)
+                    .map_err(E::custom)
+            }
+            Raw::Parts(parts) => {
+                if parts.len() != 9 {
+                    return Err(E::custom("unsupported timestamp array"));
+                }
+                let date = time::Date::from_ordinal_date(parts[0] as i32, parts[1] as u16)
+                    .map_err(E::custom)?;
+                let time = time::Time::from_hms_nano(
+                    parts[2] as u8,
+                    parts[3] as u8,
+                    parts[4] as u8,
+                    parts[5] as u32,
+                )
+                .map_err(E::custom)?;
+                let offset =
+                    time::UtcOffset::from_hms(parts[6] as i8, parts[7] as i8, parts[8] as i8)
+                        .map_err(E::custom)?;
+                Ok(time::PrimitiveDateTime::new(date, time).assume_offset(offset))
+            }
+        }
+    }
+
+    pub fn serialize<S: Serializer>(
+        value: &OffsetDateTime,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        time::serde::rfc3339::serialize(value, serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<OffsetDateTime, D::Error> {
+        from_raw(Raw::deserialize(deserializer)?)
+    }
+
+    pub mod option {
+        use super::{Raw, from_raw};
+        use serde::{Deserialize, Deserializer, Serializer};
+        use time::OffsetDateTime;
+
+        pub fn serialize<S: Serializer>(
+            value: &Option<OffsetDateTime>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            time::serde::rfc3339::option::serialize(value, serializer)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<OffsetDateTime>, D::Error> {
+            match Option::<Raw>::deserialize(deserializer)? {
+                Some(raw) => from_raw(raw).map(Some),
+                None => Ok(None),
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SavedAccountMetadata {
     pub id: Uuid,
@@ -264,6 +346,10 @@ pub struct StatusOutput {
     /// Live Desktop/CLI activity strip (working / waiting / idle).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<crate::codex_activity::CodexActivitySummary>,
+    /// Non-fatal problems worth surfacing to scripts and the app, for example a
+    /// failed automatic account-list backup (audit R2/A2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -531,6 +617,7 @@ pub struct TokenUsageBreakdownOutput {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AccountUsageView {
     pub source: UsageSource,
+    #[serde(with = "time_compat")]
     pub fetched_at: OffsetDateTime,
     pub five_hour: Option<UsageWindowView>,
     pub weekly: Option<UsageWindowView>,
@@ -546,6 +633,7 @@ pub struct AccountUsageView {
     /// End of the currently active ChatGPT subscription period reported by
     /// OpenAI's ID-token claim. This is separate from OAuth token expiry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "time_compat::option")]
     pub subscription_active_until: Option<OffsetDateTime>,
     /// Luna Reserve fallback status. Present when an account has access to the
     /// GPT-5.6 Luna reserve pool after primary model exhaustion.
@@ -566,6 +654,7 @@ pub struct LunaReserveView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub used_percent: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "time_compat::option")]
     pub reset_at: Option<OffsetDateTime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_slug: Option<String>,
@@ -615,6 +704,7 @@ pub struct ProviderUsageWindowView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remaining_percent: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "time_compat::option")]
     pub reset_at: Option<OffsetDateTime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub used: Option<f64>,
@@ -627,6 +717,7 @@ pub struct ProviderUsageWindowView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ahead_of_pace: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "time_compat::option")]
     pub projected_exhaustion_at: Option<OffsetDateTime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub will_last_to_reset: Option<bool>,
@@ -635,6 +726,7 @@ pub struct ProviderUsageWindowView {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ProviderUsageView {
     pub provider: AiProvider,
+    #[serde(with = "time_compat")]
     pub fetched_at: OffsetDateTime,
     pub status: ProviderUsageStatus,
     pub fidelity: UsageFidelity,
@@ -764,6 +856,7 @@ pub struct ProviderActivateOutput {
 pub struct UsageWindowView {
     pub used_percent: u8,
     pub remaining_percent: u8,
+    #[serde(with = "time_compat")]
     pub reset_at: OffsetDateTime,
 }
 
@@ -785,6 +878,7 @@ pub struct CreditLimitView {
     pub used: Option<f64>,
     pub limit: f64,
     pub remaining_percent: f64,
+    #[serde(with = "time_compat::option")]
     pub resets_at: Option<OffsetDateTime>,
 }
 
@@ -801,7 +895,9 @@ pub struct BankedResetCreditView {
     pub id: String,
     pub reset_type: String,
     pub status: String,
+    #[serde(with = "time_compat")]
     pub granted_at: OffsetDateTime,
+    #[serde(with = "time_compat::option")]
     pub expires_at: Option<OffsetDateTime>,
     pub title: Option<String>,
     pub description: Option<String>,
@@ -823,5 +919,48 @@ pub fn display_remaining_percent(window: &UsageWindowView) -> u8 {
         0
     } else {
         window.remaining_percent
+    }
+}
+
+#[cfg(test)]
+mod time_compat_tests {
+    use serde::{Deserialize, Serialize};
+    use time::OffsetDateTime;
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Holder {
+        #[serde(with = "super::time_compat")]
+        at: OffsetDateTime,
+    }
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct OptionalHolder {
+        #[serde(with = "super::time_compat::option")]
+        at: Option<OffsetDateTime>,
+    }
+
+    #[test]
+    fn legacy_array_timestamps_are_read_and_rewritten_as_rfc3339() {
+        let legacy = r#"{"at":[2026,291,5,32,48,854254000,0,0,0]}"#;
+        let parsed: Holder = serde_json::from_str(legacy).expect("legacy 9-integer array");
+        let encoded = serde_json::to_string(&parsed).expect("encode");
+        assert!(
+            encoded.contains("2026-10-18T05:32:48"),
+            "must be rewritten as RFC3339: {encoded}"
+        );
+        let round: Holder = serde_json::from_str(&encoded).expect("rfc3339 round trip");
+        assert_eq!(round, parsed);
+    }
+
+    #[test]
+    fn optional_timestamps_accept_null_array_and_string() {
+        let none: OptionalHolder = serde_json::from_str(r#"{"at":null}"#).expect("null");
+        assert_eq!(none.at, None);
+        let array: OptionalHolder =
+            serde_json::from_str(r#"{"at":[2026,291,5,32,48,854254000,0,0,0]}"#).expect("array");
+        assert!(array.at.is_some());
+        let text: OptionalHolder =
+            serde_json::from_str(r#"{"at":"2026-10-18T05:32:48.854254Z"}"#).expect("string");
+        assert_eq!(text.at, array.at);
     }
 }

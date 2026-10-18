@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime};
 
 mod codec;
 mod index_store;
+pub use index_store::last_backup_warning;
 
 use anyhow::{Context, Result, anyhow};
 use time::OffsetDateTime;

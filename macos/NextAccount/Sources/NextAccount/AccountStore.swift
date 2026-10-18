@@ -122,9 +122,16 @@ enum RosterListFilter: Equatable {
         case .archived:
             return account.archived
         case .triage(let bucket):
-            return account.triage == bucket
+            // The archived chip *is* `.triage(.archived)`, so that bucket must
+            // keep matching archived rows. Every other bucket must not: archived
+            // rows used to reappear under Ready/Needs-action and inflate those
+            // counters (review finding 10).
+            if bucket == .archived {
+                return account.archived
+            }
+            return !account.archived && account.triage == bucket
         case .deferredUnverified:
-            return account.hasDeferredAccessTokenRefresh
+            return !account.archived && account.hasDeferredAccessTokenRefresh
         }
     }
 }
@@ -332,6 +339,11 @@ final class AccountStore: ObservableObject {
     /// "no saved accounts" empty state while the first load is still in flight
     /// (audit FLOW-8).
     @Published private(set) var hasLoadedAccounts = false
+    /// True when the first roster load failed. The deck shows a retry row
+    /// instead of an endless "loading" spinner (review finding 9).
+    @Published private(set) var didFailInitialLoad = false
+    /// Non-fatal warnings reported by `status --json`.
+    @Published private(set) var statusWarnings: [String] = []
     @Published private(set) var lastQuotaRefreshAt: Date?
     @Published private(set) var accountSortMode: AccountSortMode
     @Published private(set) var newAccountLoginState: NewAccountLoginState = .idle
@@ -348,6 +360,11 @@ final class AccountStore: ObservableObject {
     /// blocking alert: it confirms an action where it was triggered (audit FLOW-2).
     @Published var toast: RosterToast?
     private var toastDismissTask: Task<Void, Never>?
+
+    /// Hide the current CLI warnings until the next status poll re-reports them.
+    func dismissStatusWarnings() {
+        statusWarnings = []
+    }
 
     func showToast(_ text: String, kind: RosterToastKind = .success) {
         toast = RosterToast(text: text, kind: kind)
@@ -566,6 +583,9 @@ final class AccountStore: ObservableObject {
                 try await self.load()
             } catch {
                 self.errorMessage = error.localizedDescription
+                if !self.hasLoadedAccounts {
+                    self.didFailInitialLoad = true
+                }
             }
         }
     }
@@ -654,6 +674,19 @@ final class AccountStore: ObservableObject {
             self.newAccountLoginState = .saved(liveIdentity)
             try await self.load()
             self.lastQuotaRefreshAt = .now
+            // Say whether the row was added or refreshed instead of leaving the
+            // user to guess (the CLI reports `action`).
+            if saved.action == "refreshed" {
+                self.showToast(AppLanguage.text(
+                    "Đã cập nhật phiên của \(saved.account.email).",
+                    "Refreshed the saved session for \(saved.account.email)."
+                ))
+            } else {
+                self.showToast(AppLanguage.text(
+                    "Đã thêm \(saved.account.email) vào roster.",
+                    "Added \(saved.account.email) to the roster."
+                ))
+            }
         }
     }
 
@@ -1213,10 +1246,18 @@ final class AccountStore: ObservableObject {
                 self.lastQuotaRefreshAt = .now
             }
             await self.applySessionResumeIfNeeded(activated.sessionResume, continueExhausted: false)
-            self.showToast(AppLanguage.text(
-                "Đã chuyển sang \(activated.account.email).",
-                "Switched to \(activated.account.email)."
-            ))
+            let closed = activated.warnings?.count ?? 0
+            if closed > 0 {
+                self.showToast(AppLanguage.text(
+                    "Đã chuyển sang \(activated.account.email) (đã đóng \(closed) tiến trình Codex/ChatGPT).",
+                    "Switched to \(activated.account.email) (closed \(closed) Codex/ChatGPT process(es))."
+                ))
+            } else {
+                self.showToast(AppLanguage.text(
+                    "Đã chuyển sang \(activated.account.email).",
+                    "Switched to \(activated.account.email)."
+                ))
+            }
         }
     }
 
@@ -2117,10 +2158,10 @@ final class AccountStore: ObservableObject {
                     ResetNotifier.showOpenAIIncidentIfNeeded(self.openAIStatus)
                     if Date.now >= nextPublicSignalCheck {
                         if let signals = try? await self.cli.decode(
-                            [GlobalResetEvent].self,
+                            ResetEventsOutput.self,
                             arguments: ["reset-events"]
                         ) {
-                            signals.forEach { ResetNotifier.showPublicSignal($0) }
+                            signals.events.forEach { ResetNotifier.showPublicSignal($0) }
                             self.refreshResetOutlook(silently: true)
                         }
                         nextPublicSignalCheck = Date.now.addingTimeInterval(60)
@@ -2610,6 +2651,7 @@ final class AccountStore: ObservableObject {
         )
         applyRoster(status: loadedStatus, accounts: loadedAccounts.accounts)
         hasLoadedAccounts = true
+        didFailInitialLoad = false
         let pendingLegacyArchives = legacyArchivedAccountIDs.intersection(Set(loadedAccounts.accounts.map(\.id)))
         if !pendingLegacyArchives.isEmpty {
             for accountID in pendingLegacyArchives {
@@ -2680,6 +2722,13 @@ final class AccountStore: ObservableObject {
                 } else {
                     logSessionResume("active_has_quota without recovery pending — skip auto-resume decide=\(decideMs)ms")
                 }
+            case "usage_unknown":
+                // Quota is unknown (probe failed or the cached window already
+                // expired). Never treat this as a recovery: no "quota recovered"
+                // notification and no resuming interrupted turns. Recovery flags
+                // stay set so a genuine later recovery still fires.
+                autoSwitchState = nil
+                logSessionResume("decide status=usage_unknown — quota unknown, recovery still pending")
             case "waiting_for_login":
                 autoSwitchState = .waitingForLogin
             case "all_accounts_exhausted":
@@ -3172,6 +3221,9 @@ final class AccountStore: ObservableObject {
 
     private func applyRoster(status: StatusOutput, accounts: [SavedAccount]) {
         self.status = status
+        // Surface CLI-side problems (for example a failing account-list backup)
+        // that would otherwise only appear in stderr (audit R2/A2).
+        self.statusWarnings = status.warnings ?? []
         self.accounts = accounts.map { account in
             account.withActiveState(account.id == status.currentAccountSavedId)
         }
@@ -3787,6 +3839,9 @@ struct StatusOutput: Decodable {
     let vibeUsage: VibeUsageSummary?
     let codexModel: String?
     let activity: CodexActivitySummary?
+    /// Non-fatal problems the CLI knows about, e.g. a failed automatic
+    /// account-list backup (contract v1 `warnings[]`).
+    let warnings: [String]?
 
     init(
         currentAccount: AccountIdentity?,
@@ -3794,8 +3849,10 @@ struct StatusOutput: Decodable {
         processWarnings: [RunningProcess],
         vibeUsage: VibeUsageSummary? = nil,
         codexModel: String? = nil,
-        activity: CodexActivitySummary? = nil
+        activity: CodexActivitySummary? = nil,
+        warnings: [String]? = nil
     ) {
+        self.warnings = warnings
         self.currentAccount = currentAccount
         self.currentAccountSavedId = currentAccountSavedId
         self.processWarnings = processWarnings
@@ -3816,6 +3873,9 @@ struct VibeUsageSummary: Decodable {
 
 private struct SaveOutput: Decodable {
     let account: SavedAccount
+    /// `created` (new row) or `refreshed` (existing row updated). Emitted by the
+    /// CLI since contract v1 and previously dropped by the app.
+    let action: String?
 }
 
 private struct ImportJsonOutput: Decodable {
@@ -3871,6 +3931,8 @@ struct ActivateOutput: Decodable {
     let account: SavedAccount
     let previousAccountId: UUID?
     let sessionResume: SessionResumeHint?
+    /// Codex/ChatGPT processes the switch had to close first.
+    let warnings: [RunningProcess]?
 }
 
 struct SessionResumeHint: Decodable {
@@ -3994,6 +4056,12 @@ enum ResetOutlookPresentation {
             ? "Reset: đang theo dõi"
             : "Reset: watching"
     }
+}
+
+/// `reset-events --json` is wrapped in an object so the payload can carry
+/// `contract_version` (contract v2).
+private struct ResetEventsOutput: Decodable {
+    let events: [GlobalResetEvent]
 }
 
 private struct GlobalResetEvent: Decodable {
@@ -5365,6 +5433,8 @@ struct AutoSwitchOutput: Decodable {
     let detail: String?
     let bankedResetCount: Int?
     let sessionResume: SessionResumeHint?
+    /// True when the CLI could not establish the active account's quota.
+    let usageUnknown: Bool?
 }
 
 enum AIProvider: String, CaseIterable, Identifiable, Decodable {

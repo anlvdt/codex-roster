@@ -71,10 +71,16 @@ impl MetadataIndexStore {
         replace_file_with_recovery(&self.metadata_path, Some(json.as_bytes()), |temp_path| {
             crate::file_store::write_private_durable(temp_path, json.as_bytes())
         })?;
-        if let Err(error) = self.write_automatic_backup(&persisted, &json) {
-            // A failed account-list backup must be visible: it is the last line
-            // of defence for a damaged metadata file (audit R2).
-            eprintln!("warning: automatic account-list backup failed: {error:#}");
+        match self.write_automatic_backup(&persisted, &json) {
+            Ok(()) => clear_backup_warning(),
+            Err(error) => {
+                // A failed account-list backup must be visible: it is the last
+                // line of defence for a damaged metadata file (audit R2). Record
+                // it so `status --json` reports it instead of only stderr.
+                let message = format!("automatic account-list backup failed: {error:#}");
+                eprintln!("warning: {message}");
+                record_backup_warning(message);
+            }
         }
         Ok(())
     }
@@ -196,10 +202,16 @@ impl MetadataIndexStore {
             crate::file_store::write_private_durable(temp, json.as_bytes())
         })?;
         // A subsequent list restore must see this roster, even before another save.
-        if let Err(error) = self.write_automatic_backup(&persisted, &json) {
-            // A failed account-list backup must be visible: it is the last line
-            // of defence for a damaged metadata file (audit R2).
-            eprintln!("warning: automatic account-list backup failed: {error:#}");
+        match self.write_automatic_backup(&persisted, &json) {
+            Ok(()) => clear_backup_warning(),
+            Err(error) => {
+                // A failed account-list backup must be visible: it is the last
+                // line of defence for a damaged metadata file (audit R2). Record
+                // it so `status --json` reports it instead of only stderr.
+                let message = format!("automatic account-list backup failed: {error:#}");
+                eprintln!("warning: {message}");
+                record_backup_warning(message);
+            }
         }
         Ok(())
     }
@@ -391,6 +403,37 @@ fn legacy_timestamp_to_current_format(value: &Value) -> Option<Value> {
     serde_json::to_value(timestamp).ok()
 }
 
+/// Process-wide note about the most recent automatic backup failure. The CLI
+/// surfaces it in `status --json` so a silent backup problem reaches scripts and
+/// the app, not only whoever reads stderr (audit R2/A2).
+static LAST_BACKUP_WARNING: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+
+fn backup_warning_slot() -> &'static std::sync::Mutex<Option<String>> {
+    LAST_BACKUP_WARNING.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn record_backup_warning(message: String) {
+    if let Ok(mut slot) = backup_warning_slot().lock() {
+        *slot = Some(message);
+    }
+}
+
+/// The most recent automatic-backup failure, if any.
+pub fn last_backup_warning() -> Option<String> {
+    backup_warning_slot()
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
+}
+
+/// Forget a previous failure once a backup succeeds again.
+pub(crate) fn clear_backup_warning() {
+    if let Ok(mut slot) = backup_warning_slot().lock() {
+        *slot = None;
+    }
+}
+
 struct RecoveryCandidate {
     kind: RecoveryFileKind,
     write_generation: u64,
@@ -411,10 +454,35 @@ fn recovery_priority(kind: RecoveryFileKind) -> u8 {
 mod tests {
     use super::MetadataIndexStore;
     use super::PRESERVED_METADATA_LIMIT;
+    use super::clear_backup_warning;
     use super::parse_metadata_index;
     use crate::model::{METADATA_SCHEMA_VERSION, MetadataIndex};
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn a_failed_account_list_backup_is_recorded_for_status_json() {
+        let temp = tempdir().unwrap();
+        clear_backup_warning();
+        let store = MetadataIndexStore::new(temp.path());
+        // A file where the backup directory should be makes create_dir_all fail.
+        fs::write(temp.path().join("account-list-backups"), b"not a directory").unwrap();
+        let index = MetadataIndex {
+            schema_version: METADATA_SCHEMA_VERSION,
+            write_generation: 1,
+            accounts: Vec::new(),
+        };
+        store
+            .save_index(&index)
+            .expect("metadata write still succeeds");
+        let warning = super::last_backup_warning().expect("backup failure recorded");
+        assert!(
+            warning.contains("account-list backup failed"),
+            "unexpected warning: {warning}"
+        );
+        clear_backup_warning();
+        assert!(super::last_backup_warning().is_none());
+    }
 
     #[test]
     fn preserved_metadata_copies_are_capped() {

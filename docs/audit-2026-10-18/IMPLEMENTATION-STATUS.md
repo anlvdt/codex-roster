@@ -44,6 +44,52 @@ Nhánh: `main`. Chưa push `origin`. Chưa xoá dữ liệu người dùng.
 | **A2 — Nốt phần phụ** | Cap config VibeCafe 64 KiB + response 2 MiB (bounded read, không buffer file lạ); cache VibeCafe ghi atomic 0600; `doctor` thêm check **`account_list_backup`** (tuổi backup danh sách tài khoản, warn nếu chưa có hoặc >24h) để backup lỗi không còn im lặng | `d5feeef` | test `config_reader_rejects_oversized_files`; `doctor` chạy thật: `[ok] account_list_backup newest account-list backup is 1h old` |
 | **I18N-1** | Rà toàn bộ literal hiển thị không qua `language.text`: **0 chuỗi tiếng Anh lộ** (2 hit là tên riêng attribution). Các leak audit nêu (watchdog login, export success, About) đã được bản địa hoá ở các vòng trước | — | ghi trong [VERIFICATION.md](VERIFICATION.md) §4b |
 
+| **A2 — Cảnh báo backup vào JSON** | Cảnh báo backup thất bại được ghi nhớ trong process và phơi ra `status --json` qua `warnings[]` (additive, ẩn khi rỗng); tự xoá khi backup kế tiếp thành công | `cf7c4e3` | test `a_failed_account_list_backup_is_recorded_for_status_json` (chặn backup bằng file cùng tên thư mục); `status --json` không có `warnings` khi mọi thứ bình thường |
+| **A3 — `add-account-status`** | Trả thêm `state` (`pending`/`none`), `codex_root`, `hint`; human output nói rõ bước tiếp theo và credentials đã đổi chưa | `1d576d4` | chạy thật: `{"active":false,"state":"none","hint":"Start one with …","contract_version":1}` |
+| **F wave 2 — Runway bar** | `QuotaRunwayBar`: so `time_to_empty` với thời gian tới reset của cửa sổ 5h → "dự báo cạn trước khi reset" (cam) / "đủ tới lúc reset" (xanh) / "chưa đủ mẫu" (mờ) | `ec07cf7` | `swift build` pass |
+
+| **A2 — Cảnh báo backup lên UI** | App decode `status.warnings[]` (contract v1) và hiện banner cảnh báo trong Console, có nút đóng (ẩn tới lần poll status kế tiếp) | `5b26657` | `swift build` pass |
+
+| **Hợp đồng JSON — sửa theo audit độc lập (subagent)** | `reset-events --json` được bọc thành `{"events":[…]}` (trước là mảng trần nên **thiếu `contract_version`**) + Swift decode wrapper; **lỗi clap** nay đi qua `try_parse` → envelope JSON + exit 2 (trước in prose, stdout rỗng); timestamp của `usage`/`window`/`vibe` chuyển sang **RFC3339** bằng codec **đọc được cả mảng 9 số cũ** (không phá `metadata.json` hiện có); `schema` phủ đủ lệnh + field mới; app đọc `SaveOutput.action` và `ActivateOutput.warnings` (trước bị bỏ) | `250af21` | test `legacy_array_timestamps_are_read_and_rewritten_as_rfc3339`, `optional_timestamps_accept_null_array_and_string`, `clap_style_failures_classify_as_usage_errors`, `schema_covers_the_newer_commands_and_fields`; chạy thật: `reset-events --json` có `contract_version`, `activate not-a-uuid --json` → exit 2 + envelope, `list --json` timestamp là chuỗi RFC3339 |
+| **P0-4 — hiển thị 0% đồng nhất** | CLI/TUI dùng `display_remaining_percent()` (trước in raw 1% trong khi app hiện 0%) | `5da0ff7` | test `a_depleted_window_reads_as_zero_percent_everywhere` |
+| **P0-11 — trung thực về khoá** | README (EN+VI) nói đúng: khoá là **file `0600` trong thư mục dữ liệu**, Keychain chỉ là bản sao/migrate; bổ sung mục "được bảo vệ / không được bảo vệ" (không chống được tiến trình cùng user) | `a83554f` | đọc code `backup.rs::keyring_password` (file-first) để viết đúng |
+| **P0-13 — dọn dữ liệu mồ côi** | Lệnh **`cleanup`** (mặc định **dry-run**): báo `chatgpt-web-profiles`, `codex-account-switcher-menubar` + mục "review manually" (`protected-recovery-points`, `activity.jsonl`); chỉ xoá khi `--apply` và chỉ với allow-list | `62e0115`, `8d1f412` | chạy thật: **375,6 MB** reclaimable; test `cleanup_reports_without_deleting_and_applies_only_the_allow_list` |
+| **P1-10 — bỏ phụ thuộc `npx` lúc chạy** | `CODEX_ROSTER_VIBE_USAGE_BIN` cho phép trỏ tới collector đã cài sẵn (mặc định vẫn dùng spec ghim `@vibe-cafe/vibe-usage@0.13.2`); README ghi rõ | `f240299`, `62bfefb` | test `collector_command_prefers_a_vendored_binary` |
+| **F/G — gợi ý hành động + test Swift** | `NextAction.switchBeforeDry`: gợi ý chuyển khi forecast (đủ tin cậy) nói cửa sổ 5h cạn trước reset và có account Ready; thêm `QuotaForecastUITests.swift` (forecast summary, runway math, archived filter) cho CI | `d5f0a47`, `6bcb4cb`, `fa8d1f9` | `swift build` pass; file test Swift parse sạch (máy CLT-only không chạy được `swift test`) |
+
+### 1b. Kết quả review đối kháng (3 subagent độc lập, vòng cuối)
+
+Ba subagent được gọi song song với phạm vi tách biệt: (1) review đối kháng read-only, (2) viết integration test cho đường apply, (3) kiểm chứng hợp đồng JSON bằng chương trình Swift độc lập. Kết quả:
+
+| Finding | Mức | Xử lý |
+|---|---|---|
+| `usage_unknown` không có consumer → app coi "quota unknown" là "quota đã hồi" và resume phiên sai | **High** | Rust trả **status riêng `usage_unknown`**; Swift decode `usageUnknown` + case riêng, không thông báo "đã hồi", giữ cờ recovery cho lần hồi thật |
+| Guard mù với phiên `codex` là **ancestor** (agent shell chạy `codex-roster activate`) | **High** | Bỏ loại trừ ancestor; chỉ bỏ qua chính tiến trình roster (`should_examine_process`) + test |
+| Credits không có hạn dùng → treo auto-switch vĩnh viễn | **High** | `has_usable_credits(usage, now)` yêu cầu quan sát ≤ 30 phút; 2 test (credits thường + unlimited) |
+| `schema --json` là chuỗi trần, thiếu `contract_version` | Med | Bọc thành object `{command, document}` — chạy thật: `contract_version: 1` |
+| `delete --json` thiếu ID vẫn mở menu, exit 0, không JSON | Med | Cùng guard như `activate`: bail usage error + non-TTY hint — chạy thật: exit 2 + envelope |
+| Xoá tài khoản đang dùng chỉ bị chặn ở UI (Rust không chặn) | Med | `App::delete` từ chối account đang live (test dùng fixture của subagent 2) |
+| `in_flight_for_pair` là dead code; manual `activate` ngoài saga | Med | Ghi nhận: chỉ auto-switch nằm trong saga; `AutoSwitchLock` + recheck danh tính là guard thực tế (tài liệu đã sửa claim) |
+| Capture resume-hint lỗi bị nuốt (`let _ =`) | Med | Lỗi nay vào `warnings[]` |
+| Load đầu thất bại → treo "Đang tải…" vĩnh viễn | Med | `didFailInitialLoad` + hàng "Không tải được… [Thử lại]" |
+| `.triage`/`.deferredUnverified` không loại archived | Med | Sửa `matches` để mọi filter (trừ `.archived`) bỏ qua archived |
+| `config.toml` ghi bằng `fs::write` không atomic | Low | Chuyển sang `atomic_write` 0600 |
+| `schema auto-resume-session` mô tả field không tồn tại | Low | Sửa text theo DTO thật |
+| Credits-only pick không có breakdown | Low | `switch_score_breakdown` trả breakdown với lý do `credits` |
+| `parse_user_session_meta` cap theo **số dòng**, không theo byte | Low | **Chưa sửa** — ghi nhận; mọi đường đọc rollout khác đã bound theo byte |
+| `Verified` được ghi khi verify không kết luận được | Low | **Chưa sửa** — cần race giữa restore và check; đã ghi nhận |
+| `five_hour_known`/`weekly_known` chỉ được ghi, không đọc | Low | **Chưa sửa** — unknown-ness suy ra từ `Option`; ghi nhận là nợ kỹ thuật |
+
+**Integration test (subagent 2):** `auto_switch_apply_completes_the_durable_switch_saga_end_to_end` — chạy thật `auto_switch_with_candidate(true, …)` trên temp env, 3 case: thành công (bắt được `switch-txn.json` ở phase `captured` **trước khi** auth bị đổi, rồi file được xoá), bookkeeping lỗi vẫn `switched` + warnings, và swap lỗi để lại `Err` + không còn txn.
+
+**Kiểm chứng hợp đồng (subagent 3):** decode mọi output `--json` an toàn bằng Swift độc lập — **0 lỗi decode**; các defect hợp đồng nêu trên đã sửa; `providers status` không tồn tại trong build mặc định (feature tắt).
+
+### 1c. Cài đặt app local (theo yêu cầu)
+
+- Build: `bash scripts/build-macos-app.sh` → `build/CodexRoster.app` (arm64, ad-hoc signed, `codesign --verify` PASS).
+- Thay thế: `/Applications/CodexRoster.app` được thay bằng bundle mới; **bản cũ giữ nguyên** tại `/Applications/CodexRoster.app.backup-20261018-134547` (không xoá).
+- Xác minh sau cài: `codesign --verify` PASS; CLI trong bundle `doctor` **14/14 ok**; app chạy (pid 15621), tự gọi CLI mới (`refresh-usage`, `create-automatic-full-backup`), không có crash report; `status --json` → contract 1, 20 tài khoản.
+
 **Verification độc lập:** xem [VERIFICATION.md](VERIFICATION.md) — gate đầy đủ với `--all-features` (449 test), decode hợp đồng Rust↔Swift bằng binary thật, 29/29 điểm audit then chốt PASS, và 1 gate CI (`check-auth-switch-safety.sh`) đã được sửa sau khi verification phát hiện fail.
 
 **Gate hiện tại:** `cargo fmt --check` pass · `cargo clippy --all-targets -- -D warnings` pass · **447 test pass, 0 fail, 2 ignored** · `swift build --package-path macos/NextAccount` pass · `scripts/build-macos-app.sh` pass.
@@ -54,14 +100,12 @@ Nhánh: `main`. Chưa push `origin`. Chưa xoá dữ liệu người dùng.
 
 | # | Hạng mục | Trạng thái |
 |---|---|---|
-| 1 | Đưa cảnh báo backup thất bại vào JSON `warnings[]` của lệnh ghi (hiện đã có ở `doctor` + stderr) | Chưa làm — mức ưu tiên thấp |
-| 2 | `add-account-status` chi tiết hơn (hiện trả `active`/`auth_changed`) | Chưa làm — mức ưu tiên thấp |
-| 3 | F/G wave 2: HUD/thanh dự báo nâng cao, gợi ý hành động theo ngữ cảnh | Một phần (forecast đã hiển thị trong deck) |
-| 4 | Review độc lập bởi **agent khác** (Orca worker) | Không thực hiện được: mọi provider Orca cạn quota; verification do Lead tự chạy và ghi rõ giới hạn |
-| 5 | Integration test đầu-cuối cho một lần apply thành công (đường saga) | Chưa có; đã ghi nhận trung thực |
-| 6 | Test Swift trong CI (`swift test`) | Không chạy được trên máy CLT-only; CI `macos-latest` sẽ chạy |
+| 1 | Review độc lập bởi **agent khác** (Orca worker) | Không thực hiện được: mọi provider Orca cạn quota; verification do Lead tự chạy, đã ghi rõ giới hạn trong [VERIFICATION.md](VERIFICATION.md) §5 |
+| 2 | Integration test đầu-cuối cho một lần apply thành công (đường saga) | Chưa có; đã ghi nhận trung thực |
+| 3 | Test Swift trong CI (`swift test`) | Không chạy được trên máy CLT-only; CI `macos-latest` sẽ chạy |
+| 4 | HUD/gợi ý hành động nâng cao hơn nữa (ngoài runway bar + caption hiện có) | Ngoài phạm vi audit đề xuất |
 
-Đã xong và không còn trong danh sách: Light Mode console + role màu ngữ nghĩa, a11y toggle/switch/hit-target, freshness chip, notification loop 15s, archived filter, update badge + xác nhận, empty-state loading gate, i18n sweep, TUI search/paging, `list --all` + giờ reset địa phương, housekeeping `.cas-*`/`preserved-metadata-*`, cap VibeCafe, check backup trong `doctor`.
+Mọi hạng mục P0/P1/P2 và các tính năng thuật toán P3 khả thi trong audit đều đã được triển khai và có bằng chứng; các mục còn lại ở trên là giới hạn môi trường hoặc phần mở rộng ngoài đề xuất.
 
 ## 3. Vì sao Lead làm trực tiếp thay vì worker Orca
 

@@ -348,7 +348,10 @@ fn account_usage_labels(account: &AccountView) -> (String, String) {
             if window.reset_at <= now {
                 remaining.push(format!("{label} Remaining: passed"));
             } else {
-                remaining.push(format!("{label} Remaining: {}%", window.remaining_percent));
+                remaining.push(format!(
+                    "{label} Remaining: {}%",
+                    crate::model::display_remaining_percent(window)
+                ));
                 resets.push(format!(
                     "{label} Reset: {}",
                     format_local_reset_at(window.reset_at)
@@ -1229,6 +1232,7 @@ mod tests {
             vibe_usage: None,
             codex_model: None,
             activity: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -1539,6 +1543,7 @@ mod tests {
             vibe_usage: None,
             codex_model: None,
             activity: None,
+            warnings: Vec::new(),
         };
         let menu = build_menu(
             InteractiveMode::Persistent,

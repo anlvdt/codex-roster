@@ -8,10 +8,10 @@ Mục đích: kiểm chứng lại các tuyên bố trong [IMPLEMENTATION-STATUS
 | Lệnh | Kết quả |
 |---|---|
 | `cargo fmt --check` | PASS |
-| `bash scripts/check-auth-switch-safety.sh` | PASS — `Auth switch safety checks passed.` (sau khi sửa, xem §3) |
+| `bash scripts/check-auth-switch-safety.sh` | PASS — `Auth switch safety checks passed.` (sau 2 lần sửa, xem §3 và §3b) |
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | PASS — **0 warning/error** |
-| `cargo test --locked --all-features` | **454 passed, 0 failed, 2 ignored** |
-| `cargo test` (mặc định) | **452 passed, 0 failed, 2 ignored** |
+| `cargo test --locked --all-features` | **455 passed, 0 failed, 2 ignored** |
+| `cargo test` (mặc định) | **453 passed, 0 failed, 2 ignored** |
 | `swift build --package-path macos/NextAccount` | PASS — `Build complete!` |
 | `bash scripts/build-macos-app.sh` | PASS — bundle `build/CodexRoster.app` được build + ký (ad-hoc) |
 
@@ -36,6 +36,12 @@ Lần chạy đầu **thất bại** (`DecodingError … Path: generatedAt`) và
 Nguyên nhân: script đếm mọi lần xuất hiện chuỗi `--force` trong mã Swift, nhưng 4 lần mới là **chuỗi thông báo hướng dẫn người dùng** (được thêm khi bản địa hoá lỗi guard ở vòng 1), không phải site thêm cờ. Đã sửa script để đếm đúng `append("--force")` (vẫn giữ nguyên bất biến: đúng 2 site và cả hai phải có guard `forceDesktop`/`didCloseDesktop`). Sau khi sửa: PASS.
 
 Đây là ví dụ cho thấy gate CI của repo bắt được thay đổi ngoài dự kiến — nếu không chạy script này, một gate CI sẽ đỏ trên `main`.
+
+## 3b. Lần thứ hai script an toàn bắt được drift (vòng 12)
+
+Sau khi refactor `add-account-status` (trả thêm `state`/`hint`, gán `auth_changed` vào biến trước khi dựng JSON), `check-auth-switch-safety.sh` lại **fail**: nó grep đúng chuỗi `"auth_changed": app.add_account_session_auth_changed()?` nên không còn khớp. Bất biến an toàn vẫn đúng (field vẫn được báo cáo), nên script được cập nhật để kiểm tra **cả hai** vế (`"auth_changed": auth_changed,` trong JSON **và** lời gọi `app.add_account_session_auth_changed()?` tồn tại), thay vì khớp một biểu thức cụ thể. Sau khi sửa: PASS.
+
+Ghi chú: đây là lần thứ hai gate CI này phát hiện thay đổi ngoài dự kiến; cả hai lần đều là **script quá khớp vào cú pháp**, không phải lỗi an toàn — nhưng nếu không chạy, `main` sẽ có CI đỏ.
 
 ## 4. Rà 29 điểm then chốt của audit so với code hiện tại
 
@@ -65,6 +71,20 @@ Rà lại 24 điểm then chốt sau các vòng CLI/TUI, housekeeping và B còn
 - **Số liệu tuning trong ALGORITHM-TUNING.md là mô phỏng**, không phải đo trên máy thật.
 - Verification do **cùng một tác nhân** thực hiện (Lead), không phải bên thứ ba độc lập; đây là mức kiểm chứng tốt nhất có thể trong điều kiện toàn bộ provider agent (Orca) đều cạn quota.
 
+## 5b. Kết quả verification cuối (vòng 12/12)
+
+| Hạng mục | Kết quả |
+|---|---|
+| `cargo fmt --check` | PASS |
+| `cargo clippy --locked --all-targets --all-features -- -D warnings` | PASS — 0 warning |
+| `cargo test --locked --all-features` | **455 passed, 0 failed, 2 ignored** |
+| `check-auth-switch-safety.sh` | PASS (sau khi sửa invariant, §3b) |
+| `swift build --package-path macos/NextAccount` | PASS |
+| `scripts/build-macos-app.sh` | PASS — bundle build + ký ad-hoc |
+| `doctor` trên máy thật | 14/14 check `ok` (gồm `account_list_backup`: backup 1h tuổi) |
+| Decode hợp đồng bằng chương trình Swift độc lập | PASS — `quota-forecast --json` decode đủ field |
+| Spot-check 24 điểm then chốt | **24/24 PASS** |
+
 ## 6. Hạng mục audit còn lại (chưa triển khai)
 
-Xem bảng "Còn lại" trong [IMPLEMENTATION-STATUS.md](IMPLEMENTATION-STATUS.md). Tóm tắt: phần B còn lại (Light Mode cho vài sheet, i18n leaks sót, empty-state loading gate), A2 phần phụ (cảnh báo backup vào JSON `warnings[]`, cap `preserved-metadata-*`, dọn `.cas-*`), A3 `list` human + TUI search, và F/G wave 2 đầy đủ (HUD/dự báo nâng cao/gợi ý + review độc lập bởi agent khác).
+Xem bảng "Còn lại" trong [IMPLEMENTATION-STATUS.md](IMPLEMENTATION-STATUS.md). Tại thời điểm đóng goal, danh sách còn lại chỉ gồm **giới hạn môi trường**: (1) không có agent Orca thứ ba để review độc lập vì mọi provider cạn quota; (2) chưa có integration test đầu-cuối cho một lần apply thành công; (3) `swift test` cần Xcode nên chỉ CI chạy. Mọi hạng mục P0/P1/P2 và các tính năng P3 khả thi trong audit đã được triển khai kèm bằng chứng.

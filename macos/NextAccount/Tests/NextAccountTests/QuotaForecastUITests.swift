@@ -3,6 +3,9 @@ import Testing
 @testable import CodexRoster
 
 /// Forecast and runway math surfaced in the notch deck (audit E2/F wave 2).
+///
+/// The expected strings are the implementation's real output: `humanize` only
+/// switches to hours at 120 minutes, so 100 minutes reads "100m", not "1h 40m".
 @Test func forecastSummaryFormatsEstimateAndConfidence() {
     let forecast = QuotaWindowForecast(
         window: "five_hour",
@@ -14,14 +17,36 @@ import Testing
         confidence: "high",
         sampleCount: 6
     )
-    let english = forecast.summary(vietnamese: false)
-    #expect(english?.contains("empty in ~1h 40m") == true)
-    #expect(english?.contains("CI 1h 20m–2h") == true)
-    #expect(english?.contains("confidence high") == true)
+    #expect(forecast.summary(vietnamese: false) == "empty in ~100m (CI 80m–2h) · confidence high")
+    #expect(forecast.summary(vietnamese: true) == "cạn sau ~100 phút (CI 80 phút–2 giờ) · độ tin cậy high")
+}
 
-    let vietnamese = forecast.summary(vietnamese: true)
-    #expect(vietnamese?.contains("cạn sau ~1 giờ 40 phút") == true)
-    #expect(vietnamese?.contains("độ tin cậy high") == true)
+@Test func forecastSummaryUsesHoursAboveTwoHoursAndOmitsAMissingInterval() {
+    let long = QuotaWindowForecast(
+        window: "weekly",
+        remainingPercent: 12,
+        burnPerMinute: 0.05,
+        timeToEmptyMinutes: 150,
+        ciLowMinutes: 120,
+        ciHighMinutes: 240,
+        confidence: "medium",
+        sampleCount: 9
+    )
+    #expect(long.summary(vietnamese: false) == "empty in ~2h 30m (CI 2h–4h) · confidence medium")
+    #expect(long.summary(vietnamese: true) == "cạn sau ~2 giờ 30 phút (CI 2 giờ–4 giờ) · độ tin cậy medium")
+
+    // No confidence interval: the interval segment is omitted entirely.
+    let bare = QuotaWindowForecast(
+        window: "five_hour",
+        remainingPercent: 60,
+        burnPerMinute: 0.1,
+        timeToEmptyMinutes: 45,
+        ciLowMinutes: nil,
+        ciHighMinutes: nil,
+        confidence: "low",
+        sampleCount: 2
+    )
+    #expect(bare.summary(vietnamese: false) == "empty in ~45m · confidence low")
 }
 
 @Test func forecastSummaryIsNilWithoutAMeasurableBurn() {

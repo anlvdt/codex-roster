@@ -44,10 +44,12 @@ enum Command {
         #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
-    /// List saved accounts with cached quota (archived rows included).
+    /// List saved accounts with cached quota (archived rows hidden unless --all).
     List {
         #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
+        #[arg(long, help = "Include archived accounts")]
+        all: bool,
     },
     #[cfg(feature = "external-providers")]
     /// Inspect and manage external provider accounts.
@@ -524,15 +526,38 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
-        Some(Command::List { json }) => {
+        Some(Command::List { json, all }) => {
             let list = app.list()?;
             if json {
                 print_json(&list)?;
-            } else if list.accounts.is_empty() {
-                println!("No saved accounts in {}.", list.environment);
+                return Ok(());
+            }
+            let total = list.accounts.len();
+            let archived = list
+                .accounts
+                .iter()
+                .filter(|account| account.archived)
+                .count();
+            let accounts = list
+                .accounts
+                .iter()
+                .filter(|account| all || !account.archived)
+                .collect::<Vec<_>>();
+            if accounts.is_empty() {
+                if total == 0 {
+                    println!("No saved accounts in {}.", list.environment);
+                } else {
+                    println!(
+                        "No active accounts in {}; {archived} archived (use --all to list them).",
+                        list.environment
+                    );
+                }
             } else {
-                for account in list.accounts {
-                    println!("{}", render_account_summary(&account));
+                for account in &accounts {
+                    println!("{}", render_account_summary(account));
+                }
+                if !all && archived > 0 {
+                    println!("({archived} archived hidden; use --all to include them.)");
                 }
             }
             Ok(())
@@ -1653,12 +1678,27 @@ fn print_process_summary(title: &str, processes: &[RunningCodexProcess]) {
 }
 
 fn render_account_summary(account: &AccountView) -> String {
-    let mut line = format!(
-        "{} {}{}",
-        account.id,
-        account.email,
-        if account.is_active { " [active]" } else { "" }
-    );
+    let mut line = format!("{} {}", account.id, account.email);
+    if let Some(label) = account
+        .custom_label
+        .as_deref()
+        .filter(|label| !label.trim().is_empty())
+    {
+        line.push_str(&format!(" ({label})"));
+    }
+    if account.is_active {
+        line.push_str(" [active]");
+    }
+    if account.archived {
+        line.push_str(" [archived]");
+    }
+    if let Some(plan) = account
+        .plan_label
+        .as_deref()
+        .filter(|plan| !plan.is_empty())
+    {
+        line.push_str(&format!(" [{plan}]"));
+    }
     if account
         .usage_error
         .as_deref()
@@ -1680,10 +1720,16 @@ fn render_account_summary(account: &AccountView) -> String {
                 if window.reset_at <= OffsetDateTime::now_utc() {
                     line.push_str(&format!(" [{label} reset passed]"));
                 } else {
+                    // Show the reset in the user's own time zone: a UTC date is
+                    // off by up to a day for many users (audit CLI-04).
+                    let local = window.reset_at.to_offset(
+                        time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC),
+                    );
                     line.push_str(&format!(
-                        " [{label} remaining: {}%, reset {}]",
+                        " [{label} remaining: {}%, reset {} {}]",
                         window.remaining_percent,
-                        window.reset_at.date()
+                        local.date(),
+                        local.time(),
                     ));
                 }
             }
@@ -2086,8 +2132,65 @@ mod codex_only_cli_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{CONTRACT_VERSION, classify_error, schema_document};
+    use super::{CONTRACT_VERSION, classify_error, render_account_summary, schema_document};
     use anyhow::anyhow;
+    use time::OffsetDateTime;
+    use uuid::Uuid;
+
+    #[test]
+    fn account_summary_shows_label_plan_and_state() {
+        let now = OffsetDateTime::now_utc();
+        let account = crate::model::AccountView {
+            id: Uuid::new_v4(),
+            provider: crate::model::AiProvider::OpenAi,
+            email: "person@example.com".to_owned(),
+            subject: None,
+            name: None,
+            custom_label: Some("Work".to_owned()),
+            plan_label: Some("Plus".to_owned()),
+            environment: crate::model::EnvironmentKind::Linux,
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+            last_activated_at: None,
+            archived: true,
+            usage: Some(crate::model::AccountUsageView {
+                source: crate::model::UsageSource::LiveAccessToken,
+                fetched_at: now,
+                five_hour: Some(crate::model::UsageWindowView {
+                    used_percent: 20,
+                    remaining_percent: 80,
+                    reset_at: now + time::Duration::hours(3),
+                }),
+                weekly: None,
+                credits: None,
+                banked_resets: None,
+                plan_label: None,
+                subscription_active_until: None,
+                luna_reserve: None,
+                five_hour_known: true,
+                weekly_known: false,
+            }),
+            usage_error: None,
+        };
+        let line = render_account_summary(&account);
+        assert!(line.contains("person@example.com"));
+        assert!(
+            line.contains("(Work)"),
+            "custom label must be visible: {line}"
+        );
+        assert!(line.contains("[active]"));
+        assert!(
+            line.contains("[archived]"),
+            "archived rows must be marked: {line}"
+        );
+        assert!(line.contains("[Plus]"));
+        assert!(line.contains("5h remaining: 80%"));
+        assert!(
+            line.contains("reset "),
+            "reset time must be rendered: {line}"
+        );
+    }
 
     #[test]
     fn classify_error_maps_known_failures_to_exit_codes() {

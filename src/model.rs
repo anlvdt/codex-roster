@@ -389,6 +389,9 @@ pub struct DeadAccountReport {
     pub deep_alive: usize,
     /// OpenAI explicitly reported these as deleted/deactivated.
     pub confirmed: Vec<DeadAccountEntry>,
+    /// The saved grant is dead: OpenAI rejected the refresh token, so this
+    /// snapshot can never sign in again without a fresh login.
+    pub grant_rejected: Vec<DeadAccountEntry>,
     /// Corroborating evidence only: auth keeps failing and nothing was fetched
     /// for `stale_after_days`. Never proof on its own.
     pub suspects: Vec<DeadAccountEntry>,

@@ -1627,13 +1627,17 @@ fn print_dead_account_report(report: &crate::model::DeadAccountReport) {
             report.deep_checked, report.deep_alive
         );
     }
-    let total = report.confirmed.len() + report.suspects.len();
+    let total = report.confirmed.len() + report.grant_rejected.len() + report.suspects.len();
     if total == 0 {
         println!("No dead or suspect accounts found.");
         return;
     }
     for (title, entries) in [
         ("Confirmed deactivated by OpenAI", &report.confirmed),
+        (
+            "Grant rejected: the saved refresh token is dead, a fresh login is required",
+            &report.grant_rejected,
+        ),
         (
             "Suspect: auth keeps failing and nothing was fetched recently",
             &report.suspects,
@@ -1962,7 +1966,7 @@ Exit codes: 0 ok, 2 usage, 3 login/blocked, 4 lock timeout, 5 no account, 6 netw
                 "open-ai-status" => "indicator, description, updated_at, codex_components[]",
                 "auto-start-usage-windows" => "enabled, poll_seconds",
                 "dead-accounts" => {
-                    "generated_at, stale_after_days, confirmed[] (account_id, name, email, plan_label, archived, is_active, reason, detail, last_usage_at?, suggested_commands[]), suspects[], note"
+                    "generated_at, stale_after_days, deep_checked, deep_alive, confirmed[] (account_id, name, email, plan_label, archived, is_active, reason, detail, last_usage_at?, suggested_commands[]), grant_rejected[], suspects[], note"
                 }
                 "cleanup" => {
                     "apply, reclaimable_bytes, items[] (path, name, bytes, reason, removed?), review_only[]"

@@ -823,6 +823,7 @@ where
         };
         let now = OffsetDateTime::now_utc();
         let mut confirmed = Vec::new();
+        let mut grant_rejected = Vec::new();
         let mut suspects = Vec::new();
         for account in self.list()?.accounts {
             let Some((reason, detail)) = classify_dead_account(&account, now, stale_days) else {
@@ -831,6 +832,7 @@ where
             let entry = dead_account_entry(account, reason, detail);
             match reason {
                 DeadAccountReason::Deactivated => confirmed.push(entry),
+                DeadAccountReason::GrantRejected => grant_rejected.push(entry),
                 DeadAccountReason::StaleAuthFailure => suspects.push(entry),
             }
         }
@@ -840,6 +842,7 @@ where
             deep_checked,
             deep_alive,
             confirmed,
+            grant_rejected,
             suspects,
             note: DEAD_ACCOUNT_NOTE.to_owned(),
         })
@@ -2015,6 +2018,9 @@ pub const DEAD_ACCOUNT_NOTE: &str = "Missing 5h/7d windows are NOT evidence of a
 pub enum DeadAccountReason {
     /// OpenAI explicitly reported the account as deleted/deactivated.
     Deactivated,
+    /// The refresh token was rejected (`invalid_grant`, session ended): the saved
+    /// grant is dead and only a fresh login can revive it.
+    GrantRejected,
     /// Auth keeps failing and nothing has been fetched for a long time.
     StaleAuthFailure,
 }
@@ -2023,6 +2029,7 @@ impl DeadAccountReason {
     fn as_str(self) -> &'static str {
         match self {
             Self::Deactivated => "account_deactivated",
+            Self::GrantRejected => "grant_rejected",
             Self::StaleAuthFailure => "auth_failure_stale",
         }
     }
@@ -2043,11 +2050,14 @@ fn classify_dead_account(
     if usage_error_account_deactivated(error) {
         return Some((DeadAccountReason::Deactivated, error.to_owned()));
     }
-    // Only auth-shaped failures count, and only when the account has produced
-    // nothing for a while. A window that is merely absent never qualifies.
-    let auth_failure =
-        usage_error_requires_login(error) || usage_error_is_deferred_access_token_refresh(error);
-    if !auth_failure {
+    // A rejected refresh token is authoritative: the grant is gone.
+    if usage_error_requires_login(error) {
+        return Some((DeadAccountReason::GrantRejected, error.to_owned()));
+    }
+    // A deferred access-token failure is only a hint, and only when the account
+    // has produced nothing for a while. A window that is merely absent never
+    // qualifies (Free/Go have no weekly window by design).
+    if !usage_error_is_deferred_access_token_refresh(error) {
         return None;
     }
     match account.usage.as_ref().map(|usage| now - usage.fetched_at) {

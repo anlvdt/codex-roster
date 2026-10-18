@@ -4008,6 +4008,309 @@ mod tests {
         );
     }
 
+    /// A two-account temp roster for exercising the real apply path: the live
+    /// account is exhausted and the saved candidate has a fresh usable paid
+    /// cache, so no network or Keychain access is needed.
+    struct AutoSwitchSwap {
+        _temp: tempfile::TempDir,
+        app: App<MemorySecretStore>,
+        active_id: Uuid,
+        candidate_id: Uuid,
+    }
+
+    fn write_live_auth(env: &AppEnv, email: &str, subject: &str, plan: &str, sid: &str) {
+        std::fs::write(
+            env.codex_root.join("auth.json"),
+            auth_json_fixture(email, subject, Some(plan)),
+        )
+        .expect("write live auth");
+        std::fs::write(env.codex_root.join("cap_sid"), sid).expect("write cap_sid");
+    }
+
+    fn seed_cached_usage(app: &App<MemorySecretStore>, account_id: Uuid, usage: AccountUsageView) {
+        let (metadata, snapshot) = app
+            .repository
+            .load_snapshot(&app.env.kind, account_id)
+            .expect("load snapshot");
+        app.repository
+            .replace_snapshot_without_backup(
+                &app.env.kind,
+                account_id,
+                &saved_identity(&metadata),
+                &snapshot,
+                Some(usage),
+            )
+            .expect("seed cached usage");
+    }
+
+    /// The exhausted live account: both windows depleted but still current, so
+    /// `is_exhausted_for_switch` holds and the recent cache skips the live probe.
+    fn exhausted_switch_usage() -> AccountUsageView {
+        usage_with(Some(window_view(0, 5)), Some(window_view(0, 48)), None, 0)
+    }
+
+    /// The replacement account: fresh, current, paid, and not exhausted.
+    fn usable_switch_usage() -> AccountUsageView {
+        usage_with(Some(window_view(80, 5)), Some(window_view(90, 48)), None, 0)
+    }
+
+    fn save_live_account(app: &App<MemorySecretStore>) -> Uuid {
+        let live = crate::codex::read_live_auth_bundle(&app.env).expect("live auth bundle");
+        app.repository
+            .save_snapshot_without_backup(&app.env.kind, &live.identity, &live.snapshot)
+            .expect("save live account")
+            .0
+            .id
+    }
+
+    fn auto_switch_swap_fixture() -> AutoSwitchSwap {
+        let temp = tempdir().expect("tempdir");
+        let env = AppEnv {
+            kind: EnvironmentKind::Linux,
+            home_dir: temp.path().to_path_buf(),
+            codex_root: temp.path().join(".codex"),
+            app_data_dir: temp.path().join("app"),
+        };
+        std::fs::create_dir_all(&env.codex_root).expect("codex root");
+        let app = App::new(
+            env.clone(),
+            SnapshotRepository::new(&env.app_data_dir, MemorySecretStore::default()),
+        );
+        // Save both accounts from real (temp) live auth bundles, then make the
+        // exhausted one live again so the switch has somewhere to move away from.
+        // The snapshot is written without the unrelated first full-backup pass.
+        write_live_auth(
+            &env,
+            "active@example.com",
+            "sub-active",
+            "pro",
+            "sid-active",
+        );
+        let active_id = save_live_account(&app);
+        write_live_auth(
+            &env,
+            "candidate@example.com",
+            "sub-candidate",
+            "plus",
+            "sid-candidate",
+        );
+        let candidate_id = save_live_account(&app);
+        write_live_auth(
+            &env,
+            "active@example.com",
+            "sub-active",
+            "pro",
+            "sid-active",
+        );
+        seed_cached_usage(&app, active_id, exhausted_switch_usage());
+        seed_cached_usage(&app, candidate_id, usable_switch_usage());
+        crate::settings::save_settings(
+            &env.app_data_dir,
+            &crate::settings::AppSettings {
+                auto_switch_when_exhausted: true,
+                ..crate::settings::AppSettings::default()
+            },
+        )
+        .expect("enable auto-switch");
+        AutoSwitchSwap {
+            _temp: temp,
+            app,
+            active_id,
+            candidate_id,
+        }
+    }
+
+    /// End-to-end apply: a real `auto_switch_with_candidate(true, ...)` swaps the
+    /// temp `~/.codex` auth, records the durable switch transaction before the
+    /// mutation, advances it, removes it, and reports the pick score.
+    #[test]
+    fn auto_switch_apply_completes_the_durable_switch_saga_end_to_end() {
+        use crate::switch_txn::{SwitchPhase, path as txn_path};
+
+        // ---- Case 1: a successful swap, with the transaction observed mid-flight.
+        let AutoSwitchSwap {
+            _temp,
+            app,
+            active_id,
+            candidate_id,
+        } = auto_switch_swap_fixture();
+        let app_data_dir = app.env.app_data_dir.clone();
+        assert!(
+            !txn_path(&app_data_dir).exists(),
+            "no transaction may exist before a switch starts"
+        );
+
+        // Hold AuthLock so the switch thread parks right after the `Captured`
+        // phase (which is written before `activate` mutates auth). That makes the
+        // durable intermediate state observable without changing production code.
+        let auth_lock = AuthLock::acquire(&app_data_dir).expect("hold auth lock");
+        let output = std::thread::scope(|scope| {
+            let switching =
+                scope.spawn(|| app.auto_switch_with_candidate(true, Some(candidate_id), true));
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                if let Ok(Some(txn)) = crate::switch_txn::load(&app_data_dir)
+                    && txn.phase == SwitchPhase::Captured
+                {
+                    assert_eq!(
+                        txn.from_account, active_id,
+                        "transaction records the source"
+                    );
+                    assert_eq!(
+                        txn.to_account, candidate_id,
+                        "transaction records the target"
+                    );
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "the durable switch transaction never reached the captured phase"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            drop(auth_lock);
+            switching.join().expect("switch thread")
+        })
+        .expect("apply auto-switch");
+
+        assert_eq!(output.status, "switched");
+        assert_eq!(output.active_account_id, Some(active_id));
+        assert_eq!(output.candidate_account_id, Some(candidate_id));
+        assert!(
+            output.warnings.is_empty(),
+            "a clean switch must not warn: {:?}",
+            output.warnings
+        );
+        let score = output
+            .candidate_switch_score
+            .expect("the pick must be explained by a score");
+        assert!(
+            score.quota_component > 0 && score.score > 0,
+            "unexpected score: {score:?}"
+        );
+        assert!(
+            score.reason.contains("quota"),
+            "the score must explain the pick: {score:?}"
+        );
+
+        // The auth mutation really landed on the candidate...
+        let live = crate::codex::read_live_auth_bundle(&app.env).expect("live bundle");
+        assert_eq!(live.identity.email, "candidate@example.com");
+        assert_eq!(live.identity.subject.as_deref(), Some("sub-candidate"));
+
+        // ...the durable transaction was removed before returning...
+        assert!(
+            !txn_path(&app_data_dir).exists(),
+            "a finished switch must not leave switch-txn.json behind"
+        );
+        assert!(
+            crate::switch_txn::load(&app_data_dir)
+                .expect("load switch transaction")
+                .is_none(),
+            "the finished transaction must be cleared"
+        );
+
+        // ...and the post-`verified` cooldown bookkeeping ran.
+        let settings = crate::settings::load_settings(&app_data_dir).expect("settings");
+        assert_eq!(settings.last_auto_switch_target, Some(candidate_id));
+        assert_eq!(settings.last_auto_switch_from, Some(active_id));
+        assert!(settings.last_auto_switch_at.is_some());
+
+        // ---- Case 2: a failing resume-hint read warns but keeps the switch.
+        let AutoSwitchSwap {
+            _temp: _temp2,
+            app: app2,
+            active_id: active2,
+            candidate_id: candidate2,
+        } = auto_switch_swap_fixture();
+        let app_data_dir2 = app2.env.app_data_dir.clone();
+        // A directory where the resume index should be makes only the post-swap
+        // hint read fail; the credential swap must still be reported as applied.
+        let resume_index = app_data_dir2.join("session-resume.json");
+        let _ = std::fs::remove_file(&resume_index);
+        std::fs::create_dir(&resume_index).expect("break the resume index");
+        let output2 = app2
+            .auto_switch_with_candidate(true, Some(candidate2), true)
+            .expect("apply must survive a resume-hint read failure");
+        assert_eq!(output2.status, "switched");
+        assert_eq!(output2.active_account_id, Some(active2));
+        assert_eq!(output2.candidate_account_id, Some(candidate2));
+        assert!(
+            output2
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("resume hint")),
+            "the failed hint read must surface as a warning: {:?}",
+            output2.warnings
+        );
+        assert!(!txn_path(&app_data_dir2).exists());
+        assert_eq!(
+            crate::codex::read_live_auth_bundle(&app2.env)
+                .expect("live bundle")
+                .identity
+                .email,
+            "candidate@example.com"
+        );
+
+        // ---- Case 3: a failed swap leaves no transaction and no cooldown.
+        let AutoSwitchSwap {
+            _temp: _temp3,
+            app: app3,
+            active_id: _active3,
+            candidate_id: candidate3,
+        } = auto_switch_swap_fixture();
+        let app_data_dir3 = app3.env.app_data_dir.clone();
+        // Break activation after the saga has begun: the saved metadata subject no
+        // longer matches the snapshot identity, so the restore is refused.
+        let (metadata3, snapshot3) = app3
+            .repository
+            .load_snapshot(&app3.env.kind, candidate3)
+            .expect("load candidate snapshot");
+        app3.repository
+            .replace_snapshot_without_backup(
+                &app3.env.kind,
+                candidate3,
+                &DisplayIdentity {
+                    subject: Some("sub-mismatch".to_owned()),
+                    ..saved_identity(&metadata3)
+                },
+                &snapshot3,
+                Some(usable_switch_usage()),
+            )
+            .expect("mismatch the candidate metadata");
+        let error = app3
+            .auto_switch_with_candidate(true, Some(candidate3), true)
+            .expect_err("a mismatched snapshot must fail the swap");
+        assert!(
+            format!("{error:#}").contains("does not match the selected account"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            !txn_path(&app_data_dir3).exists(),
+            "the failure path must remove switch-txn.json"
+        );
+        assert!(
+            crate::switch_txn::load(&app_data_dir3)
+                .expect("load switch transaction")
+                .is_none()
+        );
+        assert_eq!(
+            crate::codex::read_live_auth_bundle(&app3.env)
+                .expect("live bundle")
+                .identity
+                .email,
+            "active@example.com",
+            "a failed swap must leave the previous account live"
+        );
+        assert_eq!(
+            crate::settings::load_settings(&app_data_dir3)
+                .expect("settings")
+                .last_auto_switch_target,
+            None,
+            "a failed swap must not record a cooldown"
+        );
+    }
+
     #[test]
     fn deferred_fresh_usable_cache_is_auto_switch_candidate_without_network() {
         let now = OffsetDateTime::now_utc();

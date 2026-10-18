@@ -331,6 +331,46 @@ pub struct AccountView {
     pub usage_error: Option<String>,
 }
 
+/// One account proposed for removal by `dead-accounts`.
+#[derive(Clone, Debug, Serialize)]
+pub struct DeadAccountEntry {
+    pub account_id: Uuid,
+    pub name: Option<String>,
+    pub email: String,
+    pub plan_label: Option<String>,
+    pub archived: bool,
+    pub is_active: bool,
+    /// `account_deactivated` (OpenAI said the account is gone) or
+    /// `auth_failure_stale` (keeps failing auth with nothing fetched for a while).
+    pub reason: String,
+    pub detail: String,
+    #[serde(with = "time_compat::option")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_usage_at: Option<OffsetDateTime>,
+    /// Commands the user can run. This report never removes anything itself.
+    pub suggested_commands: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DeadAccountReport {
+    #[serde(with = "time_compat")]
+    pub generated_at: OffsetDateTime,
+    pub stale_after_days: i64,
+    /// How many inactive accounts had their refresh token exchanged in this run
+    /// (0 for the default read-only report).
+    pub deep_checked: usize,
+    /// Of those, how many still had a live grant (their error was cleared).
+    pub deep_alive: usize,
+    /// OpenAI explicitly reported these as deleted/deactivated.
+    pub confirmed: Vec<DeadAccountEntry>,
+    /// Corroborating evidence only: auth keeps failing and nothing was fetched
+    /// for `stale_after_days`. Never proof on its own.
+    pub suspects: Vec<DeadAccountEntry>,
+    /// Explains what is *not* treated as evidence, so a Free/Go account with only
+    /// a monthly limit is never mistaken for a dead one.
+    pub note: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct StatusOutput {
     pub environment: EnvironmentKind,

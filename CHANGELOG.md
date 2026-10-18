@@ -33,6 +33,11 @@ Per-item status and evidence: [IMPLEMENTATION-STATUS.md](docs/audit-2026-10-18/I
 - Release binaries are built with thin LTO and stripped symbols (CLI 8.6 MB → 6.9 MB, bundle 16 MB → 14 MB).
 - README reflects the shipped command set, architecture, default language and validation steps; superseded audits moved to [docs/archive](docs/archive/README.md).
 
+### Added
+
+- `codex-roster dead-accounts` reports saved accounts that are dead or look dead and prints the exact `archive`/`delete` commands; it never removes anything itself. Only an explicit `account_deactivated` error is treated as proof, and `--deep` exchanges each inactive account's refresh token once to turn a suspicion into an answer (it never touches the account currently live in `~/.codex`, and persists the rotated snapshot immediately).
+- Missing 5h/7d windows are explicitly **not** evidence: Free/Go plans have no weekly limit and only a monthly one, so the report and its note say so instead of flagging those accounts.
+
 ### Fixed
 
 - Notch ears no longer clip their reset label ("Sun 6:00 A"): the label degrades through shorter forms (`Sun 6 PM`, then `Sun`) and the activity glyph only appears when something is actually running or waiting, so the fixed 146pt ear always fits.

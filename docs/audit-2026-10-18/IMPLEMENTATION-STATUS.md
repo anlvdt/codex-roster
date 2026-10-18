@@ -50,16 +50,18 @@ Nhánh: `main`. Chưa push `origin`. Chưa xoá dữ liệu người dùng.
 
 **Orca:** Codex chạy được 1 task nhỏ rồi **cạn hạn mức tháng đến 17/11/2026** (`You've hit your usage limit`); worker D đã được `worker-stop` + `worker-release` sạch và phần D do Lead hoàn thành. Các provider khác vẫn cạn (Claude 22/10, Cursor 11/12/2026, OpenCode/Muse sai model, antigravity/zcode fail).
 
-## 2. Còn lại (theo thứ tự ưu tiên)
+## 2. Còn lại (đã dọn theo thực tế)
 
-| # | Hạng mục | Ghi chú |
+| # | Hạng mục | Trạng thái |
 |---|---|---|
-| 2 | A2 phần còn lại: đưa cảnh báo backup vào JSON `warnings[]`, cap config VibeCafe | Phần lớn đã xong |
-| 3 | A3 phần còn lại: `add-account-status` chi tiết hơn | list human + TUI search/paging đã xong |
-| 4 | B phần còn lại: Light Mode token (VIS-1), a11y label/toggle/reduce-motion, freshness chip (QTA-1), notification loop 15s, archived filter, update badge | Đã xong menu-bar/`⌘,`/xoá/hover/passive refresh |
-| 5 | B phần còn lại: Light Mode cho các sheet khác, i18n leaks còn sót, feedback cho các thao tác khác, empty-state loading gate | Phần lớn B đã xong |
-| 6 | F/G wave 2: HUD/thanh dự báo nâng cao, gợi ý hành động, review độc lập bởi agent khác | Forecast đã lên UI; verification đã có báo cáo riêng |
-| 7 | Giới hạn đã biết: chưa có integration test cho một lần apply thành công (đường saga được phủ bởi test module + hồi quy toàn bộ suite) | Ghi nhận trung thực |
+| 1 | Đưa cảnh báo backup thất bại vào JSON `warnings[]` của lệnh ghi (hiện đã có ở `doctor` + stderr) | Chưa làm — mức ưu tiên thấp |
+| 2 | `add-account-status` chi tiết hơn (hiện trả `active`/`auth_changed`) | Chưa làm — mức ưu tiên thấp |
+| 3 | F/G wave 2: HUD/thanh dự báo nâng cao, gợi ý hành động theo ngữ cảnh | Một phần (forecast đã hiển thị trong deck) |
+| 4 | Review độc lập bởi **agent khác** (Orca worker) | Không thực hiện được: mọi provider Orca cạn quota; verification do Lead tự chạy và ghi rõ giới hạn |
+| 5 | Integration test đầu-cuối cho một lần apply thành công (đường saga) | Chưa có; đã ghi nhận trung thực |
+| 6 | Test Swift trong CI (`swift test`) | Không chạy được trên máy CLT-only; CI `macos-latest` sẽ chạy |
+
+Đã xong và không còn trong danh sách: Light Mode console + role màu ngữ nghĩa, a11y toggle/switch/hit-target, freshness chip, notification loop 15s, archived filter, update badge + xác nhận, empty-state loading gate, i18n sweep, TUI search/paging, `list --all` + giờ reset địa phương, housekeeping `.cas-*`/`preserved-metadata-*`, cap VibeCafe, check backup trong `doctor`.
 
 ## 3. Vì sao Lead làm trực tiếp thay vì worker Orca
 

@@ -1791,7 +1791,10 @@ fn render_account_summary(account: &AccountView) -> String {
                     );
                     line.push_str(&format!(
                         " [{label} remaining: {}%, reset {} {}]",
-                        window.remaining_percent,
+                        // Depleted windows read as 0% here, matching the app and
+                        // the TUI instead of leaking the raw 1% sentinel
+                        // (audit Q7/P0-4).
+                        crate::model::display_remaining_percent(window),
                         local.date(),
                         local.time(),
                     ));
@@ -2080,13 +2083,15 @@ fn print_usage_summary(usage: &AccountUsageView) {
     if let Some(five_hour) = &usage.five_hour {
         println!(
             "5h remaining: {}% (reset {})",
-            five_hour.remaining_percent, five_hour.reset_at
+            crate::model::display_remaining_percent(five_hour),
+            five_hour.reset_at
         );
     }
     if let Some(weekly) = &usage.weekly {
         println!(
             "Weekly remaining: {}% (reset {})",
-            weekly.remaining_percent, weekly.reset_at
+            crate::model::display_remaining_percent(weekly),
+            weekly.reset_at
         );
     }
     if let Some(credits) = &usage.credits {
@@ -2200,6 +2205,55 @@ mod tests {
     use anyhow::anyhow;
     use time::OffsetDateTime;
     use uuid::Uuid;
+
+    #[test]
+    fn a_depleted_window_reads_as_zero_percent_everywhere() {
+        let now = OffsetDateTime::now_utc();
+        let account = crate::model::AccountView {
+            id: Uuid::new_v4(),
+            provider: crate::model::AiProvider::OpenAi,
+            email: "dry@example.com".to_owned(),
+            subject: None,
+            name: None,
+            custom_label: None,
+            plan_label: Some("Plus".to_owned()),
+            environment: crate::model::EnvironmentKind::Linux,
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+            last_activated_at: None,
+            archived: false,
+            usage: Some(crate::model::AccountUsageView {
+                source: crate::model::UsageSource::LiveAccessToken,
+                fetched_at: now,
+                // 1% is the "exhausted" sentinel; the CLI must not print it raw
+                // while the app shows 0% (audit Q7/P0-4).
+                five_hour: Some(crate::model::UsageWindowView {
+                    used_percent: 99,
+                    remaining_percent: 1,
+                    reset_at: now + time::Duration::hours(1),
+                }),
+                weekly: None,
+                credits: None,
+                banked_resets: None,
+                plan_label: None,
+                subscription_active_until: None,
+                luna_reserve: None,
+                five_hour_known: true,
+                weekly_known: false,
+            }),
+            usage_error: None,
+        };
+        let line = render_account_summary(&account);
+        assert!(
+            line.contains("5h remaining: 0%"),
+            "depleted windows must read 0%, got: {line}"
+        );
+        assert!(
+            !line.contains("remaining: 1%"),
+            "raw sentinel leaked: {line}"
+        );
+    }
 
     #[test]
     fn account_summary_shows_label_plan_and_state() {

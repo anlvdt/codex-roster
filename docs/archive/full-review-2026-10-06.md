@@ -1,3 +1,6 @@
+> **Archived 2026-10-18.** Superseded by [docs/audit-2026-10-18](../audit-2026-10-18/00-MASTER-AUDIT.md).
+> Kept for history only: some commands, flags and file paths described below no longer exist.
+
 # Review toàn bộ AgentDock / codex-roster — 2026-10-06
 
 Các 35 Important ban đầu và các khoảng trống phát hiện khi review bản sửa đã được xử lý trong working tree. Review độc lập cuối không còn blocker trong các phần được sửa. Rust **377 passed, 1 ignored**; Swift **94 functions / 115 cases passed**. Còn ba Minor provider được liệt kê bên dưới. Chưa commit, push, merge hay deploy.

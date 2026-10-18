@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::backup::{read_encrypted, write_encrypted};
@@ -10,7 +11,7 @@ use crate::model::{
     AccountUsageView, AccountView, ActivateOutput, AutoSwitchOutput, DeleteOutput, DisplayIdentity,
     LegacyRecoveryOutput, ListOutput, RunningCodexProcess, SaveAction, SaveOutput,
     SavedAccountMetadata, SnapshotBlob, StatusOutput, TokenUsageSummaryOutput, UsageOutput,
-    UsageSource,
+    UsageSource, UsageWindowView,
 };
 use crate::operation_lock::{AuthLock, AutoSwitchLock, OperationLock};
 use crate::repository::SnapshotRepository;
@@ -122,6 +123,8 @@ where
             detail: None,
             banked_reset_count: 0,
             session_resume: None,
+            usage_unknown: false,
+            warnings: Vec::new(),
         })
     }
 
@@ -220,7 +223,29 @@ where
                 None,
             ));
         };
-        if !is_exhausted_for_switch(active.usage.as_ref()) {
+        let now = time::OffsetDateTime::now_utc();
+        // No current known window and no usable credits means the live probe
+        // failed (for example an expired access token, which Roster deliberately
+        // does not refresh) or the cached windows already reset. Say so instead
+        // of claiming the active account has quota (audit S2).
+        if !has_usable_credits(active.usage.as_ref())
+            && !has_current_five_hour_window(active.usage.as_ref(), now)
+        {
+            let mut output = auto_switch_output(
+                enabled,
+                "active_has_quota",
+                Some(active.id),
+                None,
+                None,
+                Some(
+                    "Quota is unknown for the active account; open Codex to refresh the session."
+                        .to_owned(),
+                ),
+            );
+            output.usage_unknown = true;
+            return Ok(output);
+        }
+        if !is_exhausted_for_switch(active.usage.as_ref(), now) {
             return Ok(auto_switch_output(
                 enabled,
                 "active_has_quota",
@@ -232,7 +257,6 @@ where
         }
 
         let settings = load_settings(&self.env.app_data_dir)?;
-        let now = time::OffsetDateTime::now_utc();
         let candidates = self.repository.list_accounts(&self.env.kind)?;
         let mut usable_candidate_ids = HashSet::new();
         for candidate in candidates.iter().filter(|candidate| {
@@ -253,7 +277,7 @@ where
             // Deferred AT unauthorized with fresh usable cache is also eligible —
             // never call usage(Some) on deferred (early-bail / no RT prove).
             if cached_usage_is_fresh(candidate.cached_usage.as_ref(), now) && confirmed_paid {
-                if is_usable_for_switch(candidate.cached_usage.as_ref()) {
+                if is_usable_for_switch(candidate.cached_usage.as_ref(), now) {
                     usable_candidate_ids.insert(candidate.id);
                 }
                 continue;
@@ -278,7 +302,7 @@ where
                 continue;
             }
             match self.usage(Some(candidate.id)) {
-                Ok(output) if fresh_usage_passes_auto_switch_gate(&output.usage) => {
+                Ok(output) if fresh_usage_passes_auto_switch_gate(&output.usage, now) => {
                     usable_candidate_ids.insert(candidate.id);
                 }
                 _ => {}
@@ -295,8 +319,23 @@ where
             .cloned()
             .collect();
         ranked.sort_by_key(|candidate| {
-            std::cmp::Reverse(switch_quota_score(candidate.usage.as_ref()))
+            std::cmp::Reverse(switch_quota_score(candidate.usage.as_ref(), now))
         });
+        // A live Codex CLI session cannot be switched past: apply would refuse
+        // after the GUI already quit Desktop, bouncing the session in a loop.
+        // Report `waiting_for_processes` instead of `ready` (audit S1).
+        let preflight = self.activation_blocking_report(true);
+        if preflight.has_live_cli() {
+            return Ok(auto_switch_output(
+                enabled,
+                "waiting_for_processes",
+                Some(active.id),
+                None,
+                None,
+                Some(crate::process::format_blocking_report(&preflight).join("; ")),
+            ));
+        }
+
         // Never tell the GUI to quit ChatGPT on a cache-only guess. A stale
         // >0% window on the only other row (often the same exhausted identity)
         // would otherwise close Desktop every 10s and bounce the session.
@@ -322,7 +361,7 @@ where
         // never spend it or switch to a still-exhausted account silently. Return
         // a distinct state so the UI can explain exactly why monitoring did not
         // switch while keeping the normal paid/quota path fully automatic.
-        let active_banked_reset_count = banked_reset_count(active.usage.as_ref());
+        let active_banked_reset_count = banked_reset_count(active.usage.as_ref(), now);
         let banked_reset_candidate = if active_banked_reset_count > 0 {
             Some((active.clone(), active_banked_reset_count))
         } else {
@@ -334,7 +373,7 @@ where
                 .map(|candidate| {
                     (
                         candidate.clone(),
-                        banked_reset_count(candidate.usage.as_ref()),
+                        banked_reset_count(candidate.usage.as_ref(), now),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -398,7 +437,7 @@ where
                 None,
             ));
         };
-        if !is_exhausted_for_switch(active.usage.as_ref()) {
+        if !is_exhausted_for_switch(active.usage.as_ref(), now) {
             // Active may have recovered quota between check and apply.
             return Ok(auto_switch_output(
                 enabled,
@@ -452,8 +491,8 @@ where
 
         // Final belt: never activate an exhausted / unusable candidate even if a
         // preferred id or list row slipped past revalidation.
-        if !is_usable_for_switch(candidate.usage.as_ref())
-            || is_exhausted_for_switch(candidate.usage.as_ref())
+        if !is_usable_for_switch(candidate.usage.as_ref(), now)
+            || is_exhausted_for_switch(candidate.usage.as_ref(), now)
         {
             return Ok(auto_switch_output(
                 enabled,
@@ -494,7 +533,14 @@ where
         settings.last_auto_switch_at = Some(now);
         settings.last_auto_switch_target = Some(candidate.id);
         settings.last_auto_switch_from = Some(active.id);
-        save_settings(&self.env.app_data_dir, &settings)?;
+        let mut bookkeeping_warnings = Vec::new();
+        if let Err(error) = save_settings(&self.env.app_data_dir, &settings) {
+            // The credential swap already succeeded. Report the switch with a
+            // warning instead of failing and losing cooldown/resume (audit S7).
+            bookkeeping_warnings.push(format!(
+                "session switched, but auto-switch cooldown bookkeeping failed: {error:#}"
+            ));
+        }
         let mut output = auto_switch_output(
             enabled,
             "switched",
@@ -504,12 +550,16 @@ where
             None,
         );
         let auto_resume_enabled = settings.auto_resume_session;
-        output.session_resume = crate::session_resume::take_pending_continue_hint(
+        match crate::session_resume::take_pending_continue_hint(
             &self.env.app_data_dir,
             auto_resume_enabled,
-        )
-        .ok()
-        .flatten();
+        ) {
+            Ok(hint) => output.session_resume = hint,
+            Err(error) => bookkeeping_warnings.push(format!(
+                "session switched, but the resume hint could not be read: {error:#}"
+            )),
+        }
+        output.warnings = bookkeeping_warnings;
         Ok(output)
     }
 
@@ -545,7 +595,7 @@ where
         // before trusting list eligibility, so a stale roster row cannot make an
         // exhausted account look ready/activate-able.
         let output = self.usage(Some(candidate_id)).ok()?;
-        if !fresh_usage_passes_auto_switch_gate(&output.usage) {
+        if !fresh_usage_passes_auto_switch_gate(&output.usage, now) {
             return None;
         }
         self.list().ok()?.accounts.into_iter().find(|account| {
@@ -1007,6 +1057,14 @@ where
 
     pub fn activation_blocking_warnings(&self, allow_desktop: bool) -> Vec<RunningCodexProcess> {
         crate::process::processes_blocking_activation(allow_desktop, &self.env.codex_root)
+    }
+
+    /// Blocking decision with reasons, for actionable CLI/GUI messages.
+    pub fn activation_blocking_report(
+        &self,
+        allow_desktop: bool,
+    ) -> crate::process::BlockingReport {
+        crate::process::blocking_report(allow_desktop, &self.env.codex_root)
     }
 
     pub fn refresh_saved_usage_cache(&self) -> Result<()> {
@@ -1529,6 +1587,8 @@ fn auto_switch_output(
         detail,
         banked_reset_count: 0,
         session_resume: None,
+        usage_unknown: false,
+        warnings: Vec::new(),
     }
 }
 
@@ -1552,51 +1612,66 @@ fn window_is_depleted(remaining_percent: u8) -> bool {
     remaining_percent <= EXHAUSTED_REMAINING_PERCENT
 }
 
-fn is_exhausted_for_switch(usage: Option<&AccountUsageView>) -> bool {
+/// Returns true if the window has not yet expired. A window with reset_at in
+/// the past is stale and must not be used for decision-making.
+fn window_is_current(window: &UsageWindowView, now: OffsetDateTime) -> bool {
+    window.reset_at > now
+}
+
+fn is_exhausted_for_switch(usage: Option<&AccountUsageView>, now: OffsetDateTime) -> bool {
     if has_usable_credits(usage) {
         return false;
     }
-    // Weekly depletion alone exhausts the account for switch purposes.
-    if usage
-        .and_then(|usage| usage.weekly.as_ref())
-        .is_some_and(|weekly| window_is_depleted(weekly.remaining_percent))
-    {
-        return true;
-    }
-    quota_windows(usage).any(|window| window_is_depleted(window.remaining_percent))
+    let Some(usage) = usage else {
+        return false;
+    };
+    // Only windows still in effect can be exhausted. A window whose `reset_at`
+    // has passed is *unknown* (it may already have reset); the caller must
+    // refetch instead of trusting its stale percentage (audit Q1).
+    quota_windows(Some(usage))
+        .filter(|window| window_is_current(window, now))
+        .any(|window| window_is_depleted(window.remaining_percent))
 }
 
-/// Weekly-dominant usability: a depleted weekly window blocks switch even when
-/// 5H still has leftover, unless the account has usable credits. Missing weekly
-/// falls back to five-hour-only.
-fn is_usable_for_switch(usage: Option<&AccountUsageView>) -> bool {
+/// True when the 5-hour window is known and still in effect. That window is the
+/// one that blocks a turn, so it is the gate for "the active account's quota is
+/// known" (audit Q3/S2).
+fn has_current_five_hour_window(usage: Option<&AccountUsageView>, now: OffsetDateTime) -> bool {
+    usage
+        .and_then(|usage| usage.five_hour.as_ref())
+        .is_some_and(|window| window_is_current(window, now))
+}
+
+/// Weekly-dominant usability plus completeness: the 5-hour window is the one
+/// that actually blocks a turn, so it must be known, current and not depleted
+/// unless the account has usable credits. An unknown or expired 5h window is
+/// never eligible (audit Q3). Missing weekly still falls back to 5h-only.
+fn is_usable_for_switch(usage: Option<&AccountUsageView>, now: OffsetDateTime) -> bool {
     if has_usable_credits(usage) {
         return true;
     }
     let Some(usage) = usage else {
         return false;
     };
-    if let Some(weekly) = usage.weekly.as_ref() {
-        if window_is_depleted(weekly.remaining_percent) {
-            return false;
-        }
-        return usage
-            .five_hour
-            .as_ref()
-            .map(|five| !window_is_depleted(five.remaining_percent))
-            .unwrap_or(true);
+    let five_ok = usage.five_hour.as_ref().is_some_and(|five| {
+        window_is_current(five, now) && !window_is_depleted(five.remaining_percent)
+    });
+    if !five_ok {
+        return false;
     }
-    usage
-        .five_hour
-        .as_ref()
-        .is_some_and(|five| !window_is_depleted(five.remaining_percent))
+    match usage.weekly.as_ref() {
+        Some(weekly) => {
+            window_is_current(weekly, now) && !window_is_depleted(weekly.remaining_percent)
+        }
+        None => true,
+    }
 }
 
 /// Live revalidation gate: fresh AT usage must be spendable, not exhausted, and
 /// not Free/Go. Used by `revalidated_auto_switch_candidate` before list eligibility.
-fn fresh_usage_passes_auto_switch_gate(usage: &AccountUsageView) -> bool {
-    is_usable_for_switch(Some(usage))
-        && !is_exhausted_for_switch(Some(usage))
+fn fresh_usage_passes_auto_switch_gate(usage: &AccountUsageView, now: OffsetDateTime) -> bool {
+    is_usable_for_switch(Some(usage), now)
+        && !is_exhausted_for_switch(Some(usage), now)
         && !is_free_plan_label(usage.plan_label.as_deref())
 }
 
@@ -1613,7 +1688,8 @@ fn deferred_fresh_usable_auto_switch_candidate(
         .as_deref()
         .is_some_and(usage_error_is_deferred_access_token_refresh)
         && candidate.usage.as_ref().is_some_and(|usage| {
-            cached_usage_is_fresh(Some(usage), now) && fresh_usage_passes_auto_switch_gate(usage)
+            cached_usage_is_fresh(Some(usage), now)
+                && fresh_usage_passes_auto_switch_gate(usage, now)
         })
         && is_eligible_auto_switch_candidate(candidate, active, settings, now, None)
 }
@@ -1628,7 +1704,7 @@ fn fresh_usable_paid_cached_auto_switch_candidate(
     now: time::OffsetDateTime,
 ) -> bool {
     candidate.usage.as_ref().is_some_and(|usage| {
-        cached_usage_is_fresh(Some(usage), now) && fresh_usage_passes_auto_switch_gate(usage)
+        cached_usage_is_fresh(Some(usage), now) && fresh_usage_passes_auto_switch_gate(usage, now)
     }) && is_eligible_auto_switch_candidate(candidate, active, settings, now, None)
 }
 
@@ -1641,7 +1717,7 @@ fn has_usable_credits(usage: Option<&AccountUsageView>) -> bool {
         })
 }
 
-fn banked_reset_count(usage: Option<&AccountUsageView>) -> i64 {
+fn banked_reset_count(usage: Option<&AccountUsageView>, now: OffsetDateTime) -> i64 {
     usage
         .and_then(|usage| usage.banked_resets.as_ref())
         .map(|resets| {
@@ -1651,6 +1727,8 @@ fn banked_reset_count(usage: Option<&AccountUsageView>) -> i64 {
                 .unwrap_or(&[])
                 .iter()
                 .filter(|credit| credit.status.eq_ignore_ascii_case("available"))
+                // Expired credits are not redeemable (audit Q6).
+                .filter(|credit| credit.expires_at.is_none_or(|expires| expires > now))
                 .count() as i64;
             resets.available_count.max(0).max(from_credits)
         })
@@ -1670,9 +1748,9 @@ fn is_banked_reset_fallback_candidate(
             .usage_error
             .as_deref()
             .is_some_and(usage_error_blocks_activation)
-        && !is_usable_for_switch(candidate.usage.as_ref())
+        && !is_usable_for_switch(candidate.usage.as_ref(), now)
         && !is_free_plan(candidate)
-        && banked_reset_count(candidate.usage.as_ref()) > 0
+        && banked_reset_count(candidate.usage.as_ref(), now) > 0
         && !is_in_auto_switch_cooldown(settings, candidate.id, now)
 }
 
@@ -1744,7 +1822,7 @@ fn is_eligible_auto_switch_candidate(
             .usage_error
             .as_deref()
             .is_some_and(usage_error_blocks_activation)
-        && is_usable_for_switch(candidate.usage.as_ref())
+        && is_usable_for_switch(candidate.usage.as_ref(), now)
         && !is_free_plan(candidate)
         && !is_in_auto_switch_cooldown(settings, candidate.id, now)
 }
@@ -1764,7 +1842,7 @@ fn is_cached_auto_switch_hint(
             .usage_error
             .as_deref()
             .is_some_and(usage_error_blocks_activation)
-        && is_usable_for_switch(candidate.usage.as_ref())
+        && is_usable_for_switch(candidate.usage.as_ref(), now)
         && !is_free_plan_label(plan_hint_for_auto_switch(candidate))
         && !is_in_auto_switch_cooldown(settings, candidate.id, now)
 }
@@ -1772,26 +1850,33 @@ fn is_cached_auto_switch_hint(
 /// Weekly-dominant ranking: `weekly * 1000 + five_hour` so any weekly gap
 /// outranks any 5H-only difference. Depleted weekly (or missing usable windows)
 /// scores `-1`.
-fn switch_quota_score(usage: Option<&AccountUsageView>) -> i32 {
+fn switch_quota_score(usage: Option<&AccountUsageView>, now: OffsetDateTime) -> i32 {
     let Some(usage) = usage else {
         return -1;
     };
-    if let Some(weekly) = usage.weekly.as_ref() {
+    // A missing or expired 5-hour window makes the account ineligible, so it
+    // must not outrank an eligible one (audit Q3).
+    let Some(five) = usage
+        .five_hour
+        .as_ref()
+        .filter(|window| window_is_current(window, now))
+    else {
+        return -1;
+    };
+    if window_is_depleted(five.remaining_percent) {
+        return -1;
+    }
+    if let Some(weekly) = usage
+        .weekly
+        .as_ref()
+        .filter(|window| window_is_current(window, now))
+    {
         if window_is_depleted(weekly.remaining_percent) {
             return -1;
         }
-        let five = usage
-            .five_hour
-            .as_ref()
-            .map(|window| i32::from(window.remaining_percent))
-            .unwrap_or(0);
-        return i32::from(weekly.remaining_percent) * 1000 + five;
+        return i32::from(weekly.remaining_percent) * 1000 + i32::from(five.remaining_percent);
     }
-    match usage.five_hour.as_ref() {
-        Some(five) if window_is_depleted(five.remaining_percent) => -1,
-        Some(five) => i32::from(five.remaining_percent),
-        None => -1,
-    }
+    i32::from(five.remaining_percent)
 }
 
 /// Keep source/target out of the next auto-switch briefly to avoid thrashing,
@@ -1838,8 +1923,9 @@ fn ranked_cached_auto_switch_candidates(
         })
         .cloned()
         .collect();
-    candidates
-        .sort_by_key(|candidate| std::cmp::Reverse(switch_quota_score(candidate.usage.as_ref())));
+    candidates.sort_by_key(|candidate| {
+        std::cmp::Reverse(switch_quota_score(candidate.usage.as_ref(), now))
+    });
     candidates
 }
 
@@ -1866,8 +1952,14 @@ fn cached_usage_is_fresh(
         // and trusting reset_at would keep re-querying suppressed until the old
         // scheduled time, hiding restored quota. Only accounts that still have
         // quota in every reported window skip the refetch.
+        let windows = quota_windows(Some(usage)).collect::<Vec<_>>();
         now - usage.fetched_at < time::Duration::minutes(15)
-            && quota_windows(Some(usage))
+            && !windows.is_empty()
+            // Any window past its reset time makes the whole cache stale: the
+            // percentage may belong to a window that already reset (audit Q1).
+            && windows.iter().all(|window| window_is_current(window, now))
+            && windows
+                .iter()
                 .all(|window| !window_is_depleted(window.remaining_percent))
     })
 }
@@ -1885,7 +1977,11 @@ fn exhausted_cached_usage_skips_probe(
     now: time::OffsetDateTime,
 ) -> bool {
     usage.is_some_and(|usage| {
-        !is_usable_for_switch(Some(usage)) && now - usage.fetched_at < EXHAUSTED_USAGE_PROBE_BACKOFF
+        !is_usable_for_switch(Some(usage), now)
+            && now - usage.fetched_at < EXHAUSTED_USAGE_PROBE_BACKOFF
+            // Never let the backoff hide a natural reset: a window whose reset
+            // time has passed must be re-probed immediately (audit Q2).
+            && quota_windows(Some(usage)).all(|window| window_is_current(window, now))
     })
 }
 
@@ -2230,18 +2326,20 @@ mod tests {
             five_hour: Some(UsageWindowView {
                 used_percent: 10,
                 remaining_percent: 90,
-                reset_at: OffsetDateTime::now_utc(),
+                reset_at: OffsetDateTime::now_utc() + time::Duration::hours(5),
             }),
             weekly: Some(UsageWindowView {
                 used_percent: 10,
                 remaining_percent: 90,
-                reset_at: OffsetDateTime::now_utc(),
+                reset_at: OffsetDateTime::now_utc() + time::Duration::hours(5),
             }),
             credits: None,
             banked_resets: None,
             plan_label: Some("Plus".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
         repo.replace_snapshot_without_backup(
             &env.kind,
@@ -2321,6 +2419,95 @@ mod tests {
         app.cancel_add_account_session().expect("cancel");
     }
 
+    fn window_view(remaining: u8, reset_in_hours: i64) -> UsageWindowView {
+        UsageWindowView {
+            used_percent: 100u8.saturating_sub(remaining),
+            remaining_percent: remaining,
+            reset_at: OffsetDateTime::now_utc() + time::Duration::hours(reset_in_hours),
+        }
+    }
+
+    fn usage_with(
+        five: Option<UsageWindowView>,
+        weekly: Option<UsageWindowView>,
+        credits: Option<crate::model::CreditsView>,
+        fetched_minutes_ago: i64,
+    ) -> AccountUsageView {
+        AccountUsageView {
+            source: UsageSource::LiveAccessToken,
+            fetched_at: OffsetDateTime::now_utc() - time::Duration::minutes(fetched_minutes_ago),
+            five_hour_known: five.is_some(),
+            weekly_known: weekly.is_some(),
+            five_hour: five,
+            weekly,
+            credits,
+            banked_resets: None,
+            plan_label: Some("Plus".to_owned()),
+            subscription_active_until: None,
+            luna_reserve: None,
+        }
+    }
+
+    #[test]
+    fn expired_window_is_unknown_not_usable_or_exhausted() {
+        let now = OffsetDateTime::now_utc();
+        // Plenty of percentage left, but the window's reset time already passed:
+        // the number belongs to a window that may have reset (audit Q1).
+        let stale = usage_with(
+            Some(window_view(90, -1)),
+            Some(window_view(80, -2)),
+            None,
+            2,
+        );
+        assert!(!has_current_five_hour_window(Some(&stale), now));
+        assert!(!is_usable_for_switch(Some(&stale), now));
+        assert!(!is_exhausted_for_switch(Some(&stale), now));
+        assert!(!cached_usage_is_fresh(Some(&stale), now));
+
+        // Same percentages with current windows stay usable.
+        let current = usage_with(Some(window_view(90, 1)), Some(window_view(80, 48)), None, 2);
+        assert!(has_current_five_hour_window(Some(&current), now));
+        assert!(is_usable_for_switch(Some(&current), now));
+        assert!(cached_usage_is_fresh(Some(&current), now));
+    }
+
+    #[test]
+    fn missing_five_hour_window_is_not_eligible_without_credits() {
+        let now = OffsetDateTime::now_utc();
+        // Weekly looks healthy but the 5h window (the one that blocks turns) is
+        // absent: not eligible, and not a reason to claim active_has_quota.
+        let no_five = usage_with(None, Some(window_view(90, 48)), None, 1);
+        assert!(!is_usable_for_switch(Some(&no_five), now));
+        assert!(!has_current_five_hour_window(Some(&no_five), now));
+        assert_eq!(switch_quota_score(Some(&no_five), now), -1);
+
+        // Usable credits make the account spendable even without a 5h window.
+        let credits = crate::model::CreditsView {
+            has_credits: true,
+            unlimited: false,
+            balance: "12.50".to_owned(),
+            credit_limit: None,
+        };
+        let with_credits = usage_with(None, Some(window_view(90, 48)), Some(credits), 1);
+        assert!(is_usable_for_switch(Some(&with_credits), now));
+    }
+
+    #[test]
+    fn exhausted_probe_backoff_never_hides_a_natural_reset() {
+        let now = OffsetDateTime::now_utc();
+        // Exhausted 3 minutes ago with a reset still in the future: back off.
+        let pending = usage_with(Some(window_view(0, 1)), Some(window_view(0, 48)), None, 3);
+        assert!(exhausted_cached_usage_skips_probe(Some(&pending), now));
+
+        // Same cache, but a window's reset time already passed: probe now, so a
+        // natural reset is never hidden for up to ten minutes (audit Q2).
+        let reset_passed = usage_with(Some(window_view(0, -1)), Some(window_view(0, 48)), None, 3);
+        assert!(!exhausted_cached_usage_skips_probe(
+            Some(&reset_passed),
+            now
+        ));
+    }
+
     #[test]
     fn auto_switch_requires_every_reported_window_to_be_usable() {
         let usage = AccountUsageView {
@@ -2329,22 +2516,25 @@ mod tests {
             five_hour: Some(UsageWindowView {
                 used_percent: 100,
                 remaining_percent: 0,
-                reset_at: OffsetDateTime::now_utc(),
+                reset_at: OffsetDateTime::now_utc() + time::Duration::hours(5),
             }),
             weekly: Some(UsageWindowView {
                 used_percent: 10,
                 remaining_percent: 90,
-                reset_at: OffsetDateTime::now_utc(),
+                reset_at: OffsetDateTime::now_utc() + time::Duration::hours(5),
             }),
             credits: None,
             banked_resets: None,
             plan_label: None,
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
+        let now = OffsetDateTime::now_utc();
 
-        assert!(is_exhausted_for_switch(Some(&usage)));
-        assert!(!is_usable_for_switch(Some(&usage)));
+        assert!(is_exhausted_for_switch(Some(&usage), now));
+        assert!(!is_usable_for_switch(Some(&usage), now));
     }
 
     #[test]
@@ -2356,33 +2546,35 @@ mod tests {
             five_hour: Some(UsageWindowView {
                 used_percent: 10,
                 remaining_percent: 90,
-                reset_at: now,
+                reset_at: now + time::Duration::hours(5),
             }),
             weekly: Some(UsageWindowView {
                 used_percent: 100,
                 remaining_percent: 0,
-                reset_at: now,
+                reset_at: now + time::Duration::hours(5),
             }),
             credits: None,
             banked_resets: None,
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
-        assert!(is_exhausted_for_switch(Some(&weekly_dead)));
-        assert!(!is_usable_for_switch(Some(&weekly_dead)));
-        assert_eq!(switch_quota_score(Some(&weekly_dead)), -1);
+        assert!(is_exhausted_for_switch(Some(&weekly_dead), now));
+        assert!(!is_usable_for_switch(Some(&weekly_dead), now));
+        assert_eq!(switch_quota_score(Some(&weekly_dead), now), -1);
 
         let high_weekly = AccountUsageView {
             five_hour: Some(UsageWindowView {
                 used_percent: 95,
                 remaining_percent: 5,
-                reset_at: now,
+                reset_at: now + time::Duration::hours(5),
             }),
             weekly: Some(UsageWindowView {
                 used_percent: 40,
                 remaining_percent: 60,
-                reset_at: now,
+                reset_at: now + time::Duration::hours(5),
             }),
             ..weekly_dead.clone()
         };
@@ -2390,20 +2582,23 @@ mod tests {
             five_hour: Some(UsageWindowView {
                 used_percent: 1,
                 remaining_percent: 99,
-                reset_at: now,
+                reset_at: now + time::Duration::hours(5),
             }),
             weekly: Some(UsageWindowView {
                 used_percent: 50,
                 remaining_percent: 50,
-                reset_at: now,
+                reset_at: now + time::Duration::hours(5),
             }),
             ..weekly_dead
         };
-        assert!(is_usable_for_switch(Some(&high_weekly)));
-        assert!(is_usable_for_switch(Some(&low_weekly)));
-        assert_eq!(switch_quota_score(Some(&high_weekly)), 60_005);
-        assert_eq!(switch_quota_score(Some(&low_weekly)), 50_099);
-        assert!(switch_quota_score(Some(&high_weekly)) > switch_quota_score(Some(&low_weekly)));
+        assert!(is_usable_for_switch(Some(&high_weekly), now));
+        assert!(is_usable_for_switch(Some(&low_weekly), now));
+        assert_eq!(switch_quota_score(Some(&high_weekly), now), 60_005);
+        assert_eq!(switch_quota_score(Some(&low_weekly), now), 50_099);
+        assert!(
+            switch_quota_score(Some(&high_weekly), now)
+                > switch_quota_score(Some(&low_weekly), now)
+        );
     }
 
     #[test]
@@ -2512,18 +2707,20 @@ mod tests {
             five_hour: Some(UsageWindowView {
                 used_percent: 10,
                 remaining_percent: 90,
-                reset_at: now,
+                reset_at: now + time::Duration::hours(5),
             }),
             weekly: Some(UsageWindowView {
                 used_percent: 10,
                 remaining_percent: 90,
-                reset_at: now,
+                reset_at: now + time::Duration::hours(5),
             }),
             credits: None,
             banked_resets: None,
             plan_label: plan.map(str::to_owned),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
         let account = |roster: Option<&str>, usage_plan: Option<&str>| crate::model::AccountView {
             id: Uuid::new_v4(),
@@ -2577,23 +2774,25 @@ mod tests {
             five_hour: Some(UsageWindowView {
                 used_percent: 100u8.saturating_sub(remaining),
                 remaining_percent: remaining,
-                reset_at: now,
+                reset_at: now + time::Duration::hours(5),
             }),
             weekly: Some(UsageWindowView {
                 used_percent: 100u8.saturating_sub(remaining),
                 remaining_percent: remaining,
-                reset_at: now,
+                reset_at: now + time::Duration::hours(5),
             }),
             credits,
             banked_resets: None,
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
 
         let exhausted = usage(0, None);
-        assert!(is_exhausted_for_switch(Some(&exhausted)));
-        assert!(!is_usable_for_switch(Some(&exhausted)));
+        assert!(is_exhausted_for_switch(Some(&exhausted), now));
+        assert!(!is_usable_for_switch(Some(&exhausted), now));
 
         let unlimited = usage(
             0,
@@ -2604,8 +2803,8 @@ mod tests {
                 credit_limit: None,
             }),
         );
-        assert!(!is_exhausted_for_switch(Some(&unlimited)));
-        assert!(is_usable_for_switch(Some(&unlimited)));
+        assert!(!is_exhausted_for_switch(Some(&unlimited), now));
+        assert!(is_usable_for_switch(Some(&unlimited), now));
 
         let paid_credits = usage(
             0,
@@ -2616,8 +2815,8 @@ mod tests {
                 credit_limit: None,
             }),
         );
-        assert!(!is_exhausted_for_switch(Some(&paid_credits)));
-        assert!(is_usable_for_switch(Some(&paid_credits)));
+        assert!(!is_exhausted_for_switch(Some(&paid_credits), now));
+        assert!(is_usable_for_switch(Some(&paid_credits), now));
 
         let empty_credits = usage(
             0,
@@ -2628,8 +2827,8 @@ mod tests {
                 credit_limit: None,
             }),
         );
-        assert!(is_exhausted_for_switch(Some(&empty_credits)));
-        assert!(!is_usable_for_switch(Some(&empty_credits)));
+        assert!(is_exhausted_for_switch(Some(&empty_credits), now));
+        assert!(!is_usable_for_switch(Some(&empty_credits), now));
     }
 
     #[test]
@@ -2645,7 +2844,7 @@ mod tests {
             five_hour: Some(UsageWindowView {
                 used_percent: 99,
                 remaining_percent: 1,
-                reset_at: now,
+                reset_at: now + time::Duration::hours(5),
             }),
             weekly: None,
             credits: None,
@@ -2653,21 +2852,23 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
-        assert!(is_exhausted_for_switch(Some(&depleted)));
-        assert!(!is_usable_for_switch(Some(&depleted)));
+        assert!(is_exhausted_for_switch(Some(&depleted), now));
+        assert!(!is_usable_for_switch(Some(&depleted), now));
         assert!(!cached_usage_is_fresh(Some(&depleted), now));
 
         let usable = AccountUsageView {
             five_hour: Some(UsageWindowView {
                 used_percent: 98,
                 remaining_percent: 2,
-                reset_at: now,
+                reset_at: now + time::Duration::hours(5),
             }),
             ..depleted
         };
-        assert!(!is_exhausted_for_switch(Some(&usable)));
-        assert!(is_usable_for_switch(Some(&usable)));
+        assert!(!is_exhausted_for_switch(Some(&usable), now));
+        assert!(is_usable_for_switch(Some(&usable), now));
     }
 
     #[test]
@@ -2679,7 +2880,7 @@ mod tests {
             five_hour: Some(UsageWindowView {
                 used_percent: 100,
                 remaining_percent: 0,
-                reset_at: now,
+                reset_at: now + time::Duration::hours(5),
             }),
             weekly: None,
             credits: None,
@@ -2690,6 +2891,8 @@ mod tests {
             plan_label: Some(plan.to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
         let account = |email: &str, plan: &str, reset_count: i64| AccountView {
             id: Uuid::new_v4(),
@@ -2713,9 +2916,9 @@ mod tests {
         let candidate = account("candidate@example.com", "Plus", 1);
         let settings = crate::settings::AppSettings::default();
 
-        assert!(is_exhausted_for_switch(candidate.usage.as_ref()));
-        assert!(!is_usable_for_switch(candidate.usage.as_ref()));
-        assert_eq!(banked_reset_count(candidate.usage.as_ref()), 1);
+        assert!(is_exhausted_for_switch(candidate.usage.as_ref(), now));
+        assert!(!is_usable_for_switch(candidate.usage.as_ref(), now));
+        assert_eq!(banked_reset_count(candidate.usage.as_ref(), now), 1);
         assert!(is_banked_reset_fallback_candidate(
             &candidate, &active, &settings, now
         ));
@@ -2739,7 +2942,7 @@ mod tests {
         let window = |remaining: u8| UsageWindowView {
             used_percent: 100u8.saturating_sub(remaining),
             remaining_percent: remaining,
-            reset_at: now,
+            reset_at: now + time::Duration::hours(5),
         };
         let account = |plan: &str, remaining: u8, active: bool| crate::model::AccountView {
             id: Uuid::new_v4(),
@@ -2765,6 +2968,8 @@ mod tests {
                 plan_label: Some(plan.to_owned()),
                 subscription_active_until: None,
                 luna_reserve: None,
+                five_hour_known: false,
+                weekly_known: false,
             }),
             usage_error: None,
         };
@@ -2800,7 +3005,7 @@ mod tests {
         let window = |remaining: u8| UsageWindowView {
             used_percent: 100u8.saturating_sub(remaining),
             remaining_percent: remaining,
-            reset_at: now,
+            reset_at: now + time::Duration::hours(5),
         };
         let exhausted_usage = AccountUsageView {
             source: UsageSource::SavedAccessToken,
@@ -2812,6 +3017,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
         let exhausted = AccountView {
             id: Uuid::new_v4(),
@@ -2836,15 +3043,15 @@ mod tests {
         active.subject = Some("subject-active".to_owned());
         active.is_active = true;
 
-        assert!(is_exhausted_for_switch(Some(&exhausted_usage)));
-        assert!(!is_usable_for_switch(Some(&exhausted_usage)));
-        assert!(!fresh_usage_passes_auto_switch_gate(&exhausted_usage));
+        assert!(is_exhausted_for_switch(Some(&exhausted_usage), now));
+        assert!(!is_usable_for_switch(Some(&exhausted_usage), now));
+        assert!(!fresh_usage_passes_auto_switch_gate(&exhausted_usage, now));
         assert!(!is_eligible_auto_switch_candidate(
             &exhausted, &active, &settings, now, None
         ));
         // Preferred exhausted id: apply's revalidation + final belt both refuse.
         let preferred_exhausted_would_activate =
-            fresh_usage_passes_auto_switch_gate(exhausted.usage.as_ref().expect("usage"))
+            fresh_usage_passes_auto_switch_gate(exhausted.usage.as_ref().expect("usage"), now)
                 && is_eligible_auto_switch_candidate(&exhausted, &active, &settings, now, None);
         assert!(
             !preferred_exhausted_would_activate,
@@ -2864,7 +3071,7 @@ mod tests {
         let window = |remaining: u8| UsageWindowView {
             used_percent: 100u8.saturating_sub(remaining),
             remaining_percent: remaining,
-            reset_at: now,
+            reset_at: now + time::Duration::hours(5),
         };
         let recent_exhausted = AccountUsageView {
             source: UsageSource::SavedAccessToken,
@@ -2876,6 +3083,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
         let stale_exhausted = AccountUsageView {
             fetched_at: now - time::Duration::minutes(11),
@@ -2891,6 +3100,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
 
         assert!(exhausted_cached_usage_skips_probe(
@@ -2925,18 +3136,20 @@ mod tests {
             five_hour: Some(UsageWindowView {
                 used_percent: 100,
                 remaining_percent: 0,
-                reset_at: now,
+                reset_at: now + time::Duration::hours(5),
             }),
             weekly: Some(UsageWindowView {
                 used_percent: 100,
                 remaining_percent: 0,
-                reset_at: now,
+                reset_at: now + time::Duration::hours(5),
             }),
             credits: None,
             banked_resets: None,
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
         let save = |email: &str, minutes_ago: i64| {
             let identity = DisplayIdentity {
@@ -3132,18 +3345,20 @@ mod tests {
             five_hour: Some(UsageWindowView {
                 used_percent: 100,
                 remaining_percent: 0,
-                reset_at: OffsetDateTime::now_utc(),
+                reset_at: OffsetDateTime::now_utc() + time::Duration::hours(5),
             }),
             weekly: Some(UsageWindowView {
                 used_percent: 100,
                 remaining_percent: 0,
-                reset_at: OffsetDateTime::now_utc(),
+                reset_at: OffsetDateTime::now_utc() + time::Duration::hours(5),
             }),
             credits: None,
             banked_resets: None,
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
         let seed_usage = |fetched_at: OffsetDateTime| {
             app.repository
@@ -3198,7 +3413,7 @@ mod tests {
         let window = |remaining: u8| UsageWindowView {
             used_percent: 100u8.saturating_sub(remaining),
             remaining_percent: remaining,
-            reset_at: now,
+            reset_at: now + time::Duration::hours(5),
         };
         let usable = AccountUsageView {
             source: UsageSource::SavedAccessToken,
@@ -3210,6 +3425,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
         let deferred = AccountView {
             id: Uuid::new_v4(),
@@ -3244,6 +3461,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         });
 
         assert!(usage_error_is_deferred_access_token_refresh(
@@ -3280,7 +3499,7 @@ mod tests {
         let window = |remaining: u8| UsageWindowView {
             used_percent: 100u8.saturating_sub(remaining),
             remaining_percent: remaining,
-            reset_at: now,
+            reset_at: now + time::Duration::hours(5),
         };
         let usable = AccountUsageView {
             source: UsageSource::SavedAccessToken,
@@ -3292,6 +3511,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
         let candidate = AccountView {
             id: Uuid::new_v4(),
@@ -3325,6 +3546,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         });
 
         assert!(fresh_usable_paid_cached_auto_switch_candidate(
@@ -3344,6 +3567,8 @@ mod tests {
             plan_label: Some("Free".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         });
         assert!(!fresh_usable_paid_cached_auto_switch_candidate(
             &free, &active, &settings, now
@@ -3361,6 +3586,8 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         });
         assert!(!fresh_usable_paid_cached_auto_switch_candidate(
             &stale, &active, &settings, now
@@ -3374,7 +3601,7 @@ mod tests {
         let window = |remaining: u8| UsageWindowView {
             used_percent: 100u8.saturating_sub(remaining),
             remaining_percent: remaining,
-            reset_at: now,
+            reset_at: now + time::Duration::hours(5),
         };
         let account = |email: &str, plan: &str, remaining: u8, active: bool| AccountView {
             id: Uuid::new_v4(),
@@ -3400,6 +3627,8 @@ mod tests {
                 plan_label: Some(plan.to_owned()),
                 subscription_active_until: None,
                 luna_reserve: None,
+                five_hour_known: false,
+                weekly_known: false,
             }),
             usage_error: None,
         };
@@ -3409,10 +3638,12 @@ mod tests {
         let roster = [active.clone(), exhausted.clone(), usable.clone()];
 
         assert!(!fresh_usage_passes_auto_switch_gate(
-            exhausted.usage.as_ref().expect("usage")
+            exhausted.usage.as_ref().expect("usage"),
+            now
         ));
         assert!(fresh_usage_passes_auto_switch_gate(
-            usable.usage.as_ref().expect("usage")
+            usable.usage.as_ref().expect("usage"),
+            now
         ));
         assert!(!is_eligible_auto_switch_candidate(
             &exhausted, &active, &settings, now, None
@@ -3427,7 +3658,7 @@ mod tests {
 
         // decide's ready path: only a fresh-gated usable id may become the candidate.
         let ready_candidate = ranked.into_iter().find(|candidate| {
-            fresh_usage_passes_auto_switch_gate(candidate.usage.as_ref().expect("usage"))
+            fresh_usage_passes_auto_switch_gate(candidate.usage.as_ref().expect("usage"), now)
                 && is_eligible_auto_switch_candidate(candidate, &active, &settings, now, None)
         });
         assert_eq!(
@@ -3448,7 +3679,7 @@ mod tests {
         let window = |remaining: u8| UsageWindowView {
             used_percent: 100u8.saturating_sub(remaining),
             remaining_percent: remaining,
-            reset_at: now,
+            reset_at: now + time::Duration::hours(5),
         };
         let account =
             |email: &str, plan: &str, remaining: u8, banked: i64, active: bool| AccountView {
@@ -3478,6 +3709,8 @@ mod tests {
                     plan_label: Some(plan.to_owned()),
                     subscription_active_until: None,
                     luna_reserve: None,
+                    five_hour_known: false,
+                    weekly_known: false,
                 }),
                 usage_error: None,
             };
@@ -3486,11 +3719,12 @@ mod tests {
         let banked_only = account("banked@example.com", "Pro", 0, 2, false);
         let roster = [active.clone(), exhausted.clone(), banked_only.clone()];
 
-        assert!(is_exhausted_for_switch(active.usage.as_ref()));
-        assert!(!is_usable_for_switch(exhausted.usage.as_ref()));
-        assert!(!is_usable_for_switch(banked_only.usage.as_ref()));
+        assert!(is_exhausted_for_switch(active.usage.as_ref(), now));
+        assert!(!is_usable_for_switch(exhausted.usage.as_ref(), now));
+        assert!(!is_usable_for_switch(banked_only.usage.as_ref(), now));
         assert!(!fresh_usage_passes_auto_switch_gate(
-            exhausted.usage.as_ref().expect("usage")
+            exhausted.usage.as_ref().expect("usage"),
+            now
         ));
         assert!(!is_eligible_auto_switch_candidate(
             &exhausted, &active, &settings, now, None
@@ -3515,7 +3749,8 @@ mod tests {
         // Mirrors apply_auto_switch's empty-candidate / final-belt branch: no activation.
         let apply_status = if ranked.is_empty()
             || ranked.iter().any(|c| {
-                !is_usable_for_switch(c.usage.as_ref()) || is_exhausted_for_switch(c.usage.as_ref())
+                !is_usable_for_switch(c.usage.as_ref(), now)
+                    || is_exhausted_for_switch(c.usage.as_ref(), now)
             }) {
             "all_accounts_exhausted"
         } else {
@@ -3602,6 +3837,8 @@ mod tests {
             plan_label: None,
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
 
         assert!(!cached_usage_is_fresh(Some(&usage), now));
@@ -3626,6 +3863,8 @@ mod tests {
             plan_label: None,
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
 
         assert!(!cached_usage_is_fresh(Some(&usage), now));
@@ -3648,6 +3887,8 @@ mod tests {
             plan_label: None,
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         };
 
         assert!(cached_usage_is_fresh(Some(&usage), now));
@@ -3744,6 +3985,8 @@ mod tests {
                 plan_label: None,
                 subscription_active_until: None,
                 luna_reserve: None,
+                five_hour_known: false,
+                weekly_known: false,
             }),
         )
         .expect("replace");
@@ -3807,6 +4050,8 @@ mod tests {
                 plan_label: None,
                 subscription_active_until: None,
                 luna_reserve: None,
+                five_hour_known: false,
+                weekly_known: false,
             }),
         )
         .expect("replace");

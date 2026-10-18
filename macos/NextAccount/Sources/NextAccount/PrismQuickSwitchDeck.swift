@@ -1294,12 +1294,31 @@ private struct PrismCompactAccountCard: View {
             .disabled(account.isActive || store.isBusyForActions || store.isWorking)
             Button(role: .destructive) {
                 guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
-                store.delete(target)
+                store.requestDelete(target)
             } label: {
                 Label(language.text("Xóa", "Delete"), systemImage: "trash")
             }
+            .disabled(account.isActive || store.isBusyForActions || store.isWorking)
         }
         .id(targetID)
+        .confirmationDialog(
+            language.text("Xóa tài khoản?", "Delete account?"),
+            isPresented: Binding(
+                get: { store.pendingDeleteAccount?.id == targetID },
+                set: { if !$0 { store.pendingDeleteAccount = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button(language.text("Xóa vĩnh viễn", "Delete permanently"), role: .destructive) {
+                store.confirmPendingDelete()
+            }
+            Button(language.text("Hủy", "Cancel"), role: .cancel) { store.pendingDeleteAccount = nil }
+        } message: {
+            Text(language.text(
+                "Tài khoản \(store.pendingDeleteAccount?.email ?? "") sẽ bị xóa cùng snapshot đã lưu. Không thể hoàn tác.",
+                "The account \(store.pendingDeleteAccount?.email ?? "") and its saved snapshot will be removed. This cannot be undone."
+            ))
+        }
     }
 
     /// Manual Switch when activation is not blocked — Free/exhausted rows stay

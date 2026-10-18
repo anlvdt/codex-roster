@@ -236,8 +236,13 @@ pub struct AccountView {
     pub plan_label: Option<String>,
     pub environment: EnvironmentKind,
     pub is_active: bool,
+    /// CLI JSON only: RFC3339 strings instead of the legacy 9-integer array.
+    /// Storage keeps the array form (`SavedAccountMetadata` is untouched).
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_activated_at: Option<OffsetDateTime>,
     pub archived: bool,
     pub usage: Option<AccountUsageView>,
@@ -309,6 +314,14 @@ pub struct AutoSwitchOutput {
     /// Target-account resume hint after a successful switch (optional).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_resume: Option<SessionResumeHint>,
+    /// True when the active account has no current known usage window and a
+    /// live probe failed or was impossible. Decisions must not switch in this state.
+    #[serde(default)]
+    pub usage_unknown: bool,
+    /// Non-fatal notes recorded after a successful credential swap, for example
+    /// when bookkeeping failed but the switch itself succeeded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -382,6 +395,22 @@ pub struct RunningCodexProcess {
     /// "desktop" (ChatGPT/Codex.app/plugin) or "cli". Optional for older tests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DoctorCheck {
+    pub id: String,
+    /// `ok` | `warn` | `fail`
+    pub status: String,
+    pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DoctorOutput {
+    pub version: String,
+    pub checks: Vec<DoctorCheck>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -473,6 +502,13 @@ pub struct AccountUsageView {
     /// GPT-5.6 Luna reserve pool after primary model exhaustion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub luna_reserve: Option<LunaReserveView>,
+    /// Whether the 5-hour window was present and parsable in the source payload.
+    /// Missing fields deserialize as false so old caches force a refetch.
+    #[serde(default)]
+    pub five_hour_known: bool,
+    /// Whether the weekly window was present and parsable in the source payload.
+    #[serde(default)]
+    pub weekly_known: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -726,4 +762,14 @@ pub enum UsageSource {
     LiveRefreshToken,
     SavedAccessToken,
     SavedRefreshToken,
+}
+
+/// Returns the display remaining percent for a window.
+/// Depleted windows (remaining <= 1) display as 0; otherwise the remaining percent.
+pub fn display_remaining_percent(window: &UsageWindowView) -> u8 {
+    if window.remaining_percent <= 1 {
+        0
+    } else {
+        window.remaining_percent
+    }
 }

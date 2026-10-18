@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Single tabbed hub for Settings / Operations / About / Backup (replaces multiple popup windows).
@@ -21,6 +22,21 @@ struct RosterConsoleView: View {
             idealHeight: RosterSecondaryChrome.consoleHeight
         )
         .background(.background)
+        // Console-triggered failures (export/import/restore/refresh) must be
+        // visible where they happened, not only on the notch window (audit FLOW-2).
+        .alert("Codex Roster", isPresented: Binding(
+            get: { store.errorMessage != nil },
+            set: { if !$0 { store.errorMessage = nil } }
+        )) {
+            Button(language.text("Sao chép chi tiết", "Copy details")) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(store.errorMessage ?? "", forType: .string)
+                store.errorMessage = nil
+            }
+            Button(language.text("Đồng ý", "OK"), role: .cancel) { store.errorMessage = nil }
+        } message: {
+            Text(store.errorMessage ?? "")
+        }
         // SwiftUI `Window(title:)` does not refresh when LanguageStore changes.
         .background {
             SyncNamedWindowTitle(

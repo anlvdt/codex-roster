@@ -45,10 +45,7 @@ struct OperationsView: View {
         }
         .onAppear {
             store.refreshTokenUsage(silently: true)
-            store.refreshOpenAIStatus(silently: true)
-            store.refreshResetOutlook(silently: true)
-            store.refreshResetTimeline(silently: true)
-            store.refreshResetJuice(silently: true)
+            store.refreshPublicDataPassively()
         }
     }
 

@@ -6,8 +6,10 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -51,14 +53,49 @@ fn load(path: &Path) -> HistoryFile {
 }
 
 fn save(path: &Path, file: &HistoryFile) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).ok();
-    }
     let bytes = serde_json::to_vec_pretty(file).context("encode quota history")?;
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, bytes).context("write quota history tmp")?;
-    fs::rename(&tmp, path).context("commit quota history")?;
-    Ok(())
+    // Atomic + durable with a unique temp name: a fixed `.json.tmp` let two
+    // writers clobber each other's temp file (audit C2).
+    crate::file_store::atomic_write(path, &bytes, 0o600)
+}
+
+/// Cross-process lease for the quota-history read-modify-write. A dedicated
+/// lock file avoids re-entrancy with `OperationLock`, which activation holds.
+struct HistoryLock(fs::File);
+
+impl HistoryLock {
+    fn acquire(app_data_dir: &Path) -> Result<Self> {
+        let path = app_data_dir.join("quota-history.lock");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("failed to open {}", path.display()))?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => return Ok(Self(file)),
+                Err(error) if Instant::now() < deadline => {
+                    let _ = error;
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("timed out locking {}", path.display()));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for HistoryLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 
 fn minute_of(now: OffsetDateTime) -> i64 {
@@ -84,6 +121,7 @@ pub fn record_sample(
     now: OffsetDateTime,
 ) -> Result<()> {
     let path = history_path(app_data_dir);
+    let _lock = HistoryLock::acquire(app_data_dir)?;
     let mut file = load(&path);
     let key = account_id.to_string();
     let now_minute = minute_of(now);
@@ -111,18 +149,20 @@ pub fn load_samples(
     now: OffsetDateTime,
 ) -> QuotaHistoryOutput {
     let path = history_path(app_data_dir);
-    let mut file = load(&path);
+    let file = load(&path);
     let key = account_id.to_string();
     let now_minute = minute_of(now);
+    // Read-only: pruning must never write from a read path (audit C2). The
+    // pruned view is returned without mutating the stored file.
     let samples = file
         .accounts
-        .get_mut(&key)
+        .get(&key)
         .map(|entry| {
-            prune(entry, now_minute);
-            entry.clone()
+            let mut entry = entry.clone();
+            prune(&mut entry, now_minute);
+            entry
         })
         .unwrap_or_default();
-    let _ = save(&path, &file);
     QuotaHistoryOutput {
         account_id: Some(account_id),
         samples,
@@ -155,6 +195,8 @@ mod tests {
             plan_label: None,
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         }
     }
 
@@ -170,6 +212,34 @@ mod tests {
         assert_eq!(out.samples.len(), 2);
         assert_eq!(out.samples[0].five_remaining, 80);
         assert_eq!(out.samples[1].five_remaining, 70);
+    }
+
+    #[test]
+    fn reading_history_never_writes() {
+        let dir = tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let out = load_samples(dir.path(), id, OffsetDateTime::now_utc());
+        assert!(out.samples.is_empty());
+        assert!(
+            !dir.path().join(FILE_NAME).exists(),
+            "a read path must not create or rewrite the history file (audit C2)"
+        );
+    }
+
+    #[test]
+    fn record_keeps_other_accounts_intact() {
+        let dir = tempdir().unwrap();
+        let now = OffsetDateTime::now_utc();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        record_sample(dir.path(), first, &usage(50, 40), now).unwrap();
+        record_sample(dir.path(), second, &usage(80, 70), now).unwrap();
+        let first_out = load_samples(dir.path(), first, now);
+        let second_out = load_samples(dir.path(), second, now);
+        assert_eq!(first_out.samples.len(), 1);
+        assert_eq!(first_out.samples[0].five_remaining, 50);
+        assert_eq!(second_out.samples.len(), 1);
+        assert_eq!(second_out.samples[0].five_remaining, 80);
     }
 
     #[test]

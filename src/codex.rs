@@ -633,6 +633,7 @@ fn copy_atomic(src: &Path, dest: &Path) -> Result<()> {
         let _ = fs::remove_file(&tmp);
         return Err(error).with_context(|| format!("failed to replace {}", dest.display()));
     }
+    crate::file_store::fsync_parent(dest);
     Ok(())
 }
 
@@ -668,6 +669,10 @@ fn write_private_staged_file(path: &Path, bytes: &[u8]) -> Result<()> {
             .with_context(|| format!("failed to stage {}", path.display()))?;
         file.write_all(bytes)
             .with_context(|| format!("failed to stage {}", path.display()))?;
+        // Credentials must be on disk before the rename makes them the live
+        // session; otherwise a crash can leave a truncated auth.json (audit R1).
+        file.sync_all()
+            .with_context(|| format!("failed to flush {}", path.display()))?;
     }
     #[cfg(not(unix))]
     fs::write(path, bytes).with_context(|| format!("failed to stage {}", path.display()))?;

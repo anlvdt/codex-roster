@@ -1,3 +1,6 @@
+> **Archived 2026-10-18.** Superseded by [docs/audit-2026-10-18](../audit-2026-10-18/00-MASTER-AUDIT.md).
+> Kept for history only: some commands, flags and file paths described below no longer exist.
+
 # Claude live quota audit — 2026-10-08
 
 ## Findings and changes

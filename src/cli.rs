@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 
@@ -29,7 +29,8 @@ use crate::usage::{usage_error_label, usage_error_requires_login};
     name = crate::CLI_NAME,
     author,
     version,
-    about = "Manage Codex accounts across the CLI and IDE"
+    about = "Manage Codex accounts across the CLI and IDE",
+    after_help = "EXAMPLES:\n  codex-roster list --json\n  codex-roster activate <ACCOUNT_ID>\n  codex-roster tui\n\nAll commands accept --json for machine-readable output; the macOS app consumes it."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -38,12 +39,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Show environment, the live account, saved-account count and process warnings.
     Status {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// List saved accounts with cached quota (archived rows included).
     List {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     #[cfg(feature = "external-providers")]
@@ -52,73 +55,87 @@ enum Command {
         #[command(subcommand)]
         command: Option<ProviderCommand>,
     },
+    /// Save the current live Codex session as a roster account.
     Save {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Start an isolated login for a new account without touching the live session.
     BeginAddAccount {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Import the account created by `begin-add-account` into the roster.
     SaveAddedAccount {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Discard a pending add-account login and its temporary CODEX_HOME.
     CancelAddAccount {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Report whether the pending add-account login produced credentials.
     AddAccountStatus {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Show quota for one account, or for the active account when no id is given.
     Usage {
         account_id: Option<Uuid>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Re-query the active account plus any stale saved accounts (staleness-aware).
     RefreshUsage {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Switch the live Codex session to a saved account.
     Activate {
         account_id: Option<Uuid>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Ignore ChatGPT/Codex Desktop leftovers (never a live Codex CLI session)"
+        )]
         force: bool,
     },
     /// Enable Luna Reserve (gpt-5.6-luna) for the active account or a specific account.
     EnableLunaReserve {
         account_id: Option<Uuid>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Delete a saved account and its encrypted snapshot.
     Delete {
         account_id: Option<Uuid>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Hide an account from the roster, or restore it with --restore.
     Archive {
         account_id: Uuid,
-        #[arg(long)]
+        #[arg(long, help = "Restore the account instead of archiving it")]
         restore: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Write an encrypted backup bundle to OUTPUT.
     Export {
         output: PathBuf,
-        #[arg(long)]
+        #[arg(long, help = "Read the backup password from stdin (max 4 KiB)")]
         password_stdin: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Restore accounts from an encrypted backup bundle.
     Import {
         input: PathBuf,
-        #[arg(long)]
+        #[arg(long, help = "Read the backup password from stdin (max 4 KiB)")]
         password_stdin: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Import account(s) from Codex auth.json, a Roster snapshot JSON, or a plaintext backup bundle.
@@ -127,21 +144,25 @@ enum Command {
         /// Optional display label (single-account auth.json / snapshot only).
         #[arg(long)]
         label: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Restore roster metadata from the newest automatic account-list backup.
     RestoreAccountListBackup {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Restore the full encrypted backup over the current roster.
     RestoreFullBackup {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Write an automatic full backup now instead of waiting for the next schedule.
     CreateAutomaticFullBackup {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Keep Codex usage windows fresh in the background.
     AutoStartUsageWindows {
         #[arg(long, conflicts_with = "disable")]
         enable: bool,
@@ -149,7 +170,7 @@ enum Command {
         disable: bool,
         #[arg(long)]
         run: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Remember Codex rollout cwd/session on switch; reopen thread after activate.
@@ -161,9 +182,10 @@ enum Command {
         /// Discover interrupted / quota-blocked threads (same-account recovery).
         #[arg(long, conflicts_with_all = ["enable", "disable"])]
         continue_interrupted: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Inspect or change automatic switching when quota is exhausted.
     AutoSwitch {
         #[arg(long, conflicts_with_all = ["disable", "apply", "status"])]
         enable: bool,
@@ -179,21 +201,23 @@ enum Command {
         force: bool,
         #[arg(long)]
         status: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Recover accounts from legacy snapshot formats.
     RecoverLegacySnapshots {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Summarise local Codex token usage and estimated cost.
     TokenUsage {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Official rate-limit remaining % samples for the last ~7 days.
     QuotaHistory {
         account_id: Option<Uuid>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Run the optional VibeCafe usage collector for Codex and other AI tools.
@@ -203,38 +227,55 @@ enum Command {
     },
     /// Global Codex Reset outlook (codex-resets.com status).
     ResetOutlook {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Return newly published Codex reset events once, for desktop notifications
     /// (codex-resets.com status/list + forecast official_signal).
     ResetEvents {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Return recent reset announcements from codex-resets.com.
     ResetTimeline {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Deprecated: Codex Resets does not publish service status history.
+    #[command(hide = true)]
     ResetStatusHistory {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Deprecated: Codex Resets does not publish effort tiers.
+    #[command(hide = true)]
     ResetJuice {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Show the public OpenAI Status summary.
     OpenAiStatus {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Report local diagnostics (paths, keys, locks, ports) for support.
+    Doctor {
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+        #[arg(long, help = "Write a redacted report to doctor-report.txt")]
+        bundle: bool,
+    },
+    /// Describe the `--json` contract, optionally for one command.
+    Schema {
+        command: Option<String>,
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+    },
+    /// Set or clear the custom label of a saved account.
     SetLabel {
         account_id: Uuid,
         label: String,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
 }
@@ -261,7 +302,7 @@ enum ProviderCommand {
     SyncClaude {
         #[arg(long)]
         email: String,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Save or restore a matching Claude Desktop login while Desktop is closed.
@@ -269,49 +310,52 @@ enum ProviderCommand {
         account_id: Uuid,
         #[arg(long, conflicts_with = "restore")]
         save: bool,
-        #[arg(long)]
+        #[arg(long, help = "Restore the account instead of archiving it")]
         restore: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Show live availability, identity, capabilities, and saved-account counts.
     Status {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// List saved accounts, optionally scoped to one provider.
     List {
         #[arg(long, value_parser = parse_ai_provider)]
         provider: Option<AiProvider>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Save the provider's currently authenticated account.
     Save {
         #[arg(value_parser = parse_ai_provider)]
         provider: AiProvider,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Activate a saved account. The provider is inferred from the account ID.
     Activate {
         account_id: Uuid,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Delete a saved external-provider account and its stored snapshot.
     Delete {
         account_id: Uuid,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Ignore ChatGPT/Codex Desktop leftovers (never a live Codex CLI session)"
+        )]
         force: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Set or clear a saved external-provider account's custom label.
     SetLabel {
         account_id: Uuid,
         label: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Refresh cached usage for all saved accounts of one provider.
@@ -323,7 +367,7 @@ enum ProviderCommand {
         /// Read Claude Code local quota only; never contact the usage API.
         #[arg(long)]
         local_only: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Fetch provider usage for the live account or a saved account ID.
@@ -331,7 +375,7 @@ enum ProviderCommand {
         #[arg(value_parser = parse_ai_provider)]
         provider: AiProvider,
         account_id: Option<Uuid>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Decide or apply a Claude account auto-switch, and manage its policy.
@@ -361,9 +405,76 @@ enum ProviderCommand {
         cooldown: Option<u64>,
         #[arg(long, value_parser = parse_claude_auto_switch_strategy)]
         strategy: Option<ClaudeAutoSwitchStrategy>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+}
+
+/// Version of the `--json` contract. Additive: new fields may appear, existing
+/// keys and their meaning do not change without a bump (audit E1).
+pub const CONTRACT_VERSION: u32 = 1;
+
+/// Map an error to a stable exit code and machine-readable kind, so scripts can
+/// branch on the failure class instead of parsing prose (audit OUT-03).
+pub fn classify_error(error: &anyhow::Error) -> (u8, &'static str, Option<String>) {
+    let message = format!("{error:#}");
+    let lowered = message.to_ascii_lowercase();
+    if lowered.contains("requires account_id")
+        || lowered.contains("is required when stdin")
+        || lowered.contains("no command given and stdin is not a terminal")
+        || lowered.contains("unknown command")
+    {
+        return (2, "usage", None);
+    }
+    if lowered.contains("login") && lowered.contains("required") {
+        return (
+            3,
+            "login_required",
+            Some("Run `codex login` and retry.".to_owned()),
+        );
+    }
+    if lowered.contains("keychain")
+        || lowered.contains("credential store")
+        || lowered.contains("decrypt")
+    {
+        return (
+            7,
+            "keychain",
+            Some("Unlock the login keychain or restore the missing key.".to_owned()),
+        );
+    }
+    if lowered.contains("lock") && (lowered.contains("timed out") || lowered.contains("timeout")) {
+        return (
+            4,
+            "lock_timeout",
+            Some("Another Roster process holds the lock; retry shortly.".to_owned()),
+        );
+    }
+    if lowered.contains("no active account") || lowered.contains("no saved account") {
+        return (
+            5,
+            "no_account",
+            Some("Run `codex-roster list` and pick an account id.".to_owned()),
+        );
+    }
+    if lowered.contains("http")
+        || lowered.contains("contact")
+        || lowered.contains("usage request failed")
+        || lowered.contains("network")
+    {
+        return (
+            6,
+            "network",
+            Some("Check connectivity and retry.".to_owned()),
+        );
+    }
+    if lowered.contains("activation_blocked_by_cli") {
+        return (3, "activation_blocked_by_cli", None);
+    }
+    if lowered.contains("activation_blocked_by_desktop") {
+        return (3, "activation_blocked_by_desktop", None);
+    }
+    (1, "error", None)
 }
 
 pub fn run() -> Result<()> {
@@ -719,13 +830,22 @@ pub fn run() -> Result<()> {
                             .iter()
                             .any(|process| !crate::process::is_force_skippable_process(process))
                         {
-                            bail!(
-                                "Codex CLI is still running. Close those processes first; `--force` cannot override a live CLI session."
+                            let report = app.activation_blocking_report(force);
+                            let mut message = String::from(
+                                "activation_blocked_by_cli: a live Codex CLI session is running and `--force` cannot override it",
                             );
+                            for line in crate::process::format_blocking_report(&report) {
+                                message.push('\n');
+                                message.push_str(&line);
+                            }
+                            message.push_str(
+                                "\nClose the listed Codex CLI session(s) (Ctrl-C in the terminal running `codex`) and retry.",
+                            );
+                            bail!(message);
                         }
                         if !force {
                             bail!(
-                                "ChatGPT/Codex Desktop is still running. Close it first or rerun `activate` with `--force` after quitting Desktop."
+                                "activation_blocked_by_desktop: ChatGPT/Codex Desktop is still running. Quit it first, or rerun `activate --force` to let Roster close and relaunch it."
                             );
                         }
                     } else if !warnings.is_empty() && force && !json {
@@ -738,6 +858,14 @@ pub fn run() -> Result<()> {
                     app.activate_with_running_policy(account_id, force)?
                 }
                 None => {
+                    if json {
+                        bail!(
+                            "--json requires ACCOUNT_ID; run `codex-roster list --json` to find ids"
+                        );
+                    }
+                    if !std::io::stdin().is_terminal() {
+                        bail!("ACCOUNT_ID is required when stdin is not a terminal");
+                    }
                     let _ = app.interactive(InteractiveMode::ActivateOnce, force)?;
                     return Ok(());
                 }
@@ -974,6 +1102,8 @@ pub fn run() -> Result<()> {
                     detail: None,
                     banked_reset_count: 0,
                     session_resume: None,
+                    usage_unknown: false,
+                    warnings: Vec::new(),
                 }
             } else {
                 app.auto_switch_with_candidate(apply, account_id, force)?
@@ -1129,6 +1259,55 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::Doctor { json, bundle }) => {
+            let output = collect_doctor_output(&app)?;
+            if bundle {
+                let path = std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join("doctor-report.txt");
+                let mut text = String::new();
+                text.push_str(&format!("codex-roster {}\n", output.version));
+                for check in &output.checks {
+                    text.push_str(&format!(
+                        "[{}] {}: {}{}\n",
+                        check.status,
+                        check.id,
+                        check.detail,
+                        check
+                            .hint
+                            .as_deref()
+                            .map(|hint| format!(" (hint: {hint})"))
+                            .unwrap_or_default()
+                    ));
+                }
+                std::fs::write(&path, text)
+                    .with_context(|| format!("failed to write {}", path.display()))?;
+                if !json {
+                    println!("Wrote {}", path.display());
+                }
+            }
+            if json {
+                print_json(&output)?;
+            } else {
+                println!("codex-roster {}", output.version);
+                for check in &output.checks {
+                    println!("  [{:>4}] {:<16} {}", check.status, check.id, check.detail);
+                    if let Some(hint) = &check.hint {
+                        println!("         hint: {hint}");
+                    }
+                }
+            }
+            Ok(())
+        }
+        Some(Command::Schema { command, json }) => {
+            let schema = schema_document(command.as_deref());
+            if json {
+                print_json(&schema)?;
+            } else {
+                println!("{schema}");
+            }
+            Ok(())
+        }
         Some(Command::SetLabel {
             account_id,
             label,
@@ -1165,10 +1344,238 @@ fn backup_password(password_stdin: bool) -> Result<String> {
     }
 }
 
+/// Collect local diagnostics. Never prints secrets: key files are reported by
+/// count and mode only, and no account emails are included (audit E1/O2).
+fn collect_doctor_output<S>(app: &App<S>) -> Result<crate::model::DoctorOutput>
+where
+    S: crate::secrets::SecretStore,
+{
+    use crate::model::DoctorCheck;
+    let mut checks = Vec::new();
+    let env = app.env();
+
+    checks.push(DoctorCheck {
+        id: "version".to_owned(),
+        status: "ok".to_owned(),
+        detail: format!(
+            "codex-roster {} (json contract {})",
+            env!("CARGO_PKG_VERSION"),
+            CONTRACT_VERSION
+        ),
+        hint: None,
+    });
+
+    let data_dir = env.app_data_dir.clone();
+    let data_status = if data_dir.is_dir() { "ok" } else { "warn" };
+    checks.push(DoctorCheck {
+        id: "app_data".to_owned(),
+        status: data_status.to_owned(),
+        detail: format!("{} ({})", data_dir.display(), data_status),
+        hint: (data_status == "warn").then(|| "It is created on first save.".to_owned()),
+    });
+
+    let keys_dir = data_dir.join("keys");
+    let mut key_count = 0usize;
+    let mut loose_modes = 0usize;
+    if let Ok(entries) = std::fs::read_dir(&keys_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.ends_with(".key") {
+                continue;
+            }
+            key_count += 1;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(metadata) = entry.metadata()
+                    && metadata.permissions().mode() & 0o777 != 0o600
+                {
+                    loose_modes += 1;
+                }
+            }
+        }
+    }
+    let key_status = if loose_modes > 0 { "fail" } else { "ok" };
+    checks.push(DoctorCheck {
+        id: "keys".to_owned(),
+        status: key_status.to_owned(),
+        detail: format!("{key_count} key file(s), {loose_modes} with loose permissions"),
+        hint: (loose_modes > 0).then(|| {
+            "Run `chmod 600` on the key files; a same-user process could read them.".to_owned()
+        }),
+    });
+
+    for (id, file_name) in [
+        ("lock_operation", ".operation.lock"),
+        ("lock_auth", ".auth-operation.lock"),
+        ("lock_auto_switch", ".auto-switch.lock"),
+    ] {
+        let path = data_dir.join(file_name);
+        let (status, detail) = match std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+        {
+            Ok(file) => match fs2::FileExt::try_lock_exclusive(&file) {
+                Ok(()) => {
+                    let _ = fs2::FileExt::unlock(&file);
+                    ("ok", "free".to_owned())
+                }
+                Err(_) => ("warn", "held by another process".to_owned()),
+            },
+            Err(error) => ("warn", format!("unreadable: {error}")),
+        };
+        checks.push(DoctorCheck {
+            id: id.to_owned(),
+            status: status.to_owned(),
+            detail,
+            hint: None,
+        });
+    }
+
+    let auth_path = env.codex_root.join("auth.json");
+    let auth_status = if auth_path.is_file() { "ok" } else { "warn" };
+    checks.push(DoctorCheck {
+        id: "codex_auth".to_owned(),
+        status: auth_status.to_owned(),
+        detail: if auth_path.is_file() {
+            "~/.codex/auth.json present".to_owned()
+        } else {
+            "~/.codex/auth.json missing (not signed in?)".to_owned()
+        },
+        hint: None,
+    });
+
+    let mut leftover_dirs = 0usize;
+    if let Ok(entries) = std::fs::read_dir(&env.codex_root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(".cas-backup-") || name.starts_with(".cas-restore-") {
+                leftover_dirs += 1;
+            }
+        }
+    }
+    checks.push(DoctorCheck {
+        id: "leftover_recovery".to_owned(),
+        status: if leftover_dirs > 0 { "warn" } else { "ok" }.to_owned(),
+        detail: format!("{leftover_dirs} staged auth recovery dir(s)"),
+        hint: (leftover_dirs > 0)
+            .then(|| "Safe to delete once no switch is in progress.".to_owned()),
+    });
+
+    for port in [1455u16, 1457u16] {
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let busy =
+            std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(200))
+                .is_ok();
+        checks.push(DoctorCheck {
+            id: format!("port_{port}"),
+            status: if busy { "warn" } else { "ok" }.to_owned(),
+            detail: if busy { "in use" } else { "free" }.to_owned(),
+            hint: busy.then(|| {
+                "ChatGPT Desktop usually holds the Codex OAuth callback ports.".to_owned()
+            }),
+        });
+    }
+
+    let list = app.list()?;
+    let archived = list
+        .accounts
+        .iter()
+        .filter(|account| account.archived)
+        .count();
+    checks.push(DoctorCheck {
+        id: "accounts".to_owned(),
+        status: "ok".to_owned(),
+        detail: format!("{} saved, {archived} archived", list.accounts.len()),
+        hint: None,
+    });
+
+    let newest_cache = list
+        .accounts
+        .iter()
+        .filter_map(|account| account.usage.as_ref().map(|usage| usage.fetched_at))
+        .max();
+    checks.push(DoctorCheck {
+        id: "usage_cache".to_owned(),
+        status: "ok".to_owned(),
+        detail: match newest_cache {
+            Some(fetched_at) => {
+                let age = time::OffsetDateTime::now_utc() - fetched_at;
+                format!(
+                    "newest cached usage {} minute(s) old",
+                    age.whole_minutes().max(0)
+                )
+            }
+            None => "no cached usage".to_owned(),
+        },
+        hint: None,
+    });
+
+    checks.push(DoctorCheck {
+        id: "add_account_session".to_owned(),
+        status: "ok".to_owned(),
+        detail: if crate::codex::add_account_session_active(env) {
+            "pending add-account session".to_owned()
+        } else {
+            "none".to_owned()
+        },
+        hint: None,
+    });
+
+    Ok(crate::model::DoctorOutput {
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        checks,
+    })
+}
+
+/// Static description of the JSON contract. Kept in code so `schema` can never
+/// drift from the version constant it reports.
+fn schema_document(command: Option<&str>) -> String {
+    let envelope = "Every --json output includes \"contract_version\": 1 (additive).\n\
+View timestamps are RFC3339 strings; stored metadata keeps the legacy array form.\n\
+Errors print {\"contract_version\":1,\"error\":{\"code\",\"message\",\"hint\"}} to stdout.\n\
+Exit codes: 0 ok, 2 usage, 3 login/blocked, 4 lock timeout, 5 no account, 6 network, 7 keychain, 8 unsupported.";
+    match command {
+        None => format!(
+            "{envelope}\n\nCommands with typed JSON output: status, list, usage, refresh-usage, activate, delete, archive, export, import, restore-full-backup, auto-switch, auto-start-usage-windows, auto-resume-session, token-usage, quota-history, reset-outlook, doctor."
+        ),
+        Some(name) => {
+            let fields = match name {
+                "status" => {
+                    "environment, codex_root, current_account, current_account_saved_id, saved_accounts, process_warnings, vibe_usage?, codex_model?, activity?"
+                }
+                "list" => {
+                    "environment, accounts[] (id, email, plan_label, is_active, created_at, updated_at, usage, archived)"
+                }
+                "usage" => "account, usage (five_hour, weekly, credits, banked_resets, plan_label)",
+                "auto-switch" => {
+                    "enabled, status, active_account_id, candidate_account_id, candidate_display_name, detail, banked_reset_count, session_resume?, usage_unknown, warnings[]"
+                }
+                "doctor" => "version, checks[] (id, status, detail, hint?)",
+                "token-usage" => "totals, by_day, by_project",
+                "quota-history" => "account_id, samples[] (minute, five_remaining, week_remaining)",
+                _ => {
+                    "unknown command; run `codex-roster schema` for the envelope and supported commands"
+                }
+            };
+            format!("{envelope}\n\n{name}: {fields}")
+        }
+    }
+}
+
 fn run_interactive_app<S>(app: &App<S>) -> Result<()>
 where
     S: crate::secrets::SecretStore,
 {
+    // A non-TTY stdin makes `Term::read_key` return `Key::Unknown` forever, so
+    // an unguarded menu would spin at 100% CPU in scripts/CI (audit SAF-01).
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "no command given and stdin is not a terminal; use `codex-roster status --json` or run `codex-roster` in a terminal"
+        );
+    }
     crate::app::spawn_auto_start_usage_windows_worker(app.env().clone());
     crate::app::spawn_auto_switch_worker(app.env().clone());
     #[cfg(feature = "external-providers")]
@@ -1183,6 +1590,24 @@ where
 }
 
 fn print_json<T>(value: &T) -> Result<()>
+where
+    T: serde::Serialize,
+{
+    // Every `--json` path goes through here, so the contract version is added
+    // once instead of on each of the 30+ output types.
+    let mut value = serde_json::to_value(value)?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "contract_version".to_owned(),
+            serde_json::Value::from(CONTRACT_VERSION),
+        );
+    }
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn print_json_unversioned<T>(value: &T) -> Result<()>
 where
     T: serde::Serialize,
 {
@@ -1627,5 +2052,47 @@ mod codex_only_cli_tests {
     fn default_cli_exposes_codex_without_external_provider_actions() {
         assert!(Cli::try_parse_from(["codex-roster", "list", "--json"]).is_ok());
         assert!(Cli::try_parse_from(["codex-roster", "providers", "status"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CONTRACT_VERSION, classify_error, schema_document};
+    use anyhow::anyhow;
+
+    #[test]
+    fn classify_error_maps_known_failures_to_exit_codes() {
+        assert_eq!(
+            classify_error(&anyhow!("--json requires ACCOUNT_ID; run list")).0,
+            2
+        );
+        assert_eq!(
+            classify_error(&anyhow!("login required for this account")).0,
+            3
+        );
+        assert_eq!(
+            classify_error(&anyhow!("timed out locking .operation.lock")).0,
+            4
+        );
+        assert_eq!(classify_error(&anyhow!("no saved account matches")).0, 5);
+        assert_eq!(
+            classify_error(&anyhow!("failed to contact OpenAI Status")).0,
+            6
+        );
+        assert_eq!(classify_error(&anyhow!("the keychain key is missing")).0, 7);
+        let (code, kind, _) = classify_error(&anyhow!("something unexpected"));
+        assert_eq!((code, kind), (1, "error"));
+    }
+
+    #[test]
+    fn schema_document_describes_the_contract() {
+        let envelope = schema_document(None);
+        assert!(envelope.contains("contract_version"));
+        assert!(envelope.contains("Exit codes"));
+        let status = schema_document(Some("status"));
+        assert!(status.contains("process_warnings"));
+        // The version is a compile-time constant; assert it in a const block so
+        // the check cannot be optimized away or flagged as a runtime assertion.
+        const { assert!(CONTRACT_VERSION >= 1) };
     }
 }

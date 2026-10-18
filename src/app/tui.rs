@@ -487,6 +487,23 @@ pub(crate) fn build_menu(
     }
 }
 
+/// Keys that must end an interactive menu: `q`, Esc and Ctrl-C. Ctrl-C has to
+/// be handled explicitly because `console` puts the terminal in raw mode, which
+/// disables the kernel's SIGINT generation (audit TUI-02).
+fn is_quit_key(key: &Key) -> bool {
+    matches!(key, Key::Escape | Key::Char('q') | Key::Char('\u{3}'))
+}
+
+/// Restores the terminal cursor on every exit path, including `?` errors and
+/// panics unwinding out of the menu (audit TUI-02).
+struct CursorRestore;
+
+impl Drop for CursorRestore {
+    fn drop(&mut self) {
+        let _ = Term::stderr().show_cursor();
+    }
+}
+
 fn select_persistent_entry(
     menu: &InteractiveMenu,
     default_selection: usize,
@@ -495,6 +512,7 @@ fn select_persistent_entry(
     let term = Term::stderr();
     let mut selection = default_selection.min(menu.len().saturating_sub(1));
     term.hide_cursor()?;
+    let _cursor_guard = CursorRestore;
     let mut rendered_size = term.size();
     let mut render_state = render_persistent_menu(&term, menu, selection, feedback)?;
     loop {
@@ -555,13 +573,16 @@ fn select_persistent_entry(
                 term.show_cursor()?;
                 return Ok(selection);
             }
-            Key::Escape | Key::Char('q') => {
+            key if is_quit_key(&key) => {
                 if render_state.total_lines > 0 {
                     term.clear_last_lines(render_state.total_lines)?;
                 }
                 term.show_cursor()?;
                 return Ok(menu.len().saturating_sub(1));
             }
+            // A non-TTY stdin (or a closed pipe) returns Unknown immediately;
+            // sleeping keeps the loop from burning a core (audit SAF-01).
+            Key::Unknown => std::thread::sleep(std::time::Duration::from_millis(50)),
             _ => {}
         }
     }
@@ -895,6 +916,7 @@ fn confirm_with_menu(
     let options = [no_label, yes_label];
     let mut rendered_lines = 0usize;
     term.hide_cursor()?;
+    let _cursor_guard = CursorRestore;
     loop {
         if rendered_lines > 0 {
             term.clear_last_lines(rendered_lines)?;
@@ -935,11 +957,12 @@ fn confirm_with_menu(
                 term.show_cursor()?;
                 return Ok(selection == 1);
             }
-            Key::Escape | Key::Char('q') => {
+            key if is_quit_key(&key) => {
                 term.clear_last_lines(rendered_lines)?;
                 term.show_cursor()?;
                 return Ok(false);
             }
+            Key::Unknown => std::thread::sleep(std::time::Duration::from_millis(50)),
             _ => {}
         }
     }
@@ -968,6 +991,16 @@ mod tests {
     };
     use crate::repository::SnapshotRepository;
     use crate::secrets::test_support::MemorySecretStore;
+
+    #[test]
+    fn ctrl_c_escape_and_q_all_quit_the_menu() {
+        assert!(is_quit_key(&Key::Char('\u{3}')), "Ctrl-C must quit");
+        assert!(is_quit_key(&Key::Escape));
+        assert!(is_quit_key(&Key::Char('q')));
+        assert!(!is_quit_key(&Key::Char('j')));
+        assert!(!is_quit_key(&Key::Unknown));
+        assert!(!is_quit_key(&Key::Enter));
+    }
 
     #[test]
     fn persistent_menu_keeps_unicode_rows_and_selection_aligned_across_width_changes() {
@@ -1139,6 +1172,8 @@ mod tests {
             plan_label: None,
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         });
 
         let label = render_account_label(
@@ -1177,6 +1212,8 @@ mod tests {
             plan_label: None,
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         });
         list.accounts[0].usage_error = Some("Login required: Codex auth expired.".to_owned());
 
@@ -1212,6 +1249,8 @@ mod tests {
             plan_label: None,
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         });
         list.accounts[0].usage_error =
             Some("Usage unavailable: failed to query Codex usage".to_owned());

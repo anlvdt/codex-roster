@@ -625,7 +625,7 @@ impl UsageResponse {
         let now = OffsetDateTime::now_utc();
         let plan_label = normalize_plan_label(self.plan_type.as_deref());
         let banked_resets = reset_credit_details
-            .and_then(|details| details.into_view().ok())
+            .and_then(|details| details.into_view(now).ok())
             .or_else(|| {
                 self.rate_limit_reset_credits
                     .map(|summary| BankedResetSummaryView {
@@ -634,21 +634,26 @@ impl UsageResponse {
                     })
             });
         let credit_limit = self.individual_limit.as_ref().and_then(credit_limit_view);
+        let five_hour = self
+            .rate_limit
+            .as_ref()
+            .and_then(|limits| limits.primary_window.as_ref())
+            .map(window_view)
+            .transpose()?;
+        let weekly = self
+            .rate_limit
+            .as_ref()
+            .and_then(|limits| limits.secondary_window.as_ref())
+            .map(window_view)
+            .transpose()?;
+
         Ok(AccountUsageView {
             source,
             fetched_at: now,
-            five_hour: self
-                .rate_limit
-                .as_ref()
-                .and_then(|limits| limits.primary_window.as_ref())
-                .map(window_view)
-                .transpose()?,
-            weekly: self
-                .rate_limit
-                .as_ref()
-                .and_then(|limits| limits.secondary_window.as_ref())
-                .map(window_view)
-                .transpose()?,
+            five_hour_known: five_hour.is_some(),
+            weekly_known: weekly.is_some(),
+            five_hour,
+            weekly,
             credits: credits_view(self.credits, credit_limit, workspace_balance),
             banked_resets,
             plan_label,
@@ -659,7 +664,7 @@ impl UsageResponse {
 }
 
 impl ResetCreditDetailsResponse {
-    fn into_view(self) -> Result<BankedResetSummaryView> {
+    fn into_view(self, now: OffsetDateTime) -> Result<BankedResetSummaryView> {
         let credits = self
             .credits
             .into_iter()
@@ -684,7 +689,7 @@ impl ResetCreditDetailsResponse {
         // Prefer the higher of the API summary and the detailed available rows —
         // either side can under-report when the other is truncated or stale.
         Ok(BankedResetSummaryView {
-            available_count: effective_banked_available_count(self.available_count, &credits),
+            available_count: effective_banked_available_count(self.available_count, &credits, now),
             credits: Some(credits),
         })
     }
@@ -695,10 +700,17 @@ impl ResetCreditDetailsResponse {
 /// OpenAI may return `available_count` without listing every credit, or list
 /// more `available` rows than the summary field. Take the max so roster UI and
 /// auto-switch messaging never under-count.
-fn effective_banked_available_count(reported: i64, credits: &[BankedResetCreditView]) -> i64 {
+fn effective_banked_available_count(
+    reported: i64,
+    credits: &[BankedResetCreditView],
+    now: OffsetDateTime,
+) -> i64 {
     let from_credits = credits
         .iter()
         .filter(|credit| credit.status.eq_ignore_ascii_case("available"))
+        // An expired credit is not redeemable; counting it would make the UI
+        // wait for a reset that no longer exists (audit Q6).
+        .filter(|credit| credit.expires_at.is_none_or(|expires| expires > now))
         .count() as i64;
     reported.max(0).max(from_credits)
 }
@@ -1407,7 +1419,9 @@ mod tests {
         }))
         .expect("details payload");
 
-        let view = details.into_view().expect("details view");
+        let view = details
+            .into_view(OffsetDateTime::now_utc())
+            .expect("details view");
 
         assert_eq!(view.available_count, 2);
         let credits = view.credits.expect("detailed rows");
@@ -1420,6 +1434,37 @@ mod tests {
     }
 
     #[test]
+    fn expired_banked_credits_are_not_counted_as_redeemable() {
+        let details: ResetCreditDetailsResponse = serde_json::from_value(json!({
+            "available_count": 0,
+            "credits": [
+                {
+                    "id": "expired",
+                    "reset_type": "codex_rate_limits",
+                    "status": "available",
+                    "granted_at": "2026-01-01T00:00:00Z",
+                    "expires_at": "2026-01-02T00:00:00Z"
+                },
+                {
+                    "id": "valid",
+                    "reset_type": "codex_rate_limits",
+                    "status": "available",
+                    "granted_at": "2026-01-01T00:00:00Z",
+                    "expires_at": "2099-01-01T00:00:00Z"
+                }
+            ]
+        }))
+        .expect("details payload");
+
+        let view = details
+            .into_view(OffsetDateTime::now_utc())
+            .expect("details view");
+        // Only the unexpired row counts; the expired one must not make the UI
+        // wait for a reset that can no longer be redeemed (audit Q6).
+        assert_eq!(view.available_count, 1);
+    }
+
+    #[test]
     fn detailed_banked_resets_prefer_taller_available_credit_list() {
         let details: ResetCreditDetailsResponse = serde_json::from_value(json!({
             "available_count": 1,
@@ -1429,14 +1474,14 @@ mod tests {
                     "reset_type": "codex_rate_limits",
                     "status": "available",
                     "granted_at": "2026-08-22T00:00:00Z",
-                    "expires_at": "2026-09-21T00:00:00Z"
+                    "expires_at": "2099-09-21T00:00:00Z"
                 },
                 {
                     "id": "credit-2",
                     "reset_type": "codex_rate_limits",
                     "status": "available",
                     "granted_at": "2026-08-23T00:00:00Z",
-                    "expires_at": "2026-09-22T00:00:00Z"
+                    "expires_at": "2099-09-22T00:00:00Z"
                 },
                 {
                     "id": "credit-3",
@@ -1449,7 +1494,9 @@ mod tests {
         }))
         .expect("details payload");
 
-        let view = details.into_view().expect("details view");
+        let view = details
+            .into_view(OffsetDateTime::now_utc())
+            .expect("details view");
         assert_eq!(view.available_count, 2);
     }
 

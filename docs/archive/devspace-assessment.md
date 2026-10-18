@@ -1,3 +1,6 @@
+> **Archived 2026-10-18.** Superseded by [docs/audit-2026-10-18](../audit-2026-10-18/00-MASTER-AUDIT.md).
+> Kept for history only: some commands, flags and file paths described below no longer exist.
+
 # Deep Research: Có nên áp dụng DevSpace vào Codex Roster?
 
 Ngày đánh giá: 30/08/2026

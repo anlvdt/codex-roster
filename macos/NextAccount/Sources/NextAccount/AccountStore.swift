@@ -2112,7 +2112,37 @@ final class AccountStore: ObservableObject {
         }
     }
 
+    /// Row awaiting an explicit delete confirmation (audit FLOW-1).
+    @Published var pendingDeleteAccount: SavedAccount?
+
+    /// Deleting is destructive and cannot be undone from the UI, so ask first.
+    /// The active account is refused outright: the roster would lose the row
+    /// while `~/.codex` still holds that login.
+    func requestDelete(_ account: SavedAccount) {
+        guard !account.isActive else {
+            errorMessage = AppLanguage.text(
+                "Không thể xóa tài khoản đang dùng. Hãy chuyển sang tài khoản khác trước.",
+                "The active account cannot be deleted. Switch to another account first."
+            )
+            return
+        }
+        pendingDeleteAccount = account
+    }
+
+    func confirmPendingDelete() {
+        guard let account = pendingDeleteAccount else { return }
+        pendingDeleteAccount = nil
+        delete(account)
+    }
+
     func delete(_ account: SavedAccount) {
+        guard !account.isActive else {
+            errorMessage = AppLanguage.text(
+                "Không thể xóa tài khoản đang dùng. Hãy chuyển sang tài khoản khác trước.",
+                "The active account cannot be deleted. Switch to another account first."
+            )
+            return
+        }
         run {
             _ = try await self.cli.data(arguments: ["delete", account.id.uuidString, "--json"])
             try await self.load()
@@ -2448,6 +2478,20 @@ final class AccountStore: ObservableObject {
 
     func noteQuotaResetPulse() {
         quotaResetPulse &+= 1
+    }
+
+    /// Shared cooldown for appear-driven public-data refreshes: opening the
+    /// notch or the Operations tab used to fire several CLI subprocesses and
+    /// network calls every time (audit PERF-1). Explicit buttons still refresh
+    /// immediately because they call the individual methods directly.
+    private var passivePublicRefreshGate = PassiveRefreshGate(interval: 60)
+
+    func refreshPublicDataPassively() {
+        guard passivePublicRefreshGate.request() else { return }
+        refreshResetOutlook(silently: true)
+        refreshResetTimeline(silently: true)
+        refreshResetJuice(silently: true)
+        refreshOpenAIStatus(silently: true)
     }
 
     func refreshResetOutlook(silently: Bool = false) {
@@ -2793,6 +2837,34 @@ final class AccountStore: ObservableObject {
         menuInteractionUntil.map { $0 > Date() } ?? false
     }
 
+    /// Turns raw CLI stderr into an actionable, localized message for the
+    /// activation-blocking errors the guard emits. The process list the CLI
+    /// prints after the machine prefix is preserved as details. Unknown errors
+    /// pass through unchanged.
+    static func friendlyErrorMessage(_ raw: String) -> String {
+        if raw.contains("activation_blocked_by_cli:") {
+            let details = raw
+                .components(separatedBy: "\n")
+                .drop(while: { !$0.hasPrefix("activation_blocked_by_cli:") })
+                .dropFirst()
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let head = AppLanguage.text(
+                "Không thể chuyển tài khoản: đang có phiên Codex CLI chạy.",
+                "Cannot switch accounts: a Codex CLI session is running.")
+            let advice = AppLanguage.text(
+                "Hãy đóng (Ctrl-C) các phiên Codex CLI được liệt kê rồi thử lại. ChatGPT/Codex Desktop có thể xử lý bằng --force.",
+                "Close (Ctrl-C) the listed Codex CLI sessions and retry. ChatGPT/Codex Desktop can be handled with --force.")
+            return details.isEmpty ? "\(head)\n\n\(advice)" : "\(head)\n\n\(details)\n\n\(advice)"
+        }
+        if raw.contains("activation_blocked_by_desktop:") {
+            return AppLanguage.text(
+                "Không thể chuyển tài khoản: ChatGPT/Codex Desktop đang chạy. Hãy thoát Desktop rồi thử lại, hoặc dùng --force để Roster tự đóng và mở lại.",
+                "Cannot switch accounts: ChatGPT/Codex Desktop is running. Quit it and retry, or use --force to let Roster close and relaunch it.")
+        }
+        return raw
+    }
+
     private func run(switching: Bool = false, _ operation: @escaping @MainActor () async throws -> Void) {
         guard !isBusyForActions else { return }
         isWorking = true
@@ -2807,12 +2879,13 @@ final class AccountStore: ObservableObject {
             do {
                 try await operation()
             } catch {
-                errorMessage = error.localizedDescription
+                let message = Self.friendlyErrorMessage(error.localizedDescription)
+                errorMessage = message
                 if case .waiting = newAccountLoginState {
-                    newAccountLoginState = .failed(error.localizedDescription)
+                    newAccountLoginState = .failed(message)
                     clearPendingLoginFlags()
                 } else if case .saving = newAccountLoginState {
-                    newAccountLoginState = .failed(error.localizedDescription)
+                    newAccountLoginState = .failed(message)
                 }
             }
         }

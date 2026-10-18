@@ -67,10 +67,13 @@ impl MetadataIndexStore {
         let json =
             serde_json::to_string_pretty(&persisted).context("failed to serialize metadata")?;
         replace_file_with_recovery(&self.metadata_path, Some(json.as_bytes()), |temp_path| {
-            fs::write(temp_path, &json)
-                .with_context(|| format!("failed to write {}", temp_path.display()))
+            crate::file_store::write_private_durable(temp_path, json.as_bytes())
         })?;
-        let _ = self.write_automatic_backup(&persisted, &json);
+        if let Err(error) = self.write_automatic_backup(&persisted, &json) {
+            // A failed account-list backup must be visible: it is the last line
+            // of defence for a damaged metadata file (audit R2).
+            eprintln!("warning: automatic account-list backup failed: {error:#}");
+        }
         Ok(())
     }
 
@@ -154,10 +157,14 @@ impl MetadataIndexStore {
         persisted.write_generation = generation.saturating_add(1);
         let json = serde_json::to_string_pretty(&persisted)?;
         replace_file_with_recovery(&self.metadata_path, Some(json.as_bytes()), |temp| {
-            fs::write(temp, &json).context("failed to write restored metadata")
+            crate::file_store::write_private_durable(temp, json.as_bytes())
         })?;
         // A subsequent list restore must see this roster, even before another save.
-        let _ = self.write_automatic_backup(&persisted, &json);
+        if let Err(error) = self.write_automatic_backup(&persisted, &json) {
+            // A failed account-list backup must be visible: it is the last line
+            // of defence for a damaged metadata file (audit R2).
+            eprintln!("warning: automatic account-list backup failed: {error:#}");
+        }
         Ok(())
     }
 
@@ -184,7 +191,8 @@ impl MetadataIndexStore {
         fs::create_dir_all(&directory)
             .with_context(|| format!("failed to create {}", directory.display()))?;
         let path = directory.join(format!("metadata-{:020}.json", index.write_generation));
-        fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
+        // Account metadata names every saved account: private mode + durable.
+        crate::file_store::atomic_write(&path, json.as_bytes(), 0o600)?;
         let backups = self.automatic_backup_candidates()?;
         for (path, _) in backups.into_iter().skip(AUTOMATIC_BACKUP_LIMIT) {
             let _ = fs::remove_file(path);

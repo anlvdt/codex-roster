@@ -10,14 +10,39 @@ iconset_root="$(mktemp -d "$root_dir/build/CodexRoster.XXXXXX")"
 iconset="$iconset_root/CodexRoster.iconset"
 
 cd "$root_dir"
-cargo build --release --bin codex-roster --target-dir "$target_dir"
-swift build --package-path "$swift_package" -c release
+
+# UNIVERSAL=1 builds one bundle for Apple Silicon + Intel (used by the release
+# workflow). The default stays host-arch so local builds remain fast.
+universal="${UNIVERSAL:-0}"
+if [[ "$universal" == "1" ]]; then
+    cargo build --release --bin codex-roster --target-dir "$target_dir" --target aarch64-apple-darwin
+    cargo build --release --bin codex-roster --target-dir "$target_dir" --target x86_64-apple-darwin
+    swift build --package-path "$swift_package" -c release --arch arm64 --arch x86_64
+    swift_binary="$swift_package/.build/apple/Products/Release/CodexRoster"
+else
+    cargo build --release --bin codex-roster --target-dir "$target_dir"
+    swift build --package-path "$swift_package" -c release
+    swift_binary="$swift_package/.build/release/CodexRoster"
+fi
+
+if [[ ! -x "$swift_binary" ]]; then
+    echo "Swift product missing at $swift_binary" >&2
+    exit 1
+fi
 
 rm -rf "$app_root"
 mkdir -p "$app_root/Contents/MacOS" "$app_root/Contents/Resources"
 cp "$swift_package/Resources/Info.plist" "$app_root/Contents/Info.plist"
-cp "$swift_package/.build/release/CodexRoster" "$app_root/Contents/MacOS/CodexRoster"
-cp "$target_dir/release/codex-roster" "$app_root/Contents/MacOS/codex-roster"
+cp "$swift_binary" "$app_root/Contents/MacOS/CodexRoster"
+if [[ "$universal" == "1" ]]; then
+    lipo -create \
+        "$target_dir/aarch64-apple-darwin/release/codex-roster" \
+        "$target_dir/x86_64-apple-darwin/release/codex-roster" \
+        -output "$app_root/Contents/MacOS/codex-roster"
+else
+    cp "$target_dir/release/codex-roster" "$app_root/Contents/MacOS/codex-roster"
+fi
+lipo -info "$app_root/Contents/MacOS/CodexRoster" "$app_root/Contents/MacOS/codex-roster" || true
 
 swift "$root_dir/scripts/generate-macos-icon.swift" "$root_dir/assets/codex-roster.png"
 mkdir -p "$iconset"

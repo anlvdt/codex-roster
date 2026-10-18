@@ -26,7 +26,7 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
 - Refresh local Codex token statistics, public OpenAI Status, and the public [Codex Reset outlook](https://codex-resets.com/) (with forecast probabilities from [codex-reset.com](https://codex-reset.com/)).
 - Sync usage to [VibeCafe](https://vibecafe.ai/) via the optional [`@vibe-cafe/vibe-usage`](https://github.com/vibe-cafe/vibe-usage) collector; its token and estimated-cost statistics remain separate from OpenAI quota/banked-reset credits.
 - When VibeCafe is configured, Roster automatically syncs every 30 minutes and shows the official 7-day API totals (tokens, estimated cost, sessions, and active time) in Status.
-- Offer Vietnamese and English; Vietnamese is the default.
+- Offer Vietnamese and English; the UI follows the Mac language by default, with an explicit Tiếng Việt / English switch.
 
 ### Quota and automatic switching
 
@@ -96,47 +96,62 @@ open "build/CodexRoster.app"
 
 ### Platform
 
-macOS only. Codex Roster is a native macOS app; the crate builds and ships for macOS (Apple Silicon and Intel). Windows and Linux support has been removed.
+macOS 14+ only. Codex Roster is a native macOS app; the shipped bundle is built for Apple Silicon. The release workflow can produce a universal (Apple Silicon + Intel) bundle with `UNIVERSAL=1`, and Windows/Linux support has been removed.
 
 ### CLI
 
 The app bundles `codex-roster` and always uses it. For unbundled development runs (e.g. `swift run`), set `CODEX_ROSTER_CLI_PATH` to an absolute path to another build; it is ignored when the bundled binary exists.
 
+Running `codex-roster` with no arguments opens the interactive terminal menu; `q`, Esc or Ctrl-C quits it, and a non-terminal stdin is refused instead of hanging.
+
 ```text
 codex-roster status [--json]
 codex-roster list [--json]
 codex-roster save [--json]
+codex-roster begin-add-account | save-added-account | cancel-add-account | add-account-status [--json]
 codex-roster usage [ACCOUNT_ID] [--json]
+codex-roster refresh-usage [--json]
 codex-roster activate [ACCOUNT_ID] [--force] [--json]
+codex-roster enable-luna-reserve [ACCOUNT_ID] [--json]
 codex-roster delete [ACCOUNT_ID] [--json]
 codex-roster archive ACCOUNT_ID [--restore] [--json]
 codex-roster export OUTPUT.codexroster [--password-stdin] [--json]
 codex-roster import INPUT.codexroster [--password-stdin] [--json]
-codex-roster restore-full-backup [--json]
+codex-roster import-json INPUT [--json]
+codex-roster restore-account-list-backup | restore-full-backup | create-automatic-full-backup [--json]
+codex-roster recover-legacy-snapshots [--json]
 codex-roster auto-start-usage-windows [--enable|--disable] [--run] [--json]
 codex-roster auto-resume-session [--enable|--disable] [--json]
 codex-roster auto-switch [--enable|--disable|--status|--apply] [--json]
 codex-roster token-usage [--json]
+codex-roster quota-history [ACCOUNT_ID] [--json]
 codex-roster vibe-usage [init|sync|summary|status]
-codex-roster reset-outlook [--json]
+codex-roster reset-outlook | reset-events | reset-timeline [--json]
 codex-roster open-ai-status [--json]
-
+codex-roster set-label ACCOUNT_ID [LABEL] [--json]
+codex-roster doctor [--json] [--bundle]
+codex-roster schema [COMMAND] [--json]
 ```
+
+`--json` output carries `"contract_version": 1`, view timestamps are RFC3339 strings, and failures print `{"contract_version":1,"error":{"code","message","hint"}}` with a class-specific exit code (2 usage, 3 login/blocked, 4 lock timeout, 5 no account, 6 network, 7 keychain). Run `codex-roster schema <command>` for the fields of one command, and `codex-roster doctor` for local diagnostics (paths, key file modes, lock state, OAuth ports).
 
 ### Privacy, status, and credits
 
-Saved account data remains on this Mac. OpenAI Status and Codex Reset outlook requests (codex-resets.com / codex-reset.com) never include account credentials, identifiers, saved sessions, or quota data. The 24h/48h values are public-signal forecast scores, not statistical probabilities. Public reset posts are advisory; authenticated per-account quota returned by Codex remains the source of truth. Read [OpenAI's current ChatGPT and Codex pricing documentation](https://learn.chatgpt.com/docs/pricing) for plan and usage policy.
+Saved account data remains on this Mac. OpenAI Status and Codex Reset outlook requests (codex-resets.com / codex-reset.com) never include account credentials, identifiers, saved sessions, or quota data. The reset outlook mirrors the public schedule/status feed (codex-resets.com) and is advisory, not a statistical probability. Authenticated per-account quota returned by Codex remains the source of truth. Read [OpenAI's current ChatGPT and Codex pricing documentation](https://learn.chatgpt.com/docs/pricing) for plan and usage policy.
 
 Codex Roster is MIT licensed. It is maintained by [LE AN (@anlvdt)](https://github.com/anlvdt). See [AUTHORS.md](AUTHORS.md) and [CREDITS.md](CREDITS.md) for original-foundation, research, and license attribution.
 
 ### Validation
 
 ```sh
-cargo test
-cargo clippy -- -D warnings
 cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
 swift build --package-path macos/NextAccount
+bash scripts/build-macos-app.sh
 ```
+
+`swift test` needs a full Xcode toolchain; with Command Line Tools only it fails with `no such module 'Testing'`. CI runs the Swift suite on `macos-latest`.
 
 ## Tiếng Việt
 
@@ -229,6 +244,6 @@ App đi kèm `codex-roster` để quản lý tài khoản Codex. Các lệnh `st
 
 ### Riêng tư, trạng thái và ghi nhận
 
-Dữ liệu tài khoản lưu trên máy Mac. Kiểm tra OpenAI Status và Codex Reset outlook (codex-resets.com / codex-reset.com) không gửi credential, định danh tài khoản, phiên đã lưu hay dữ liệu quota. Giá trị 24h/48h là điểm dự báo từ tín hiệu công khai, không phải xác suất thống kê. Bài đăng reset công khai chỉ là tín hiệu tham khảo; quota có xác thực do Codex trả về cho từng tài khoản vẫn là nguồn xác nhận cuối cùng. Xem [tài liệu pricing và usage chính thức của ChatGPT/Codex](https://learn.chatgpt.com/docs/pricing) để biết chính sách gói và quota mới nhất.
+Dữ liệu tài khoản lưu trên máy Mac. Kiểm tra OpenAI Status và Codex Reset outlook (codex-resets.com / codex-reset.com) không gửi credential, định danh tài khoản, phiên đã lưu hay dữ liệu quota. Bảng reset outlook phản ánh lịch/trạng thái công khai từ codex-resets.com, chỉ là tín hiệu tham khảo và không phải xác suất thống kê; quota có xác thực do Codex trả về cho từng tài khoản vẫn là nguồn xác nhận cuối cùng. Xem [tài liệu pricing và usage chính thức của ChatGPT/Codex](https://learn.chatgpt.com/docs/pricing) để biết chính sách gói và quota mới nhất.
 
 Codex Roster dùng giấy phép MIT, được duy trì bởi [LE AN (@anlvdt)](https://github.com/anlvdt). Xem [AUTHORS.md](AUTHORS.md) và [CREDITS.md](CREDITS.md) để biết ghi nhận tác giả, nguồn tham khảo và ranh giới giấy phép.

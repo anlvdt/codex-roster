@@ -35,6 +35,8 @@ Nhánh: `main`. Chưa push `origin`. Chưa xoá dữ liệu người dùng.
 | **macOS UX (B, phần 7 — IA-3/IA-4)** | `RosterListFilter.archived` + chip "Đã cất N" trong deck; **danh sách mặc định loại archived** (và khỏi counts); badge chấm nhỏ trên nút `⋯` khi có bản cập nhật; **xác nhận trước khi cài**, nêu rõ version | `cf922c8` | `swift build` pass |
 | **PERF-2** | Vòng thông báo reset: **2s → 15s** (30 → 4 lần wakeup/phút) và **cache quyền thông báo** (chỉ hỏi lại mỗi 5 phút) | `791001c` | `swift build` pass |
 
+**Verification độc lập:** xem [VERIFICATION.md](VERIFICATION.md) — gate đầy đủ với `--all-features` (449 test), decode hợp đồng Rust↔Swift bằng binary thật, 29/29 điểm audit then chốt PASS, và 1 gate CI (`check-auth-switch-safety.sh`) đã được sửa sau khi verification phát hiện fail.
+
 **Gate hiện tại:** `cargo fmt --check` pass · `cargo clippy --all-targets -- -D warnings` pass · **447 test pass, 0 fail, 2 ignored** · `swift build --package-path macos/NextAccount` pass · `scripts/build-macos-app.sh` pass.
 
 **Orca:** Codex chạy được 1 task nhỏ rồi **cạn hạn mức tháng đến 17/11/2026** (`You've hit your usage limit`); worker D đã được `worker-stop` + `worker-release` sạch và phần D do Lead hoàn thành. Các provider khác vẫn cạn (Claude 22/10, Cursor 11/12/2026, OpenCode/Muse sai model, antigravity/zcode fail).

@@ -4,8 +4,9 @@ set -euo pipefail
 root_dir="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Codex activation has two guarded force sites: manual activation and
-# auto-switch after Desktop was confirmed closed.
-macos_force_count="$(grep -R -F -h -- '--force' \
+# auto-switch after Desktop was confirmed closed. Count the argument appends
+# only: user-facing guidance text may legitimately mention --force.
+macos_force_count="$(grep -R -F -h -- 'append("--force")' \
   "$root_dir/macos/NextAccount/Sources/NextAccount" | wc -l | tr -d ' ')"
 if [[ "$macos_force_count" -ne 2 ]]; then
   echo "Expected exactly two guarded macOS --force append sites; found $macos_force_count." >&2

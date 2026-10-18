@@ -12,6 +12,8 @@ pub(super) struct MetadataIndexStore {
     metadata_path: PathBuf,
 }
 
+/// How many preserved metadata copies a restore may leave behind.
+const PRESERVED_METADATA_LIMIT: usize = 20;
 const AUTOMATIC_BACKUP_LIMIT: usize = 20;
 
 impl MetadataIndexStore {
@@ -67,10 +69,19 @@ impl MetadataIndexStore {
         let json =
             serde_json::to_string_pretty(&persisted).context("failed to serialize metadata")?;
         replace_file_with_recovery(&self.metadata_path, Some(json.as_bytes()), |temp_path| {
-            fs::write(temp_path, &json)
-                .with_context(|| format!("failed to write {}", temp_path.display()))
+            crate::file_store::write_private_durable(temp_path, json.as_bytes())
         })?;
-        let _ = self.write_automatic_backup(&persisted, &json);
+        match self.write_automatic_backup(&persisted, &json) {
+            Ok(()) => clear_backup_warning(),
+            Err(error) => {
+                // A failed account-list backup must be visible: it is the last
+                // line of defence for a damaged metadata file (audit R2). Record
+                // it so `status --json` reports it instead of only stderr.
+                let message = format!("automatic account-list backup failed: {error:#}");
+                eprintln!("warning: {message}");
+                record_backup_warning(message);
+            }
+        }
         Ok(())
     }
 
@@ -119,6 +130,37 @@ impl MetadataIndexStore {
             .unwrap_or(false)
     }
 
+    /// Keep only the newest `keep` `preserved-metadata-*.json` files. Failures
+    /// are ignored: housekeeping must never break a restore.
+    fn prune_preserved_metadata(&self, keep: usize) {
+        let Some(directory) = self.metadata_path.parent() else {
+            return;
+        };
+        let Ok(entries) = fs::read_dir(directory) else {
+            return;
+        };
+        let mut preserved = entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("preserved-metadata-"))
+            })
+            .filter_map(|entry| {
+                let modified = entry.metadata().ok()?.modified().ok()?;
+                Some((modified, entry.path()))
+            })
+            .collect::<Vec<_>>();
+        if preserved.len() <= keep {
+            return;
+        }
+        preserved.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+        for (_, path) in preserved.into_iter().skip(keep) {
+            let _ = fs::remove_file(path);
+        }
+    }
+
     fn best_non_empty_automatic_backup(&self) -> Result<Option<(PathBuf, MetadataIndex)>> {
         let mut backups = self.automatic_backup_candidates()?;
         backups.retain(|(_, index)| !index.accounts.is_empty());
@@ -150,14 +192,27 @@ impl MetadataIndexStore {
                     format!("failed to preserve metadata at {}", entry.path.display())
                 })?;
         }
+        // Preserved copies are a safety net, not an archive: keep the newest few
+        // so repeated restores cannot grow the directory without bound (audit A2).
+        self.prune_preserved_metadata(PRESERVED_METADATA_LIMIT);
         let mut persisted = index.clone();
         persisted.write_generation = generation.saturating_add(1);
         let json = serde_json::to_string_pretty(&persisted)?;
         replace_file_with_recovery(&self.metadata_path, Some(json.as_bytes()), |temp| {
-            fs::write(temp, &json).context("failed to write restored metadata")
+            crate::file_store::write_private_durable(temp, json.as_bytes())
         })?;
         // A subsequent list restore must see this roster, even before another save.
-        let _ = self.write_automatic_backup(&persisted, &json);
+        match self.write_automatic_backup(&persisted, &json) {
+            Ok(()) => clear_backup_warning(),
+            Err(error) => {
+                // A failed account-list backup must be visible: it is the last
+                // line of defence for a damaged metadata file (audit R2). Record
+                // it so `status --json` reports it instead of only stderr.
+                let message = format!("automatic account-list backup failed: {error:#}");
+                eprintln!("warning: {message}");
+                record_backup_warning(message);
+            }
+        }
         Ok(())
     }
 
@@ -184,7 +239,8 @@ impl MetadataIndexStore {
         fs::create_dir_all(&directory)
             .with_context(|| format!("failed to create {}", directory.display()))?;
         let path = directory.join(format!("metadata-{:020}.json", index.write_generation));
-        fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
+        // Account metadata names every saved account: private mode + durable.
+        crate::file_store::atomic_write(&path, json.as_bytes(), 0o600)?;
         let backups = self.automatic_backup_candidates()?;
         for (path, _) in backups.into_iter().skip(AUTOMATIC_BACKUP_LIMIT) {
             let _ = fs::remove_file(path);
@@ -347,6 +403,37 @@ fn legacy_timestamp_to_current_format(value: &Value) -> Option<Value> {
     serde_json::to_value(timestamp).ok()
 }
 
+/// Process-wide note about the most recent automatic backup failure. The CLI
+/// surfaces it in `status --json` so a silent backup problem reaches scripts and
+/// the app, not only whoever reads stderr (audit R2/A2).
+static LAST_BACKUP_WARNING: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+
+fn backup_warning_slot() -> &'static std::sync::Mutex<Option<String>> {
+    LAST_BACKUP_WARNING.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn record_backup_warning(message: String) {
+    if let Ok(mut slot) = backup_warning_slot().lock() {
+        *slot = Some(message);
+    }
+}
+
+/// The most recent automatic-backup failure, if any.
+pub fn last_backup_warning() -> Option<String> {
+    backup_warning_slot()
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
+}
+
+/// Forget a previous failure once a backup succeeds again.
+pub(crate) fn clear_backup_warning() {
+    if let Ok(mut slot) = backup_warning_slot().lock() {
+        *slot = None;
+    }
+}
+
 struct RecoveryCandidate {
     kind: RecoveryFileKind,
     write_generation: u64,
@@ -366,10 +453,75 @@ fn recovery_priority(kind: RecoveryFileKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::MetadataIndexStore;
+    use super::PRESERVED_METADATA_LIMIT;
+    use super::clear_backup_warning;
     use super::parse_metadata_index;
     use crate::model::{METADATA_SCHEMA_VERSION, MetadataIndex};
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn a_failed_account_list_backup_is_recorded_for_status_json() {
+        let temp = tempdir().unwrap();
+        clear_backup_warning();
+        let store = MetadataIndexStore::new(temp.path());
+        // A file where the backup directory should be makes create_dir_all fail.
+        fs::write(temp.path().join("account-list-backups"), b"not a directory").unwrap();
+        let index = MetadataIndex {
+            schema_version: METADATA_SCHEMA_VERSION,
+            write_generation: 1,
+            accounts: Vec::new(),
+        };
+        store
+            .save_index(&index)
+            .expect("metadata write still succeeds");
+        let warning = super::last_backup_warning().expect("backup failure recorded");
+        assert!(
+            warning.contains("account-list backup failed"),
+            "unexpected warning: {warning}"
+        );
+        clear_backup_warning();
+        assert!(super::last_backup_warning().is_none());
+    }
+
+    #[test]
+    fn preserved_metadata_copies_are_capped() {
+        let temp = tempdir().unwrap();
+        let store = MetadataIndexStore::new(temp.path());
+        for index in 0..(PRESERVED_METADATA_LIMIT + 5) {
+            fs::write(
+                temp.path()
+                    .join(format!("preserved-metadata-{index:04}.json")),
+                b"{}",
+            )
+            .unwrap();
+        }
+        store.prune_preserved_metadata(PRESERVED_METADATA_LIMIT);
+        let remaining = fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("preserved-metadata-"))
+            })
+            .count();
+        assert_eq!(remaining, PRESERVED_METADATA_LIMIT);
+        // A second pass is a no-op (idempotent housekeeping).
+        store.prune_preserved_metadata(PRESERVED_METADATA_LIMIT);
+        let again = fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("preserved-metadata-"))
+            })
+            .count();
+        assert_eq!(again, PRESERVED_METADATA_LIMIT);
+    }
 
     #[test]
     fn review_recovery_list_restore_keeps_generations_monotonic() {

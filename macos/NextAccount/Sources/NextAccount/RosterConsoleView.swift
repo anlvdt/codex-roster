@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Single tabbed hub for Settings / Operations / About / Backup (replaces multiple popup windows).
@@ -9,6 +10,17 @@ struct RosterConsoleView: View {
     var body: some View {
         VStack(spacing: 0) {
             consoleTabBar
+            if let toast = store.toast {
+                RosterToastBanner(toast: toast) { store.toast = nil }
+                Divider()
+            }
+            if let warning = store.statusWarnings.first {
+                RosterToastBanner(
+                    toast: RosterToast(text: warning, kind: .failure),
+                    dismiss: { store.dismissStatusWarnings() }
+                )
+                Divider()
+            }
             Divider()
             tabContent
                 .rosterConsoleTypography()
@@ -21,6 +33,21 @@ struct RosterConsoleView: View {
             idealHeight: RosterSecondaryChrome.consoleHeight
         )
         .background(.background)
+        // Console-triggered failures (export/import/restore/refresh) must be
+        // visible where they happened, not only on the notch window (audit FLOW-2).
+        .alert("Codex Roster", isPresented: Binding(
+            get: { store.errorMessage != nil },
+            set: { if !$0 { store.errorMessage = nil } }
+        )) {
+            Button(language.text("Sao chép chi tiết", "Copy details")) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(store.errorMessage ?? "", forType: .string)
+                store.errorMessage = nil
+            }
+            Button(language.text("Đồng ý", "OK"), role: .cancel) { store.errorMessage = nil }
+        } message: {
+            Text(store.errorMessage ?? "")
+        }
         // SwiftUI `Window(title:)` does not refresh when LanguageStore changes.
         .background {
             SyncNamedWindowTitle(
@@ -145,5 +172,35 @@ struct RosterConsoleOpenBridge: ViewModifier {
 extension View {
     func rosterConsoleOpenBridge() -> some View {
         modifier(RosterConsoleOpenBridge())
+    }
+}
+
+/// Transient confirmation banner. Success and failure use different glyphs and
+/// semantic colours so it still reads in Light Mode (audit FLOW-2/VIS-1).
+struct RosterToastBanner: View {
+    let toast: RosterToast
+    let dismiss: () -> Void
+    @EnvironmentObject private var language: LanguageStore
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: toast.kind == .success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .foregroundStyle(toast.kind == .success ? Color(nsColor: .systemGreen) : Color(nsColor: .systemOrange))
+            Text(toast.text)
+                .font(.callout)
+                .foregroundStyle(Color(nsColor: .labelColor))
+                .lineLimit(2)
+            Spacer(minLength: 8)
+            Button(action: dismiss) {
+                Image(systemName: "xmark")
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(language.text("Đóng thông báo", "Dismiss notification"))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .accessibilityElement(children: .combine)
     }
 }

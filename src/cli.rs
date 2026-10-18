@@ -1,6 +1,5 @@
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
-use std::process::Command as ProcessCommand;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -29,7 +28,8 @@ use crate::usage::{usage_error_label, usage_error_requires_login};
     name = crate::CLI_NAME,
     author,
     version,
-    about = "Manage Codex accounts across the CLI and IDE"
+    about = "Manage Codex accounts across the CLI and IDE",
+    after_help = "EXAMPLES:\n  codex-roster list --json\n  codex-roster activate <ACCOUNT_ID>\n  codex-roster tui\n\nAll commands accept --json for machine-readable output; the macOS app consumes it."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -38,13 +38,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Show environment, the live account, saved-account count and process warnings.
     Status {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// List saved accounts with cached quota (archived rows hidden unless --all).
     List {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
+        #[arg(long, help = "Include archived accounts")]
+        all: bool,
     },
     #[cfg(feature = "external-providers")]
     /// Inspect and manage external provider accounts.
@@ -52,73 +56,87 @@ enum Command {
         #[command(subcommand)]
         command: Option<ProviderCommand>,
     },
+    /// Save the current live Codex session as a roster account.
     Save {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Start an isolated login for a new account without touching the live session.
     BeginAddAccount {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Import the account created by `begin-add-account` into the roster.
     SaveAddedAccount {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Discard a pending add-account login and its temporary CODEX_HOME.
     CancelAddAccount {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Report whether the pending add-account login produced credentials.
     AddAccountStatus {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Show quota for one account, or for the active account when no id is given.
     Usage {
         account_id: Option<Uuid>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Re-query the active account plus any stale saved accounts (staleness-aware).
     RefreshUsage {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Switch the live Codex session to a saved account.
     Activate {
         account_id: Option<Uuid>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Ignore ChatGPT/Codex Desktop leftovers (never a live Codex CLI session)"
+        )]
         force: bool,
     },
     /// Enable Luna Reserve (gpt-5.6-luna) for the active account or a specific account.
     EnableLunaReserve {
         account_id: Option<Uuid>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Delete a saved account and its encrypted snapshot.
     Delete {
         account_id: Option<Uuid>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Hide an account from the roster, or restore it with --restore.
     Archive {
         account_id: Uuid,
-        #[arg(long)]
+        #[arg(long, help = "Restore the account instead of archiving it")]
         restore: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Write an encrypted backup bundle to OUTPUT.
     Export {
         output: PathBuf,
-        #[arg(long)]
+        #[arg(long, help = "Read the backup password from stdin (max 4 KiB)")]
         password_stdin: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Restore accounts from an encrypted backup bundle.
     Import {
         input: PathBuf,
-        #[arg(long)]
+        #[arg(long, help = "Read the backup password from stdin (max 4 KiB)")]
         password_stdin: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Import account(s) from Codex auth.json, a Roster snapshot JSON, or a plaintext backup bundle.
@@ -127,21 +145,25 @@ enum Command {
         /// Optional display label (single-account auth.json / snapshot only).
         #[arg(long)]
         label: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Restore roster metadata from the newest automatic account-list backup.
     RestoreAccountListBackup {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Restore the full encrypted backup over the current roster.
     RestoreFullBackup {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Write an automatic full backup now instead of waiting for the next schedule.
     CreateAutomaticFullBackup {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Keep Codex usage windows fresh in the background.
     AutoStartUsageWindows {
         #[arg(long, conflicts_with = "disable")]
         enable: bool,
@@ -149,7 +171,7 @@ enum Command {
         disable: bool,
         #[arg(long)]
         run: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Remember Codex rollout cwd/session on switch; reopen thread after activate.
@@ -161,9 +183,10 @@ enum Command {
         /// Discover interrupted / quota-blocked threads (same-account recovery).
         #[arg(long, conflicts_with_all = ["enable", "disable"])]
         continue_interrupted: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Inspect or change automatic switching when quota is exhausted.
     AutoSwitch {
         #[arg(long, conflicts_with_all = ["disable", "apply", "status"])]
         enable: bool,
@@ -179,21 +202,23 @@ enum Command {
         force: bool,
         #[arg(long)]
         status: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Recover accounts from legacy snapshot formats.
     RecoverLegacySnapshots {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Summarise local Codex token usage and estimated cost.
     TokenUsage {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Official rate-limit remaining % samples for the last ~7 days.
     QuotaHistory {
         account_id: Option<Uuid>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Run the optional VibeCafe usage collector for Codex and other AI tools.
@@ -203,38 +228,87 @@ enum Command {
     },
     /// Global Codex Reset outlook (codex-resets.com status).
     ResetOutlook {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Return newly published Codex reset events once, for desktop notifications
     /// (codex-resets.com status/list + forecast official_signal).
     ResetEvents {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Return recent reset announcements from codex-resets.com.
     ResetTimeline {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Deprecated: Codex Resets does not publish service status history.
+    #[command(hide = true)]
     ResetStatusHistory {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Deprecated: Codex Resets does not publish effort tiers.
+    #[command(hide = true)]
     ResetJuice {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Show the public OpenAI Status summary.
     OpenAiStatus {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Estimate when each quota window runs out, from recorded samples.
+    QuotaForecast {
+        account_id: Option<Uuid>,
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+    },
+    /// List saved accounts that are dead or look dead, with the commands to remove them (read-only).
+    DeadAccounts {
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+        #[arg(
+            long,
+            help = "Exchange each inactive account's refresh token to prove whether its grant still exists (consumes rotating tokens; never touches the live account)"
+        )]
+        deep: bool,
+        #[arg(
+            long,
+            default_value_t = 14,
+            help = "Days without a successful usage fetch before an auth failure counts as suspect"
+        )]
+        stale_days: i64,
+    },
+    /// Reclaim space from data left behind by removed features (dry-run by default).
+    Cleanup {
+        #[arg(
+            long,
+            help = "Delete the listed directories instead of only reporting them"
+        )]
+        apply: bool,
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+    },
+    /// Report local diagnostics (paths, keys, locks, ports) for support.
+    Doctor {
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+        #[arg(long, help = "Write a redacted report to doctor-report.txt")]
+        bundle: bool,
+    },
+    /// Describe the `--json` contract, optionally for one command.
+    Schema {
+        command: Option<String>,
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+    },
+    /// Set or clear the custom label of a saved account.
     SetLabel {
         account_id: Uuid,
         label: String,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
 }
@@ -261,7 +335,7 @@ enum ProviderCommand {
     SyncClaude {
         #[arg(long)]
         email: String,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Save or restore a matching Claude Desktop login while Desktop is closed.
@@ -269,49 +343,52 @@ enum ProviderCommand {
         account_id: Uuid,
         #[arg(long, conflicts_with = "restore")]
         save: bool,
-        #[arg(long)]
+        #[arg(long, help = "Restore the account instead of archiving it")]
         restore: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Show live availability, identity, capabilities, and saved-account counts.
     Status {
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// List saved accounts, optionally scoped to one provider.
     List {
         #[arg(long, value_parser = parse_ai_provider)]
         provider: Option<AiProvider>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Save the provider's currently authenticated account.
     Save {
         #[arg(value_parser = parse_ai_provider)]
         provider: AiProvider,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Activate a saved account. The provider is inferred from the account ID.
     Activate {
         account_id: Uuid,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Delete a saved external-provider account and its stored snapshot.
     Delete {
         account_id: Uuid,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Ignore ChatGPT/Codex Desktop leftovers (never a live Codex CLI session)"
+        )]
         force: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Set or clear a saved external-provider account's custom label.
     SetLabel {
         account_id: Uuid,
         label: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Refresh cached usage for all saved accounts of one provider.
@@ -323,7 +400,7 @@ enum ProviderCommand {
         /// Read Claude Code local quota only; never contact the usage API.
         #[arg(long)]
         local_only: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Fetch provider usage for the live account or a saved account ID.
@@ -331,7 +408,7 @@ enum ProviderCommand {
         #[arg(value_parser = parse_ai_provider)]
         provider: AiProvider,
         account_id: Option<Uuid>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
     /// Decide or apply a Claude account auto-switch, and manage its policy.
@@ -361,13 +438,103 @@ enum ProviderCommand {
         cooldown: Option<u64>,
         #[arg(long, value_parser = parse_claude_auto_switch_strategy)]
         strategy: Option<ClaudeAutoSwitchStrategy>,
-        #[arg(long)]
+        #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
 }
 
+/// Version of the `--json` contract. Additive: new fields may appear, existing
+/// keys and their meaning do not change without a bump (audit E1).
+pub const CONTRACT_VERSION: u32 = 1;
+
+/// Map an error to a stable exit code and machine-readable kind, so scripts can
+/// branch on the failure class instead of parsing prose (audit OUT-03).
+pub fn classify_error(error: &anyhow::Error) -> (u8, &'static str, Option<String>) {
+    let message = format!("{error:#}");
+    let lowered = message.to_ascii_lowercase();
+    if lowered.contains("invalid value")
+        || lowered.contains("unexpected argument")
+        || lowered.contains("unrecognized subcommand")
+        || lowered.contains("invalid subcommand")
+        || lowered.contains("a value is required")
+    {
+        return (2, "usage", None);
+    }
+    if lowered.contains("requires account_id")
+        || lowered.contains("is required when stdin")
+        || lowered.contains("no command given and stdin is not a terminal")
+        || lowered.contains("unknown command")
+    {
+        return (2, "usage", None);
+    }
+    if lowered.contains("login") && lowered.contains("required") {
+        return (
+            3,
+            "login_required",
+            Some("Run `codex login` and retry.".to_owned()),
+        );
+    }
+    if lowered.contains("keychain")
+        || lowered.contains("credential store")
+        || lowered.contains("decrypt")
+    {
+        return (
+            7,
+            "keychain",
+            Some("Unlock the login keychain or restore the missing key.".to_owned()),
+        );
+    }
+    if lowered.contains("lock") && (lowered.contains("timed out") || lowered.contains("timeout")) {
+        return (
+            4,
+            "lock_timeout",
+            Some("Another Roster process holds the lock; retry shortly.".to_owned()),
+        );
+    }
+    if lowered.contains("no active account") || lowered.contains("no saved account") {
+        return (
+            5,
+            "no_account",
+            Some("Run `codex-roster list` and pick an account id.".to_owned()),
+        );
+    }
+    if lowered.contains("http")
+        || lowered.contains("contact")
+        || lowered.contains("usage request failed")
+        || lowered.contains("network")
+    {
+        return (
+            6,
+            "network",
+            Some("Check connectivity and retry.".to_owned()),
+        );
+    }
+    if lowered.contains("activation_blocked_by_cli") {
+        return (3, "activation_blocked_by_cli", None);
+    }
+    if lowered.contains("activation_blocked_by_desktop") {
+        return (3, "activation_blocked_by_desktop", None);
+    }
+    (1, "error", None)
+}
+
 pub fn run() -> Result<()> {
-    let cli = Cli::parse();
+    // `parse()` exits the process on bad input, which would bypass the JSON
+    // error envelope that `--json` callers rely on. Help/version still print
+    // normally and exit 0.
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            use clap::error::ErrorKind;
+            if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) {
+                error.exit();
+            }
+            return Err(anyhow::anyhow!(error.render().to_string()));
+        }
+    };
     let env = env::detect()?;
     let repository = SnapshotRepository::new(
         &env.app_data_dir,
@@ -407,15 +574,38 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
-        Some(Command::List { json }) => {
+        Some(Command::List { json, all }) => {
             let list = app.list()?;
             if json {
                 print_json(&list)?;
-            } else if list.accounts.is_empty() {
-                println!("No saved accounts in {}.", list.environment);
+                return Ok(());
+            }
+            let total = list.accounts.len();
+            let archived = list
+                .accounts
+                .iter()
+                .filter(|account| account.archived)
+                .count();
+            let accounts = list
+                .accounts
+                .iter()
+                .filter(|account| all || !account.archived)
+                .collect::<Vec<_>>();
+            if accounts.is_empty() {
+                if total == 0 {
+                    println!("No saved accounts in {}.", list.environment);
+                } else {
+                    println!(
+                        "No active accounts in {}; {archived} archived (use --all to list them).",
+                        list.environment
+                    );
+                }
             } else {
-                for account in list.accounts {
-                    println!("{}", render_account_summary(&account));
+                for account in &accounts {
+                    println!("{}", render_account_summary(account));
+                }
+                if !all && archived > 0 {
+                    println!("({archived} archived hidden; use --all to include them.)");
                 }
             }
             Ok(())
@@ -671,14 +861,40 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         Some(Command::AddAccountStatus { json }) => {
+            let active = app.add_account_session_active();
+            let auth_changed = app.add_account_session_auth_changed()?;
+            // Say what to do next, not just whether a marker file exists
+            // (audit A3).
             let output = serde_json::json!({
-                "active": app.add_account_session_active(),
-                "auth_changed": app.add_account_session_auth_changed()?,
+                "active": active,
+                "auth_changed": auth_changed,
+                "state": if active { "pending" } else { "none" },
+                "codex_root": app.env().codex_root.display().to_string(),
+                "hint": if active {
+                    "Finish the browser login, then run `codex-roster save-added-account`."
+                } else {
+                    "Start one with `codex-roster begin-add-account`."
+                },
             });
             if json {
                 print_json(&output)?;
+            } else if active {
+                println!(
+                    "Add account session: pending login in {}",
+                    app.env().codex_root.display()
+                );
+                println!(
+                    "Credentials changed: {}",
+                    if auth_changed {
+                        "yes (ready to save)"
+                    } else {
+                        "not yet"
+                    }
+                );
+                println!("Finish the browser login, then run `codex-roster save-added-account`.");
             } else {
-                println!("Add account session: {}", output["active"]);
+                println!("Add account session: none");
+                println!("Start one with `codex-roster begin-add-account`.");
             }
             Ok(())
         }
@@ -719,13 +935,22 @@ pub fn run() -> Result<()> {
                             .iter()
                             .any(|process| !crate::process::is_force_skippable_process(process))
                         {
-                            bail!(
-                                "Codex CLI is still running. Close those processes first; `--force` cannot override a live CLI session."
+                            let report = app.activation_blocking_report(force);
+                            let mut message = String::from(
+                                "activation_blocked_by_cli: a live Codex CLI session is running and `--force` cannot override it",
                             );
+                            for line in crate::process::format_blocking_report(&report) {
+                                message.push('\n');
+                                message.push_str(&line);
+                            }
+                            message.push_str(
+                                "\nClose the listed Codex CLI session(s) (Ctrl-C in the terminal running `codex`) and retry.",
+                            );
+                            bail!(message);
                         }
                         if !force {
                             bail!(
-                                "ChatGPT/Codex Desktop is still running. Close it first or rerun `activate` with `--force` after quitting Desktop."
+                                "activation_blocked_by_desktop: ChatGPT/Codex Desktop is still running. Quit it first, or rerun `activate --force` to let Roster close and relaunch it."
                             );
                         }
                     } else if !warnings.is_empty() && force && !json {
@@ -738,6 +963,14 @@ pub fn run() -> Result<()> {
                     app.activate_with_running_policy(account_id, force)?
                 }
                 None => {
+                    if json {
+                        bail!(
+                            "--json requires ACCOUNT_ID; run `codex-roster list --json` to find ids"
+                        );
+                    }
+                    if !std::io::stdin().is_terminal() {
+                        bail!("ACCOUNT_ID is required when stdin is not a terminal");
+                    }
                     let _ = app.interactive(InteractiveMode::ActivateOnce, force)?;
                     return Ok(());
                 }
@@ -771,6 +1004,18 @@ pub fn run() -> Result<()> {
             let output = match account_id {
                 Some(account_id) => app.delete(account_id)?,
                 None => {
+                    // Same contract as `activate`: a JSON caller must never end
+                    // up in the interactive menu, and a non-TTY must get an
+                    // actionable hint instead of dialoguer's opaque error
+                    // (review finding 5).
+                    if json {
+                        bail!(
+                            "--json requires ACCOUNT_ID; run `codex-roster list --json` to find ids"
+                        );
+                    }
+                    if !std::io::stdin().is_terminal() {
+                        bail!("ACCOUNT_ID is required when stdin is not a terminal");
+                    }
                     let _ = app.interactive(InteractiveMode::DeleteOnce, false)?;
                     return Ok(());
                 }
@@ -974,6 +1219,10 @@ pub fn run() -> Result<()> {
                     detail: None,
                     banked_reset_count: 0,
                     session_resume: None,
+                    usage_unknown: false,
+                    warnings: Vec::new(),
+                    candidate_switch_score: None,
+                    next_probe_seconds: None,
                 }
             } else {
                 app.auto_switch_with_candidate(apply, account_id, force)?
@@ -1057,7 +1306,10 @@ pub fn run() -> Result<()> {
         Some(Command::ResetEvents { json }) => {
             let events = crate::reset_tracker::fetch_new_reset_events(&app.env().app_data_dir)?;
             if json {
-                print_json(&events)?;
+                // Wrapped in an object: `print_json` can only attach
+                // `contract_version` to an object, and a bare array left this
+                // one command unversioned (contract v2).
+                print_json(&serde_json::json!({ "events": events }))?;
             } else if events.is_empty() {
                 println!("No new verified global resets.");
             } else {
@@ -1129,6 +1381,130 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::QuotaForecast { account_id, json }) => {
+            let output = app.quota_forecast(account_id)?;
+            if json {
+                print_json(&output)?;
+            } else {
+                let windows = [output.five_hour.as_ref(), output.weekly.as_ref()];
+                if windows.iter().all(|window| window.is_none()) {
+                    println!(
+                        "No cached quota for that account yet; run `codex-roster refresh-usage` first."
+                    );
+                } else {
+                    for window in windows.into_iter().flatten() {
+                        println!("{}", crate::forecast::describe_window(window, true));
+                    }
+                }
+            }
+            Ok(())
+        }
+        Some(Command::DeadAccounts {
+            json,
+            stale_days,
+            deep,
+        }) => {
+            let report = app.dead_accounts(stale_days, deep)?;
+            if json {
+                print_json(&report)?;
+            } else {
+                print_dead_account_report(&report);
+            }
+            Ok(())
+        }
+        Some(Command::Cleanup { apply, json }) => {
+            let report = collect_cleanup_report(&app.env().app_data_dir, apply);
+            if json {
+                print_json(&report)?;
+            } else {
+                if report.candidates.is_empty() {
+                    println!("Nothing to clean in {}.", app.env().app_data_dir.display());
+                } else {
+                    for candidate in &report.candidates {
+                        println!(
+                            "  {:>8}  {}{}",
+                            human_bytes(candidate.bytes),
+                            candidate.path,
+                            if candidate.removed == Some(true) {
+                                "  (removed)"
+                            } else {
+                                ""
+                            }
+                        );
+                    }
+                    println!(
+                        "{}: {} across {} item(s).",
+                        if apply { "Removed" } else { "Reclaimable" },
+                        human_bytes(report.reclaimable_bytes),
+                        report.candidates.len()
+                    );
+                }
+                if !report.review_only.is_empty() {
+                    println!("Review manually (never deleted automatically):");
+                    for item in &report.review_only {
+                        println!("  {:>8}  {}", human_bytes(item.bytes), item.path);
+                    }
+                }
+                if !apply && !report.candidates.is_empty() {
+                    println!("Dry run. Re-run with --apply to delete the items above.");
+                }
+            }
+            Ok(())
+        }
+        Some(Command::Doctor { json, bundle }) => {
+            let output = collect_doctor_output(&app)?;
+            if bundle {
+                let path = std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join("doctor-report.txt");
+                let mut text = String::new();
+                text.push_str(&format!("codex-roster {}\n", output.version));
+                for check in &output.checks {
+                    text.push_str(&format!(
+                        "[{}] {}: {}{}\n",
+                        check.status,
+                        check.id,
+                        check.detail,
+                        check
+                            .hint
+                            .as_deref()
+                            .map(|hint| format!(" (hint: {hint})"))
+                            .unwrap_or_default()
+                    ));
+                }
+                std::fs::write(&path, text)
+                    .with_context(|| format!("failed to write {}", path.display()))?;
+                if !json {
+                    println!("Wrote {}", path.display());
+                }
+            }
+            if json {
+                print_json(&output)?;
+            } else {
+                println!("codex-roster {}", output.version);
+                for check in &output.checks {
+                    println!("  [{:>4}] {:<16} {}", check.status, check.id, check.detail);
+                    if let Some(hint) = &check.hint {
+                        println!("         hint: {hint}");
+                    }
+                }
+            }
+            Ok(())
+        }
+        Some(Command::Schema { command, json }) => {
+            let schema = schema_document(command.as_deref());
+            if json {
+                // Wrapped in an object so `print_json` can attach
+                // `contract_version`; a bare string could not (review finding 4).
+                print_json(&serde_json::json!({
+                    "command": command,
+                    "document": schema,
+                }))?;
+            } else {
+                println!("{schema}");
+            }
+            Ok(())
+        }
         Some(Command::SetLabel {
             account_id,
             label,
@@ -1165,10 +1541,465 @@ fn backup_password(password_stdin: bool) -> Result<String> {
     }
 }
 
+/// Directories left behind by features that no longer exist in the product.
+/// Deleting them is safe, but it is still the user's data, so `cleanup` only
+/// removes them with an explicit `--apply` (audit P0-13).
+const CLEANUP_CANDIDATES: &[(&str, &str)] = &[
+    (
+        "chatgpt-web-profiles",
+        "Electron profile cache from the removed web-view feature",
+    ),
+    (
+        "codex-account-switcher-menubar",
+        "binary from the removed menu-bar prototype",
+    ),
+];
+
+/// Reported for the user to inspect, never deleted automatically: these may
+/// hold recovery points or audit history someone still wants.
+const CLEANUP_REVIEW_ONLY: &[(&str, &str)] = &[
+    (
+        "protected-recovery-points",
+        "recovery points kept by an older build",
+    ),
+    ("activity.jsonl", "activity log from an older build"),
+];
+
+fn path_bytes(path: &std::path::Path) -> u64 {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if metadata.is_file() {
+        return metadata.len();
+    }
+    if !metadata.is_dir() {
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| path_bytes(&entry.path()))
+        .sum()
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+#[derive(serde::Serialize)]
+struct CleanupItem {
+    path: String,
+    name: String,
+    bytes: u64,
+    reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    removed: Option<bool>,
+}
+
+#[derive(serde::Serialize)]
+struct CleanupReport {
+    applied: bool,
+    reclaimable_bytes: u64,
+    candidates: Vec<CleanupItem>,
+    review_only: Vec<CleanupItem>,
+}
+
+/// Build the cleanup report. `apply` deletes only the allow-listed candidates.
+/// Human rendering for `dead-accounts`. Nothing is removed here: the report only
+/// proposes commands, and it explains why absent windows are not evidence.
+fn print_dead_account_report(report: &crate::model::DeadAccountReport) {
+    if report.deep_checked > 0 {
+        println!(
+            "Deep check: exchanged {} refresh token(s); {} grant(s) still alive.",
+            report.deep_checked, report.deep_alive
+        );
+    }
+    let total = report.confirmed.len() + report.grant_rejected.len() + report.suspects.len();
+    if total == 0 {
+        println!("No dead or suspect accounts found.");
+        return;
+    }
+    for (title, entries) in [
+        ("Confirmed deactivated by OpenAI", &report.confirmed),
+        (
+            "Grant rejected: the saved refresh token is dead, a fresh login is required",
+            &report.grant_rejected,
+        ),
+        (
+            "Suspect: auth keeps failing and nothing was fetched recently",
+            &report.suspects,
+        ),
+    ] {
+        if entries.is_empty() {
+            continue;
+        }
+        println!("\n{title} ({})", entries.len());
+        for entry in entries {
+            let label = entry.name.clone().unwrap_or_else(|| entry.email.clone());
+            let plan = entry.plan_label.as_deref().unwrap_or("unknown plan");
+            println!(
+                "  · {label} <{}> [{plan}]{}",
+                entry.email,
+                if entry.is_active { " (active)" } else { "" }
+            );
+            println!("      reason: {} — {}", entry.reason, entry.detail);
+            for command in &entry.suggested_commands {
+                println!("      {command}");
+            }
+        }
+    }
+    println!("\nNote: {}", report.note);
+}
+
+fn collect_cleanup_report(app_data_dir: &std::path::Path, apply: bool) -> CleanupReport {
+    let mut candidates = Vec::new();
+    let mut reclaimable = 0u64;
+    for (name, why) in CLEANUP_CANDIDATES {
+        let path = app_data_dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let bytes = path_bytes(&path);
+        let mut removed = None;
+        if apply {
+            let deleted =
+                std::fs::remove_dir_all(&path).is_ok() || std::fs::remove_file(&path).is_ok();
+            removed = Some(deleted);
+            if deleted {
+                reclaimable += bytes;
+            }
+        } else {
+            reclaimable += bytes;
+        }
+        candidates.push(CleanupItem {
+            path: path.display().to_string(),
+            name: (*name).to_owned(),
+            bytes,
+            reason: (*why).to_owned(),
+            removed,
+        });
+    }
+    let review_only = CLEANUP_REVIEW_ONLY
+        .iter()
+        .filter_map(|(name, why)| {
+            let path = app_data_dir.join(name);
+            path.exists().then(|| CleanupItem {
+                path: path.display().to_string(),
+                name: (*name).to_owned(),
+                bytes: path_bytes(&path),
+                reason: (*why).to_owned(),
+                removed: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    CleanupReport {
+        applied: apply,
+        reclaimable_bytes: reclaimable,
+        candidates,
+        review_only,
+    }
+}
+
+/// Collect local diagnostics. Never prints secrets: key files are reported by
+/// count and mode only, and no account emails are included (audit E1/O2).
+fn collect_doctor_output<S>(app: &App<S>) -> Result<crate::model::DoctorOutput>
+where
+    S: crate::secrets::SecretStore,
+{
+    use crate::model::DoctorCheck;
+    let mut checks = Vec::new();
+    let env = app.env();
+
+    checks.push(DoctorCheck {
+        id: "version".to_owned(),
+        status: "ok".to_owned(),
+        detail: format!(
+            "codex-roster {} (json contract {})",
+            env!("CARGO_PKG_VERSION"),
+            CONTRACT_VERSION
+        ),
+        hint: None,
+    });
+
+    let data_dir = env.app_data_dir.clone();
+    let data_status = if data_dir.is_dir() { "ok" } else { "warn" };
+    checks.push(DoctorCheck {
+        id: "app_data".to_owned(),
+        status: data_status.to_owned(),
+        detail: format!("{} ({})", data_dir.display(), data_status),
+        hint: (data_status == "warn").then(|| "It is created on first save.".to_owned()),
+    });
+
+    let keys_dir = data_dir.join("keys");
+    let mut key_count = 0usize;
+    let mut loose_modes = 0usize;
+    if let Ok(entries) = std::fs::read_dir(&keys_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.ends_with(".key") {
+                continue;
+            }
+            key_count += 1;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(metadata) = entry.metadata()
+                    && metadata.permissions().mode() & 0o777 != 0o600
+                {
+                    loose_modes += 1;
+                }
+            }
+        }
+    }
+    let key_status = if loose_modes > 0 { "fail" } else { "ok" };
+    checks.push(DoctorCheck {
+        id: "keys".to_owned(),
+        status: key_status.to_owned(),
+        detail: format!("{key_count} key file(s), {loose_modes} with loose permissions"),
+        hint: (loose_modes > 0).then(|| {
+            "Run `chmod 600` on the key files; a same-user process could read them.".to_owned()
+        }),
+    });
+
+    for (id, file_name) in [
+        ("lock_operation", ".operation.lock"),
+        ("lock_auth", ".auth-operation.lock"),
+        ("lock_auto_switch", ".auto-switch.lock"),
+    ] {
+        let path = data_dir.join(file_name);
+        let (status, detail) = match std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+        {
+            Ok(file) => match fs2::FileExt::try_lock_exclusive(&file) {
+                Ok(()) => {
+                    let _ = fs2::FileExt::unlock(&file);
+                    ("ok", "free".to_owned())
+                }
+                Err(_) => ("warn", "held by another process".to_owned()),
+            },
+            Err(error) => ("warn", format!("unreadable: {error}")),
+        };
+        checks.push(DoctorCheck {
+            id: id.to_owned(),
+            status: status.to_owned(),
+            detail,
+            hint: None,
+        });
+    }
+
+    // Account-list backups are the last line of defence for metadata.json, so a
+    // stalled or failing backup must be visible here (audit R2/A2).
+    let backup_dir = data_dir.join("account-list-backups");
+    let newest_backup = std::fs::read_dir(&backup_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("metadata-"))
+        .filter_map(|entry| entry.metadata().ok()?.modified().ok())
+        .max();
+    let (backup_status, backup_detail) = match newest_backup {
+        Some(modified) => {
+            let age = std::time::SystemTime::now()
+                .duration_since(modified)
+                .unwrap_or_default();
+            let hours = age.as_secs() / 3600;
+            if hours > 24 {
+                (
+                    "warn",
+                    format!("newest account-list backup is {hours}h old"),
+                )
+            } else {
+                ("ok", format!("newest account-list backup is {hours}h old"))
+            }
+        }
+        None => ("warn", "no account-list backup yet".to_owned()),
+    };
+    checks.push(DoctorCheck {
+        id: "account_list_backup".to_owned(),
+        status: backup_status.to_owned(),
+        detail: backup_detail,
+        hint: (backup_status == "warn").then(|| {
+            "Save or edit an account to trigger a new backup; check disk space and permissions."
+                .to_owned()
+        }),
+    });
+
+    let auth_path = env.codex_root.join("auth.json");
+    let auth_status = if auth_path.is_file() { "ok" } else { "warn" };
+    checks.push(DoctorCheck {
+        id: "codex_auth".to_owned(),
+        status: auth_status.to_owned(),
+        detail: if auth_path.is_file() {
+            "~/.codex/auth.json present".to_owned()
+        } else {
+            "~/.codex/auth.json missing (not signed in?)".to_owned()
+        },
+        hint: None,
+    });
+
+    let mut leftover_dirs = 0usize;
+    if let Ok(entries) = std::fs::read_dir(&env.codex_root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(".cas-backup-") || name.starts_with(".cas-restore-") {
+                leftover_dirs += 1;
+            }
+        }
+    }
+    checks.push(DoctorCheck {
+        id: "leftover_recovery".to_owned(),
+        status: if leftover_dirs > 0 { "warn" } else { "ok" }.to_owned(),
+        detail: format!("{leftover_dirs} staged auth recovery dir(s)"),
+        hint: (leftover_dirs > 0)
+            .then(|| "Safe to delete once no switch is in progress.".to_owned()),
+    });
+
+    for port in [1455u16, 1457u16] {
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let busy =
+            std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(200))
+                .is_ok();
+        checks.push(DoctorCheck {
+            id: format!("port_{port}"),
+            status: if busy { "warn" } else { "ok" }.to_owned(),
+            detail: if busy { "in use" } else { "free" }.to_owned(),
+            hint: busy.then(|| {
+                "ChatGPT Desktop usually holds the Codex OAuth callback ports.".to_owned()
+            }),
+        });
+    }
+
+    let list = app.list()?;
+    let archived = list
+        .accounts
+        .iter()
+        .filter(|account| account.archived)
+        .count();
+    checks.push(DoctorCheck {
+        id: "accounts".to_owned(),
+        status: "ok".to_owned(),
+        detail: format!("{} saved, {archived} archived", list.accounts.len()),
+        hint: None,
+    });
+
+    let newest_cache = list
+        .accounts
+        .iter()
+        .filter_map(|account| account.usage.as_ref().map(|usage| usage.fetched_at))
+        .max();
+    checks.push(DoctorCheck {
+        id: "usage_cache".to_owned(),
+        status: "ok".to_owned(),
+        detail: match newest_cache {
+            Some(fetched_at) => {
+                let age = time::OffsetDateTime::now_utc() - fetched_at;
+                format!(
+                    "newest cached usage {} minute(s) old",
+                    age.whole_minutes().max(0)
+                )
+            }
+            None => "no cached usage".to_owned(),
+        },
+        hint: None,
+    });
+
+    checks.push(DoctorCheck {
+        id: "add_account_session".to_owned(),
+        status: "ok".to_owned(),
+        detail: if crate::codex::add_account_session_active(env) {
+            "pending add-account session".to_owned()
+        } else {
+            "none".to_owned()
+        },
+        hint: None,
+    });
+
+    Ok(crate::model::DoctorOutput {
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        checks,
+    })
+}
+
+/// Static description of the JSON contract. Kept in code so `schema` can never
+/// drift from the version constant it reports.
+fn schema_document(command: Option<&str>) -> String {
+    let envelope = "Every --json output includes \"contract_version\": 1 (additive).\n\
+View timestamps are RFC3339 strings (older array-form values are still read).\n\
+Errors print {\"contract_version\":1,\"error\":{\"code\",\"message\",\"hint\"}} to stdout.\n\
+Exit codes: 0 ok, 2 usage, 3 login/blocked, 4 lock timeout, 5 no account, 6 network, 7 keychain, 8 unsupported.";
+    match command {
+        None => format!(
+            "{envelope}\n\nCommands with typed JSON output: status, list, save, usage, refresh-usage, activate, delete, archive, export, import, import-json, restore-account-list-backup, restore-full-backup, create-automatic-full-backup, auto-switch, auto-start-usage-windows, auto-resume-session, token-usage, quota-history, quota-forecast, reset-outlook, reset-events, reset-timeline, open-ai-status, add-account-status, set-label, enable-luna-reserve, doctor, dead-accounts, cleanup."
+        ),
+        Some(name) => {
+            let fields = match name {
+                "status" => {
+                    "environment, codex_root, current_account, current_account_saved_id, saved_accounts, process_warnings, vibe_usage?, codex_model?, activity?, warnings[]"
+                }
+                "list" => {
+                    "environment, accounts[] (id, email, plan_label, is_active, created_at, updated_at, usage, archived)"
+                }
+                "usage" => "account, usage (five_hour, weekly, credits, banked_resets, plan_label)",
+                "auto-switch" => {
+                    "enabled, status, active_account_id, candidate_account_id, candidate_display_name, detail, banked_reset_count, session_resume?, usage_unknown, warnings[], candidate_switch_score?, next_probe_seconds?"
+                }
+                "reset-events" => "events[] (id, reset_type, announced_at, summary, audience?)",
+                "reset-timeline" => "events[] (id, announced_at, summary, audience?)",
+                "add-account-status" => "active, auth_changed, state, codex_root, hint",
+                "open-ai-status" => "indicator, description, updated_at, codex_components[]",
+                "auto-start-usage-windows" => "enabled, poll_seconds",
+                "dead-accounts" => {
+                    "generated_at, stale_after_days, deep_checked, deep_alive, confirmed[] (account_id, name, email, plan_label, archived, is_active, reason, detail, last_usage_at?, suggested_commands[]), grant_rejected[], suspects[], note"
+                }
+                "cleanup" => {
+                    "apply, reclaimable_bytes, items[] (path, name, bytes, reason, removed?), review_only[]"
+                }
+                "auto-resume-session" => {
+                    "enabled (--continue-interrupted returns a SessionResumeHint: enabled, account_id, session_id, cwd, additional_sessions[])"
+                }
+                "doctor" => "version, checks[] (id, status, detail, hint?)",
+                "token-usage" => "totals, by_day, by_project",
+                "quota-history" => "account_id, samples[] (minute, five_remaining, week_remaining)",
+                "quota-forecast" => {
+                    "account_id, generated_at, five_hour?, weekly? (window, remaining_percent, burn_per_minute, time_to_empty_minutes, ci_low_minutes, ci_high_minutes, confidence, sample_count)"
+                }
+                _ => {
+                    "unknown command; run `codex-roster schema` for the envelope and supported commands"
+                }
+            };
+            format!("{envelope}\n\n{name}: {fields}")
+        }
+    }
+}
+
 fn run_interactive_app<S>(app: &App<S>) -> Result<()>
 where
     S: crate::secrets::SecretStore,
 {
+    // A non-TTY stdin makes `Term::read_key` return `Key::Unknown` forever, so
+    // an unguarded menu would spin at 100% CPU in scripts/CI (audit SAF-01).
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "no command given and stdin is not a terminal; use `codex-roster status --json` or run `codex-roster` in a terminal"
+        );
+    }
     crate::app::spawn_auto_start_usage_windows_worker(app.env().clone());
     crate::app::spawn_auto_switch_worker(app.env().clone());
     #[cfg(feature = "external-providers")]
@@ -1186,6 +2017,24 @@ fn print_json<T>(value: &T) -> Result<()>
 where
     T: serde::Serialize,
 {
+    // Every `--json` path goes through here, so the contract version is added
+    // once instead of on each of the 30+ output types.
+    let mut value = serde_json::to_value(value)?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "contract_version".to_owned(),
+            serde_json::Value::from(CONTRACT_VERSION),
+        );
+    }
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn print_json_unversioned<T>(value: &T) -> Result<()>
+where
+    T: serde::Serialize,
+{
     let json = serde_json::to_string_pretty(value).context("failed to encode JSON output")?;
     println!("{json}");
     Ok(())
@@ -1199,12 +2048,27 @@ fn print_process_summary(title: &str, processes: &[RunningCodexProcess]) {
 }
 
 fn render_account_summary(account: &AccountView) -> String {
-    let mut line = format!(
-        "{} {}{}",
-        account.id,
-        account.email,
-        if account.is_active { " [active]" } else { "" }
-    );
+    let mut line = format!("{} {}", account.id, account.email);
+    if let Some(label) = account
+        .custom_label
+        .as_deref()
+        .filter(|label| !label.trim().is_empty())
+    {
+        line.push_str(&format!(" ({label})"));
+    }
+    if account.is_active {
+        line.push_str(" [active]");
+    }
+    if account.archived {
+        line.push_str(" [archived]");
+    }
+    if let Some(plan) = account
+        .plan_label
+        .as_deref()
+        .filter(|plan| !plan.is_empty())
+    {
+        line.push_str(&format!(" [{plan}]"));
+    }
     if account
         .usage_error
         .as_deref()
@@ -1218,7 +2082,7 @@ fn render_account_summary(account: &AccountView) -> String {
         let mut rendered_window = false;
         if let Some(usage) = &account.usage {
             for (label, window) in [
-                ("5h", usage.five_hour.as_ref()),
+                (usage.primary_window_label(), usage.five_hour.as_ref()),
                 ("weekly", usage.weekly.as_ref()),
             ] {
                 let Some(window) = window else { continue };
@@ -1226,10 +2090,19 @@ fn render_account_summary(account: &AccountView) -> String {
                 if window.reset_at <= OffsetDateTime::now_utc() {
                     line.push_str(&format!(" [{label} reset passed]"));
                 } else {
+                    // Show the reset in the user's own time zone: a UTC date is
+                    // off by up to a day for many users (audit CLI-04).
+                    let local = window.reset_at.to_offset(
+                        time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC),
+                    );
                     line.push_str(&format!(
-                        " [{label} remaining: {}%, reset {}]",
-                        window.remaining_percent,
-                        window.reset_at.date()
+                        " [{label} remaining: {}%, reset {} {}]",
+                        // Depleted windows read as 0% here, matching the app and
+                        // the TUI instead of leaking the raw 1% sentinel
+                        // (audit Q7/P0-4).
+                        crate::model::display_remaining_percent(window),
+                        local.date(),
+                        local.time(),
                     ));
                 }
             }
@@ -1488,22 +2361,21 @@ fn print_token_usage_summary(output: &TokenUsageSummaryOutput) {
 }
 
 fn run_vibe_usage(command: VibeUsageCommand) -> Result<()> {
-    let mut args = vec![
-        "--yes".to_owned(),
-        crate::vibe_usage::VIBE_USAGE_NPM_SPEC.to_owned(),
-    ];
-    match command {
-        VibeUsageCommand::Init => args.push("init".to_owned()),
-        VibeUsageCommand::Sync => args.push("sync".to_owned()),
-        VibeUsageCommand::Summary { days } => {
-            args.extend(["summary".to_owned(), "--days".to_owned(), days.to_string()]);
-        }
-        VibeUsageCommand::Status => args.push("status".to_owned()),
+    // A vendored collector (CODEX_ROSTER_VIBE_USAGE_BIN) avoids the runtime
+    // `npx` download entirely; otherwise the pinned npm spec is fetched.
+    let subcommand = match command {
+        VibeUsageCommand::Init => "init",
+        VibeUsageCommand::Sync => "sync",
+        VibeUsageCommand::Summary { .. } => "summary",
+        VibeUsageCommand::Status => "status",
+    };
+    let mut process = crate::vibe_usage::collector_command(subcommand);
+    if let VibeUsageCommand::Summary { days } = command {
+        process.args(["--days", &days.to_string()]);
     }
-    let status = ProcessCommand::new("npx")
-        .args(args)
+    let status = process
         .status()
-        .context("failed to launch npx; install Node.js 20+ to use `vibe-usage`")?;
+        .context("failed to launch the VibeCafe collector; install Node.js 20+, or point CODEX_ROSTER_VIBE_USAGE_BIN at a local copy")?;
     if !status.success() {
         bail!("vibe-usage exited with status {status}");
     }
@@ -1516,13 +2388,15 @@ fn print_usage_summary(usage: &AccountUsageView) {
     if let Some(five_hour) = &usage.five_hour {
         println!(
             "5h remaining: {}% (reset {})",
-            five_hour.remaining_percent, five_hour.reset_at
+            crate::model::display_remaining_percent(five_hour),
+            five_hour.reset_at
         );
     }
     if let Some(weekly) = &usage.weekly {
         println!(
             "Weekly remaining: {}% (reset {})",
-            weekly.remaining_percent, weekly.reset_at
+            crate::model::display_remaining_percent(weekly),
+            weekly.reset_at
         );
     }
     if let Some(credits) = &usage.credits {
@@ -1627,5 +2501,203 @@ mod codex_only_cli_tests {
     fn default_cli_exposes_codex_without_external_provider_actions() {
         assert!(Cli::try_parse_from(["codex-roster", "list", "--json"]).is_ok());
         assert!(Cli::try_parse_from(["codex-roster", "providers", "status"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CONTRACT_VERSION, classify_error, collect_cleanup_report, render_account_summary,
+        schema_document,
+    };
+    use anyhow::anyhow;
+    use time::OffsetDateTime;
+    use uuid::Uuid;
+
+    #[test]
+    fn a_depleted_window_reads_as_zero_percent_everywhere() {
+        let now = OffsetDateTime::now_utc();
+        let account = crate::model::AccountView {
+            id: Uuid::new_v4(),
+            provider: crate::model::AiProvider::OpenAi,
+            email: "dry@example.com".to_owned(),
+            subject: None,
+            name: None,
+            custom_label: None,
+            plan_label: Some("Plus".to_owned()),
+            environment: crate::model::EnvironmentKind::Linux,
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+            last_activated_at: None,
+            archived: false,
+            usage: Some(crate::model::AccountUsageView {
+                primary_window_kind: None,
+                source: crate::model::UsageSource::LiveAccessToken,
+                fetched_at: now,
+                // 1% is the "exhausted" sentinel; the CLI must not print it raw
+                // while the app shows 0% (audit Q7/P0-4).
+                five_hour: Some(crate::model::UsageWindowView {
+                    used_percent: 99,
+                    remaining_percent: 1,
+                    reset_at: now + time::Duration::hours(1),
+                }),
+                weekly: None,
+                credits: None,
+                banked_resets: None,
+                plan_label: None,
+                subscription_active_until: None,
+                luna_reserve: None,
+                five_hour_known: true,
+                weekly_known: false,
+            }),
+            usage_error: None,
+        };
+        let line = render_account_summary(&account);
+        assert!(
+            line.contains("5h remaining: 0%"),
+            "depleted windows must read 0%, got: {line}"
+        );
+        assert!(
+            !line.contains("remaining: 1%"),
+            "raw sentinel leaked: {line}"
+        );
+    }
+
+    #[test]
+    fn account_summary_shows_label_plan_and_state() {
+        let now = OffsetDateTime::now_utc();
+        let account = crate::model::AccountView {
+            id: Uuid::new_v4(),
+            provider: crate::model::AiProvider::OpenAi,
+            email: "person@example.com".to_owned(),
+            subject: None,
+            name: None,
+            custom_label: Some("Work".to_owned()),
+            plan_label: Some("Plus".to_owned()),
+            environment: crate::model::EnvironmentKind::Linux,
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+            last_activated_at: None,
+            archived: true,
+            usage: Some(crate::model::AccountUsageView {
+                primary_window_kind: None,
+                source: crate::model::UsageSource::LiveAccessToken,
+                fetched_at: now,
+                five_hour: Some(crate::model::UsageWindowView {
+                    used_percent: 20,
+                    remaining_percent: 80,
+                    reset_at: now + time::Duration::hours(3),
+                }),
+                weekly: None,
+                credits: None,
+                banked_resets: None,
+                plan_label: None,
+                subscription_active_until: None,
+                luna_reserve: None,
+                five_hour_known: true,
+                weekly_known: false,
+            }),
+            usage_error: None,
+        };
+        let line = render_account_summary(&account);
+        assert!(line.contains("person@example.com"));
+        assert!(
+            line.contains("(Work)"),
+            "custom label must be visible: {line}"
+        );
+        assert!(line.contains("[active]"));
+        assert!(
+            line.contains("[archived]"),
+            "archived rows must be marked: {line}"
+        );
+        assert!(line.contains("[Plus]"));
+        assert!(line.contains("5h remaining: 80%"));
+        assert!(
+            line.contains("reset "),
+            "reset time must be rendered: {line}"
+        );
+    }
+
+    #[test]
+    fn classify_error_maps_known_failures_to_exit_codes() {
+        assert_eq!(
+            classify_error(&anyhow!("--json requires ACCOUNT_ID; run list")).0,
+            2
+        );
+        assert_eq!(
+            classify_error(&anyhow!("login required for this account")).0,
+            3
+        );
+        assert_eq!(
+            classify_error(&anyhow!("timed out locking .operation.lock")).0,
+            4
+        );
+        assert_eq!(classify_error(&anyhow!("no saved account matches")).0, 5);
+        assert_eq!(
+            classify_error(&anyhow!("failed to contact OpenAI Status")).0,
+            6
+        );
+        assert_eq!(classify_error(&anyhow!("the keychain key is missing")).0, 7);
+        let (code, kind, _) = classify_error(&anyhow!("something unexpected"));
+        assert_eq!((code, kind), (1, "error"));
+    }
+
+    #[test]
+    fn cleanup_reports_without_deleting_and_applies_only_the_allow_list() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cache = temp.path().join("chatgpt-web-profiles");
+        std::fs::create_dir_all(cache.join("nested")).expect("cache dir");
+        std::fs::write(cache.join("nested/blob"), vec![0u8; 2048]).expect("blob");
+        let keep = temp.path().join("protected-recovery-points");
+        std::fs::create_dir_all(&keep).expect("recovery dir");
+        std::fs::write(keep.join("point.json"), b"{}").expect("point");
+
+        let dry = collect_cleanup_report(temp.path(), false);
+        assert!(!dry.applied);
+        assert_eq!(dry.candidates.len(), 1);
+        assert!(dry.reclaimable_bytes >= 2048);
+        assert!(cache.exists(), "a dry run must never delete anything");
+        assert_eq!(dry.review_only.len(), 1, "recovery points are reported");
+
+        let applied = collect_cleanup_report(temp.path(), true);
+        assert!(applied.applied);
+        assert!(!cache.exists(), "apply removes the allow-listed cache");
+        assert!(keep.exists(), "review-only items are never deleted");
+        assert_eq!(applied.candidates[0].removed, Some(true));
+    }
+
+    #[test]
+    fn clap_style_failures_classify_as_usage_errors() {
+        // `try_parse` errors now flow through classify_error so `--json` callers
+        // still get the envelope (contract v2).
+        let invalid = anyhow!("error: invalid value 'not-a-uuid' for '[ACCOUNT_ID]'");
+        assert_eq!(classify_error(&invalid).0, 2);
+        let unknown = anyhow!("error: unrecognized subcommand 'nope'");
+        assert_eq!(classify_error(&unknown).0, 2);
+        let missing = anyhow!("error: a value is required for '--json <VALUE>'");
+        assert_eq!(classify_error(&missing).0, 2);
+    }
+
+    #[test]
+    fn schema_covers_the_newer_commands_and_fields() {
+        assert!(schema_document(None).contains("quota-forecast"));
+        assert!(schema_document(None).contains("reset-events"));
+        assert!(schema_document(Some("reset-events")).contains("events[]"));
+        assert!(schema_document(Some("status")).contains("warnings[]"));
+        assert!(schema_document(Some("add-account-status")).contains("state"));
+    }
+
+    #[test]
+    fn schema_document_describes_the_contract() {
+        let envelope = schema_document(None);
+        assert!(envelope.contains("contract_version"));
+        assert!(envelope.contains("Exit codes"));
+        let status = schema_document(Some("status"));
+        assert!(status.contains("process_warnings"));
+        // The version is a compile-time constant; assert it in a const block so
+        // the check cannot be optimized away or flagged as a runtime assertion.
+        const { assert!(CONTRACT_VERSION >= 1) };
     }
 }

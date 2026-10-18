@@ -111,15 +111,27 @@ enum RosterListFilter: Equatable {
     case all
     case triage(AccountTriage)
     case deferredUnverified
+    /// Archived rows are hidden from the default list (and from counts) but stay
+    /// findable behind their own chip (audit IA-3).
+    case archived
 
     func matches(_ account: SavedAccount) -> Bool {
         switch self {
         case .all:
-            return true
+            return !account.archived
+        case .archived:
+            return account.archived
         case .triage(let bucket):
-            return account.triage == bucket
+            // The archived chip *is* `.triage(.archived)`, so that bucket must
+            // keep matching archived rows. Every other bucket must not: archived
+            // rows used to reappear under Ready/Needs-action and inflate those
+            // counters (review finding 10).
+            if bucket == .archived {
+                return account.archived
+            }
+            return !account.archived && account.triage == bucket
         case .deferredUnverified:
-            return account.hasDeferredAccessTokenRefresh
+            return !account.archived && account.hasDeferredAccessTokenRefresh
         }
     }
 }
@@ -302,6 +314,8 @@ final class AccountStore: ObservableObject {
     @Published private(set) var autoStartUsageWindows = false
     @Published private(set) var tokenUsage: TokenUsageSummary?
     @Published private(set) var quotaHistory: QuotaHistoryOutput?
+    /// Burn-rate estimate for the active account's windows (audit E2/F).
+    @Published private(set) var quotaForecast: QuotaForecastOutput?
     /// Increments when a 5-hour (or weekly) quota reset is confirmed — drives notch pulse.
     @Published private(set) var quotaResetPulse: UInt = 0
     @Published private(set) var resetOutlook: ResetOutlook?
@@ -321,6 +335,15 @@ final class AccountStore: ObservableObject {
     @Published private(set) var isLoadingResetOutlook = false
     @Published private(set) var isLoadingOpenAIStatus = false
     @Published private(set) var isRefreshingQuotaInBackground = false
+    /// True once the first roster load has completed. The UI must not show the
+    /// "no saved accounts" empty state while the first load is still in flight
+    /// (audit FLOW-8).
+    @Published private(set) var hasLoadedAccounts = false
+    /// True when the first roster load failed. The deck shows a retry row
+    /// instead of an endless "loading" spinner (review finding 9).
+    @Published private(set) var didFailInitialLoad = false
+    /// Non-fatal warnings reported by `status --json`.
+    @Published private(set) var statusWarnings: [String] = []
     @Published private(set) var lastQuotaRefreshAt: Date?
     @Published private(set) var accountSortMode: AccountSortMode
     @Published private(set) var newAccountLoginState: NewAccountLoginState = .idle
@@ -332,6 +355,26 @@ final class AccountStore: ObservableObject {
     /// Brief notch/menu caption after Auto-resume opens a remembered workspace.
     @Published private(set) var sessionResumeCaption: String?
     @Published var errorMessage: String?
+
+    /// Transient success/failure feedback. Unlike `errorMessage` this is not a
+    /// blocking alert: it confirms an action where it was triggered (audit FLOW-2).
+    @Published var toast: RosterToast?
+    private var toastDismissTask: Task<Void, Never>?
+
+    /// Hide the current CLI warnings until the next status poll re-reports them.
+    func dismissStatusWarnings() {
+        statusWarnings = []
+    }
+
+    func showToast(_ text: String, kind: RosterToastKind = .success) {
+        toast = RosterToast(text: text, kind: kind)
+        toastDismissTask?.cancel()
+        toastDismissTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            self?.toast = nil
+        }
+    }
 
     private let cli = AccountHubCLI()
     private let archivedAccountsMigrationKeys = ["codexRoster.archivedAccountIDs", "accountHub.archivedAccountIDs"]
@@ -540,6 +583,9 @@ final class AccountStore: ObservableObject {
                 try await self.load()
             } catch {
                 self.errorMessage = error.localizedDescription
+                if !self.hasLoadedAccounts {
+                    self.didFailInitialLoad = true
+                }
             }
         }
     }
@@ -628,6 +674,19 @@ final class AccountStore: ObservableObject {
             self.newAccountLoginState = .saved(liveIdentity)
             try await self.load()
             self.lastQuotaRefreshAt = .now
+            // Say whether the row was added or refreshed instead of leaving the
+            // user to guess (the CLI reports `action`).
+            if saved.action == "refreshed" {
+                self.showToast(AppLanguage.text(
+                    "Đã cập nhật phiên của \(saved.account.email).",
+                    "Refreshed the saved session for \(saved.account.email)."
+                ))
+            } else {
+                self.showToast(AppLanguage.text(
+                    "Đã thêm \(saved.account.email) vào roster.",
+                    "Added \(saved.account.email) to the roster."
+                ))
+            }
         }
     }
 
@@ -1187,6 +1246,18 @@ final class AccountStore: ObservableObject {
                 self.lastQuotaRefreshAt = .now
             }
             await self.applySessionResumeIfNeeded(activated.sessionResume, continueExhausted: false)
+            let closed = activated.warnings?.count ?? 0
+            if closed > 0 {
+                self.showToast(AppLanguage.text(
+                    "Đã chuyển sang \(activated.account.email) (đã đóng \(closed) tiến trình Codex/ChatGPT).",
+                    "Switched to \(activated.account.email) (closed \(closed) Codex/ChatGPT process(es))."
+                ))
+            } else {
+                self.showToast(AppLanguage.text(
+                    "Đã chuyển sang \(activated.account.email).",
+                    "Switched to \(activated.account.email)."
+                ))
+            }
         }
     }
 
@@ -2066,9 +2137,18 @@ final class AccountStore: ObservableObject {
         ResetNotifier.prepare()
         resetNotificationTask = Task { [weak self] in
             var nextPublicSignalCheck = Date.distantPast
+            // Notification authorization is a system call that cannot change
+            // without the app being foregrounded, so cache it instead of asking
+            // every tick (audit PERF-2).
+            var authorized: Bool?
+            var nextAuthorizationCheck = Date.distantPast
             while !Task.isCancelled {
                 guard let self else { return }
-                if await ResetNotifier.isAuthorized() {
+                if authorized == nil || Date.now >= nextAuthorizationCheck {
+                    authorized = await ResetNotifier.isAuthorized()
+                    nextAuthorizationCheck = Date.now.addingTimeInterval(300)
+                }
+                if authorized == true {
                     // Account-authenticated usage is the source of truth for
                     // personal banked credits and actual quota resets.
                     ResetNotifier.showAccountSignals(
@@ -2078,18 +2158,18 @@ final class AccountStore: ObservableObject {
                     ResetNotifier.showOpenAIIncidentIfNeeded(self.openAIStatus)
                     if Date.now >= nextPublicSignalCheck {
                         if let signals = try? await self.cli.decode(
-                            [GlobalResetEvent].self,
+                            ResetEventsOutput.self,
                             arguments: ["reset-events"]
                         ) {
-                            signals.forEach { ResetNotifier.showPublicSignal($0) }
+                            signals.events.forEach { ResetNotifier.showPublicSignal($0) }
                             self.refreshResetOutlook(silently: true)
                         }
                         nextPublicSignalCheck = Date.now.addingTimeInterval(60)
                     }
                 }
-                // Usage refreshes separately; checking the local result often
-                // makes the banner appear immediately after a signal lands.
-                try? await Task.sleep(for: .seconds(2))
+                // 15s keeps a local reset banner timely while cutting wakeups
+                // from 30/minute to 4/minute (audit PERF-2).
+                try? await Task.sleep(for: .seconds(15))
             }
         }
     }
@@ -2112,7 +2192,37 @@ final class AccountStore: ObservableObject {
         }
     }
 
+    /// Row awaiting an explicit delete confirmation (audit FLOW-1).
+    @Published var pendingDeleteAccount: SavedAccount?
+
+    /// Deleting is destructive and cannot be undone from the UI, so ask first.
+    /// The active account is refused outright: the roster would lose the row
+    /// while `~/.codex` still holds that login.
+    func requestDelete(_ account: SavedAccount) {
+        guard !account.isActive else {
+            errorMessage = AppLanguage.text(
+                "Không thể xóa tài khoản đang dùng. Hãy chuyển sang tài khoản khác trước.",
+                "The active account cannot be deleted. Switch to another account first."
+            )
+            return
+        }
+        pendingDeleteAccount = account
+    }
+
+    func confirmPendingDelete() {
+        guard let account = pendingDeleteAccount else { return }
+        pendingDeleteAccount = nil
+        delete(account)
+    }
+
     func delete(_ account: SavedAccount) {
+        guard !account.isActive else {
+            errorMessage = AppLanguage.text(
+                "Không thể xóa tài khoản đang dùng. Hãy chuyển sang tài khoản khác trước.",
+                "The active account cannot be deleted. Switch to another account first."
+            )
+            return
+        }
         run {
             _ = try await self.cli.data(arguments: ["delete", account.id.uuidString, "--json"])
             try await self.load()
@@ -2251,7 +2361,13 @@ final class AccountStore: ObservableObject {
                 arguments: ["export", url.path, "--password-stdin", "--json"],
                 standardInput: password + "\n"
             )
-            self.backupStatusMessage = "Đã xuất bản sao lưu mã hóa."
+            let displayPath = url.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+            let message = AppLanguage.text(
+                "Đã xuất bản sao lưu mã hóa tới \(displayPath).",
+                "Encrypted backup exported to \(displayPath)."
+            )
+            self.backupStatusMessage = message
+            self.showToast(message)
         }
     }
 
@@ -2266,6 +2382,7 @@ final class AccountStore: ObservableObject {
                 "Đã nhập bản sao lưu. Snapshot có thể giữ refresh token cũ hơn phiên Codex đang sống — hãy Save current trước, và đừng kích hoạt hàng vừa khôi phục một cách mù quáng (có thể buộc đăng nhập lại).",
                 "Backup imported. Restored snapshots may hold stale refresh tokens vs live Codex — save the current session first, and do not activate restored rows blindly (that can force re-login)."
             )
+            self.showToast(AppLanguage.text("Đã nhập bản sao lưu.", "Backup imported."))
         }
     }
 
@@ -2277,6 +2394,7 @@ final class AccountStore: ObservableObject {
                 "Đã khôi phục danh sách. Snapshot có thể giữ refresh token cũ hơn phiên Codex đang sống — hãy Save current trước, và đừng kích hoạt hàng vừa khôi phục một cách mù quáng (có thể buộc đăng nhập lại).",
                 "Account list restored. Restored snapshots may hold stale refresh tokens vs live Codex — save the current session first, and do not activate restored rows blindly (that can force re-login)."
             )
+            self.showToast(AppLanguage.text("Đã khôi phục danh sách tài khoản.", "Account list restored."))
         }
     }
 
@@ -2288,6 +2406,7 @@ final class AccountStore: ObservableObject {
                 "Đã khôi phục phiên sao lưu. Snapshot có thể giữ refresh token cũ hơn phiên Codex đang sống — hãy Save current trước, và đừng kích hoạt hàng vừa khôi phục một cách mù quáng (có thể buộc đăng nhập lại).",
                 "Full backup restored. Restored snapshots may hold stale refresh tokens vs live Codex — save the current session first, and do not activate restored rows blindly (that can force re-login)."
             )
+            self.showToast(AppLanguage.text("Đã khôi phục phiên sao lưu.", "Full backup restored."))
         }
     }
 
@@ -2431,6 +2550,21 @@ final class AccountStore: ObservableObject {
         }
     }
 
+    func refreshQuotaForecast(silently: Bool = false) {
+        Task {
+            do {
+                var arguments = ["quota-forecast"]
+                if let id = accounts.first(where: \.isActive)?.id {
+                    arguments.append(id.uuidString)
+                }
+                arguments.append("--json")
+                quotaForecast = try await cli.decode(QuotaForecastOutput.self, arguments: arguments)
+            } catch {
+                if !silently { errorMessage = error.localizedDescription }
+            }
+        }
+    }
+
     func refreshQuotaHistory(silently: Bool = false) {
         Task {
             do {
@@ -2448,6 +2582,20 @@ final class AccountStore: ObservableObject {
 
     func noteQuotaResetPulse() {
         quotaResetPulse &+= 1
+    }
+
+    /// Shared cooldown for appear-driven public-data refreshes: opening the
+    /// notch or the Operations tab used to fire several CLI subprocesses and
+    /// network calls every time (audit PERF-1). Explicit buttons still refresh
+    /// immediately because they call the individual methods directly.
+    private var passivePublicRefreshGate = PassiveRefreshGate(interval: 60)
+
+    func refreshPublicDataPassively() {
+        guard passivePublicRefreshGate.request() else { return }
+        refreshResetOutlook(silently: true)
+        refreshResetTimeline(silently: true)
+        refreshResetJuice(silently: true)
+        refreshOpenAIStatus(silently: true)
     }
 
     func refreshResetOutlook(silently: Bool = false) {
@@ -2502,6 +2650,8 @@ final class AccountStore: ObservableObject {
             status, accounts, settings, autoSwitch, autoResume
         )
         applyRoster(status: loadedStatus, accounts: loadedAccounts.accounts)
+        hasLoadedAccounts = true
+        didFailInitialLoad = false
         let pendingLegacyArchives = legacyArchivedAccountIDs.intersection(Set(loadedAccounts.accounts.map(\.id)))
         if !pendingLegacyArchives.isEmpty {
             for accountID in pendingLegacyArchives {
@@ -2527,6 +2677,7 @@ final class AccountStore: ObservableObject {
             self.autoSwitchWhenExhausted = loadedAutoSwitch.enabled
         }
         refreshQuotaHistory(silently: true)
+        refreshQuotaForecast(silently: true)
     }
 
     private func checkAutoSwitchWhenExhausted() async {
@@ -2571,6 +2722,13 @@ final class AccountStore: ObservableObject {
                 } else {
                     logSessionResume("active_has_quota without recovery pending — skip auto-resume decide=\(decideMs)ms")
                 }
+            case "usage_unknown":
+                // Quota is unknown (probe failed or the cached window already
+                // expired). Never treat this as a recovery: no "quota recovered"
+                // notification and no resuming interrupted turns. Recovery flags
+                // stay set so a genuine later recovery still fires.
+                autoSwitchState = nil
+                logSessionResume("decide status=usage_unknown — quota unknown, recovery still pending")
             case "waiting_for_login":
                 autoSwitchState = .waitingForLogin
             case "all_accounts_exhausted":
@@ -2716,6 +2874,10 @@ final class AccountStore: ObservableObject {
                 autoSwitchAllExhaustedNotified = false
                 autoSwitchCooldownUntil = Date.now.addingTimeInterval(8)
                 await self.applySessionResumeIfNeeded(applied.sessionResume, continueExhausted: true)
+            case "waiting_for_dwell":
+                // Benign: the minimum dwell between automatic switches has not
+                // elapsed yet. Do not surface this as a failure.
+                autoSwitchState = nil
             default:
                 autoSwitchState = .checkFailed
             }
@@ -2793,6 +2955,34 @@ final class AccountStore: ObservableObject {
         menuInteractionUntil.map { $0 > Date() } ?? false
     }
 
+    /// Turns raw CLI stderr into an actionable, localized message for the
+    /// activation-blocking errors the guard emits. The process list the CLI
+    /// prints after the machine prefix is preserved as details. Unknown errors
+    /// pass through unchanged.
+    static func friendlyErrorMessage(_ raw: String) -> String {
+        if raw.contains("activation_blocked_by_cli:") {
+            let details = raw
+                .components(separatedBy: "\n")
+                .drop(while: { !$0.hasPrefix("activation_blocked_by_cli:") })
+                .dropFirst()
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let head = AppLanguage.text(
+                "Không thể chuyển tài khoản: đang có phiên Codex CLI chạy.",
+                "Cannot switch accounts: a Codex CLI session is running.")
+            let advice = AppLanguage.text(
+                "Hãy đóng (Ctrl-C) các phiên Codex CLI được liệt kê rồi thử lại. ChatGPT/Codex Desktop có thể xử lý bằng --force.",
+                "Close (Ctrl-C) the listed Codex CLI sessions and retry. ChatGPT/Codex Desktop can be handled with --force.")
+            return details.isEmpty ? "\(head)\n\n\(advice)" : "\(head)\n\n\(details)\n\n\(advice)"
+        }
+        if raw.contains("activation_blocked_by_desktop:") {
+            return AppLanguage.text(
+                "Không thể chuyển tài khoản: ChatGPT/Codex Desktop đang chạy. Hãy thoát Desktop rồi thử lại, hoặc dùng --force để Roster tự đóng và mở lại.",
+                "Cannot switch accounts: ChatGPT/Codex Desktop is running. Quit it and retry, or use --force to let Roster close and relaunch it.")
+        }
+        return raw
+    }
+
     private func run(switching: Bool = false, _ operation: @escaping @MainActor () async throws -> Void) {
         guard !isBusyForActions else { return }
         isWorking = true
@@ -2807,12 +2997,13 @@ final class AccountStore: ObservableObject {
             do {
                 try await operation()
             } catch {
-                errorMessage = error.localizedDescription
+                let message = Self.friendlyErrorMessage(error.localizedDescription)
+                errorMessage = message
                 if case .waiting = newAccountLoginState {
-                    newAccountLoginState = .failed(error.localizedDescription)
+                    newAccountLoginState = .failed(message)
                     clearPendingLoginFlags()
                 } else if case .saving = newAccountLoginState {
-                    newAccountLoginState = .failed(error.localizedDescription)
+                    newAccountLoginState = .failed(message)
                 }
             }
         }
@@ -3030,6 +3221,9 @@ final class AccountStore: ObservableObject {
 
     private func applyRoster(status: StatusOutput, accounts: [SavedAccount]) {
         self.status = status
+        // Surface CLI-side problems (for example a failing account-list backup)
+        // that would otherwise only appear in stderr (audit R2/A2).
+        self.statusWarnings = status.warnings ?? []
         self.accounts = accounts.map { account in
             account.withActiveState(account.id == status.currentAccountSavedId)
         }
@@ -3645,6 +3839,9 @@ struct StatusOutput: Decodable {
     let vibeUsage: VibeUsageSummary?
     let codexModel: String?
     let activity: CodexActivitySummary?
+    /// Non-fatal problems the CLI knows about, e.g. a failed automatic
+    /// account-list backup (contract v1 `warnings[]`).
+    let warnings: [String]?
 
     init(
         currentAccount: AccountIdentity?,
@@ -3652,8 +3849,10 @@ struct StatusOutput: Decodable {
         processWarnings: [RunningProcess],
         vibeUsage: VibeUsageSummary? = nil,
         codexModel: String? = nil,
-        activity: CodexActivitySummary? = nil
+        activity: CodexActivitySummary? = nil,
+        warnings: [String]? = nil
     ) {
+        self.warnings = warnings
         self.currentAccount = currentAccount
         self.currentAccountSavedId = currentAccountSavedId
         self.processWarnings = processWarnings
@@ -3674,6 +3873,9 @@ struct VibeUsageSummary: Decodable {
 
 private struct SaveOutput: Decodable {
     let account: SavedAccount
+    /// `created` (new row) or `refreshed` (existing row updated). Emitted by the
+    /// CLI since contract v1 and previously dropped by the app.
+    let action: String?
 }
 
 private struct ImportJsonOutput: Decodable {
@@ -3729,6 +3931,8 @@ struct ActivateOutput: Decodable {
     let account: SavedAccount
     let previousAccountId: UUID?
     let sessionResume: SessionResumeHint?
+    /// Codex/ChatGPT processes the switch had to close first.
+    let warnings: [RunningProcess]?
 }
 
 struct SessionResumeHint: Decodable {
@@ -3852,6 +4056,12 @@ enum ResetOutlookPresentation {
             ? "Reset: đang theo dõi"
             : "Reset: watching"
     }
+}
+
+/// `reset-events --json` is wrapped in an object so the payload can carry
+/// `contract_version` (contract v2).
+private struct ResetEventsOutput: Decodable {
+    let events: [GlobalResetEvent]
 }
 
 private struct GlobalResetEvent: Decodable {
@@ -4669,7 +4879,8 @@ struct SavedAccount: Identifiable, Decodable {
         case 0: return "pro"
         case 1: return "plus"
         case 2: return "team"
-        case 3: return "free"
+        case 3: return "edu"
+        case 4: return "free"
         default: return "other"
         }
     }
@@ -4703,9 +4914,15 @@ struct SavedAccount: Identifiable, Decodable {
         if plan.contains("team") || plan.contains("business") || plan.contains("enterprise") {
             return 2
         }
-        if plan.contains("free") || plan.contains("go") { return 3 }
-        if plan.isEmpty { return 5 }
-        return 4
+        // Education plans (K12, Edu, Campus…) used to fall through to "Other"
+        // because only pro/plus/team/free were recognised.
+        if plan.contains("edu") || plan.contains("k12") || plan.contains("school")
+            || plan.contains("campus") {
+            return 3
+        }
+        if plan.contains("free") || plan.contains("go") { return 4 }
+        if plan.isEmpty { return 6 }
+        return 5
     }
 
     /// Explicit Free/Go label for UI chips — empty/unknown plans stay unlabeled.
@@ -4857,7 +5074,7 @@ enum NotchRosterLayout {
 
     /// Plan-band section sizes in switchboard display order (non-empty only).
     static func planSectionAccountCounts(from accounts: [SavedAccount]) -> [Int] {
-        let groupOrder = ["pro", "plus", "team", "other", "free"]
+        let groupOrder = ["pro", "plus", "team", "edu", "other", "free"]
         let grouped = Dictionary(grouping: accounts, by: \.planGroupKey)
         return groupOrder.compactMap { key in
             guard let list = grouped[key], !list.isEmpty else { return nil }
@@ -5019,6 +5236,34 @@ struct AccountUsage: Decodable {
     let bankedResets: BankedResetSummary?
     let subscriptionActiveUntil: RustDate?
     let lunaReserve: LunaReserve?
+    /// What the API's primary window actually is: `five_hour`, `weekly` or
+    /// `monthly`. Free/Go plans have no weekly limit and only a monthly one, so
+    /// their primary window must not be labelled "5h".
+    let primaryWindowKind: String?
+
+    /// Free/Go plans have no weekly limit, so the weekly column must not be
+    /// rendered for them: it only ever showed an empty "7d —" bar. A Plus/Pro
+    /// account with a transiently missing weekly window still shows the column.
+    var showsWeeklyWindow: Bool {
+        if weekly != nil { return true }
+        return primaryWindowLabel != "1M"
+    }
+
+    /// Label for the primary window, derived from its span when the field is
+    /// missing (caches written before the field existed).
+    var primaryWindowLabel: String {
+        switch primaryWindowKind {
+        case "monthly": return "1M"
+        case "weekly": return "1W"
+        case "five_hour": return "5h"
+        default: break
+        }
+        guard let fiveHour, let fetchedAt else { return "5h" }
+        let span = fiveHour.resetAt.value.timeIntervalSince(fetchedAt.value)
+        if span > 8 * 86_400 { return "1M" }
+        if span > 6 * 3_600 { return "1W" }
+        return "5h"
+    }
 }
 
 struct UsageCredits: Decodable {
@@ -5138,6 +5383,17 @@ struct UsageWindow: Decodable {
     }
 }
 
+enum RosterToastKind: Equatable {
+    case success
+    case failure
+}
+
+struct RosterToast: Identifiable, Equatable {
+    let id = UUID()
+    let text: String
+    let kind: RosterToastKind
+}
+
 struct RustDate: Decodable {
     let value: Date
 
@@ -5212,6 +5468,8 @@ struct AutoSwitchOutput: Decodable {
     let detail: String?
     let bankedResetCount: Int?
     let sessionResume: SessionResumeHint?
+    /// True when the CLI could not establish the active account's quota.
+    let usageUnknown: Bool?
 }
 
 enum AIProvider: String, CaseIterable, Identifiable, Decodable {

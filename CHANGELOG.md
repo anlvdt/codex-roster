@@ -2,6 +2,56 @@
 
 ## Unreleased
 
+Audit-driven hardening from [docs/audit-2026-10-18](docs/audit-2026-10-18/00-MASTER-AUDIT.md).
+Per-item status and evidence: [IMPLEMENTATION-STATUS.md](docs/audit-2026-10-18/IMPLEMENTATION-STATUS.md).
+
+### Added
+
+- `doctor` command: local diagnostics (paths, key-file modes, lock state, staged auth-recovery leftovers, OAuth callback ports, cached-usage age, account-list backup age) with `--json` and a redacted `--bundle` report.
+- `quota-forecast` command: EWMA burn rate, time-to-empty and a 95% interval per window, with a confidence level.
+- `schema` command: describes the `--json` contract, including the exit-code taxonomy.
+- Versioned JSON contract: every `--json` output carries `"contract_version": 1`; failures print `{"contract_version":1,"error":{"code","message","hint"}}` and exit with a class-specific code (2 usage, 3 login/blocked, 4 lock timeout, 5 no account, 6 network, 7 keychain).
+- Menu-bar item (`CR`) with Open notch / Console / Settings / About / Quit, plus standard `⌘,` Settings and About commands, so the app is reachable when the notch is disabled.
+- Notch deck shows the **burn-rate forecast** (`cạn sau ~X`, confidence) with a **runway bar** comparing it to the reset deadline, and suggests switching before a window is forecast to run dry.
+- Console shows CLI **status warnings** (for example a failing account-list backup) as a dismissible banner.
+- Swift test coverage for the forecast formatting, runway math and archived filter.
+- Delete confirmation dialog naming the account; the active account can no longer be deleted from the UI or the store.
+- `scripts/clean-local-artifacts.sh` for reclaiming local build output (dry-run by default).
+- Universal macOS bundle build via `UNIVERSAL=1`, and a tag-triggered release workflow that fails closed unless signing/notarization secrets are present.
+
+### Changed
+
+- Quota decisions treat an expired or missing 5-hour window as *unknown* instead of reusing stale percentages, and no longer let an ineligible account outrank an eligible one.
+- Banked reset credits that already expired are not counted as redeemable.
+- Automatic switching reports `waiting_for_processes` while a live Codex CLI session is running, and a failed bookkeeping step after a successful swap is reported as a warning instead of an error.
+- Automatic switching keeps its result (`switched` plus `warnings`) when the cooldown write or the resume hint fails.
+- `--help` describes every command; deprecated `reset-status-history` and `reset-juice` are hidden.
+- The interactive menu refuses a non-TTY stdin instead of spinning, and `q`/Esc/Ctrl-C all quit.
+- Hovering the notch no longer steals keyboard focus; appear-driven public refreshes share a 60-second cooldown.
+- Storage writes are atomic and durable (temp file + `fsync` + rename + directory `fsync`), metadata and account-list backups are mode `0600`, quota-history writes are serialized with a lock, and read paths no longer write.
+- Public status/reset feeds are read with a 2 MiB body cap.
+- Release binaries are built with thin LTO and stripped symbols (CLI 8.6 MB → 6.9 MB, bundle 16 MB → 14 MB).
+- README reflects the shipped command set, architecture, default language and validation steps; superseded audits moved to [docs/archive](docs/archive/README.md).
+
+### Added
+
+- `codex-roster dead-accounts` reports saved accounts that are dead or look dead and prints the exact `archive`/`delete` commands; it never removes anything itself. Only an explicit `account_deactivated` error is treated as proof, and `--deep` exchanges each inactive account's refresh token once to turn a suspicion into an answer (it never touches the account currently live in `~/.codex`, and persists the rotated snapshot immediately).
+- Missing 5h/7d windows are explicitly **not** evidence: Free/Go plans have no weekly limit and only a monthly one, so the report and its note say so instead of flagging those accounts.
+
+### Fixed
+
+- Free/Go accounts are no longer labelled "5h": their primary rate-limit window is monthly (they have no 7-day limit), so the CLI, TUI and deck label it `monthly`/`1M` and `primary_window_kind` records what the window really is. A missing 5h/7d window is never treated as evidence of a dead account.
+- Notch ears no longer clip their reset label ("Sun 6:00 A"): the label degrades through shorter forms (`Sun 6 PM`, then `Sun`) and the activity glyph only appears when something is actually running or waiting, so the fixed 146pt ear always fits.
+- The notch activity indicator no longer renders a literal `?` (which read as a broken glyph); it uses `bolt.fill` / `hourglass` with a VoiceOver label.
+- Activation-blocked errors are localized in the app with the blocking process list and a "Copy details" action, instead of showing raw CLI stderr.
+- Session-resume index writes are serialized across processes, and rollout discovery is bounded (SQL `LIMIT`, 128 KiB tail, 1 MiB scan cap, cached by size and mtime).
+- Reset announcements are ordered by parsed instant rather than by RFC3339 string, so mixed UTC offsets sort correctly.
+- `lsof`-based holder detection fails closed: an unverifiable scan keeps a switch blocked instead of allowing it.
+
+### Known issues
+
+- `swift test` fails with Command Line Tools only (`no such module 'Testing'`); CI runs the Swift suite on `macos-latest`, and locally `swift test --skip-build` plus `swift build` are the supported checks.
+
 ## v0.5.0 - 2026-10-17
 
 ### Changed
@@ -152,10 +202,6 @@
 - Account-detail actions (edit, archive, remove, sign-in, activate, refresh) are disabled while a session switch is in flight, matching the rest of the app.
 - The About window's default size now matches its declared minimum instead of being clamped.
 - Removed ~450 lines of unreachable view code (the old account row, state label and empty-row leftovers); the provider overview and popup strip were subsequently restored as live UI.
-
-## Known issues
-
-- `swift test` fails in this toolchain because the `Testing` module is unavailable; this predates these changes.
 
 ## v0.4.0 - 2026-09-07
 

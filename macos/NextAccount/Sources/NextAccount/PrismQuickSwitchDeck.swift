@@ -39,6 +39,8 @@ struct PrismQuickSwitchDeck: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @AppStorage("codex_roster_notch_pinned_live") private var isPinnedLive = false
+    /// Update waiting for an explicit confirmation (audit IA-4).
+    @State private var pendingUpdateInstall: GitHubUpdater.Update?
     @AppStorage(NotchRosterLayout.rosterExpandedKey) private var isRosterExpanded = false
 
     var openSettings: () -> Void = {}
@@ -51,6 +53,30 @@ struct PrismQuickSwitchDeck: View {
     var openAbout: () -> Void = {}
 
     @State private var justSwitchedID: UUID? = nil
+
+    /// Forecast vs. reset deadline for the active 5-hour window.
+    private var quotaRunway: QuotaRunway? {
+        guard let forecast = store.quotaForecast?.fiveHour,
+              let timeToEmpty = forecast.timeToEmptyMinutes,
+              let resetAt = activeAccount?.usage?.fiveHour?.resetAt.value
+        else { return nil }
+        let minutesUntilReset = resetAt.timeIntervalSinceNow / 60
+        guard minutesUntilReset > 0 else { return nil }
+        return QuotaRunway(
+            minutesToEmpty: timeToEmpty,
+            minutesUntilReset: minutesUntilReset,
+            confidence: forecast.confidence
+        )
+    }
+
+    /// One-line burn estimate for the active account, when the forecast has
+    /// enough samples to say something. Vietnamese/English follows the UI.
+    private var quotaForecastLine: String? {
+        guard let forecast = store.quotaForecast else { return nil }
+        let vietnamese = language.language == .vietnamese
+        return forecast.fiveHour?.summary(vietnamese: vietnamese)
+            ?? forecast.weekly?.summary(vietnamese: vietnamese)
+    }
 
     private var activeAccount: SavedAccount? {
         store.accounts.first { $0.isActive && !$0.archived }
@@ -88,7 +114,7 @@ struct PrismQuickSwitchDeck: View {
 
     private var orderedRosterAccounts: [SavedAccount] {
         let grouped = Dictionary(grouping: filteredAccounts, by: \.planGroupKey)
-        return ["pro", "plus", "team", "other", "free"].flatMap {
+        return ["pro", "plus", "team", "edu", "other", "free"].flatMap {
             store.sortedAccounts(grouped[$0] ?? [])
         }
     }
@@ -159,6 +185,25 @@ struct PrismQuickSwitchDeck: View {
         .animation(reduceMotion ? nil : PrismTheme.snapSpring, value: filteredAccounts.count)
         .animation(reduceMotion ? nil : PrismTheme.snapSpring, value: hasNextActionCaption)
         .animation(reduceMotion ? nil : PrismTheme.snapSpring, value: rosterColumnCount)
+        .confirmationDialog(
+            language.text("Cài bản cập nhật?", "Install update?"),
+            isPresented: Binding(
+                get: { pendingUpdateInstall != nil },
+                set: { if !$0 { pendingUpdateInstall = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button(language.text("Cài và mở lại", "Install and relaunch"), role: .destructive) {
+                pendingUpdateInstall = nil
+                updater.installAvailableUpdate()
+            }
+            Button(language.text("Hủy", "Cancel"), role: .cancel) { pendingUpdateInstall = nil }
+        } message: {
+            Text(language.text(
+                "Codex Roster \(pendingUpdateInstall?.version ?? "") sẽ được tải và thay thế bản đang chạy.",
+                "Codex Roster \(pendingUpdateInstall?.version ?? "") will be downloaded and replace the running app."
+            ))
+        }
     }
 
     /// Compact “what to do next” line — omitted when all-clear (no mid-deck gap;
@@ -251,6 +296,21 @@ struct PrismQuickSwitchDeck: View {
                 compact: true
             )
             .frame(maxWidth: .infinity, alignment: .leading)
+            // Age of the data behind those bars: without it a 12-minute-old
+            // reading looks as authoritative as a fresh one (audit QTA-1).
+            QuotaFreshnessLabel(fetchedAt: activeAccount?.usage?.fetchedAt?.value)
+            if let line = quotaForecastLine {
+                Text(line)
+                    .font(PrismTheme.fontCaption)
+                    .foregroundStyle(PrismTheme.labelSecondary)
+                    .lineLimit(1)
+                    .accessibilityLabel(line)
+            }
+            // "Will this window survive until it resets?" is the question the
+            // numbers alone do not answer (audit F wave 2).
+            if let runway = quotaRunway {
+                QuotaRunwayBar(runway: runway)
+            }
         }
         .padding(8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -807,6 +867,13 @@ struct PrismQuickSwitchDeck: View {
                 if store.accounts.contains(where: { $0.triage == .needsAction }) {
                     filterTab(label: language.text("Cần xử lý", "Needs action"), filter: .triage(.needsAction))
                 }
+                let archivedCount = store.accounts.filter(\.archived).count
+                if archivedCount > 0 {
+                    filterTab(
+                        label: language.text("Đã cất \(archivedCount)", "Archived \(archivedCount)"),
+                        filter: .archived
+                    )
+                }
 
                 toolbarIconButton(
                     systemName: isRosterExpanded
@@ -902,6 +969,17 @@ struct PrismQuickSwitchDeck: View {
                         .font(PrismTheme.fontBodyCompactBold)
                         .frame(width: 26, height: 26)
                         .background(Circle().fill(PrismTheme.surfaceFill))
+                        .overlay(alignment: .topTrailing) {
+                            // A quiet dot so an available update is discoverable
+                            // without opening the menu (audit IA-4).
+                            if case .available = updater.state {
+                                Circle()
+                                    .fill(PrismTheme.statusInfo)
+                                    .frame(width: 6, height: 6)
+                                    .offset(x: 1, y: -1)
+                                    .accessibilityHidden(true)
+                            }
+                        }
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
@@ -911,7 +989,32 @@ struct PrismQuickSwitchDeck: View {
             }
             .frame(height: NotchRosterLayout.switchboardHeaderHeight)
 
-            if filteredAccounts.isEmpty {
+            if filteredAccounts.isEmpty && !store.hasLoadedAccounts {
+                // First load in flight: show a loading row instead of claiming the
+                // roster is empty (audit FLOW-8). If that load already failed,
+                // offer a retry instead of spinning forever (review finding 9).
+                HStack(spacing: 8) {
+                    if store.didFailInitialLoad {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(PrismTheme.statusWarn)
+                        Text(language.text("Không tải được danh sách tài khoản.", "Could not load saved accounts."))
+                            .font(PrismTheme.fontCaption)
+                            .foregroundStyle(PrismTheme.labelSecondary)
+                        Spacer(minLength: 8)
+                        Button(language.text("Thử lại", "Retry")) { store.refresh() }
+                            .controlSize(.small)
+                    } else {
+                        ProgressView().controlSize(.small)
+                        Text(language.text("Đang tải danh sách tài khoản…", "Loading saved accounts…"))
+                            .font(PrismTheme.fontCaption)
+                            .foregroundStyle(PrismTheme.labelSecondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 12)
+                .frame(height: rosterGridHeight, alignment: .top)
+                .accessibilityElement(children: .combine)
+            } else if filteredAccounts.isEmpty {
                 RosterEmptyState(
                     title: store.accounts.isEmpty
                         ? language.text("Chưa có tài khoản", "No saved accounts")
@@ -1010,7 +1113,9 @@ struct PrismQuickSwitchDeck: View {
             EmptyView()
         }
         if RosterUpdateMenuAction.resolve(state) == .install, case .available(let update) = state {
-            Button { updater.installAvailableUpdate() } label: {
+            // Installing replaces the running app: confirm and name the version
+            // instead of starting immediately from a menu item (audit IA-4).
+            Button { pendingUpdateInstall = update } label: {
                 Label(language.text("Cài bản \(update.version)", "Install \(update.version)"), systemImage: "arrow.down.app")
             }
             .disabled(updater.state.isBusy)
@@ -1027,6 +1132,7 @@ struct PrismQuickSwitchDeck: View {
         case "pro": return language.text("Pro", "Pro")
         case "plus": return language.text("Plus", "Plus")
         case "team": return language.text("Team / Business", "Team / Business")
+        case "edu": return language.text("Edu / K12", "Edu / K12")
         case "free": return language.text("Free / Go", "Free / Go")
         default: return language.text("Khác", "Other")
         }
@@ -1053,11 +1159,15 @@ struct PrismQuickSwitchDeck: View {
                         .font(PrismTheme.fontBodyCompactBold)
                 }
             }
+            // Visual stays 26pt; the hit target is raised to the 28pt minimum
+            // recommended for pointer targets (audit A11Y-5).
             .frame(width: 26, height: 26)
             .background(
                 Circle()
                     .fill(active ? PrismTheme.accent.opacity(0.9) : PrismTheme.surfaceFill)
             )
+            .frame(minWidth: 28, minHeight: 28)
+            .contentShape(Rectangle())
             .foregroundStyle(active ? PrismTheme.textOnAccent : Color.primary)
         }
         .buttonStyle(.plain)
@@ -1164,8 +1274,13 @@ private struct PrismCompactAccountCard: View {
             }
             HStack(spacing: 16) {
                 HStack(spacing: 16) {
-                    quotaLabel("5h", percent: quota)
-                    quotaLabel("7d", percent: week)
+                    // Free/Go plans have no weekly limit and only a monthly one,
+                    // so the primary window is labelled by what it really is.
+                    quotaLabel(account.usage?.primaryWindowLabel ?? "5h", percent: quota)
+                    // Free/Go have no weekly limit: showing "7d —" was noise.
+                    if account.usage?.showsWeeklyWindow ?? true {
+                        quotaLabel("7d", percent: week)
+                    }
                 }
                 .frame(maxWidth: .infinity)
 
@@ -1294,12 +1409,31 @@ private struct PrismCompactAccountCard: View {
             .disabled(account.isActive || store.isBusyForActions || store.isWorking)
             Button(role: .destructive) {
                 guard let target = accountForContextMenuAction(in: store.accounts, capturedID: targetID) else { return }
-                store.delete(target)
+                store.requestDelete(target)
             } label: {
                 Label(language.text("Xóa", "Delete"), systemImage: "trash")
             }
+            .disabled(account.isActive || store.isBusyForActions || store.isWorking)
         }
         .id(targetID)
+        .confirmationDialog(
+            language.text("Xóa tài khoản?", "Delete account?"),
+            isPresented: Binding(
+                get: { store.pendingDeleteAccount?.id == targetID },
+                set: { if !$0 { store.pendingDeleteAccount = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button(language.text("Xóa vĩnh viễn", "Delete permanently"), role: .destructive) {
+                store.confirmPendingDelete()
+            }
+            Button(language.text("Hủy", "Cancel"), role: .cancel) { store.pendingDeleteAccount = nil }
+        } message: {
+            Text(language.text(
+                "Tài khoản \(store.pendingDeleteAccount?.email ?? "") sẽ bị xóa cùng snapshot đã lưu. Không thể hoàn tác.",
+                "The account \(store.pendingDeleteAccount?.email ?? "") and its saved snapshot will be removed. This cannot be undone."
+            ))
+        }
     }
 
     /// Manual Switch when activation is not blocked — Free/exhausted rows stay
@@ -1375,6 +1509,11 @@ private struct PrismCompactAccountCard: View {
                         .fill(PrismTheme.accent)
                 )
         }
+        // "Switch" alone is ambiguous with several rows on screen (audit A11Y-2).
+        .accessibilityLabel(language.text(
+            "Đổi sang \(accountForContextMenuAction(in: store.accounts, capturedID: targetID)?.displayName ?? "")",
+            "Switch to \(accountForContextMenuAction(in: store.accounts, capturedID: targetID)?.displayName ?? "")"
+        ))
         .buttonStyle(.plain)
         .pointingHandCursor()
         .disabled(store.isBusyForActions || store.isWorking)
@@ -1456,5 +1595,95 @@ private struct PrismCompactAccountCard: View {
             ),
             PrismTheme.resetProximityTint(window: window, kind: kind)
         )
+    }
+}
+
+/// Data-age chip for quota surfaces. Warns once the reading is older than the
+/// same 10-minute threshold the notch badge uses, and says so when there is no
+/// reading at all instead of leaving the bars unexplained (audit QTA-1).
+struct QuotaFreshnessLabel: View {
+    let fetchedAt: Date?
+    @EnvironmentObject private var language: LanguageStore
+
+    private static let staleAfter: TimeInterval = 10 * 60
+
+    var body: some View {
+        let text: String
+        let stale: Bool
+        if let fetchedAt {
+            let age = max(0, Date().timeIntervalSince(fetchedAt))
+            stale = age > Self.staleAfter
+            let minutes = Int(age / 60)
+            if minutes < 1 {
+                text = language.text("vừa cập nhật", "updated just now")
+            } else {
+                text = language.text("cập nhật \(minutes)p trước", "updated \(minutes)m ago")
+            }
+        } else {
+            stale = false
+            text = language.text("chưa có dữ liệu quota", "no quota data yet")
+        }
+        return HStack(spacing: 4) {
+            Image(systemName: stale ? "exclamationmark.triangle.fill" : "clock")
+                .font(.system(size: 9, weight: .semibold))
+            Text(text)
+                .font(PrismTheme.fontCaption)
+        }
+        .foregroundStyle(stale ? PrismTheme.statusWarn : PrismTheme.labelSecondary)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(text)
+    }
+}
+
+/// Forecast against the reset deadline for one window.
+struct QuotaRunway {
+    let minutesToEmpty: Double
+    let minutesUntilReset: Double
+    let confidence: String
+
+    /// True when the window is projected to drain before it resets.
+    var runsOutBeforeReset: Bool { minutesToEmpty < minutesUntilReset }
+
+    /// Marker position on the bar: how much of the runway is consumed.
+    var fraction: Double {
+        guard minutesUntilReset > 0 else { return 1 }
+        return min(1, max(0, minutesToEmpty / minutesUntilReset))
+    }
+}
+
+/// Thin runway bar: green when the window outlives its reset, orange when the
+/// forecast says it will not. Low-confidence estimates stay muted so a
+/// two-sample guess cannot look like a verdict.
+struct QuotaRunwayBar: View {
+    let runway: QuotaRunway
+    @EnvironmentObject private var language: LanguageStore
+
+    var body: some View {
+        let confident = runway.confidence != "low"
+        let tint: Color = !confident
+            ? PrismTheme.labelSecondary
+            : (runway.runsOutBeforeReset ? PrismTheme.statusWarn : PrismTheme.statusOK)
+        let caption = !confident
+            ? language.text("chưa đủ mẫu để dự báo", "not enough samples to forecast")
+            : (runway.runsOutBeforeReset
+                ? language.text("dự báo cạn trước khi reset", "forecast: empties before reset")
+                : language.text("dự báo đủ tới lúc reset", "forecast: lasts until reset"))
+
+        return VStack(alignment: .leading, spacing: 3) {
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(PrismTheme.surfaceFill)
+                    Capsule()
+                        .fill(tint.opacity(0.85))
+                        .frame(width: max(4, geometry.size.width * runway.fraction))
+                }
+            }
+            .frame(height: 4)
+            Text(caption)
+                .font(PrismTheme.fontCaption)
+                .foregroundStyle(tint)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(caption)
     }
 }

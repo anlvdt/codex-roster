@@ -1,11 +1,4 @@
-#[cfg(target_os = "windows")]
 fn main() {
-    println!("cargo:rerun-if-changed=assets/codex-roster.ico");
-    winresource::WindowsResource::new()
-        .set_icon("assets/codex-roster.ico")
-        .compile()
-        .expect("failed to embed Windows icon resource");
+    // Codex Roster is macOS-only: the Windows icon-resource branch referenced a
+    // dependency that is not in Cargo.toml and never ran (audit D2).
 }
-
-#[cfg(not(target_os = "windows"))]
-fn main() {}

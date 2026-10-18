@@ -44,7 +44,12 @@ pub fn detect_running_codex_processes() -> Vec<RunningCodexProcess> {
         .iter()
         .filter_map(|(pid, process)| {
             let pid_u32 = pid.as_u32();
-            if pid_u32 == current_pid || is_ancestor_of(&system, current_pid, pid_u32) {
+            // Only this process is skipped. An ancestor `codex` session is a real
+            // holder: when an agent shell tool runs `codex-roster activate`, the
+            // live CLI is our parent and must still block the switch (review
+            // finding 2). Roster's own binaries are excluded by name in
+            // `matches_codex_process`.
+            if !should_examine_process(current_pid, pid_u32) {
                 return None;
             }
             let name = process.name().to_string_lossy().to_ascii_lowercase();
@@ -77,6 +82,128 @@ pub fn codex_desktop_likely_running() -> bool {
         .any(is_desktop_like_process)
 }
 
+/// How a detected Codex process relates to a safe account switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockKind {
+    /// A foreground `codex` / `codex exec` / `codex resume` session that can
+    /// write auth or rollout files. Never skippable, even with `--force`.
+    CliInteractive,
+    /// A non-interactive daemon (`app-server`, `mcp`). Skippable unless it
+    /// verifiably holds a managed auth file open.
+    CliBackground,
+    /// ChatGPT/Codex Desktop or one of its helpers. Skippable with `--force`
+    /// unless it verifiably holds a managed auth file open.
+    Desktop,
+    /// Detected but not a Codex credential owner (defensive; never blocks).
+    Unrelated,
+}
+
+/// One process that blocks activation, with enough detail for an actionable
+/// message in the CLI and the GUI.
+#[derive(Clone, Debug)]
+pub struct BlockedProcess {
+    pub pid: u32,
+    pub executable: String,
+    pub role: String,
+    pub kind: BlockKind,
+    pub summary: Option<String>,
+}
+
+/// Result of the auth-file holder scan. `Unknown` means verification failed and
+/// the guard must fail closed instead of assuming nothing holds the files.
+#[derive(Clone, Debug)]
+pub enum HolderScan {
+    Known(HashSet<u32>),
+    Unknown(String),
+}
+
+/// Blocking decision plus why it was reached.
+#[derive(Clone, Debug)]
+pub struct BlockingReport {
+    pub processes: Vec<BlockedProcess>,
+    /// False when the holder scan could not be verified (lsof missing/failed).
+    pub scan_known: bool,
+    pub scan_error: Option<String>,
+}
+
+impl BlockingReport {
+    /// True when a live CLI session is among the blockers: `--force` must not
+    /// bypass it.
+    pub fn has_live_cli(&self) -> bool {
+        self.processes
+            .iter()
+            .any(|process| process.kind == BlockKind::CliInteractive)
+    }
+}
+
+/// Classify one detected process. Non-skippable processes are foreground CLI
+/// sessions; skippable ones split into background daemons and Desktop.
+fn block_kind(process: &RunningCodexProcess) -> BlockKind {
+    if is_force_skippable_process(process) {
+        if is_background_server_process(process) {
+            BlockKind::CliBackground
+        } else {
+            BlockKind::Desktop
+        }
+    } else {
+        BlockKind::CliInteractive
+    }
+}
+
+/// Pure blocking selection. Kept separate from process discovery so tests can
+/// exercise every scan outcome, including a failed holder scan.
+fn select_blocking(
+    processes: Vec<RunningCodexProcess>,
+    allow_desktop: bool,
+    scan: HolderScan,
+) -> (Vec<RunningCodexProcess>, BlockingReport) {
+    let scan_error = match &scan {
+        HolderScan::Known(_) => None,
+        HolderScan::Unknown(reason) => Some(reason.clone()),
+    };
+    let scan_known = scan_error.is_none();
+    let holders: Option<&HashSet<u32>> = match &scan {
+        HolderScan::Known(set) => Some(set),
+        HolderScan::Unknown(_) => None,
+    };
+
+    let mut kept = Vec::new();
+    let mut blocked = Vec::new();
+    for process in processes {
+        let kind = block_kind(&process);
+        if kind == BlockKind::Unrelated {
+            continue;
+        }
+        let skippable = kind != BlockKind::CliInteractive;
+        let holds_auth = holders.is_some_and(|set| set.contains(&process.pid));
+        // Without --force everything blocks; with --force an unverifiable scan
+        // still fails closed, so only a verified scan may skip a process.
+        let blocks = if !allow_desktop || !scan_known {
+            true
+        } else {
+            !skippable || holds_auth
+        };
+        if blocks {
+            blocked.push(BlockedProcess {
+                pid: process.pid,
+                executable: process.executable.clone(),
+                role: process.role.clone(),
+                kind,
+                summary: process.summary.clone(),
+            });
+            kept.push(process);
+        }
+    }
+    (
+        kept,
+        BlockingReport {
+            processes: blocked,
+            scan_known,
+            scan_error,
+        },
+    )
+}
+
 /// Processes that must stop before auth files are replaced.
 ///
 /// `allow_desktop` is `--force` / GUI-after-quit: leftover ChatGPT/Codex.app
@@ -84,47 +211,80 @@ pub fn codex_desktop_likely_running() -> bool {
 /// through it can invalidate a single-use refresh token.
 ///
 /// Even a process `--force` would normally skip keeps blocking while it has an
-/// auth file open under `codex_root`: replacing a file out from under an open
-/// handle leaves that process on stale credentials.
+/// auth file open under `codex_root`, and while that cannot be verified at all.
 pub fn processes_blocking_activation(
     allow_desktop: bool,
     codex_root: &Path,
 ) -> Vec<RunningCodexProcess> {
+    blocking_selection(allow_desktop, codex_root).0
+}
+
+/// Same decision as [`processes_blocking_activation`], with the reasons and the
+/// scan verdict needed for an actionable message.
+pub fn blocking_report(allow_desktop: bool, codex_root: &Path) -> BlockingReport {
+    blocking_selection(allow_desktop, codex_root).1
+}
+
+fn blocking_selection(
+    allow_desktop: bool,
+    codex_root: &Path,
+) -> (Vec<RunningCodexProcess>, BlockingReport) {
     let processes = detect_running_codex_processes();
     if !allow_desktop {
-        return processes;
+        // Without --force every detected process blocks; the holder scan is
+        // irrelevant, so do not pay for it.
+        return select_blocking(processes, false, HolderScan::Known(HashSet::new()));
     }
-    let skippable = processes.iter().any(is_force_skippable_process);
-    let holders = if skippable {
-        pids_holding_auth_files(codex_root)
-    } else {
-        HashSet::new()
-    };
-    filter_blocking(processes, &holders)
+    let scan = scan_auth_file_holders(codex_root);
+    select_blocking(processes, true, scan)
 }
 
-fn filter_blocking(
-    processes: Vec<RunningCodexProcess>,
-    auth_file_holders: &HashSet<u32>,
-) -> Vec<RunningCodexProcess> {
-    processes
-        .into_iter()
-        .filter(|process| {
-            !is_force_skippable_process(process) || auth_file_holders.contains(&process.pid)
-        })
-        .collect()
+/// Human-readable lines describing why activation is blocked. The first line is
+/// a summary; each following line names one process.
+pub fn format_blocking_report(report: &BlockingReport) -> Vec<String> {
+    let mut lines = Vec::new();
+    if report.processes.is_empty() {
+        lines.push("No blocking Codex processes were found.".to_owned());
+        return lines;
+    }
+    lines.push(format!(
+        "{} Codex process(es) must stop before switching:",
+        report.processes.len()
+    ));
+    for process in &report.processes {
+        let kind = match process.kind {
+            BlockKind::CliInteractive => "CLI session",
+            BlockKind::CliBackground => "background server",
+            BlockKind::Desktop => "ChatGPT/Codex Desktop",
+            BlockKind::Unrelated => "unrelated",
+        };
+        lines.push(format!(
+            "  pid {} · {} · {kind}{}",
+            process.pid,
+            process.executable,
+            process
+                .summary
+                .as_deref()
+                .map(|summary| format!(" · {summary}"))
+                .unwrap_or_default()
+        ));
+    }
+    if let Some(reason) = &report.scan_error {
+        lines.push(format!(
+            "  Could not verify which processes hold Codex auth files ({reason}); treating unverifiable processes as blocking."
+        ));
+    }
+    lines
 }
 
-/// PIDs with any managed auth file open, via `lsof -t`. Returns an empty set
-/// when `lsof` is unavailable or fails, falling back to role-based skipping.
-fn pids_holding_auth_files(codex_root: &Path) -> HashSet<u32> {
+fn scan_auth_file_holders(codex_root: &Path) -> HolderScan {
     let paths = AUTH_FILES
         .iter()
         .map(|name| codex_root.join(name))
         .filter(|path| path.exists())
         .collect::<Vec<_>>();
     if paths.is_empty() {
-        return HashSet::new();
+        return HolderScan::Known(HashSet::new());
     }
     let output = Command::new("/usr/sbin/lsof")
         .arg("-t")
@@ -134,8 +294,17 @@ fn pids_holding_auth_files(codex_root: &Path) -> HashSet<u32> {
         .stderr(Stdio::null())
         .output();
     match output {
-        Ok(output) => parse_lsof_pids(&String::from_utf8_lossy(&output.stdout)),
-        Err(_) => HashSet::new(),
+        Ok(output) => {
+            // lsof exits 1 when no process matches: a verified empty result.
+            // Any other non-zero status is a real failure and must fail closed.
+            let code = output.status.code();
+            if output.status.success() || code == Some(1) {
+                HolderScan::Known(parse_lsof_pids(&String::from_utf8_lossy(&output.stdout)))
+            } else {
+                HolderScan::Unknown(format!("lsof exited with status {code:?}"))
+            }
+        }
+        Err(error) => HolderScan::Unknown(format!("lsof could not run: {error}")),
     }
 }
 
@@ -170,7 +339,12 @@ pub fn is_force_skippable_process(process: &RunningCodexProcess) -> bool {
 /// Desktop-owned app-server. Without this, such a daemon makes account
 /// switching impossible even with `--force`.
 fn is_background_server_process(process: &RunningCodexProcess) -> bool {
-    matches!(process.role.as_str(), "app-server" | "mcp" | "mcp-server")
+    // `exec-server` is the remote execution daemon ChatGPT Desktop spawns
+    // (`codex exec-server --remote …`); it is not an interactive session.
+    matches!(
+        process.role.as_str(),
+        "app-server" | "exec-server" | "mcp" | "mcp-server"
+    )
 }
 
 fn is_desktop_like_process(process: &RunningCodexProcess) -> bool {
@@ -280,31 +454,24 @@ fn is_codex_bin_name(name: &str) -> bool {
     if is_roster_name(&name) {
         return false;
     }
+    // Electron appends its helper role to the process name, so ChatGPT's
+    // bundled Codex helpers appear as "codex (renderer)" / "codex (service)".
+    // Without this they were classified as a live CLI session, which blocked
+    // account switching whenever ChatGPT Desktop was running.
+    if let Some(rest) = name.strip_prefix("codex (") {
+        return rest.ends_with(')');
+    }
     name == "codex" || name == "codex.exe" || name.starts_with("codex helper")
 }
 
-fn is_ancestor_of(system: &System, descendant: u32, ancestor: u32) -> bool {
-    if descendant == ancestor {
-        return true;
-    }
-    let mut walk = descendant;
-    for _ in 0..32 {
-        let Some(process) = system.process(Pid::from_u32(walk)) else {
-            return false;
-        };
-        let Some(parent) = process.parent() else {
-            return false;
-        };
-        let parent = parent.as_u32();
-        if parent == 0 || parent == walk {
-            return false;
-        }
-        if parent == ancestor {
-            return true;
-        }
-        walk = parent;
-    }
-    false
+/// True when a process should be examined for blocking activation.
+///
+/// Deliberately only excludes the roster process itself: an ancestor `codex`
+/// session holds `~/.codex/auth.json` just like any other, and skipping
+/// ancestors let an agent-driven `codex-roster activate` rotate the credential
+/// underneath a live session (review finding 2).
+fn should_examine_process(current_pid: u32, candidate_pid: u32) -> bool {
+    candidate_pid != current_pid
 }
 
 fn format_process(pid: Pid, name: &str, command: &[String]) -> RunningCodexProcess {
@@ -564,7 +731,7 @@ mod tests {
     use super::{
         classify_process, clean_token, detect_flag_value, format_process_table,
         is_desktop_like_process, is_desktop_owned_command, is_force_skippable_process,
-        matches_codex_process, truncate_summary,
+        matches_codex_process, should_examine_process, truncate_summary,
     };
     use crate::model::RunningCodexProcess;
 
@@ -617,7 +784,13 @@ mod tests {
                 assert_eq!(process.origin.as_deref(), Some("desktop"));
                 assert!(!is_force_skippable_process(&process), "{command:?}");
                 assert_eq!(
-                    super::filter_blocking(vec![process], &Default::default()).len(),
+                    super::select_blocking(
+                        vec![process],
+                        true,
+                        super::HolderScan::Known(Default::default())
+                    )
+                    .0
+                    .len(),
                     1
                 );
             }
@@ -688,7 +861,13 @@ mod tests {
             assert!(matches_codex_process(name, &command), "{command:?}");
             let process = super::format_process(sysinfo::Pid::from_u32(42), name, &command);
             assert_eq!(
-                super::filter_blocking(vec![process], &Default::default()).len(),
+                super::select_blocking(
+                    vec![process],
+                    true,
+                    super::HolderScan::Known(Default::default())
+                )
+                .0
+                .len(),
                 1
             );
         }
@@ -700,6 +879,70 @@ mod tests {
                 "codex".to_owned()
             ]
         ));
+    }
+
+    #[test]
+    fn desktop_electron_helpers_are_skippable_not_live_cli() {
+        // Exactly the shapes ChatGPT Desktop produces: the helper process names
+        // carry an Electron role suffix while the command path is inside the app.
+        let helper_cmd = vec![
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+                .to_owned(),
+        ];
+        for name in ["codex (renderer)", "codex (service)", "codex (gpu)"] {
+            let process = super::format_process(sysinfo::Pid::from_u32(900), name, &helper_cmd);
+            assert_eq!(
+                process.origin.as_deref(),
+                Some("desktop"),
+                "{name} must be recognised as Desktop-owned"
+            );
+            assert!(
+                is_force_skippable_process(&process),
+                "{name} must be skippable with --force"
+            );
+            assert_ne!(
+                super::block_kind(&process),
+                super::BlockKind::CliInteractive,
+                "{name} must not count as a live CLI session"
+            );
+        }
+
+        // A real interactive session keeps blocking: plain name, cli origin.
+        let live = super::format_process(
+            sysinfo::Pid::from_u32(901),
+            "codex",
+            &["/opt/homebrew/bin/codex".to_owned()],
+        );
+        assert_eq!(live.origin.as_deref(), Some("cli"));
+        assert!(!is_force_skippable_process(&live));
+        assert_eq!(super::block_kind(&live), super::BlockKind::CliInteractive);
+
+        // Desktop's remote execution daemon is a background server.
+        let exec_server = super::format_process(
+            sysinfo::Pid::from_u32(902),
+            "codex",
+            &[
+                "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+                    .to_owned(),
+                "exec-server".to_owned(),
+                "--remote".to_owned(),
+                "https://codex-cloud-environments.chatgpt.com/api".to_owned(),
+            ],
+        );
+        assert!(is_force_skippable_process(&exec_server));
+        assert_eq!(
+            super::block_kind(&exec_server),
+            super::BlockKind::CliBackground
+        );
+    }
+
+    #[test]
+    fn ancestor_codex_sessions_are_still_examined() {
+        // The roster's own pid is skipped; every other pid is examined, even a
+        // parent that happens to be the live Codex CLI.
+        assert!(!should_examine_process(4242, 4242));
+        assert!(should_examine_process(4242, 1));
+        assert!(should_examine_process(4242, 99));
     }
 
     #[test]
@@ -839,7 +1082,8 @@ mod tests {
             ..daemon.clone()
         };
         let holders = std::collections::HashSet::from([100]);
-        let blocking = super::filter_blocking(vec![daemon, other], &holders);
+        let blocking =
+            super::select_blocking(vec![daemon, other], true, super::HolderScan::Known(holders)).0;
         assert_eq!(blocking.len(), 1);
         assert_eq!(blocking[0].pid, 100);
     }
@@ -848,6 +1092,102 @@ mod tests {
     fn parse_lsof_pids_ignores_noise() {
         let pids = super::parse_lsof_pids("123\n  456 \nlsof: warning\n\n");
         assert_eq!(pids, std::collections::HashSet::from([123, 456]));
+    }
+
+    #[test]
+    fn failed_holder_scan_fails_closed_for_skippable_processes() {
+        let daemon = super::format_process(
+            sysinfo::Pid::from_u32(700),
+            "codex",
+            &["codex".to_owned(), "app-server".to_owned()],
+        );
+        assert!(is_force_skippable_process(&daemon));
+
+        // Verified empty holder set: the daemon may be skipped with --force.
+        let (kept, report) = super::select_blocking(
+            vec![daemon.clone()],
+            true,
+            super::HolderScan::Known(Default::default()),
+        );
+        assert!(kept.is_empty());
+        assert!(report.processes.is_empty());
+        assert!(report.scan_known);
+
+        // Unverifiable scan: fail closed and explain why.
+        let (kept, report) = super::select_blocking(
+            vec![daemon],
+            true,
+            super::HolderScan::Unknown("lsof exited with status Some(2)".to_owned()),
+        );
+        assert_eq!(kept.len(), 1);
+        assert_eq!(report.processes.len(), 1);
+        assert!(!report.scan_known);
+        assert!(report.scan_error.is_some());
+    }
+
+    #[test]
+    fn block_kinds_separate_cli_background_desktop_and_live_cli() {
+        let live_cli =
+            super::format_process(sysinfo::Pid::from_u32(801), "codex", &["codex".to_owned()]);
+        assert_eq!(
+            super::block_kind(&live_cli),
+            super::BlockKind::CliInteractive
+        );
+        assert!(!is_force_skippable_process(&live_cli));
+
+        let daemon = super::format_process(
+            sysinfo::Pid::from_u32(802),
+            "codex",
+            &["codex".to_owned(), "app-server".to_owned()],
+        );
+        assert_eq!(super::block_kind(&daemon), super::BlockKind::CliBackground);
+
+        let desktop = super::format_process(
+            sysinfo::Pid::from_u32(803),
+            "ChatGPT",
+            &["/Applications/ChatGPT.app/Contents/MacOS/ChatGPT".to_owned()],
+        );
+        assert_eq!(super::block_kind(&desktop), super::BlockKind::Desktop);
+
+        let (kept, report) = super::select_blocking(
+            vec![live_cli, daemon, desktop],
+            true,
+            super::HolderScan::Known(Default::default()),
+        );
+        assert_eq!(kept.len(), 1, "only the live CLI session blocks");
+        assert!(report.has_live_cli());
+        let lines = super::format_blocking_report(&report);
+        assert!(lines[0].contains("1 Codex process"));
+        assert!(lines.iter().any(|line| line.contains("pid 801")));
+        assert!(lines.iter().any(|line| line.contains("CLI session")));
+    }
+
+    #[test]
+    fn report_without_live_cli_does_not_block_force() {
+        let desktop = super::format_process(
+            sysinfo::Pid::from_u32(901),
+            "ChatGPT",
+            &["/Applications/ChatGPT.app/Contents/MacOS/ChatGPT".to_owned()],
+        );
+        let (kept, report) = super::select_blocking(
+            vec![desktop],
+            true,
+            super::HolderScan::Known(Default::default()),
+        );
+        assert!(kept.is_empty());
+        assert!(!report.has_live_cli());
+        // Without --force the same process still blocks.
+        let (kept, report) = super::select_blocking(
+            vec![super::format_process(
+                sysinfo::Pid::from_u32(902),
+                "ChatGPT",
+                &["/Applications/ChatGPT.app/Contents/MacOS/ChatGPT".to_owned()],
+            )],
+            false,
+            super::HolderScan::Known(Default::default()),
+        );
+        assert_eq!(kept.len(), 1);
+        assert!(!report.has_live_cli());
     }
 
     #[test]

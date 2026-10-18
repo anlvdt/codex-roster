@@ -246,8 +246,7 @@ struct NotchWindowView: View {
         .task {
             store.startCoreMonitoring()
             store.refreshTokenUsage(silently: true)
-            store.refreshResetOutlook(silently: true)
-            store.refreshOpenAIStatus(silently: true)
+            store.refreshPublicDataPassively()
             store.ensureAutomaticFullBackup()
             updater.startAutomaticChecks(currentVersion: AppInfo.shortVersion)
             NotchGlobalHotKey.shared.registerIfNeeded()
@@ -316,7 +315,9 @@ struct NotchWindowView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
-            if isExpanded && !isPinnedLive { collapse() }
+            // Keep the panel open while a switch is running: collapsing it hides
+            // the progress and makes the app look like it did nothing (audit FLOW-4).
+            if isExpanded && !isPinnedLive && !store.isSwitching { collapse() }
         }
         .onChange(of: store.notchPanelEnabled) { _, enabled in
             if !enabled { collapse() }
@@ -342,6 +343,11 @@ struct NotchWindowView: View {
             get: { store.errorMessage != nil },
             set: { if !$0 { store.errorMessage = nil } }
         )) {
+            Button(language.text("Sao chép chi tiết", "Copy details")) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(store.errorMessage ?? "", forType: .string)
+                store.errorMessage = nil
+            }
             Button(language.text("Đồng ý", "OK"), role: .cancel) { store.errorMessage = nil }
         } message: {
             Text(store.errorMessage ?? "")
@@ -393,8 +399,44 @@ struct NotchWindowView: View {
                 .background(PrismTheme.surfacePanel.opacity(0.94), in: Capsule())
                 .padding(.top, compactHeight + NotchRosterLayout.screenSwitcherTopInset)
         }
+        // Progress and confirmation must be visible in the notch itself, not only
+        // in the console: a switch takes seconds and looks like nothing happened
+        // otherwise (audit FLOW-2/FLOW-4).
+        .overlay(alignment: .bottom) {
+            if store.isSwitching {
+                notchStatusPill(
+                    systemImage: "arrow.triangle.2.circlepath",
+                    text: language.text("Đang chuyển…", "Switching…"),
+                    tint: Color(nsColor: .systemBlue)
+                )
+            } else if let toast = store.toast {
+                notchStatusPill(
+                    systemImage: toast.kind == .success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill",
+                    text: toast.text,
+                    tint: toast.kind == .success ? Color(nsColor: .systemGreen) : Color(nsColor: .systemOrange)
+                )
+            }
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .clipped()
+    }
+
+    private func notchStatusPill(systemImage: String, text: String, tint: Color) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .foregroundStyle(tint)
+            Text(text)
+                .font(PrismTheme.fontCaption)
+                .foregroundStyle(Color(nsColor: .labelColor))
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(PrismTheme.surfacePanel.opacity(0.96), in: Capsule())
+        .padding(.bottom, 8)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(text)
     }
 
     private var compactQuota: NotchQuotaSnapshot {
@@ -460,7 +502,10 @@ struct NotchWindowView: View {
                     case .keepWaiting:
                         continue
                     case .open:
-                        NSApplication.shared.activate(ignoringOtherApps: true)
+                        // Hover must not steal keyboard focus: activating here
+                        // interrupted typing/IME whenever the pointer crossed
+                        // the notch (audit A11Y-1). Clicks and the hotkey still
+                        // activate, which is where focus is actually wanted.
                         expand()
                         return
                     case .abortDriveBy, .abortTimeout:

@@ -341,14 +341,17 @@ fn account_usage_labels(account: &AccountView) -> (String, String) {
         let mut remaining = Vec::new();
         let mut resets = Vec::new();
         for (label, window) in [
-            ("5h", usage.five_hour.as_ref()),
+            (usage.primary_window_label(), usage.five_hour.as_ref()),
             ("Weekly", usage.weekly.as_ref()),
         ] {
             let Some(window) = window else { continue };
             if window.reset_at <= now {
                 remaining.push(format!("{label} Remaining: passed"));
             } else {
-                remaining.push(format!("{label} Remaining: {}%", window.remaining_percent));
+                remaining.push(format!(
+                    "{label} Remaining: {}%",
+                    crate::model::display_remaining_percent(window)
+                ));
                 resets.push(format!(
                     "{label} Reset: {}",
                     format_local_reset_at(window.reset_at)
@@ -487,6 +490,55 @@ pub(crate) fn build_menu(
     }
 }
 
+/// Keys that must end an interactive menu: `q`, Esc and Ctrl-C. Ctrl-C has to
+/// be handled explicitly because `console` puts the terminal in raw mode, which
+/// disables the kernel's SIGINT generation (audit TUI-02).
+fn is_quit_key(key: &Key) -> bool {
+    matches!(key, Key::Escape | Key::Char('q') | Key::Char('\u{3}'))
+}
+
+/// Rows moved by one PageUp/PageDown press.
+const TUI_PAGE_STEP: usize = 10;
+
+/// Ask for a search term and return the first matching row index.
+///
+/// Returns `None` when the prompt is empty or nothing matches, so the caller can
+/// simply redraw the unchanged menu.
+fn prompt_for_search(
+    term: &Term,
+    menu: &InteractiveMenu,
+    render_state: &mut PersistentRenderState,
+) -> Result<Option<usize>> {
+    if render_state.total_lines > 0 {
+        term.clear_last_lines(render_state.total_lines)?;
+    }
+    term.show_cursor()?;
+    let query = term.read_line_initial_text("")?;
+    Ok(first_matching_label(&menu.labels(), &query))
+}
+
+/// Case-insensitive substring match over row labels. Empty queries match
+/// nothing, so pressing `/` then Enter never jumps unexpectedly.
+fn first_matching_label(labels: &[&str], query: &str) -> Option<usize> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return None;
+    }
+    labels
+        .iter()
+        .position(|label| label.to_lowercase().contains(&query))
+}
+
+/// Restores the terminal cursor on every exit path, including `?` errors and
+/// panics unwinding out of the menu (audit TUI-02).
+struct CursorRestore;
+
+impl Drop for CursorRestore {
+    fn drop(&mut self) {
+        let _ = Term::stderr().show_cursor();
+    }
+}
+
 fn select_persistent_entry(
     menu: &InteractiveMenu,
     default_selection: usize,
@@ -495,6 +547,7 @@ fn select_persistent_entry(
     let term = Term::stderr();
     let mut selection = default_selection.min(menu.len().saturating_sub(1));
     term.hide_cursor()?;
+    let _cursor_guard = CursorRestore;
     let mut rendered_size = term.size();
     let mut render_state = render_persistent_menu(&term, menu, selection, feedback)?;
     loop {
@@ -548,6 +601,71 @@ fn select_persistent_entry(
                 )?;
                 selection = next;
             }
+            // Long rosters need paging, not just single steps (audit TUI-05).
+            Key::Home | Key::Char('g') => {
+                update_persistent_selection(
+                    &term,
+                    menu,
+                    &mut render_state,
+                    selection,
+                    0,
+                    feedback,
+                )?;
+                selection = 0;
+            }
+            Key::End | Key::Char('G') => {
+                let next = menu.len().saturating_sub(1);
+                update_persistent_selection(
+                    &term,
+                    menu,
+                    &mut render_state,
+                    selection,
+                    next,
+                    feedback,
+                )?;
+                selection = next;
+            }
+            Key::PageUp => {
+                let next = selection.saturating_sub(TUI_PAGE_STEP);
+                update_persistent_selection(
+                    &term,
+                    menu,
+                    &mut render_state,
+                    selection,
+                    next,
+                    feedback,
+                )?;
+                selection = next;
+            }
+            Key::PageDown => {
+                let next = (selection + TUI_PAGE_STEP).min(menu.len().saturating_sub(1));
+                update_persistent_selection(
+                    &term,
+                    menu,
+                    &mut render_state,
+                    selection,
+                    next,
+                    feedback,
+                )?;
+                selection = next;
+            }
+            Key::Char('/') => {
+                // Search jumps to the first matching row instead of filtering the
+                // rendered list, so the selective-rewrite state stays valid.
+                if let Some(match_index) = prompt_for_search(&term, menu, &mut render_state)? {
+                    update_persistent_selection(
+                        &term,
+                        menu,
+                        &mut render_state,
+                        selection,
+                        match_index,
+                        feedback,
+                    )?;
+                    selection = match_index;
+                } else {
+                    render_state = render_persistent_menu(&term, menu, selection, feedback)?;
+                }
+            }
             Key::Enter => {
                 if render_state.total_lines > 0 {
                     term.clear_last_lines(render_state.total_lines)?;
@@ -555,13 +673,16 @@ fn select_persistent_entry(
                 term.show_cursor()?;
                 return Ok(selection);
             }
-            Key::Escape | Key::Char('q') => {
+            key if is_quit_key(&key) => {
                 if render_state.total_lines > 0 {
                     term.clear_last_lines(render_state.total_lines)?;
                 }
                 term.show_cursor()?;
                 return Ok(menu.len().saturating_sub(1));
             }
+            // A non-TTY stdin (or a closed pipe) returns Unknown immediately;
+            // sleeping keeps the loop from burning a core (audit SAF-01).
+            Key::Unknown => std::thread::sleep(std::time::Duration::from_millis(50)),
             _ => {}
         }
     }
@@ -645,7 +766,7 @@ fn persistent_menu_lines(
     }
     lines.push(render_divider());
     lines.push(
-        style("Arrows or j/k move. Tab or left/right jumps sections. Enter selects. q exits.")
+        style("Arrows or j/k move. PgUp/PgDn page, Home/End jump. / searches. Tab jumps sections. Enter selects. q exits.")
             .dim()
             .to_string(),
     );
@@ -895,6 +1016,7 @@ fn confirm_with_menu(
     let options = [no_label, yes_label];
     let mut rendered_lines = 0usize;
     term.hide_cursor()?;
+    let _cursor_guard = CursorRestore;
     loop {
         if rendered_lines > 0 {
             term.clear_last_lines(rendered_lines)?;
@@ -935,11 +1057,12 @@ fn confirm_with_menu(
                 term.show_cursor()?;
                 return Ok(selection == 1);
             }
-            Key::Escape | Key::Char('q') => {
+            key if is_quit_key(&key) => {
                 term.clear_last_lines(rendered_lines)?;
                 term.show_cursor()?;
                 return Ok(false);
             }
+            Key::Unknown => std::thread::sleep(std::time::Duration::from_millis(50)),
             _ => {}
         }
     }
@@ -968,6 +1091,31 @@ mod tests {
     };
     use crate::repository::SnapshotRepository;
     use crate::secrets::test_support::MemorySecretStore;
+
+    #[test]
+    fn search_matches_case_insensitively_and_ignores_empty_queries() {
+        let labels = [
+            "alice@example.com [active]",
+            "bob@example.com",
+            "carol@other.org",
+        ];
+        assert_eq!(first_matching_label(&labels, "BOB"), Some(1));
+        assert_eq!(first_matching_label(&labels, "other.org"), Some(2));
+        assert_eq!(first_matching_label(&labels, "  alice  "), Some(0));
+        assert_eq!(first_matching_label(&labels, ""), None);
+        assert_eq!(first_matching_label(&labels, "   "), None);
+        assert_eq!(first_matching_label(&labels, "nobody"), None);
+    }
+
+    #[test]
+    fn ctrl_c_escape_and_q_all_quit_the_menu() {
+        assert!(is_quit_key(&Key::Char('\u{3}')), "Ctrl-C must quit");
+        assert!(is_quit_key(&Key::Escape));
+        assert!(is_quit_key(&Key::Char('q')));
+        assert!(!is_quit_key(&Key::Char('j')));
+        assert!(!is_quit_key(&Key::Unknown));
+        assert!(!is_quit_key(&Key::Enter));
+    }
 
     #[test]
     fn persistent_menu_keeps_unicode_rows_and_selection_aligned_across_width_changes() {
@@ -1084,6 +1232,7 @@ mod tests {
             vibe_usage: None,
             codex_model: None,
             activity: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -1122,6 +1271,10 @@ mod tests {
             .replace_date(time::Date::from_calendar_date(2099, time::Month::May, 12).unwrap())
             .replace_time(time::Time::from_hms(13, 56, 0).unwrap());
         list.accounts[0].usage = Some(AccountUsageView {
+            // The fixture's reset date is far in the future, so state the kind
+            // explicitly; this test is about rendering the reset time, not about
+            // deriving the label from the span.
+            primary_window_kind: Some("five_hour".to_owned()),
             source: UsageSource::SavedAccessToken,
             fetched_at: OffsetDateTime::UNIX_EPOCH,
             five_hour: Some(UsageWindowView {
@@ -1139,6 +1292,8 @@ mod tests {
             plan_label: None,
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         });
 
         let label = render_account_label(
@@ -1160,6 +1315,7 @@ mod tests {
         let id = Uuid::new_v4();
         let mut list = sample_list(id, false);
         list.accounts[0].usage = Some(AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: OffsetDateTime::UNIX_EPOCH,
             five_hour: None,
@@ -1177,6 +1333,8 @@ mod tests {
             plan_label: None,
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         });
         list.accounts[0].usage_error = Some("Login required: Codex auth expired.".to_owned());
 
@@ -1195,6 +1353,7 @@ mod tests {
         let id = Uuid::new_v4();
         let mut list = sample_list(id, false);
         list.accounts[0].usage = Some(AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: OffsetDateTime::UNIX_EPOCH,
             five_hour: None,
@@ -1212,6 +1371,8 @@ mod tests {
             plan_label: None,
             subscription_active_until: None,
             luna_reserve: None,
+            five_hour_known: false,
+            weekly_known: false,
         });
         list.accounts[0].usage_error =
             Some("Usage unavailable: failed to query Codex usage".to_owned());
@@ -1388,6 +1549,7 @@ mod tests {
             vibe_usage: None,
             codex_model: None,
             activity: None,
+            warnings: Vec::new(),
         };
         let menu = build_menu(
             InteractiveMode::Persistent,

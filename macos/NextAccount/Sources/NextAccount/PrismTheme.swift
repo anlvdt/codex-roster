@@ -33,6 +33,23 @@ enum PrismTheme {
     static let autoSwitch = violet
 
     // MARK: - Semantic Text (dark notch / glass surfaces)
+    // MARK: - Semantic status roles (Light/Dark safe)
+    //
+    // The saturated palette above is tuned for the dark notch surface. Console
+    // surfaces use material backgrounds, so status text there must come from the
+    // system palette instead: these roles resolve per appearance and keep body
+    // text at or above WCAG AA 4.5:1 in both schemes (audit VIS-1).
+    //   statusOK    -> success / healthy / ready
+    //   statusWarn  -> needs attention, still usable
+    //   statusError -> failure / blocked
+    //   statusInfo  -> neutral information
+    static var statusOK: Color { Color(nsColor: .systemGreen) }
+    static var statusWarn: Color { Color(nsColor: .systemOrange) }
+    static var statusError: Color { Color(nsColor: .systemRed) }
+    static var statusInfo: Color { Color(nsColor: .systemBlue) }
+    static var labelPrimary: Color { Color(nsColor: .labelColor) }
+    static var labelSecondary: Color { Color(nsColor: .secondaryLabelColor) }
+
     static let textPrimary = Color.white.opacity(0.92)
     static let textBright = Color.white.opacity(0.68)
     static let textSecondary = Color.white.opacity(0.55)
@@ -279,6 +296,7 @@ extension View {
 struct PrismGreenSwitchToggleStyle: ToggleStyle {
     var onColor: Color = PrismTheme.emerald
     var offColor: Color = Color.white.opacity(0.18)
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeBody(configuration: Configuration) -> some View {
         Button {
@@ -301,7 +319,14 @@ struct PrismGreenSwitchToggleStyle: ToggleStyle {
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
-        .animation(.easeInOut(duration: 0.16), value: configuration.isOn)
-        .accessibilityAddTraits(.isButton)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: configuration.isOn)
+        // A custom switch is a switch, not a button: expose the toggle trait and
+        // an explicit on/off value so VoiceOver announces its state (audit A11Y-4).
+        .accessibilityAddTraits(configuration.isOn ? [.isToggle, .isSelected] : .isToggle)
+        .accessibilityValue(
+            configuration.isOn
+                ? Text(AppLanguage.text("Bật", "On"))
+                : Text(AppLanguage.text("Tắt", "Off"))
+        )
     }
 }

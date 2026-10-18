@@ -26,6 +26,22 @@ pub struct AppSettings {
     pub last_auto_switch_target: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_auto_switch_from: Option<Uuid>,
+    /// Proactive switching before a window reaches zero (opt-in, audit U2).
+    /// Off by default: the reactive path stays exactly as it was.
+    #[serde(default)]
+    pub auto_switch_proactive: bool,
+    /// 5-hour remaining percent at or below which a proactive switch may fire.
+    #[serde(default = "default_auto_switch_threshold")]
+    pub auto_switch_threshold_percent: u8,
+    /// A proactive target must have at least this much 5-hour headroom.
+    #[serde(default = "default_auto_switch_hysteresis")]
+    pub auto_switch_hysteresis_percent: u8,
+    /// Minimum minutes between two automatic switches (both paths).
+    #[serde(default = "default_auto_switch_dwell")]
+    pub auto_switch_dwell_minutes: u64,
+    /// Never proactively switch while the weekly window is below this percent.
+    #[serde(default = "default_auto_switch_weekly_floor")]
+    pub auto_switch_weekly_floor_percent: u8,
     #[serde(default)]
     pub claude_auto_switch: bool,
     #[serde(default = "default_claude_auto_switch_threshold")]
@@ -49,6 +65,11 @@ impl Default for AppSettings {
         Self {
             auto_start_usage_windows: false,
             auto_switch_when_exhausted: false,
+            auto_switch_proactive: false,
+            auto_switch_threshold_percent: default_auto_switch_threshold(),
+            auto_switch_hysteresis_percent: default_auto_switch_hysteresis(),
+            auto_switch_dwell_minutes: default_auto_switch_dwell(),
+            auto_switch_weekly_floor_percent: default_auto_switch_weekly_floor(),
             auto_resume_session: true,
             last_auto_switch_at: None,
             last_auto_switch_target: None,
@@ -75,6 +96,22 @@ fn default_claude_auto_switch_hysteresis() -> u8 {
 
 fn default_claude_auto_switch_cooldown() -> u64 {
     300
+}
+
+fn default_auto_switch_threshold() -> u8 {
+    5
+}
+
+fn default_auto_switch_hysteresis() -> u8 {
+    15
+}
+
+fn default_auto_switch_dwell() -> u64 {
+    10
+}
+
+fn default_auto_switch_weekly_floor() -> u8 {
+    20
 }
 
 fn default_auto_resume_session() -> bool {

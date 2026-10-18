@@ -621,6 +621,42 @@ fn stage_and_restore(
 /// Copy `src` over `dest` atomically: write a private sibling temp file, then
 /// rename it into place. Unlike `fs::copy`, never writes through a symlink at
 /// `dest` and never leaves `dest` missing or truncated.
+/// Staged auth recovery directories older than this are leftovers from a crash.
+pub const STALE_RECOVERY_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Remove `.cas-backup-*` / `.cas-restore-*` directories left behind by an
+/// interrupted switch. Best-effort housekeeping: a failure here must never
+/// affect activation, and a fresh directory (a switch in flight in another
+/// process) is never touched (audit A2).
+pub fn prune_stale_recovery_dirs(codex_root: &Path) {
+    prune_stale_recovery_dirs_older_than(codex_root, STALE_RECOVERY_AGE);
+}
+
+fn prune_stale_recovery_dirs_older_than(codex_root: &Path, max_age: std::time::Duration) {
+    let Ok(entries) = fs::read_dir(codex_root) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(".cas-backup-") && !name.starts_with(".cas-restore-") {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age >= max_age {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 fn copy_atomic(src: &Path, dest: &Path) -> Result<()> {
     let bytes = fs::read(src).with_context(|| format!("failed to read {}", src.display()))?;
     let file_name = dest
@@ -633,6 +669,7 @@ fn copy_atomic(src: &Path, dest: &Path) -> Result<()> {
         let _ = fs::remove_file(&tmp);
         return Err(error).with_context(|| format!("failed to replace {}", dest.display()));
     }
+    crate::file_store::fsync_parent(dest);
     Ok(())
 }
 
@@ -668,6 +705,10 @@ fn write_private_staged_file(path: &Path, bytes: &[u8]) -> Result<()> {
             .with_context(|| format!("failed to stage {}", path.display()))?;
         file.write_all(bytes)
             .with_context(|| format!("failed to stage {}", path.display()))?;
+        // Credentials must be on disk before the rename makes them the live
+        // session; otherwise a crash can leave a truncated auth.json (audit R1).
+        file.sync_all()
+            .with_context(|| format!("failed to flush {}", path.display()))?;
     }
     #[cfg(not(unix))]
     fs::write(path, bytes).with_context(|| format!("failed to stage {}", path.display()))?;
@@ -819,7 +860,10 @@ pub fn set_configured_model(codex_root: &Path, new_model: &str) -> Result<()> {
     };
     let _: ModelConfig =
         toml::from_str(&result).context("updated Codex model config is invalid")?;
-    fs::write(&config_path, result)
+    // A truncated config.toml stops the Codex CLI from starting, so this write
+    // goes through the same atomic+fsync path as every other metadata writer
+    // (review finding 13).
+    crate::file_store::atomic_write(&config_path, result.as_bytes(), 0o600)
         .with_context(|| format!("failed to write {}", config_path.display()))?;
     Ok(())
 }
@@ -831,6 +875,38 @@ struct ModelConfig {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn stale_recovery_dirs_are_pruned_but_fresh_and_unrelated_ones_are_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let stale_backup = root.join(".cas-backup-old");
+        let stale_restore = root.join(".cas-restore-old");
+        let fresh = root.join(".cas-backup-fresh");
+        let unrelated = root.join("other-dir");
+        for dir in [&stale_backup, &stale_restore, &fresh, &unrelated] {
+            std::fs::create_dir(dir).unwrap();
+        }
+        // A zero max age forces the "old enough" branch without touching mtimes.
+        super::prune_stale_recovery_dirs_older_than(root, std::time::Duration::ZERO);
+        assert!(!stale_backup.exists(), "stale backup dir removed");
+        assert!(!stale_restore.exists(), "stale restore dir removed");
+        assert!(
+            !fresh.exists(),
+            "zero-age threshold removes everything staged"
+        );
+        assert!(
+            unrelated.exists(),
+            "unrelated directories are never touched"
+        );
+
+        // With the real threshold, a just-created staging dir survives.
+        let fresh_again = root.join(".cas-backup-new");
+        std::fs::create_dir(&fresh_again).unwrap();
+        super::prune_stale_recovery_dirs(root);
+        assert!(fresh_again.exists(), "a fresh staging dir must survive");
+    }
+
     use anyhow::Result;
     use tempfile::tempdir;
 

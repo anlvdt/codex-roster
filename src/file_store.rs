@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -18,6 +19,78 @@ pub struct RecoveryFile {
     pub path: PathBuf,
     pub kind: RecoveryFileKind,
     pub modified: SystemTime,
+}
+
+/// Durably write `bytes` to `path`: create a sibling temp with `create_new`
+/// and the requested mode, write, `sync_all`, rename over the target, then
+/// fsync the parent directory. A rename alone only makes the new content
+/// *visible*; without the fsyncs a power loss can leave a truncated but
+/// plausible-looking file (audit R1).
+pub fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("file");
+    let temp_path = parent.join(format!(".{file_name}.tmp-{}", Uuid::new_v4().simple()));
+
+    let result = (|| -> Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(mode);
+        }
+        let mut file = options
+            .open(&temp_path)
+            .with_context(|| format!("failed to create {}", temp_path.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("failed to write {}", temp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to flush {}", temp_path.display()))?;
+        drop(file);
+        fs::rename(&temp_path, path)
+            .with_context(|| format!("failed to persist {}", path.display()))?;
+        fsync_parent(path);
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
+/// Write `bytes` to an existing path privately and durably (0600 + `sync_all`).
+/// Used where the caller already owns the temp/rename flow.
+pub fn write_private_durable(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to flush {}", path.display()))
+}
+
+/// Best-effort directory fsync so a rename survives a crash. Some filesystems
+/// refuse to fsync a directory; that must not fail the write itself.
+pub fn fsync_parent(path: &Path) {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent()
+        && let Ok(directory) = fs::File::open(parent)
+    {
+        let _ = directory.sync_all();
+    }
 }
 
 pub fn list_recovery_files(
@@ -119,8 +192,9 @@ where
             .unwrap_or_default()
     ));
     if let Some(contents) = pending_write {
-        fs::write(&pending_path, contents)
-            .with_context(|| format!("failed to write {}", pending_path.display()))?;
+        // The pending copy holds metadata/secrets: private mode, and durable so
+        // recovery can trust it after a crash (audit R3).
+        atomic_write(&pending_path, contents, 0o600)?;
     }
 
     let file_stem = canonical_path
@@ -156,6 +230,7 @@ where
             return Err(error)
                 .with_context(|| format!("failed to persist {}", canonical_path.display()));
         }
+        fsync_parent(canonical_path);
         cleanup_best_effort(
             &cleanup,
             [
@@ -256,7 +331,29 @@ mod tests {
     use anyhow::anyhow;
     use tempfile::tempdir;
 
-    use super::{cleanup_paths, replace_file_with_recovery_impl};
+    use super::{atomic_write, cleanup_paths, replace_file_with_recovery_impl};
+
+    #[test]
+    fn atomic_write_is_private_durable_and_replaces_existing() {
+        let temp_dir = tempdir().expect("temp dir");
+        let path = temp_dir.path().join("metadata.json");
+        atomic_write(&path, b"first", 0o600).expect("first write");
+        assert_eq!(fs::read(&path).expect("read"), b"first");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "metadata must be private");
+        }
+        atomic_write(&path, b"second", 0o600).expect("replace");
+        assert_eq!(fs::read(&path).expect("read"), b"second");
+        let leftovers = fs::read_dir(temp_dir.path())
+            .expect("read dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(leftovers, 0, "no temp files may be left behind");
+    }
 
     #[test]
     fn save_without_existing_file_ignores_cleanup_failure_after_persist() {

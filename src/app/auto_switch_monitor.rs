@@ -68,6 +68,9 @@ fn run_auto_switch_for_env(env: AppEnv) -> Result<u64> {
     }
 
     let decision = app.auto_switch(false)?;
+    // A decision that knows when the world can change again tells the worker how
+    // long to sleep; otherwise fall back to the fixed cadence (audit A1).
+    let scheduled = decision.next_probe_seconds;
     match decision.status.as_str() {
         "ready" => {}
         "banked_reset_available" => {
@@ -76,7 +79,7 @@ fn run_auto_switch_for_env(env: AppEnv) -> Result<u64> {
         "all_accounts_exhausted" => {
             return Ok(AUTO_SWITCH_EXHAUSTED_BACKOFF_SECONDS);
         }
-        _ => return Ok(AUTO_SWITCH_POLL_SECONDS),
+        _ => return Ok(scheduled.unwrap_or(AUTO_SWITCH_POLL_SECONDS)),
     }
 
     let applied = app.auto_switch_with_candidate(true, decision.candidate_account_id, false)?;
@@ -86,7 +89,9 @@ fn run_auto_switch_for_env(env: AppEnv) -> Result<u64> {
         } else if applied.status == "banked_reset_available" {
             AUTO_SWITCH_BANKED_RESET_BACKOFF_SECONDS
         } else {
-            AUTO_SWITCH_POLL_SECONDS
+            applied
+                .next_probe_seconds
+                .unwrap_or(AUTO_SWITCH_POLL_SECONDS)
         };
         return Ok(backoff);
     }

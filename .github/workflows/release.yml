@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS app bundle
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Format, lint and test
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo test --locked --all
+
+      # A tagged release must be signed and notarized: an ad-hoc bundle would
+      # make the in-app updater lose its identity pin (audit S2). Manual runs
+      # may still produce an unsigned artifact for testing.
+      - name: Require signing secrets for tagged releases
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          CODE_SIGN_IDENTITY: ${{ secrets.CODE_SIGN_IDENTITY }}
+          NOTARYTOOL_PROFILE: ${{ secrets.NOTARYTOOL_PROFILE }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CODE_SIGN_IDENTITY:-}" || -z "${NOTARYTOOL_PROFILE:-}" ]]; then
+            echo "::error::Tagged releases require CODE_SIGN_IDENTITY and NOTARYTOOL_PROFILE secrets so the bundle is signed and notarized."
+            exit 1
+          fi
+
+      - name: Build universal app bundle
+        env:
+          UNIVERSAL: "1"
+          CODE_SIGN_IDENTITY: ${{ secrets.CODE_SIGN_IDENTITY }}
+          NOTARYTOOL_PROFILE: ${{ secrets.NOTARYTOOL_PROFILE }}
+        run: bash scripts/build-macos-app.sh
+
+      - name: Package ZIP
+        run: bash scripts/package-macos.sh
+
+      - name: Checksums
+        run: shasum -a 256 build/*.zip > build/SHA256SUMS.txt && cat build/SHA256SUMS.txt
+
+      - name: Upload release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" build/*.zip build/SHA256SUMS.txt --clobber

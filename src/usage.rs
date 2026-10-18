@@ -202,7 +202,9 @@ pub fn fetch_usage(target: UsageTarget) -> Result<(UsageOutput, SnapshotBlob), F
 
 pub fn usage_error_message(error: &anyhow::Error) -> String {
     let rendered = format!("{error:#}");
-    if usage_error_requires_login(&rendered) {
+    if usage_error_account_deactivated(&rendered) {
+        "Account deactivated [account_deactivated]: OpenAI reports this account was deleted or deactivated, so it can no longer sign in. Log in with a working account, or archive this one.".to_owned()
+    } else if usage_error_requires_login(&rendered) {
         match usage_error_reason_code(&rendered) {
             "server_session_revoked" => "Login required [server_session_revoked]: OpenAI ended this OAuth session. Log in with this account again, then refresh/save it.".to_owned(),
             "refresh_token_rejected" => "Login required [refresh_token_rejected]: OpenAI rejected the saved refresh token. Log in with this account again, then refresh/save it.".to_owned(),
@@ -220,7 +222,9 @@ pub fn usage_error_message(error: &anyhow::Error) -> String {
 }
 
 pub fn usage_error_label(error: &str) -> &'static str {
-    if usage_error_requires_login(error) {
+    if usage_error_account_deactivated(error) {
+        "Account deactivated"
+    } else if usage_error_requires_login(error) {
         "Login required"
     } else if usage_error_requires_local_recovery(error) {
         "Local recovery required"
@@ -243,6 +247,20 @@ pub fn usage_error_requires_login(error: &str) -> bool {
                 || error.contains("sign in")))
 }
 
+/// True when OpenAI reports the account itself is gone (`account_deactivated`).
+///
+/// This is terminal for the saved login: the refresh token can no longer mint a
+/// session, so refreshing, retrying or switching *to* this account cannot help.
+/// Seen in practice when ChatGPT Desktop answers a refresh with
+/// "You do not have an account because it has been deleted or deactivated".
+pub fn usage_error_account_deactivated(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("account_deactivated")
+        || error.contains("has been deleted or deactivated")
+        || error.contains("account has been deleted")
+        || error.contains("account is deactivated")
+}
+
 pub fn usage_error_requires_local_recovery(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     error.contains("local recovery required")
@@ -252,7 +270,13 @@ pub fn usage_error_requires_local_recovery(error: &str) -> bool {
 }
 
 pub fn usage_error_blocks_activation(error: &str) -> bool {
-    usage_error_requires_login(error) || usage_error_requires_local_recovery(error)
+    // A deactivated account must never be an auto-switch candidate and must be
+    // skipped by usage sweeps: its refresh token is dead, so every probe fails
+    // and switching to it breaks the live session (see the account_deactivated
+    // report from ChatGPT Desktop).
+    usage_error_requires_login(error)
+        || usage_error_requires_local_recovery(error)
+        || usage_error_account_deactivated(error)
 }
 
 pub fn usage_error_is_deferred_access_token_refresh(error: &str) -> bool {
@@ -458,6 +482,20 @@ impl UsageRateLimit {
     }
 }
 
+/// Classify a rate-limit window by how far its reset is: a 5-hour window resets
+/// within hours, a weekly one within a week, and a Free/Go monthly one is weeks
+/// out. Used for labels only — the quota math uses `reset_at` directly.
+pub fn primary_window_kind(window: &UsageWindowView, now: OffsetDateTime) -> &'static str {
+    let span = window.reset_at - now;
+    if span <= time::Duration::hours(6) {
+        "five_hour"
+    } else if span <= time::Duration::days(8) {
+        "weekly"
+    } else {
+        "monthly"
+    }
+}
+
 #[derive(Debug)]
 struct UsageWindow {
     used_percent: u8,
@@ -625,7 +663,7 @@ impl UsageResponse {
         let now = OffsetDateTime::now_utc();
         let plan_label = normalize_plan_label(self.plan_type.as_deref());
         let banked_resets = reset_credit_details
-            .and_then(|details| details.into_view().ok())
+            .and_then(|details| details.into_view(now).ok())
             .or_else(|| {
                 self.rate_limit_reset_credits
                     .map(|summary| BankedResetSummaryView {
@@ -634,21 +672,33 @@ impl UsageResponse {
                     })
             });
         let credit_limit = self.individual_limit.as_ref().and_then(credit_limit_view);
+        let primary_window = self
+            .rate_limit
+            .as_ref()
+            .and_then(|limits| limits.primary_window.as_ref())
+            .map(window_view)
+            .transpose()?;
+        // The payload calls this the "primary" window, but its length depends on
+        // the plan, so record what it really is instead of assuming 5 hours.
+        let primary_window_kind = primary_window
+            .as_ref()
+            .map(|window| primary_window_kind(window, now).to_owned());
+        let five_hour = primary_window;
+        let weekly = self
+            .rate_limit
+            .as_ref()
+            .and_then(|limits| limits.secondary_window.as_ref())
+            .map(window_view)
+            .transpose()?;
+
         Ok(AccountUsageView {
             source,
             fetched_at: now,
-            five_hour: self
-                .rate_limit
-                .as_ref()
-                .and_then(|limits| limits.primary_window.as_ref())
-                .map(window_view)
-                .transpose()?,
-            weekly: self
-                .rate_limit
-                .as_ref()
-                .and_then(|limits| limits.secondary_window.as_ref())
-                .map(window_view)
-                .transpose()?,
+            primary_window_kind,
+            five_hour_known: five_hour.is_some(),
+            weekly_known: weekly.is_some(),
+            five_hour,
+            weekly,
             credits: credits_view(self.credits, credit_limit, workspace_balance),
             banked_resets,
             plan_label,
@@ -659,7 +709,7 @@ impl UsageResponse {
 }
 
 impl ResetCreditDetailsResponse {
-    fn into_view(self) -> Result<BankedResetSummaryView> {
+    fn into_view(self, now: OffsetDateTime) -> Result<BankedResetSummaryView> {
         let credits = self
             .credits
             .into_iter()
@@ -684,7 +734,7 @@ impl ResetCreditDetailsResponse {
         // Prefer the higher of the API summary and the detailed available rows —
         // either side can under-report when the other is truncated or stale.
         Ok(BankedResetSummaryView {
-            available_count: effective_banked_available_count(self.available_count, &credits),
+            available_count: effective_banked_available_count(self.available_count, &credits, now),
             credits: Some(credits),
         })
     }
@@ -695,10 +745,17 @@ impl ResetCreditDetailsResponse {
 /// OpenAI may return `available_count` without listing every credit, or list
 /// more `available` rows than the summary field. Take the max so roster UI and
 /// auto-switch messaging never under-count.
-fn effective_banked_available_count(reported: i64, credits: &[BankedResetCreditView]) -> i64 {
+fn effective_banked_available_count(
+    reported: i64,
+    credits: &[BankedResetCreditView],
+    now: OffsetDateTime,
+) -> i64 {
     let from_credits = credits
         .iter()
         .filter(|credit| credit.status.eq_ignore_ascii_case("available"))
+        // An expired credit is not redeemable; counting it would make the UI
+        // wait for a reset that no longer exists (audit Q6).
+        .filter(|credit| credit.expires_at.is_none_or(|expires| expires > now))
         .count() as i64;
     reported.max(0).max(from_credits)
 }
@@ -1407,7 +1464,9 @@ mod tests {
         }))
         .expect("details payload");
 
-        let view = details.into_view().expect("details view");
+        let view = details
+            .into_view(OffsetDateTime::now_utc())
+            .expect("details view");
 
         assert_eq!(view.available_count, 2);
         let credits = view.credits.expect("detailed rows");
@@ -1420,6 +1479,37 @@ mod tests {
     }
 
     #[test]
+    fn expired_banked_credits_are_not_counted_as_redeemable() {
+        let details: ResetCreditDetailsResponse = serde_json::from_value(json!({
+            "available_count": 0,
+            "credits": [
+                {
+                    "id": "expired",
+                    "reset_type": "codex_rate_limits",
+                    "status": "available",
+                    "granted_at": "2026-01-01T00:00:00Z",
+                    "expires_at": "2026-01-02T00:00:00Z"
+                },
+                {
+                    "id": "valid",
+                    "reset_type": "codex_rate_limits",
+                    "status": "available",
+                    "granted_at": "2026-01-01T00:00:00Z",
+                    "expires_at": "2099-01-01T00:00:00Z"
+                }
+            ]
+        }))
+        .expect("details payload");
+
+        let view = details
+            .into_view(OffsetDateTime::now_utc())
+            .expect("details view");
+        // Only the unexpired row counts; the expired one must not make the UI
+        // wait for a reset that can no longer be redeemed (audit Q6).
+        assert_eq!(view.available_count, 1);
+    }
+
+    #[test]
     fn detailed_banked_resets_prefer_taller_available_credit_list() {
         let details: ResetCreditDetailsResponse = serde_json::from_value(json!({
             "available_count": 1,
@@ -1429,14 +1519,14 @@ mod tests {
                     "reset_type": "codex_rate_limits",
                     "status": "available",
                     "granted_at": "2026-08-22T00:00:00Z",
-                    "expires_at": "2026-09-21T00:00:00Z"
+                    "expires_at": "2099-09-21T00:00:00Z"
                 },
                 {
                     "id": "credit-2",
                     "reset_type": "codex_rate_limits",
                     "status": "available",
                     "granted_at": "2026-08-23T00:00:00Z",
-                    "expires_at": "2026-09-22T00:00:00Z"
+                    "expires_at": "2099-09-22T00:00:00Z"
                 },
                 {
                     "id": "credit-3",
@@ -1449,7 +1539,9 @@ mod tests {
         }))
         .expect("details payload");
 
-        let view = details.into_view().expect("details view");
+        let view = details
+            .into_view(OffsetDateTime::now_utc())
+            .expect("details view");
         assert_eq!(view.available_count, 2);
     }
 
@@ -1467,6 +1559,33 @@ mod tests {
         let resets = view.banked_resets.expect("banked reset summary");
         assert_eq!(resets.available_count, 3);
         assert!(resets.credits.is_none());
+    }
+
+    #[test]
+    fn a_monthly_primary_window_is_not_labelled_five_hour() {
+        let now = OffsetDateTime::now_utc();
+        let five = UsageWindowView {
+            used_percent: 0,
+            remaining_percent: 100,
+            reset_at: now + time::Duration::hours(4),
+        };
+        assert_eq!(super::primary_window_kind(&five, now), "five_hour");
+
+        // Free/Go: the primary window resets weeks out, so it is the monthly
+        // limit, not a 5-hour window (calling it "5h" was the bug).
+        let monthly = UsageWindowView {
+            used_percent: 100,
+            remaining_percent: 0,
+            reset_at: now + time::Duration::days(30),
+        };
+        assert_eq!(super::primary_window_kind(&monthly, now), "monthly");
+
+        let weekly = UsageWindowView {
+            used_percent: 10,
+            remaining_percent: 90,
+            reset_at: now + time::Duration::days(6),
+        };
+        assert_eq!(super::primary_window_kind(&weekly, now), "weekly");
     }
 
     #[test]
@@ -1606,6 +1725,25 @@ mod tests {
             changed: false,
         };
         assert!(needs_proactive_refresh(&auth));
+    }
+
+    #[test]
+    fn deactivated_accounts_are_terminal_not_retryable() {
+        // The exact text ChatGPT Desktop surfaces for a deleted account.
+        let desktop = "error usage authentication failed (401): account_deactivated";
+        assert!(super::usage_error_account_deactivated(desktop));
+        assert!(super::usage_error_account_deactivated(
+            "You do not have an account because it has been deleted or deactivated."
+        ));
+        assert!(!super::usage_error_account_deactivated(
+            "Usage unavailable [access_token_unauthorized]: OpenAI rejected the current access token"
+        ));
+        // Terminal: never a switch candidate, never mass-probed.
+        assert!(super::usage_error_blocks_activation(desktop));
+        assert_eq!(super::usage_error_label(desktop), "Account deactivated");
+        let message = super::usage_error_message(&anyhow::anyhow!("{desktop}"));
+        assert!(message.contains("account_deactivated"), "{message}");
+        assert!(message.contains("archive"), "{message}");
     }
 
     #[test]

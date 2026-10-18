@@ -67,10 +67,13 @@ struct ReloginPresentationQueue {
     mutating func cancelPending() { pendingIDs.removeAll() }
 }
 
+@MainActor
 private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var showDashboardObserver: NSObjectProtocol?
+    private var statusItem: NSStatusItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        installStatusItem()
         showDashboardObserver = DistributedNotificationCenter.default().addObserver(
             forName: .requestShowDashboard,
             object: nil,
@@ -85,16 +88,76 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Permanent menu-bar entry point. The notch is the primary surface, but
+    /// when it is disabled (or a display has no notch) it was the only way into
+    /// Settings or Quit (audit IA-1).
+    private func installStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.title = "CR"
+        item.button?.toolTip = "Codex Roster"
+        let menu = NSMenu()
+        menu.addItem(
+            withTitle: AppLanguage.text("Mở bảng điều khiển", "Open notch"),
+            action: #selector(openNotch),
+            keyEquivalent: ""
+        )
+        menu.addItem(
+            withTitle: AppLanguage.text("Bảng điều khiển Roster", "Roster Console"),
+            action: #selector(openConsole),
+            keyEquivalent: ""
+        )
+        menu.addItem(.separator())
+        menu.addItem(
+            withTitle: AppLanguage.text("Cài đặt…", "Settings…"),
+            action: #selector(openSettings),
+            keyEquivalent: ","
+        )
+        menu.addItem(
+            withTitle: AppLanguage.text("Giới thiệu", "About"),
+            action: #selector(openAbout),
+            keyEquivalent: ""
+        )
+        menu.addItem(.separator())
+        menu.addItem(
+            withTitle: AppLanguage.text("Thoát Codex Roster", "Quit Codex Roster"),
+            action: #selector(quitApp),
+            keyEquivalent: "q"
+        )
+        for menuItem in menu.items where menuItem.action != nil {
+            menuItem.target = self
+        }
+        item.menu = menu
+        statusItem = item
+    }
+
+    @objc private func openNotch() {
+        NotificationCenter.default.post(name: .showDashboard, object: nil)
+    }
+
+    @objc private func openConsole() {
+        RosterConsolePresenter.request(.operations)
+    }
+
+    @objc private func openSettings() {
+        RosterConsolePresenter.request(.settings)
+    }
+
+    @objc private func openAbout() {
+        RosterConsolePresenter.request(.about)
+    }
+
+    @objc private func quitApp() {
+        NSApp.terminate(nil)
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         NotificationCenter.default.post(name: .showDashboard, object: nil)
         return true
     }
 
-    deinit {
-        if let showDashboardObserver {
-            DistributedNotificationCenter.default().removeObserver(showDashboardObserver)
-        }
-    }
+    // The distributed observer lives for the whole process: AppDelegate is
+    // owned by the app for its lifetime, so there is nothing to tear down and a
+    // nonisolated deinit cannot touch main-actor state.
 }
 
 private let dashboardCardFill = AnyShapeStyle(.ultraThinMaterial)
@@ -190,6 +253,17 @@ struct CodexRosterApp: App {
         .windowResizability(.contentSize)
         .defaultPosition(.top)
         .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button(language.text("Cài đặt…", "Settings…")) {
+                    RosterConsolePresenter.request(.settings)
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
+            CommandGroup(replacing: .appInfo) {
+                Button(language.text("Giới thiệu Codex Roster", "About Codex Roster")) {
+                    RosterConsolePresenter.request(.about)
+                }
+            }
             CommandGroup(replacing: .newItem) {
                 Button(language.text("Thêm tài khoản…", "Add account…")) {
                     NotificationCenter.default.post(name: .showAddAccount, object: nil)
@@ -240,6 +314,9 @@ enum NextAction {
     case signIn([SavedAccount])
     case recover(SavedAccount)
     case retryQuota([SavedAccount])
+    /// The active window is forecast to empty before it resets, and a ready
+    /// account can take over (audit F wave 2).
+    case switchBeforeDry(SavedAccount)
     case allClear(SavedAccount?)
 
     /// Ops drops the banner entirely when nothing needs the user.
@@ -273,6 +350,22 @@ enum NextAction {
         if !signIn.isEmpty { return .signIn(signIn) }
         if let account = recovery.first { return .recover(account) }
         if !transient.isEmpty { return .retryQuota(transient) }
+        // Proactive hint: act before the user hits a wall. Only fires when the
+        // forecast has a real estimate and a ready account exists.
+        if let active,
+           let candidate = ready.first,
+           let forecast = store.quotaForecast?.fiveHour,
+           // A low-confidence estimate (few samples, erratic burn) must not
+           // trigger a suggestion; the runway bar treats it the same way.
+           forecast.confidence != "low",
+           let timeToEmpty = forecast.timeToEmptyMinutes,
+           let resetAt = active.usage?.fiveHour?.resetAt.value
+        {
+            let minutesUntilReset = resetAt.timeIntervalSinceNow / 60
+            if minutesUntilReset > 0, timeToEmpty < minutesUntilReset {
+                return .switchBeforeDry(candidate)
+            }
+        }
         return .allClear(active)
     }
 
@@ -306,6 +399,8 @@ enum NextAction {
             language.text("Khôi phục \(account.displayName)", "Recover \(account.displayName)")
         case .retryQuota(let accounts):
             language.text("Thử lại quota cho \(accounts.count) tài khoản", "Retry quota for \(accounts.count) accounts")
+        case .switchBeforeDry(let account):
+            language.text("Sắp cạn trước khi reset — chuyển sang \(account.displayName)", "Runs dry before reset — switch to \(account.displayName)")
         case .allClear(let active):
             active.map { language.text("Đang dùng \($0.displayName)", "Running on \($0.displayName)") }
                 ?? language.text("Mọi thứ ổn", "Everything is ready")
@@ -350,6 +445,11 @@ enum NextAction {
                 "Không lấy được quota — thường là mạng chập chờn, thử lại là đủ.",
                 "Quota could not be fetched — usually a flaky network; a retry is enough."
             )
+        case .switchBeforeDry(let account):
+            language.text(
+                "Dự báo cửa sổ 5 giờ hiện tại cạn trước khi reset. \(account.displayName) còn \(Self.quotaSummary(account, language: language)).",
+                "The current 5-hour window is forecast to empty before it resets. \(account.displayName) has \(Self.quotaSummary(account, language: language))."
+            )
         case .allClear(let active):
             if let active {
                 language.text(
@@ -378,6 +478,8 @@ enum NextAction {
         case .redeemBankedReset(let account):
             let count = account.bankedResetCount
             return "\(head) · ×\(count)"
+        case .switchBeforeDry(let account):
+            return "\(head) · \(Self.quotaSummary(account, language: language))"
         default:
             return head
         }
@@ -452,6 +554,7 @@ struct NextActionBanner: View {
         case .signIn: "person.crop.circle.badge.exclamationmark"
         case .recover: "externaldrive.badge.exclamationmark"
         case .retryQuota: "wifi.exclamationmark"
+        case .switchBeforeDry: "clock.badge.exclamationmark"
         case .allClear: "checkmark.seal.fill"
         }
     }
@@ -464,6 +567,7 @@ struct NextActionBanner: View {
         case .signIn: .orange
         case .recover: .red
         case .retryQuota: .orange
+        case .switchBeforeDry: .orange
         case .allClear: .green
         }
     }
@@ -477,7 +581,7 @@ struct NextActionBanner: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(store.isWorking)
-        case .switchTo(let account), .redeemBankedReset(let account):
+        case .switchTo(let account), .redeemBankedReset(let account), .switchBeforeDry(let account):
             Button(language.text("Chuyển", "Switch")) {
                 store.activate(account, force: true)
             }
@@ -2020,8 +2124,8 @@ struct AboutView: View {
                 AboutDisclosurePanel(title: language.text("Chi tiết tính năng", "Feature details"), icon: "checklist") {
                     AboutFeatureGroup(title: language.text("Tài khoản & phiên", "Accounts & sessions")) {
                         AboutBullet(icon: "person.badge.plus", text: language.text("Mở đăng nhập OpenAI trên trình duyệt, sau đó lưu phiên Codex đang dùng mà không đọc mật khẩu, mã xác thực hoặc cookie trình duyệt.", "Open the OpenAI browser sign-in, then save the active Codex session without reading passwords, verification codes, or browser cookies."))
-                        AboutBullet(icon: "pencil", text: language.text("Đặt tên, sửa, tìm kiếm, lưu trữ, khôi phục và xóa từng tài khoản đã lưu.", "Label, edit, search, archive, restore, and remove each saved account."))
-                        AboutBullet(icon: "tablecells", text: language.text("Một bảng tài khoản duy nhất trong Tổng quan, kèm tìm kiếm, lọc trạng thái, sắp xếp và thao tác hàng loạt.", "A single account table in Overview with search, status filters, sorting, and bulk actions."))
+                        AboutBullet(icon: "pencil", text: language.text("Đặt tên, sửa, lưu trữ, khôi phục và xóa từng tài khoản đã lưu.", "Label, edit, archive, restore, and remove each saved account."))
+                        AboutBullet(icon: "tablecells", text: language.text("Danh sách tài khoản trong Tổng quan, sắp xếp theo quota còn lại; bấm vào từng dòng để xem chi tiết và thao tác.", "The Overview account list, ordered by remaining quota; open a row for details and actions."))
                     }
                     AboutFeatureGroup(title: language.text("Quota & chuyển tài khoản", "Quota & switching")) {
                         AboutBullet(icon: "gauge.with.dots.needle.50percent", text: language.text("Theo dõi quota Codex, thời điểm reset và gói ChatGPT; làm mới tài khoản đang dùng mỗi phút hoặc kiểm tra toàn bộ theo yêu cầu.", "Track Codex quota, reset timing, and ChatGPT plan; refresh the active account every minute or check every account on demand."))

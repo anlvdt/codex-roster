@@ -25,8 +25,8 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
 - Close and relaunch ChatGPT/Codex Desktop after a confirmed account switch.
 - Refresh local Codex token statistics, public OpenAI Status, and the public [Codex Reset outlook](https://codex-resets.com/) (with forecast probabilities from [codex-reset.com](https://codex-reset.com/)).
 - Sync usage to [VibeCafe](https://vibecafe.ai/) via the optional [`@vibe-cafe/vibe-usage`](https://github.com/vibe-cafe/vibe-usage) collector; its token and estimated-cost statistics remain separate from OpenAI quota/banked-reset credits.
-- When VibeCafe is configured, Roster automatically syncs every 30 minutes and shows the official 7-day API totals (tokens, estimated cost, sessions, and active time) in Status.
-- Offer Vietnamese and English; Vietnamese is the default.
+- When VibeCafe is configured, Roster automatically syncs every 30 minutes and shows the official 7-day API totals (tokens, estimated cost, sessions, and active time) in Status. The collector is fetched through `npx` from a pinned version (`@vibe-cafe/vibe-usage@0.13.2`); set `CODEX_ROSTER_VIBE_USAGE_BIN` to an absolute path of a pre-installed collector to avoid the runtime download entirely.
+- Offer Vietnamese and English; the UI follows the Mac language by default, with an explicit Tiếng Việt / English switch.
 
 ### Quota and automatic switching
 
@@ -53,7 +53,8 @@ The sidebar signals, the Overview banner, and the account board all read from th
 ### Backup and recovery
 
 - **File → Export backup…** creates a password-encrypted `.codexroster` file for transfer or off-device storage. The password is never stored by the app.
-- The app automatically retains the latest five full local snapshot backups. They are encrypted with a random key held in this Mac's Keychain, so they can restore saved sessions on this same Mac.
+- The app automatically retains the latest five full local snapshot backups. They are encrypted with a random key stored in a `0600` file inside the app data directory (`keys/local-snapshot-key-v1.key`, `keys/automatic-backup-key-v1.key`), with a redundant Keychain copy used as a migration source, so they can restore saved sessions on this same Mac.
+- **What that protects:** off-device exposure (a copied backup file is useless without the key) and other macOS users. **What it does not protect:** a process already running as your macOS user, which can read the key file and the snapshots. Treat the app data directory as sensitive, and prefer the password-encrypted export for anything that leaves this Mac.
 - Use **Automation → Restore saved sessions** after local data loss. This replaces the current roster after confirmation.
 
 #### macOS Keychain prompt
@@ -62,10 +63,10 @@ macOS may show a dialog such as:
 
 > `codex-roster` / `Codex Roster` / `codex_roster-<hash>` wants to use your confidential information stored in **"com.codexroster.app"** in your keychain.
 
-That is expected. Codex Roster keeps only a local encryption key for saved snapshots and automatic backups in the Keychain item `com.codexroster.app`. The helper CLI inside the app (and local `cargo test` / `cargo run` binaries, which may appear as `codex_roster-<hash>`) must read that item to decrypt sessions on this Mac. The dialog is from macOS, not a third-party login page.
+That is expected. Codex Roster keeps the local encryption key for saved snapshots and automatic backups in a private key file, and keeps a redundant copy in the Keychain item `com.codexroster.app` (used to migrate keys from older builds). The helper CLI inside the app (and local `cargo test` / `cargo run` binaries, which may appear as `codex_roster-<hash>`) may read that item while migrating. The dialog is from macOS, not a third-party login page.
 
 - Choose **Allow** or **Always Allow** after confirming the Keychain item name is `com.codexroster.app`.
-- **Deny** leaves saved sessions/backups encrypted and unreadable until access is granted.
+- **Deny** is safe when the key file already exists: the app reads the file first. Deny it and, if a migration is pending, older snapshots stay encrypted until access is granted.
 - Codex Roster never asks for your OpenAI password through this dialog; enter your Mac login Keychain password only if macOS requests it.
 
 Never share a snapshot file, password, browser cookie, access token, or refresh token.
@@ -96,47 +97,63 @@ open "build/CodexRoster.app"
 
 ### Platform
 
-macOS only. Codex Roster is a native macOS app; the crate builds and ships for macOS (Apple Silicon and Intel). Windows and Linux support has been removed.
+macOS 14+ only. Codex Roster is a native macOS app; the shipped bundle is built for Apple Silicon. The release workflow can produce a universal (Apple Silicon + Intel) bundle with `UNIVERSAL=1`, and Windows/Linux support has been removed.
 
 ### CLI
 
 The app bundles `codex-roster` and always uses it. For unbundled development runs (e.g. `swift run`), set `CODEX_ROSTER_CLI_PATH` to an absolute path to another build; it is ignored when the bundled binary exists.
 
+Running `codex-roster` with no arguments opens the interactive terminal menu; `q`, Esc or Ctrl-C quits it, and a non-terminal stdin is refused instead of hanging.
+
 ```text
 codex-roster status [--json]
 codex-roster list [--json]
 codex-roster save [--json]
+codex-roster begin-add-account | save-added-account | cancel-add-account | add-account-status [--json]
 codex-roster usage [ACCOUNT_ID] [--json]
+codex-roster refresh-usage [--json]
 codex-roster activate [ACCOUNT_ID] [--force] [--json]
+codex-roster enable-luna-reserve [ACCOUNT_ID] [--json]
 codex-roster delete [ACCOUNT_ID] [--json]
 codex-roster archive ACCOUNT_ID [--restore] [--json]
 codex-roster export OUTPUT.codexroster [--password-stdin] [--json]
 codex-roster import INPUT.codexroster [--password-stdin] [--json]
-codex-roster restore-full-backup [--json]
+codex-roster import-json INPUT [--json]
+codex-roster restore-account-list-backup | restore-full-backup | create-automatic-full-backup [--json]
+codex-roster recover-legacy-snapshots [--json]
 codex-roster auto-start-usage-windows [--enable|--disable] [--run] [--json]
 codex-roster auto-resume-session [--enable|--disable] [--json]
 codex-roster auto-switch [--enable|--disable|--status|--apply] [--json]
 codex-roster token-usage [--json]
+codex-roster quota-history [ACCOUNT_ID] [--json]
 codex-roster vibe-usage [init|sync|summary|status]
-codex-roster reset-outlook [--json]
+codex-roster reset-outlook | reset-events | reset-timeline [--json]
 codex-roster open-ai-status [--json]
-
+codex-roster set-label ACCOUNT_ID [LABEL] [--json]
+codex-roster doctor
+codex-roster dead-accounts [--deep] [--stale-days N] [--json] [--json] [--bundle]
+codex-roster schema [COMMAND] [--json]
 ```
+
+`--json` output carries `"contract_version": 1`, view timestamps are RFC3339 strings, and failures print `{"contract_version":1,"error":{"code","message","hint"}}` with a class-specific exit code (2 usage, 3 login/blocked, 4 lock timeout, 5 no account, 6 network, 7 keychain). Run `codex-roster schema <command>` for the fields of one command, and `codex-roster doctor` for local diagnostics (paths, key file modes, lock state, OAuth ports).
 
 ### Privacy, status, and credits
 
-Saved account data remains on this Mac. OpenAI Status and Codex Reset outlook requests (codex-resets.com / codex-reset.com) never include account credentials, identifiers, saved sessions, or quota data. The 24h/48h values are public-signal forecast scores, not statistical probabilities. Public reset posts are advisory; authenticated per-account quota returned by Codex remains the source of truth. Read [OpenAI's current ChatGPT and Codex pricing documentation](https://learn.chatgpt.com/docs/pricing) for plan and usage policy.
+Saved account data remains on this Mac. OpenAI Status and Codex Reset outlook requests (codex-resets.com / codex-reset.com) never include account credentials, identifiers, saved sessions, or quota data. The reset outlook mirrors the public schedule/status feed (codex-resets.com) and is advisory, not a statistical probability. Authenticated per-account quota returned by Codex remains the source of truth. Read [OpenAI's current ChatGPT and Codex pricing documentation](https://learn.chatgpt.com/docs/pricing) for plan and usage policy.
 
 Codex Roster is MIT licensed. It is maintained by [LE AN (@anlvdt)](https://github.com/anlvdt). See [AUTHORS.md](AUTHORS.md) and [CREDITS.md](CREDITS.md) for original-foundation, research, and license attribution.
 
 ### Validation
 
 ```sh
-cargo test
-cargo clippy -- -D warnings
 cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
 swift build --package-path macos/NextAccount
+bash scripts/build-macos-app.sh
 ```
+
+`swift test` needs a full Xcode toolchain; with Command Line Tools only it fails with `no such module 'Testing'`. CI runs the Swift suite on `macos-latest`.
 
 ## Tiếng Việt
 
@@ -150,7 +167,7 @@ swift build --package-path macos/NextAccount
   - **Thêm & chuyển** — luồng cũ: sao lưu phiên live, `codex login` vào `~/.codex` (có thể đóng Desktop nếu cổng 1455/1457 bận), để credential mới làm phiên đang dùng.
 - Đóng rồi mở lại ChatGPT/Codex Desktop sau khi bạn xác nhận chuyển tài khoản.
 - Theo dõi token Codex cục bộ, trạng thái công khai OpenAI và [Codex Reset outlook](https://codex-resets.com/) (xác suất forecast từ [codex-reset.com](https://codex-reset.com/)).
-- Nếu đã cấu hình VibeCafe qua collector tùy chọn [`@vibe-cafe/vibe-usage`](https://github.com/vibe-cafe/vibe-usage), Roster tự đồng bộ mỗi 30 phút và hiển thị thống kê API chính thức trong Status: token, chi phí ước tính, số phiên và thời gian hoạt động trong 7 ngày; các thống kê này tách biệt với quota/banked reset credit của OpenAI.
+- Nếu đã cấu hình VibeCafe qua collector tùy chọn [`@vibe-cafe/vibe-usage`](https://github.com/vibe-cafe/vibe-usage) (tải qua `npx` với phiên bản ghim `@vibe-cafe/vibe-usage@0.13.2`; đặt `CODEX_ROSTER_VIBE_USAGE_BIN` tới binary có sẵn để không phải tải lúc chạy), Roster tự đồng bộ mỗi 30 phút và hiển thị thống kê API chính thức trong Status: token, chi phí ước tính, số phiên và thời gian hoạt động trong 7 ngày; các thống kê này tách biệt với quota/banked reset credit của OpenAI.
 - Hỗ trợ Tiếng Việt và English; mặc định là Tiếng Việt.
 
 ### Quota và tự động chuyển
@@ -178,7 +195,8 @@ Tín hiệu ở sidebar, thanh gợi ý và bảng trạng thái đều đọc t
 ### Sao lưu và khôi phục
 
 - **Tệp → Xuất bản sao lưu…** tạo file `.codexroster` được mã hóa bằng mật khẩu để chuyển máy hoặc lưu trữ ngoài máy. App không lưu mật khẩu này.
-- Ứng dụng tự giữ năm bản sao đầy đủ gần nhất trên máy. Chúng được mã hóa bằng khóa ngẫu nhiên trong Keychain của máy Mac này, vì vậy có thể khôi phục lại phiên đã lưu trên chính máy đó.
+- Ứng dụng tự giữ năm bản sao đầy đủ gần nhất trên máy. Chúng được mã hóa bằng khóa ngẫu nhiên lưu trong **file riêng tư `0600`** trong thư mục dữ liệu ứng dụng (`keys/local-snapshot-key-v1.key`, `keys/automatic-backup-key-v1.key`), kèm một bản sao dự phòng trong Keychain dùng để migrate từ bản cũ, vì vậy có thể khôi phục lại phiên đã lưu trên chính máy đó.
+- **Điều được bảo vệ:** file sao lưu bị copy ra ngoài vẫn vô dụng nếu không có khóa, và người dùng macOS khác. **Điều không được bảo vệ:** một tiến trình đang chạy dưới cùng tài khoản macOS của bạn — nó đọc được cả file khóa lẫn snapshot. Hãy coi thư mục dữ liệu ứng dụng là nhạy cảm, và dùng bản export có mật khẩu cho mọi thứ rời khỏi máy này.
 - Dùng **Tự động hóa → Khôi phục phiên sao lưu** khi dữ liệu cục bộ gặp lỗi. Thao tác sẽ yêu cầu xác nhận trước khi thay roster hiện tại.
 
 #### Thông báo Keychain trên macOS
@@ -187,7 +205,7 @@ macOS có thể hiện hộp thoại kiểu:
 
 > `codex-roster` / `Codex Roster` / `codex_roster-<hash>` muốn dùng thông tin bảo mật trong **"com.codexroster.app"** trên keychain của bạn.
 
-Đây là hành vi bình thường. Codex Roster chỉ lưu khóa mã hóa cục bộ cho snapshot và bản sao lưu tự động trong mục Keychain `com.codexroster.app`. CLI đi kèm app (và binary `cargo test` / `cargo run` khi phát triển, đôi khi hiện tên `codex_roster-<hash>`) cần đọc mục đó để giải mã phiên trên chính máy này. Hộp thoại do macOS hiện, không phải trang đăng nhập bên thứ ba.
+Đây là hành vi bình thường. Codex Roster lưu khóa mã hóa cục bộ cho snapshot và bản sao lưu tự động trong file khóa riêng tư, và giữ một bản sao dự phòng trong mục Keychain `com.codexroster.app` (dùng để migrate khóa từ bản cũ). CLI đi kèm app (và binary `cargo test` / `cargo run` khi phát triển, đôi khi hiện tên `codex_roster-<hash>`) có thể đọc mục đó khi migrate. Hộp thoại do macOS hiện, không phải trang đăng nhập bên thứ ba.
 
 - Chọn **Allow** hoặc **Always Allow** sau khi xác nhận tên mục Keychain là `com.codexroster.app`.
 - **Deny** sẽ khiến phiên/bản sao lưu đã mã hóa không đọc được cho đến khi được cấp quyền.
@@ -229,6 +247,6 @@ App đi kèm `codex-roster` để quản lý tài khoản Codex. Các lệnh `st
 
 ### Riêng tư, trạng thái và ghi nhận
 
-Dữ liệu tài khoản lưu trên máy Mac. Kiểm tra OpenAI Status và Codex Reset outlook (codex-resets.com / codex-reset.com) không gửi credential, định danh tài khoản, phiên đã lưu hay dữ liệu quota. Giá trị 24h/48h là điểm dự báo từ tín hiệu công khai, không phải xác suất thống kê. Bài đăng reset công khai chỉ là tín hiệu tham khảo; quota có xác thực do Codex trả về cho từng tài khoản vẫn là nguồn xác nhận cuối cùng. Xem [tài liệu pricing và usage chính thức của ChatGPT/Codex](https://learn.chatgpt.com/docs/pricing) để biết chính sách gói và quota mới nhất.
+Dữ liệu tài khoản lưu trên máy Mac. Kiểm tra OpenAI Status và Codex Reset outlook (codex-resets.com / codex-reset.com) không gửi credential, định danh tài khoản, phiên đã lưu hay dữ liệu quota. Bảng reset outlook phản ánh lịch/trạng thái công khai từ codex-resets.com, chỉ là tín hiệu tham khảo và không phải xác suất thống kê; quota có xác thực do Codex trả về cho từng tài khoản vẫn là nguồn xác nhận cuối cùng. Xem [tài liệu pricing và usage chính thức của ChatGPT/Codex](https://learn.chatgpt.com/docs/pricing) để biết chính sách gói và quota mới nhất.
 
 Codex Roster dùng giấy phép MIT, được duy trì bởi [LE AN (@anlvdt)](https://github.com/anlvdt). Xem [AUTHORS.md](AUTHORS.md) và [CREDITS.md](CREDITS.md) để biết ghi nhận tác giả, nguồn tham khảo và ranh giới giấy phép.

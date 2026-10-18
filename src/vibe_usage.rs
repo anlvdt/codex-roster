@@ -51,7 +51,29 @@ pub struct VibeUsageSummary {
     pub estimated_cost_usd: f64,
     pub sessions: usize,
     pub active_seconds: u64,
+    #[serde(with = "crate::model::time_compat")]
     pub fetched_at: OffsetDateTime,
+}
+
+/// Build the collector command for `subcommand`.
+///
+/// Honors `CODEX_ROSTER_VIBE_USAGE_BIN` (absolute path to a pre-installed
+/// collector) so a user can vendor the pinned package instead of letting `npx`
+/// fetch it from the registry at runtime (audit P1-10). Without that variable
+/// the pinned npm spec is used.
+pub fn collector_command(subcommand: &str) -> std::process::Command {
+    match std::env::var_os("CODEX_ROSTER_VIBE_USAGE_BIN") {
+        Some(path) => {
+            let mut command = std::process::Command::new(path);
+            command.arg(subcommand);
+            command
+        }
+        None => {
+            let mut command = std::process::Command::new("npx");
+            command.args(["--yes", VIBE_USAGE_NPM_SPEC, subcommand]);
+            command
+        }
+    }
 }
 
 pub fn is_configured(home_dir: &Path) -> bool {
@@ -76,12 +98,34 @@ fn restrict_config_permissions(path: &Path) {
     let _ = path;
 }
 
+/// The local VibeCafe config is user-editable input: never let a broken or
+/// hostile file stream unbounded memory into the app (audit A2/S5).
+const MAX_CONFIG_BYTES: u64 = 64 * 1024;
+/// Bound the third-party usage response for the same reason.
+const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
+
+fn read_capped(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let file =
+        fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    if bytes.len() as u64 > max_bytes {
+        anyhow::bail!(
+            "{} is larger than the {max_bytes}-byte limit for the VibeCafe config",
+            path.display()
+        );
+    }
+    Ok(bytes)
+}
+
 pub fn fetch_and_cache(home_dir: &Path, app_data_dir: &Path) -> Result<VibeUsageSummary> {
     let config_file = config_path(home_dir);
     restrict_config_permissions(&config_file);
-    let config: Config =
-        serde_json::from_slice(&fs::read(&config_file).context("failed to read VibeCafe config")?)
-            .context("failed to decode VibeCafe config")?;
+    let config: Config = serde_json::from_slice(&read_capped(&config_file, MAX_CONFIG_BYTES)?)
+        .context("failed to decode VibeCafe config")?;
     let url = format!("{}/api/usage?days=7", config.api_url.trim_end_matches('/'));
     let mut response = ureq::get(&url)
         .header("Authorization", &format!("Bearer {}", config.api_key))
@@ -97,19 +141,16 @@ pub fn fetch_and_cache(home_dir: &Path, app_data_dir: &Path) -> Result<VibeUsage
     }
     let data: UsageResponse = response
         .body_mut()
+        .with_config()
+        .limit(MAX_RESPONSE_BYTES)
         .read_json()
         .context("failed to decode VibeCafe usage response")?;
     let summary = summarize(data);
     fs::create_dir_all(app_data_dir).context("failed to create app data directory")?;
     let cache_path = app_data_dir.join(CACHE_FILE);
-    fs::write(&cache_path, serde_json::to_vec_pretty(&summary)?)
+    // Private (0600) and durable: the cache is read on the next launch.
+    crate::file_store::atomic_write(&cache_path, &serde_json::to_vec_pretty(&summary)?, 0o600)
         .context("failed to cache VibeCafe usage summary")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&cache_path, fs::Permissions::from_mode(0o600))
-            .context("failed to protect VibeCafe usage cache")?;
-    }
     Ok(summary)
 }
 
@@ -148,6 +189,48 @@ fn default_api_url() -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn collector_command_prefers_a_vendored_binary() {
+        // Without the override the pinned npm spec is used through npx.
+        // SAFETY: single-threaded test process; the variable is removed again.
+        unsafe { std::env::remove_var("CODEX_ROSTER_VIBE_USAGE_BIN") };
+        let via_npx = super::collector_command("sync");
+        assert_eq!(via_npx.get_program(), "npx");
+        let args: Vec<_> = via_npx
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, vec!["--yes", super::VIBE_USAGE_NPM_SPEC, "sync"]);
+
+        unsafe { std::env::set_var("CODEX_ROSTER_VIBE_USAGE_BIN", "/opt/vibe-usage") };
+        let vendored = super::collector_command("summary");
+        assert_eq!(vendored.get_program(), "/opt/vibe-usage");
+        let args: Vec<_> = vendored
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, vec!["summary"]);
+        unsafe { std::env::remove_var("CODEX_ROSTER_VIBE_USAGE_BIN") };
+    }
+
+    #[test]
+    fn config_reader_rejects_oversized_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        std::fs::write(&path, vec![b'a'; (MAX_CONFIG_BYTES + 1) as usize]).unwrap();
+        assert!(
+            super::read_capped(&path, MAX_CONFIG_BYTES).is_err(),
+            "a config above the cap must be rejected, not buffered"
+        );
+        let small = br#"{"api_url":"http://x","api_key":"k"}"#;
+        std::fs::write(&path, small).unwrap();
+        assert_eq!(
+            super::read_capped(&path, MAX_CONFIG_BYTES).unwrap().len(),
+            small.len()
+        );
+    }
+
     use super::*;
     use tempfile::tempdir;
 

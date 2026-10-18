@@ -339,7 +339,12 @@ pub fn is_force_skippable_process(process: &RunningCodexProcess) -> bool {
 /// Desktop-owned app-server. Without this, such a daemon makes account
 /// switching impossible even with `--force`.
 fn is_background_server_process(process: &RunningCodexProcess) -> bool {
-    matches!(process.role.as_str(), "app-server" | "mcp" | "mcp-server")
+    // `exec-server` is the remote execution daemon ChatGPT Desktop spawns
+    // (`codex exec-server --remote …`); it is not an interactive session.
+    matches!(
+        process.role.as_str(),
+        "app-server" | "exec-server" | "mcp" | "mcp-server"
+    )
 }
 
 fn is_desktop_like_process(process: &RunningCodexProcess) -> bool {
@@ -448,6 +453,13 @@ fn is_codex_bin_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     if is_roster_name(&name) {
         return false;
+    }
+    // Electron appends its helper role to the process name, so ChatGPT's
+    // bundled Codex helpers appear as "codex (renderer)" / "codex (service)".
+    // Without this they were classified as a live CLI session, which blocked
+    // account switching whenever ChatGPT Desktop was running.
+    if let Some(rest) = name.strip_prefix("codex (") {
+        return rest.ends_with(')');
     }
     name == "codex" || name == "codex.exe" || name.starts_with("codex helper")
 }
@@ -867,6 +879,61 @@ mod tests {
                 "codex".to_owned()
             ]
         ));
+    }
+
+    #[test]
+    fn desktop_electron_helpers_are_skippable_not_live_cli() {
+        // Exactly the shapes ChatGPT Desktop produces: the helper process names
+        // carry an Electron role suffix while the command path is inside the app.
+        let helper_cmd = vec![
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+                .to_owned(),
+        ];
+        for name in ["codex (renderer)", "codex (service)", "codex (gpu)"] {
+            let process = super::format_process(sysinfo::Pid::from_u32(900), name, &helper_cmd);
+            assert_eq!(
+                process.origin.as_deref(),
+                Some("desktop"),
+                "{name} must be recognised as Desktop-owned"
+            );
+            assert!(
+                is_force_skippable_process(&process),
+                "{name} must be skippable with --force"
+            );
+            assert_ne!(
+                super::block_kind(&process),
+                super::BlockKind::CliInteractive,
+                "{name} must not count as a live CLI session"
+            );
+        }
+
+        // A real interactive session keeps blocking: plain name, cli origin.
+        let live = super::format_process(
+            sysinfo::Pid::from_u32(901),
+            "codex",
+            &["/opt/homebrew/bin/codex".to_owned()],
+        );
+        assert_eq!(live.origin.as_deref(), Some("cli"));
+        assert!(!is_force_skippable_process(&live));
+        assert_eq!(super::block_kind(&live), super::BlockKind::CliInteractive);
+
+        // Desktop's remote execution daemon is a background server.
+        let exec_server = super::format_process(
+            sysinfo::Pid::from_u32(902),
+            "codex",
+            &[
+                "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+                    .to_owned(),
+                "exec-server".to_owned(),
+                "--remote".to_owned(),
+                "https://codex-cloud-environments.chatgpt.com/api".to_owned(),
+            ],
+        );
+        assert!(is_force_skippable_process(&exec_server));
+        assert_eq!(
+            super::block_kind(&exec_server),
+            super::BlockKind::CliBackground
+        );
     }
 
     #[test]

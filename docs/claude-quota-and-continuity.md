@@ -1,3 +1,8 @@
+> **Note (2026-10-18).** The Claude tab, enrollment and continuity UI were removed in
+> v0.5.0; the provider internals still exist behind the `external-providers` feature.
+> This document describes the earlier behaviour and is kept for reference.
+> See [docs/archive/claude-quota-audit-2026-10-08.md](archive/claude-quota-audit-2026-10-08.md).
+
 # Claude quota and account continuity
 
 Research checked against official Claude documentation on 2026-10-02.
@@ -64,7 +69,7 @@ pending captures from earlier app versions.
 
 ## Live refresh behavior
 
-The app reads connected local quota every ten seconds while the Claude tab or notch is enabled. OAuth fallback checks run every minute and refresh the active account after two minutes; inactive accounts retain fifteen-minute caching. New local aggregates can be displayed with older model caps, but that combined view stays unverified and does not renew model freshness. See the [2026-10-08 audit](claude-quota-audit-2026-10-08.md) for findings, source research, and limits.
+The app reads connected local quota every ten seconds while the Claude tab or notch is enabled. OAuth fallback checks run every minute and refresh the active account after two minutes; inactive accounts retain fifteen-minute caching. New local aggregates can be displayed with older model caps, but that combined view stays unverified and does not renew model freshness. See the [2026-10-08 audit](archive/claude-quota-audit-2026-10-08.md) for findings, source research, and limits.
 
 ## Automatic login detection
 

@@ -813,14 +813,40 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         Some(Command::AddAccountStatus { json }) => {
+            let active = app.add_account_session_active();
+            let auth_changed = app.add_account_session_auth_changed()?;
+            // Say what to do next, not just whether a marker file exists
+            // (audit A3).
             let output = serde_json::json!({
-                "active": app.add_account_session_active(),
-                "auth_changed": app.add_account_session_auth_changed()?,
+                "active": active,
+                "auth_changed": auth_changed,
+                "state": if active { "pending" } else { "none" },
+                "codex_root": app.env().codex_root.display().to_string(),
+                "hint": if active {
+                    "Finish the browser login, then run `codex-roster save-added-account`."
+                } else {
+                    "Start one with `codex-roster begin-add-account`."
+                },
             });
             if json {
                 print_json(&output)?;
+            } else if active {
+                println!(
+                    "Add account session: pending login in {}",
+                    app.env().codex_root.display()
+                );
+                println!(
+                    "Credentials changed: {}",
+                    if auth_changed {
+                        "yes (ready to save)"
+                    } else {
+                        "not yet"
+                    }
+                );
+                println!("Finish the browser login, then run `codex-roster save-added-account`.");
             } else {
-                println!("Add account session: {}", output["active"]);
+                println!("Add account session: none");
+                println!("Start one with `codex-roster begin-add-account`.");
             }
             Ok(())
         }

@@ -35,6 +35,8 @@ Per-item status and evidence: [IMPLEMENTATION-STATUS.md](docs/audit-2026-10-18/I
 
 ### Fixed
 
+- Notch ears no longer clip their reset label ("Sun 6:00 A"): the label degrades through shorter forms (`Sun 6 PM`, then `Sun`) and the activity glyph only appears when something is actually running or waiting, so the fixed 146pt ear always fits.
+- The notch activity indicator no longer renders a literal `?` (which read as a broken glyph); it uses `bolt.fill` / `hourglass` with a VoiceOver label.
 - Activation-blocked errors are localized in the app with the blocking process list and a "Copy details" action, instead of showing raw CLI stderr.
 - Session-resume index writes are serialized across processes, and rollout discovery is bounded (SQL `LIMIT`, 128 KiB tail, 1 MiB scan cap, cached by size and mtime).
 - Reset announcements are ordered by parsed instant rather than by RFC3339 string, so mixed UTC offsets sort correctly.

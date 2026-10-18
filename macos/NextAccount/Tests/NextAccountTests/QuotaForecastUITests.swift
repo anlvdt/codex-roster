@@ -97,3 +97,31 @@ import Testing
     #expect(RosterListFilter.archived.matches(archived))
     #expect(!RosterListFilter.archived.matches(active))
 }
+
+/// Notch ear labels must degrade instead of clipping (the ears are 146pt wide).
+@Test func earCompactDropsMinutesOnceTheResetIsFarAway() {
+    let calendar = Calendar.current
+    let far = calendar.date(byAdding: .day, value: 3, to: Date())!
+    let farLabel = ResetClockFormat.earCompact(far, asClock: true, language: .english)
+    #expect(!farLabel.contains(":"), "a reset days away should not spend width on minutes: \(farLabel)")
+
+    let soon = Date().addingTimeInterval(2 * 3600)
+    let soonLabel = ResetClockFormat.earCompact(soon, asClock: true, language: .english)
+    #expect(soonLabel.contains(":"), "a reset within the day keeps its exact time: \(soonLabel)")
+
+    // Countdown mode is unaffected: it is already short ("3D", "12M").
+    #expect(ResetClockFormat.earCompact(far, asClock: false, language: .english).count <= 4)
+}
+
+@Test func minimalEarLabelIsShorterThanTheShortForm() {
+    let calendar = Calendar.current
+    let far = calendar.date(byAdding: .day, value: 3, to: Date())!
+    let minimal = ResetClockFormat.minimal(far, asClock: true, language: .english)
+    let short = ResetClockFormat.earCompact(far, asClock: true, language: .english)
+    #expect(minimal.count < short.count, "the last-resort label must be shorter: \(minimal) vs \(short)")
+
+    let soon = Date().addingTimeInterval(3600)
+    let soonMinimal = ResetClockFormat.minimal(soon, asClock: true, language: .english)
+    let soonFull = ResetClockFormat.compact(soon, asClock: true, language: .english)
+    #expect(soonMinimal.count <= soonFull.count)
+}

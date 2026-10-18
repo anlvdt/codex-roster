@@ -494,6 +494,38 @@ fn is_quit_key(key: &Key) -> bool {
     matches!(key, Key::Escape | Key::Char('q') | Key::Char('\u{3}'))
 }
 
+/// Rows moved by one PageUp/PageDown press.
+const TUI_PAGE_STEP: usize = 10;
+
+/// Ask for a search term and return the first matching row index.
+///
+/// Returns `None` when the prompt is empty or nothing matches, so the caller can
+/// simply redraw the unchanged menu.
+fn prompt_for_search(
+    term: &Term,
+    menu: &InteractiveMenu,
+    render_state: &mut PersistentRenderState,
+) -> Result<Option<usize>> {
+    if render_state.total_lines > 0 {
+        term.clear_last_lines(render_state.total_lines)?;
+    }
+    term.show_cursor()?;
+    let query = term.read_line_initial_text("")?;
+    Ok(first_matching_label(&menu.labels(), &query))
+}
+
+/// Case-insensitive substring match over row labels. Empty queries match
+/// nothing, so pressing `/` then Enter never jumps unexpectedly.
+fn first_matching_label(labels: &[&str], query: &str) -> Option<usize> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return None;
+    }
+    labels
+        .iter()
+        .position(|label| label.to_lowercase().contains(&query))
+}
+
 /// Restores the terminal cursor on every exit path, including `?` errors and
 /// panics unwinding out of the menu (audit TUI-02).
 struct CursorRestore;
@@ -565,6 +597,71 @@ fn select_persistent_entry(
                     feedback,
                 )?;
                 selection = next;
+            }
+            // Long rosters need paging, not just single steps (audit TUI-05).
+            Key::Home | Key::Char('g') => {
+                update_persistent_selection(
+                    &term,
+                    menu,
+                    &mut render_state,
+                    selection,
+                    0,
+                    feedback,
+                )?;
+                selection = 0;
+            }
+            Key::End | Key::Char('G') => {
+                let next = menu.len().saturating_sub(1);
+                update_persistent_selection(
+                    &term,
+                    menu,
+                    &mut render_state,
+                    selection,
+                    next,
+                    feedback,
+                )?;
+                selection = next;
+            }
+            Key::PageUp => {
+                let next = selection.saturating_sub(TUI_PAGE_STEP);
+                update_persistent_selection(
+                    &term,
+                    menu,
+                    &mut render_state,
+                    selection,
+                    next,
+                    feedback,
+                )?;
+                selection = next;
+            }
+            Key::PageDown => {
+                let next = (selection + TUI_PAGE_STEP).min(menu.len().saturating_sub(1));
+                update_persistent_selection(
+                    &term,
+                    menu,
+                    &mut render_state,
+                    selection,
+                    next,
+                    feedback,
+                )?;
+                selection = next;
+            }
+            Key::Char('/') => {
+                // Search jumps to the first matching row instead of filtering the
+                // rendered list, so the selective-rewrite state stays valid.
+                if let Some(match_index) = prompt_for_search(&term, menu, &mut render_state)? {
+                    update_persistent_selection(
+                        &term,
+                        menu,
+                        &mut render_state,
+                        selection,
+                        match_index,
+                        feedback,
+                    )?;
+                    selection = match_index;
+                } else {
+                    render_state = render_persistent_menu(&term, menu, selection, feedback)?;
+                }
             }
             Key::Enter => {
                 if render_state.total_lines > 0 {
@@ -666,7 +763,7 @@ fn persistent_menu_lines(
     }
     lines.push(render_divider());
     lines.push(
-        style("Arrows or j/k move. Tab or left/right jumps sections. Enter selects. q exits.")
+        style("Arrows or j/k move. PgUp/PgDn page, Home/End jump. / searches. Tab jumps sections. Enter selects. q exits.")
             .dim()
             .to_string(),
     );
@@ -991,6 +1088,21 @@ mod tests {
     };
     use crate::repository::SnapshotRepository;
     use crate::secrets::test_support::MemorySecretStore;
+
+    #[test]
+    fn search_matches_case_insensitively_and_ignores_empty_queries() {
+        let labels = [
+            "alice@example.com [active]",
+            "bob@example.com",
+            "carol@other.org",
+        ];
+        assert_eq!(first_matching_label(&labels, "BOB"), Some(1));
+        assert_eq!(first_matching_label(&labels, "other.org"), Some(2));
+        assert_eq!(first_matching_label(&labels, "  alice  "), Some(0));
+        assert_eq!(first_matching_label(&labels, ""), None);
+        assert_eq!(first_matching_label(&labels, "   "), None);
+        assert_eq!(first_matching_label(&labels, "nobody"), None);
+    }
 
     #[test]
     fn ctrl_c_escape_and_q_all_quit_the_menu() {

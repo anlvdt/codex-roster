@@ -15,24 +15,40 @@
 //!    need continue without switching accounts.
 //!
 //! Restore never exchanges refresh tokens.
+//!
+//! ## Lock ordering
+//!
+//! Index mutations acquire a dedicated cross-process `session-resume.lock`
+//! (`fs2` advisory flock) for the whole read-modify-write of
+//! `session-resume.json`. This lock is **not** `OperationLock`: activate /
+//! auto-switch callers already hold `AuthLock` → `OperationLock`, and
+//! re-entering `OperationLock` would deadlock.
+//!
+//! When a caller needs all three, the order is:
+//! `AuthLock` → `OperationLock` → `session-resume.lock`.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
+use fs2::FileExt;
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{Date, OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use crate::file_store::replace_file_with_recovery;
 use crate::model::SessionResumeHint;
 
 const INDEX_FILE: &str = "session-resume.json";
+const LOCK_FILE: &str = "session-resume.lock";
 const LOOKBACK_DAYS: i64 = 14;
 const MAX_META_LINES: usize = 8;
 /// Tolerate small clock skew between activate timestamp and rollout mtime.
@@ -43,6 +59,140 @@ const ACTIVATED_GRACE: Duration = Duration::from_secs(5);
 /// still needing continue while discovery returned `missing`. 6h keeps
 /// same-day recovery; yesterday’s abandoned interrupts stay excluded.
 const USAGE_LIMIT_RESUME_WINDOW: Duration = Duration::from_secs(6 * 60 * 60);
+/// Bound per-rollout reads on the hot `status` path (was 512 KiB + full file).
+const ROLLOUT_TAIL_BYTES: u64 = 128 * 1024;
+/// Cap extended scans when the tail has no lifecycle event.
+const ROLLOUT_MAX_SCAN_BYTES: u64 = 1024 * 1024;
+const DISCOVERY_SQL_LIMIT: i64 = 50;
+const INDEX_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+const INDEX_LOCK_RETRY: Duration = Duration::from_millis(50);
+
+static ROLLOUT_STATE_CACHE: OnceLock<Mutex<HashMap<RolloutCacheKey, Option<ContinuationState>>>> =
+    OnceLock::new();
+static LAST_WARNINGS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+static ROLLOUT_BYTES_READ: AtomicU64 = AtomicU64::new(0);
+static ROLLOUT_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct RolloutCacheKey {
+    path: PathBuf,
+    len: u64,
+    modified: SystemTime,
+}
+
+/// Drain structured warnings from the most recent resume/discovery work on
+/// this thread's call stack (best-effort process-wide buffer). Callers can
+/// surface these without inventing session state.
+pub fn take_last_warnings() -> Vec<String> {
+    LAST_WARNINGS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .map(|mut guard| std::mem::take(&mut *guard))
+        .unwrap_or_default()
+}
+
+fn push_warning(message: impl Into<String>) {
+    if let Ok(mut guard) = LAST_WARNINGS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+    {
+        let message = message.into();
+        if !guard.iter().any(|existing| existing == &message) {
+            guard.push(message);
+        }
+    }
+}
+
+fn clear_warnings() {
+    if let Ok(mut guard) = LAST_WARNINGS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+    {
+        guard.clear();
+    }
+}
+
+#[cfg(test)]
+fn rollout_bytes_read() -> u64 {
+    ROLLOUT_BYTES_READ.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+fn reset_rollout_read_counters() {
+    ROLLOUT_BYTES_READ.store(0, Ordering::Relaxed);
+    ROLLOUT_CACHE_HITS.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+fn rollout_cache_hits() -> u64 {
+    ROLLOUT_CACHE_HITS.load(Ordering::Relaxed)
+}
+
+/// Cross-process lease for `session-resume.json` read-modify-write.
+struct SessionResumeLock(File);
+
+impl SessionResumeLock {
+    fn acquire(app_data_dir: &Path) -> Result<Self> {
+        fs::create_dir_all(app_data_dir)
+            .with_context(|| format!("failed to create {}", app_data_dir.display()))?;
+        let path = app_data_dir.join(LOCK_FILE);
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("failed to open {}", path.display()))?;
+        let deadline = Instant::now() + INDEX_LOCK_TIMEOUT;
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => return Ok(Self(file)),
+                Err(error) if is_lock_contention(&error) && Instant::now() < deadline => {
+                    thread::sleep(INDEX_LOCK_RETRY);
+                }
+                Err(error) if is_lock_contention(&error) => {
+                    return Err(anyhow!(
+                        "timed out waiting for session-resume lock at {}",
+                        path.display()
+                    ));
+                }
+                Err(error) => {
+                    return Err(anyhow!(
+                        "failed to acquire session-resume lock at {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for SessionResumeLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+fn is_lock_contention(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+    ) || error.raw_os_error() == Some(35)
+        || error.raw_os_error() == Some(11)
+        || error.raw_os_error() == Some(16)
+        || error.raw_os_error() == Some(33)
+}
+
+fn with_index_mut<T>(
+    app_data_dir: &Path,
+    f: impl FnOnce(&mut SessionResumeIndex) -> Result<T>,
+) -> Result<T> {
+    let _lock = SessionResumeLock::acquire(app_data_dir)?;
+    let mut index = load_index(app_data_dir)?;
+    let value = f(&mut index)?;
+    save_index(app_data_dir, &index)?;
+    Ok(value)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionResumePointer {
@@ -99,38 +249,42 @@ struct DiscoveredSession {
 
 /// Record that `account_id` is now the live Codex account (after successful activate).
 pub fn mark_activated(app_data_dir: &Path, account_id: Uuid) -> Result<()> {
-    let mut index = load_index(app_data_dir)?;
-    index
-        .activated_at
-        .insert(account_id, OffsetDateTime::now_utc());
-    save_index(app_data_dir, &index)
+    clear_warnings();
+    with_index_mut(app_data_dir, |index| {
+        index
+            .activated_at
+            .insert(account_id, OffsetDateTime::now_utc());
+        Ok(())
+    })
 }
 
 pub fn capture_for_account(app_data_dir: &Path, codex_root: &Path, account_id: Uuid) -> Result<()> {
-    let mut index = load_index(app_data_dir)?;
+    clear_warnings();
     let Some(discovered) = discover_active_user_session(codex_root)? else {
         return Ok(());
     };
-    if let Some(activated) = index.activated_at.get(&account_id).copied() {
-        let floor = offset_to_system(activated)
-            .checked_sub(ACTIVATED_GRACE)
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        if discovered.modified < floor {
-            // Latest rollout predates this account's live tenure — keep any
-            // prior pointer rather than stealing another account's session.
-            return Ok(());
+    with_index_mut(app_data_dir, |index| {
+        if let Some(activated) = index.activated_at.get(&account_id).copied() {
+            let floor = offset_to_system(activated)
+                .checked_sub(ACTIVATED_GRACE)
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            if discovered.modified < floor {
+                // Latest rollout predates this account's live tenure — keep any
+                // prior pointer rather than stealing another account's session.
+                return Ok(());
+            }
         }
-    }
-    let pointer = SessionResumePointer {
-        account_id,
-        session_id: discovered.session_id,
-        cwd: discovered.cwd,
-        rollout_path: discovered.rollout_path.display().to_string(),
-        originator: discovered.originator,
-        captured_at: OffsetDateTime::now_utc(),
-    };
-    index.accounts.insert(account_id, pointer);
-    save_index(app_data_dir, &index)
+        let pointer = SessionResumePointer {
+            account_id,
+            session_id: discovered.session_id.clone(),
+            cwd: discovered.cwd.clone(),
+            rollout_path: discovered.rollout_path.display().to_string(),
+            originator: discovered.originator.clone(),
+            captured_at: OffsetDateTime::now_utc(),
+        };
+        index.accounts.insert(account_id, pointer);
+        Ok(())
+    })
 }
 
 /// Freeze the live thread that just hit usage limits so auto-switch can reopen
@@ -140,40 +294,55 @@ pub fn capture_pending_continue(
     codex_root: &Path,
     from_account_id: Uuid,
 ) -> Result<()> {
-    let mut index = load_index(app_data_dir)?;
+    clear_warnings();
     let sessions = discover_interrupted_sessions(codex_root)?;
-    index.pending_continue = None;
-    index.pending_continues = Some(
-        sessions
-            .into_iter()
-            .map(|session| PendingContinueThread {
-                session_id: session.session_id,
-                cwd: session.cwd,
-                rollout_path: Some(session.rollout_path.display().to_string()),
-                from_account_id: Some(from_account_id),
-                reason: "auto_switch_exhausted".to_owned(),
-                captured_at: OffsetDateTime::now_utc(),
-            })
-            .collect(),
-    );
-    save_index(app_data_dir, &index)
+    let mut seen = HashSet::new();
+    let pending: Vec<PendingContinueThread> = sessions
+        .into_iter()
+        .filter(|session| seen.insert(session.session_id.clone()))
+        .map(|session| PendingContinueThread {
+            session_id: session.session_id,
+            cwd: session.cwd,
+            rollout_path: Some(session.rollout_path.display().to_string()),
+            from_account_id: Some(from_account_id),
+            reason: "auto_switch_exhausted".to_owned(),
+            captured_at: OffsetDateTime::now_utc(),
+        })
+        .collect();
+    with_index_mut(app_data_dir, |index| {
+        index.pending_continue = None;
+        index.pending_continues = Some(pending);
+        Ok(())
+    })
 }
 
 /// Consume the entire snapshot once, including an explicitly empty snapshot.
+///
+/// When `enabled` is false the queue is **not** consumed — disabling Auto-resume
+/// mid-switch must not drop work that should run after the toggle is turned back on.
 pub fn take_pending_continue_hint(
     app_data_dir: &Path,
     enabled: bool,
 ) -> Result<Option<SessionResumeHint>> {
-    let mut index = load_index(app_data_dir)?;
-    let pending = index
-        .pending_continues
-        .take()
-        .or_else(|| index.pending_continue.take().map(|thread| vec![thread]));
-    index.pending_continue = None;
-    save_index(app_data_dir, &index)?;
+    clear_warnings();
     if !enabled {
+        let _lock = SessionResumeLock::acquire(app_data_dir)?;
+        let index = load_index(app_data_dir)?;
+        if index.pending_continues.is_some() || index.pending_continue.is_some() {
+            push_warning(
+                "auto-resume disabled; preserved pending continue queue without consuming it",
+            );
+        }
         return Ok(None);
     }
+    let pending = with_index_mut(app_data_dir, |index| {
+        let pending = index
+            .pending_continues
+            .take()
+            .or_else(|| index.pending_continue.take().map(|thread| vec![thread]));
+        index.pending_continue = None;
+        Ok(pending)
+    })?;
     let Some(pending) = pending else {
         return Ok(None);
     };
@@ -301,15 +470,19 @@ fn hint_from_parts(
             },
         };
     };
+    // Missing rollout_path must not report `ready` (audit P3): only session_id
+    // is not enough evidence for a Desktop deep-link path.
     let rollout_exists = rollout_path
         .as_ref()
         .map(|path| Path::new(path).is_file())
-        .unwrap_or(true);
+        .unwrap_or(false);
     let cwd_ok = cwd
         .as_ref()
         .map(|cwd| Path::new(cwd).is_dir())
         .unwrap_or(false);
-    let status = if !rollout_exists {
+    let status = if rollout_path.is_none() {
+        "ready_cli"
+    } else if !rollout_exists {
         "rollout_gone"
     } else if cwd.is_some() && !cwd_ok {
         // Still openable via thread id — Desktop resume does not need cwd.
@@ -377,30 +550,66 @@ fn offset_to_system(ts: OffsetDateTime) -> SystemTime {
 /// [`USAGE_LIMIT_RESUME_WINDOW`]. A bare `task_started` is an active turn,
 /// not evidence of interruption, even when its rollout mtime is recent.
 fn discover_interrupted_sessions(codex_root: &Path) -> Result<Vec<DiscoveredSession>> {
+    let now_odt = OffsetDateTime::now_utc();
+    let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    discover_interrupted_sessions_at(codex_root, SystemTime::now(), now_odt, local_offset)
+}
+
+fn discover_interrupted_sessions_at(
+    codex_root: &Path,
+    now: SystemTime,
+    now_odt: OffsetDateTime,
+    local_offset: UtcOffset,
+) -> Result<Vec<DiscoveredSession>> {
     let mut candidates = Vec::new();
     let mut db_available = false;
     let db_path = codex_root.join("state_5.sqlite");
-    if db_path.is_file()
-        && let Ok(conn) = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        && let Ok(mut stmt) = conn.prepare(
-            "SELECT rollout_path FROM threads WHERE COALESCE(archived, 0) = 0
-                 AND COALESCE(thread_source, 'user') = 'user'
-                 ORDER BY COALESCE(recency_at_ms, updated_at_ms, 0) DESC",
-        )
-        && let Ok(rows) = stmt.query_map([], |row| row.get::<_, Option<String>>(0))
-    {
-        db_available = true;
-        candidates.extend(rows.flatten().flatten().map(PathBuf::from));
+    let floor_ms = {
+        let now_ms = now_odt.unix_timestamp() * 1000;
+        let window_ms = USAGE_LIMIT_RESUME_WINDOW.as_millis() as i64;
+        now_ms.saturating_sub(window_ms)
+    };
+    if db_path.is_file() {
+        match Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            Ok(conn) => {
+                match conn.prepare(
+                    "SELECT rollout_path FROM threads
+                     WHERE COALESCE(archived, 0) = 0
+                       AND COALESCE(thread_source, 'user') = 'user'
+                       AND COALESCE(recency_at_ms, updated_at_ms, 0) >= ?1
+                     ORDER BY COALESCE(recency_at_ms, updated_at_ms, 0) DESC
+                     LIMIT ?2",
+                ) {
+                    Ok(mut stmt) => match stmt.query_map(
+                        rusqlite::params![floor_ms, DISCOVERY_SQL_LIMIT],
+                        |row| row.get::<_, Option<String>>(0),
+                    ) {
+                        Ok(rows) => {
+                            db_available = true;
+                            candidates.extend(rows.flatten().flatten().map(PathBuf::from));
+                        }
+                        Err(error) => {
+                            push_warning(format!(
+                                "state_5.sqlite threads query failed; falling back to session dirs: {error}"
+                            ));
+                        }
+                    },
+                    Err(error) => {
+                        push_warning(format!(
+                            "state_5.sqlite schema unexpected; falling back to session dirs: {error}"
+                        ));
+                    }
+                }
+            }
+            Err(error) => {
+                push_warning(format!(
+                    "state_5.sqlite unreadable; falling back to session dirs: {error}"
+                ));
+            }
+        }
     }
     if !db_available {
-        let today = OffsetDateTime::now_utc().date();
-        for offset in 0..=1 {
-            let date = today - time::Duration::days(offset);
-            let dir = codex_root
-                .join("sessions")
-                .join(format!("{:04}", date.year()))
-                .join(format!("{:02}", date.month() as u8))
-                .join(format!("{:02}", date.day()));
+        for dir in session_day_dirs(codex_root, now_odt, local_offset, 1) {
             if let Ok(entries) = fs::read_dir(dir) {
                 candidates.extend(
                     entries
@@ -411,7 +620,6 @@ fn discover_interrupted_sessions(codex_root: &Path) -> Result<Vec<DiscoveredSess
             }
         }
     }
-    let now = SystemTime::now();
     let usage_limit_floor = now
         .checked_sub(USAGE_LIMIT_RESUME_WINDOW)
         .unwrap_or(SystemTime::UNIX_EPOCH);
@@ -420,21 +628,37 @@ fn discover_interrupted_sessions(codex_root: &Path) -> Result<Vec<DiscoveredSess
         let Ok(modified) = fs::metadata(&path).and_then(|meta| meta.modified()) else {
             continue;
         };
-        let Ok(Some(state)) = rollout_continuation_state(&path) else {
-            continue;
-        };
-        if !state.needs_continue || !state.from_interrupt_event {
-            continue;
-        }
-        // Fresh writes must not revive an old usage-limit error.
-        let interrupt_at = state.event_at.unwrap_or(modified);
-        if interrupt_at < usage_limit_floor {
-            continue;
-        }
-        if let Ok(Some(mut session)) = parse_user_session_meta(&path, modified) {
-            // Sort / dedupe by interrupt freshness, not raw file mtime.
-            session.modified = interrupt_at;
-            sessions.push(session);
+        match rollout_continuation_state(&path) {
+            Ok(Some(state)) => {
+                if !state.needs_continue || !state.from_interrupt_event {
+                    continue;
+                }
+                // Fresh writes must not revive an old usage-limit error.
+                let interrupt_at = state.event_at.unwrap_or(modified);
+                if interrupt_at < usage_limit_floor {
+                    continue;
+                }
+                match parse_user_session_meta(&path, modified) {
+                    Ok(Some(mut session)) => {
+                        session.modified = interrupt_at;
+                        sessions.push(session);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        push_warning(format!(
+                            "failed to parse session meta {}: {error}",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                push_warning(format!(
+                    "failed to read rollout {}: {error}",
+                    path.display()
+                ));
+            }
         }
     }
     sessions.sort_by(|a, b| {
@@ -445,6 +669,39 @@ fn discover_interrupted_sessions(codex_root: &Path) -> Result<Vec<DiscoveredSess
     let mut seen = HashSet::new();
     sessions.retain(|session| seen.insert(session.session_id.clone()));
     Ok(sessions)
+}
+
+/// Session day dirs covering local date ±N and UTC date ±N (Codex uses local).
+fn session_day_dirs(
+    codex_root: &Path,
+    now_odt: OffsetDateTime,
+    local_offset: UtcOffset,
+    day_radius: i64,
+) -> Vec<PathBuf> {
+    let mut dates: Vec<Date> = Vec::new();
+    let mut seen = HashSet::new();
+    let utc_date = now_odt.date();
+    let local_date = now_odt.to_offset(local_offset).date();
+    for base in [local_date, utc_date] {
+        for offset in -day_radius..=day_radius {
+            let Some(date) = base.checked_add(time::Duration::days(offset)) else {
+                continue;
+            };
+            if seen.insert(date) {
+                dates.push(date);
+            }
+        }
+    }
+    dates
+        .into_iter()
+        .map(|date| {
+            codex_root
+                .join("sessions")
+                .join(format!("{:04}", date.year()))
+                .join(format!("{:02}", date.month() as u8))
+                .join(format!("{:02}", date.day()))
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug)]

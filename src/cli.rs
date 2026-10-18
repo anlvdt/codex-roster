@@ -988,6 +988,18 @@ pub fn run() -> Result<()> {
             let output = match account_id {
                 Some(account_id) => app.delete(account_id)?,
                 None => {
+                    // Same contract as `activate`: a JSON caller must never end
+                    // up in the interactive menu, and a non-TTY must get an
+                    // actionable hint instead of dialoguer's opaque error
+                    // (review finding 5).
+                    if json {
+                        bail!(
+                            "--json requires ACCOUNT_ID; run `codex-roster list --json` to find ids"
+                        );
+                    }
+                    if !std::io::stdin().is_terminal() {
+                        bail!("ACCOUNT_ID is required when stdin is not a terminal");
+                    }
                     let _ = app.interactive(InteractiveMode::DeleteOnce, false)?;
                     return Ok(());
                 }
@@ -1453,7 +1465,12 @@ pub fn run() -> Result<()> {
         Some(Command::Schema { command, json }) => {
             let schema = schema_document(command.as_deref());
             if json {
-                print_json(&schema)?;
+                // Wrapped in an object so `print_json` can attach
+                // `contract_version`; a bare string could not (review finding 4).
+                print_json(&serde_json::json!({
+                    "command": command,
+                    "document": schema,
+                }))?;
             } else {
                 println!("{schema}");
             }
@@ -1873,7 +1890,9 @@ Exit codes: 0 ok, 2 usage, 3 login/blocked, 4 lock timeout, 5 no account, 6 netw
                 "add-account-status" => "active, auth_changed, state, codex_root, hint",
                 "open-ai-status" => "indicator, description, updated_at, codex_components[]",
                 "auto-start-usage-windows" => "enabled, poll_seconds",
-                "auto-resume-session" => "enabled, pending?, hint?",
+                "auto-resume-session" => {
+                    "enabled (--continue-interrupted returns a SessionResumeHint: enabled, account_id, session_id, cwd, additional_sessions[])"
+                }
                 "doctor" => "version, checks[] (id, status, detail, hint?)",
                 "token-usage" => "totals, by_day, by_project",
                 "quota-history" => "account_id, samples[] (minute, five_remaining, week_remaining)",

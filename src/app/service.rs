@@ -254,12 +254,15 @@ where
         // failed (for example an expired access token, which Roster deliberately
         // does not refresh) or the cached windows already reset. Say so instead
         // of claiming the active account has quota (audit S2).
-        if !has_usable_credits(active.usage.as_ref())
+        if !has_usable_credits(active.usage.as_ref(), now)
             && !has_current_five_hour_window(active.usage.as_ref(), now)
         {
             let mut output = auto_switch_output(
                 enabled,
-                "active_has_quota",
+                // A distinct status: `active_has_quota` made the app treat an
+                // unknown-quota poll as a *recovery* and resume interrupted turns
+                // on an account that may still be exhausted (review finding 1).
+                "usage_unknown",
                 Some(active.id),
                 None,
                 None,
@@ -1700,6 +1703,12 @@ where
 
     pub fn delete(&self, account_id: Uuid) -> Result<DeleteOutput> {
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
+        // Deleting the live account would remove the only rollback snapshot for
+        // the session currently in ~/.codex. The app blocks this in the UI; the
+        // CLI must refuse it too (review finding 6).
+        if self.live_saved_account_id()? == Some(account_id) {
+            anyhow::bail!("refusing to delete the active account; switch to another account first");
+        }
         self.repository
             .delete_snapshot(&self.env.kind, account_id)?;
         Ok(DeleteOutput {
@@ -1805,7 +1814,7 @@ fn window_is_current(window: &UsageWindowView, now: OffsetDateTime) -> bool {
 }
 
 fn is_exhausted_for_switch(usage: Option<&AccountUsageView>, now: OffsetDateTime) -> bool {
-    if has_usable_credits(usage) {
+    if has_usable_credits(usage, now) {
         return false;
     }
     let Some(usage) = usage else {
@@ -1833,7 +1842,7 @@ fn has_current_five_hour_window(usage: Option<&AccountUsageView>, now: OffsetDat
 /// unless the account has usable credits. An unknown or expired 5h window is
 /// never eligible (audit Q3). Missing weekly still falls back to 5h-only.
 fn is_usable_for_switch(usage: Option<&AccountUsageView>, now: OffsetDateTime) -> bool {
-    if has_usable_credits(usage) {
+    if has_usable_credits(usage, now) {
         return true;
     }
     let Some(usage) = usage else {
@@ -1894,13 +1903,23 @@ fn fresh_usable_paid_cached_auto_switch_candidate(
     }) && is_eligible_auto_switch_candidate(candidate, active, settings, now, None)
 }
 
-fn has_usable_credits(usage: Option<&AccountUsageView>) -> bool {
-    usage
-        .and_then(|usage| usage.credits.as_ref())
-        .is_some_and(|credits| {
-            credits.unlimited
-                || (credits.has_credits && credit_balance_is_positive(&credits.balance))
-        })
+/// How long a credits payload stays usable evidence. Credits have no expiry
+/// field in the view, so the fetch age is the only bound we have.
+const CREDITS_FRESH_MINUTES: i64 = 30;
+
+/// True when the account has spendable credits **and** that observation is
+/// recent. Without the age gate a weeks-old `has_credits: true` would suppress
+/// auto-switch forever and make a dead account look usable (review finding 3).
+fn has_usable_credits(usage: Option<&AccountUsageView>, now: OffsetDateTime) -> bool {
+    let Some(usage) = usage else {
+        return false;
+    };
+    if now - usage.fetched_at > time::Duration::minutes(CREDITS_FRESH_MINUTES) {
+        return false;
+    }
+    usage.credits.as_ref().is_some_and(|credits| {
+        credits.unlimited || (credits.has_credits && credit_balance_is_positive(&credits.balance))
+    })
 }
 
 fn banked_reset_count(usage: Option<&AccountUsageView>, now: OffsetDateTime) -> i64 {
@@ -3003,6 +3022,70 @@ mod tests {
             auto_switch_proactive: true,
             ..crate::settings::AppSettings::default()
         }
+    }
+
+    fn credits_view(unlimited: bool, balance: &str) -> crate::model::CreditsView {
+        crate::model::CreditsView {
+            has_credits: true,
+            unlimited,
+            balance: balance.to_owned(),
+            credit_limit: None,
+        }
+    }
+
+    #[test]
+    fn delete_refuses_the_account_that_is_currently_live() {
+        let swap = auto_switch_swap_fixture();
+        let error = swap
+            .app
+            .delete(swap.active_id)
+            .expect_err("deleting the live account must be refused");
+        assert!(
+            format!("{error:#}").contains("active account"),
+            "unexpected error: {error:#}"
+        );
+        // A saved account that is not the live session is still deletable.
+        swap.app
+            .delete(swap.candidate_id)
+            .expect("a non-live account stays deletable");
+    }
+
+    #[test]
+    fn stale_credits_do_not_suppress_switching_forever() {
+        let now = OffsetDateTime::now_utc();
+        // Fresh credits with a positive balance make an exhausted account usable.
+        let fresh = usage_with(
+            Some(window_view(0, 1)),
+            Some(window_view(0, 48)),
+            Some(credits_view(false, "12.50")),
+            1,
+        );
+        assert!(has_usable_credits(Some(&fresh), now));
+        assert!(!is_exhausted_for_switch(Some(&fresh), now));
+
+        // The same payload a week later is not evidence any more (review
+        // finding 3: credits have no expiry field, so the fetch age bounds them).
+        let stale = usage_with(
+            Some(window_view(0, 1)),
+            Some(window_view(0, 48)),
+            Some(credits_view(false, "12.50")),
+            7 * 24 * 60,
+        );
+        assert!(!has_usable_credits(Some(&stale), now));
+        assert!(
+            is_exhausted_for_switch(Some(&stale), now),
+            "a stale credits payload must not keep an exhausted account switchable"
+        );
+        assert!(!is_usable_for_switch(Some(&stale), now));
+    }
+
+    #[test]
+    fn unlimited_credits_also_expire_with_the_observation() {
+        let now = OffsetDateTime::now_utc();
+        let fresh = usage_with(None, None, Some(credits_view(true, "0")), 2);
+        assert!(has_usable_credits(Some(&fresh), now));
+        let stale = usage_with(None, None, Some(credits_view(true, "0")), 120);
+        assert!(!has_usable_credits(Some(&stale), now));
     }
 
     #[test]

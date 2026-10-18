@@ -122,9 +122,11 @@ enum RosterListFilter: Equatable {
         case .archived:
             return account.archived
         case .triage(let bucket):
-            return account.triage == bucket
+            // Archived rows must not reappear under Ready/Needs-action and must
+            // not inflate those counters (review finding 10).
+            return !account.archived && account.triage == bucket
         case .deferredUnverified:
-            return account.hasDeferredAccessTokenRefresh
+            return !account.archived && account.hasDeferredAccessTokenRefresh
         }
     }
 }
@@ -332,6 +334,9 @@ final class AccountStore: ObservableObject {
     /// "no saved accounts" empty state while the first load is still in flight
     /// (audit FLOW-8).
     @Published private(set) var hasLoadedAccounts = false
+    /// True when the first roster load failed. The deck shows a retry row
+    /// instead of an endless "loading" spinner (review finding 9).
+    @Published private(set) var didFailInitialLoad = false
     /// Non-fatal warnings reported by `status --json`.
     @Published private(set) var statusWarnings: [String] = []
     @Published private(set) var lastQuotaRefreshAt: Date?
@@ -573,6 +578,9 @@ final class AccountStore: ObservableObject {
                 try await self.load()
             } catch {
                 self.errorMessage = error.localizedDescription
+                if !self.hasLoadedAccounts {
+                    self.didFailInitialLoad = true
+                }
             }
         }
     }
@@ -2638,6 +2646,7 @@ final class AccountStore: ObservableObject {
         )
         applyRoster(status: loadedStatus, accounts: loadedAccounts.accounts)
         hasLoadedAccounts = true
+        didFailInitialLoad = false
         let pendingLegacyArchives = legacyArchivedAccountIDs.intersection(Set(loadedAccounts.accounts.map(\.id)))
         if !pendingLegacyArchives.isEmpty {
             for accountID in pendingLegacyArchives {
@@ -2708,6 +2717,13 @@ final class AccountStore: ObservableObject {
                 } else {
                     logSessionResume("active_has_quota without recovery pending — skip auto-resume decide=\(decideMs)ms")
                 }
+            case "usage_unknown":
+                // Quota is unknown (probe failed or the cached window already
+                // expired). Never treat this as a recovery: no "quota recovered"
+                // notification and no resuming interrupted turns. Recovery flags
+                // stay set so a genuine later recovery still fires.
+                autoSwitchState = nil
+                logSessionResume("decide status=usage_unknown — quota unknown, recovery still pending")
             case "waiting_for_login":
                 autoSwitchState = .waitingForLogin
             case "all_accounts_exhausted":
@@ -5412,6 +5428,8 @@ struct AutoSwitchOutput: Decodable {
     let detail: String?
     let bankedResetCount: Int?
     let sessionResume: SessionResumeHint?
+    /// True when the CLI could not establish the active account's quota.
+    let usageUnknown: Bool?
 }
 
 enum AIProvider: String, CaseIterable, Identifiable, Decodable {

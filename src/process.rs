@@ -44,7 +44,12 @@ pub fn detect_running_codex_processes() -> Vec<RunningCodexProcess> {
         .iter()
         .filter_map(|(pid, process)| {
             let pid_u32 = pid.as_u32();
-            if pid_u32 == current_pid || is_ancestor_of(&system, current_pid, pid_u32) {
+            // Only this process is skipped. An ancestor `codex` session is a real
+            // holder: when an agent shell tool runs `codex-roster activate`, the
+            // live CLI is our parent and must still block the switch (review
+            // finding 2). Roster's own binaries are excluded by name in
+            // `matches_codex_process`.
+            if !should_examine_process(current_pid, pid_u32) {
                 return None;
             }
             let name = process.name().to_string_lossy().to_ascii_lowercase();
@@ -447,28 +452,14 @@ fn is_codex_bin_name(name: &str) -> bool {
     name == "codex" || name == "codex.exe" || name.starts_with("codex helper")
 }
 
-fn is_ancestor_of(system: &System, descendant: u32, ancestor: u32) -> bool {
-    if descendant == ancestor {
-        return true;
-    }
-    let mut walk = descendant;
-    for _ in 0..32 {
-        let Some(process) = system.process(Pid::from_u32(walk)) else {
-            return false;
-        };
-        let Some(parent) = process.parent() else {
-            return false;
-        };
-        let parent = parent.as_u32();
-        if parent == 0 || parent == walk {
-            return false;
-        }
-        if parent == ancestor {
-            return true;
-        }
-        walk = parent;
-    }
-    false
+/// True when a process should be examined for blocking activation.
+///
+/// Deliberately only excludes the roster process itself: an ancestor `codex`
+/// session holds `~/.codex/auth.json` just like any other, and skipping
+/// ancestors let an agent-driven `codex-roster activate` rotate the credential
+/// underneath a live session (review finding 2).
+fn should_examine_process(current_pid: u32, candidate_pid: u32) -> bool {
+    candidate_pid != current_pid
 }
 
 fn format_process(pid: Pid, name: &str, command: &[String]) -> RunningCodexProcess {
@@ -728,7 +719,7 @@ mod tests {
     use super::{
         classify_process, clean_token, detect_flag_value, format_process_table,
         is_desktop_like_process, is_desktop_owned_command, is_force_skippable_process,
-        matches_codex_process, truncate_summary,
+        matches_codex_process, should_examine_process, truncate_summary,
     };
     use crate::model::RunningCodexProcess;
 
@@ -876,6 +867,15 @@ mod tests {
                 "codex".to_owned()
             ]
         ));
+    }
+
+    #[test]
+    fn ancestor_codex_sessions_are_still_examined() {
+        // The roster's own pid is skipped; every other pid is examined, even a
+        // parent that happens to be the live Codex CLI.
+        assert!(!should_examine_process(4242, 4242));
+        assert!(should_examine_process(4242, 1));
+        assert!(should_examine_process(4242, 99));
     }
 
     #[test]

@@ -991,12 +991,24 @@ struct PrismQuickSwitchDeck: View {
 
             if filteredAccounts.isEmpty && !store.hasLoadedAccounts {
                 // First load in flight: show a loading row instead of claiming the
-                // roster is empty (audit FLOW-8).
+                // roster is empty (audit FLOW-8). If that load already failed,
+                // offer a retry instead of spinning forever (review finding 9).
                 HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(language.text("Đang tải danh sách tài khoản…", "Loading saved accounts…"))
-                        .font(PrismTheme.fontCaption)
-                        .foregroundStyle(PrismTheme.labelSecondary)
+                    if store.didFailInitialLoad {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(PrismTheme.statusWarn)
+                        Text(language.text("Không tải được danh sách tài khoản.", "Could not load saved accounts."))
+                            .font(PrismTheme.fontCaption)
+                            .foregroundStyle(PrismTheme.labelSecondary)
+                        Spacer(minLength: 8)
+                        Button(language.text("Thử lại", "Retry")) { store.refresh() }
+                            .controlSize(.small)
+                    } else {
+                        ProgressView().controlSize(.small)
+                        Text(language.text("Đang tải danh sách tài khoản…", "Loading saved accounts…"))
+                            .font(PrismTheme.fontCaption)
+                            .foregroundStyle(PrismTheme.labelSecondary)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 12)

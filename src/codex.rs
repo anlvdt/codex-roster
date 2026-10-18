@@ -860,7 +860,10 @@ pub fn set_configured_model(codex_root: &Path, new_model: &str) -> Result<()> {
     };
     let _: ModelConfig =
         toml::from_str(&result).context("updated Codex model config is invalid")?;
-    fs::write(&config_path, result)
+    // A truncated config.toml stops the Codex CLI from starting, so this write
+    // goes through the same atomic+fsync path as every other metadata writer
+    // (review finding 13).
+    crate::file_store::atomic_write(&config_path, result.as_bytes(), 0o600)
         .with_context(|| format!("failed to write {}", config_path.display()))?;
     Ok(())
 }

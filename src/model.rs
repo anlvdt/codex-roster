@@ -236,8 +236,13 @@ pub struct AccountView {
     pub plan_label: Option<String>,
     pub environment: EnvironmentKind,
     pub is_active: bool,
+    /// CLI JSON only: RFC3339 strings instead of the legacy 9-integer array.
+    /// Storage keeps the array form (`SavedAccountMetadata` is untouched).
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_activated_at: Option<OffsetDateTime>,
     pub archived: bool,
     pub usage: Option<AccountUsageView>,
@@ -390,6 +395,22 @@ pub struct RunningCodexProcess {
     /// "desktop" (ChatGPT/Codex.app/plugin) or "cli". Optional for older tests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DoctorCheck {
+    pub id: String,
+    /// `ok` | `warn` | `fail`
+    pub status: String,
+    pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DoctorOutput {
+    pub version: String,
+    pub checks: Vec<DoctorCheck>,
 }
 
 #[derive(Clone, Debug, Serialize)]

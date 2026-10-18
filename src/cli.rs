@@ -258,6 +258,19 @@ enum Command {
         #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    /// Report local diagnostics (paths, keys, locks, ports) for support.
+    Doctor {
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+        #[arg(long, help = "Write a redacted report to doctor-report.txt")]
+        bundle: bool,
+    },
+    /// Describe the `--json` contract, optionally for one command.
+    Schema {
+        command: Option<String>,
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+    },
     /// Set or clear the custom label of a saved account.
     SetLabel {
         account_id: Uuid,
@@ -395,6 +408,73 @@ enum ProviderCommand {
         #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+}
+
+/// Version of the `--json` contract. Additive: new fields may appear, existing
+/// keys and their meaning do not change without a bump (audit E1).
+pub const CONTRACT_VERSION: u32 = 1;
+
+/// Map an error to a stable exit code and machine-readable kind, so scripts can
+/// branch on the failure class instead of parsing prose (audit OUT-03).
+pub fn classify_error(error: &anyhow::Error) -> (u8, &'static str, Option<String>) {
+    let message = format!("{error:#}");
+    let lowered = message.to_ascii_lowercase();
+    if lowered.contains("requires account_id")
+        || lowered.contains("is required when stdin")
+        || lowered.contains("no command given and stdin is not a terminal")
+        || lowered.contains("unknown command")
+    {
+        return (2, "usage", None);
+    }
+    if lowered.contains("login") && lowered.contains("required") {
+        return (
+            3,
+            "login_required",
+            Some("Run `codex login` and retry.".to_owned()),
+        );
+    }
+    if lowered.contains("keychain")
+        || lowered.contains("credential store")
+        || lowered.contains("decrypt")
+    {
+        return (
+            7,
+            "keychain",
+            Some("Unlock the login keychain or restore the missing key.".to_owned()),
+        );
+    }
+    if lowered.contains("lock") && (lowered.contains("timed out") || lowered.contains("timeout")) {
+        return (
+            4,
+            "lock_timeout",
+            Some("Another Roster process holds the lock; retry shortly.".to_owned()),
+        );
+    }
+    if lowered.contains("no active account") || lowered.contains("no saved account") {
+        return (
+            5,
+            "no_account",
+            Some("Run `codex-roster list` and pick an account id.".to_owned()),
+        );
+    }
+    if lowered.contains("http")
+        || lowered.contains("contact")
+        || lowered.contains("usage request failed")
+        || lowered.contains("network")
+    {
+        return (
+            6,
+            "network",
+            Some("Check connectivity and retry.".to_owned()),
+        );
+    }
+    if lowered.contains("activation_blocked_by_cli") {
+        return (3, "activation_blocked_by_cli", None);
+    }
+    if lowered.contains("activation_blocked_by_desktop") {
+        return (3, "activation_blocked_by_desktop", None);
+    }
+    (1, "error", None)
 }
 
 pub fn run() -> Result<()> {
@@ -1179,6 +1259,55 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::Doctor { json, bundle }) => {
+            let output = collect_doctor_output(&app)?;
+            if bundle {
+                let path = std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join("doctor-report.txt");
+                let mut text = String::new();
+                text.push_str(&format!("codex-roster {}\n", output.version));
+                for check in &output.checks {
+                    text.push_str(&format!(
+                        "[{}] {}: {}{}\n",
+                        check.status,
+                        check.id,
+                        check.detail,
+                        check
+                            .hint
+                            .as_deref()
+                            .map(|hint| format!(" (hint: {hint})"))
+                            .unwrap_or_default()
+                    ));
+                }
+                std::fs::write(&path, text)
+                    .with_context(|| format!("failed to write {}", path.display()))?;
+                if !json {
+                    println!("Wrote {}", path.display());
+                }
+            }
+            if json {
+                print_json(&output)?;
+            } else {
+                println!("codex-roster {}", output.version);
+                for check in &output.checks {
+                    println!("  [{:>4}] {:<16} {}", check.status, check.id, check.detail);
+                    if let Some(hint) = &check.hint {
+                        println!("         hint: {hint}");
+                    }
+                }
+            }
+            Ok(())
+        }
+        Some(Command::Schema { command, json }) => {
+            let schema = schema_document(command.as_deref());
+            if json {
+                print_json(&schema)?;
+            } else {
+                println!("{schema}");
+            }
+            Ok(())
+        }
         Some(Command::SetLabel {
             account_id,
             label,
@@ -1215,6 +1344,227 @@ fn backup_password(password_stdin: bool) -> Result<String> {
     }
 }
 
+/// Collect local diagnostics. Never prints secrets: key files are reported by
+/// count and mode only, and no account emails are included (audit E1/O2).
+fn collect_doctor_output<S>(app: &App<S>) -> Result<crate::model::DoctorOutput>
+where
+    S: crate::secrets::SecretStore,
+{
+    use crate::model::DoctorCheck;
+    let mut checks = Vec::new();
+    let env = app.env();
+
+    checks.push(DoctorCheck {
+        id: "version".to_owned(),
+        status: "ok".to_owned(),
+        detail: format!(
+            "codex-roster {} (json contract {})",
+            env!("CARGO_PKG_VERSION"),
+            CONTRACT_VERSION
+        ),
+        hint: None,
+    });
+
+    let data_dir = env.app_data_dir.clone();
+    let data_status = if data_dir.is_dir() { "ok" } else { "warn" };
+    checks.push(DoctorCheck {
+        id: "app_data".to_owned(),
+        status: data_status.to_owned(),
+        detail: format!("{} ({})", data_dir.display(), data_status),
+        hint: (data_status == "warn").then(|| "It is created on first save.".to_owned()),
+    });
+
+    let keys_dir = data_dir.join("keys");
+    let mut key_count = 0usize;
+    let mut loose_modes = 0usize;
+    if let Ok(entries) = std::fs::read_dir(&keys_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.ends_with(".key") {
+                continue;
+            }
+            key_count += 1;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(metadata) = entry.metadata()
+                    && metadata.permissions().mode() & 0o777 != 0o600
+                {
+                    loose_modes += 1;
+                }
+            }
+        }
+    }
+    let key_status = if loose_modes > 0 { "fail" } else { "ok" };
+    checks.push(DoctorCheck {
+        id: "keys".to_owned(),
+        status: key_status.to_owned(),
+        detail: format!("{key_count} key file(s), {loose_modes} with loose permissions"),
+        hint: (loose_modes > 0).then(|| {
+            "Run `chmod 600` on the key files; a same-user process could read them.".to_owned()
+        }),
+    });
+
+    for (id, file_name) in [
+        ("lock_operation", ".operation.lock"),
+        ("lock_auth", ".auth-operation.lock"),
+        ("lock_auto_switch", ".auto-switch.lock"),
+    ] {
+        let path = data_dir.join(file_name);
+        let (status, detail) = match std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+        {
+            Ok(file) => match fs2::FileExt::try_lock_exclusive(&file) {
+                Ok(()) => {
+                    let _ = fs2::FileExt::unlock(&file);
+                    ("ok", "free".to_owned())
+                }
+                Err(_) => ("warn", "held by another process".to_owned()),
+            },
+            Err(error) => ("warn", format!("unreadable: {error}")),
+        };
+        checks.push(DoctorCheck {
+            id: id.to_owned(),
+            status: status.to_owned(),
+            detail,
+            hint: None,
+        });
+    }
+
+    let auth_path = env.codex_root.join("auth.json");
+    let auth_status = if auth_path.is_file() { "ok" } else { "warn" };
+    checks.push(DoctorCheck {
+        id: "codex_auth".to_owned(),
+        status: auth_status.to_owned(),
+        detail: if auth_path.is_file() {
+            "~/.codex/auth.json present".to_owned()
+        } else {
+            "~/.codex/auth.json missing (not signed in?)".to_owned()
+        },
+        hint: None,
+    });
+
+    let mut leftover_dirs = 0usize;
+    if let Ok(entries) = std::fs::read_dir(&env.codex_root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(".cas-backup-") || name.starts_with(".cas-restore-") {
+                leftover_dirs += 1;
+            }
+        }
+    }
+    checks.push(DoctorCheck {
+        id: "leftover_recovery".to_owned(),
+        status: if leftover_dirs > 0 { "warn" } else { "ok" }.to_owned(),
+        detail: format!("{leftover_dirs} staged auth recovery dir(s)"),
+        hint: (leftover_dirs > 0)
+            .then(|| "Safe to delete once no switch is in progress.".to_owned()),
+    });
+
+    for port in [1455u16, 1457u16] {
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let busy =
+            std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(200))
+                .is_ok();
+        checks.push(DoctorCheck {
+            id: format!("port_{port}"),
+            status: if busy { "warn" } else { "ok" }.to_owned(),
+            detail: if busy { "in use" } else { "free" }.to_owned(),
+            hint: busy.then(|| {
+                "ChatGPT Desktop usually holds the Codex OAuth callback ports.".to_owned()
+            }),
+        });
+    }
+
+    let list = app.list()?;
+    let archived = list
+        .accounts
+        .iter()
+        .filter(|account| account.archived)
+        .count();
+    checks.push(DoctorCheck {
+        id: "accounts".to_owned(),
+        status: "ok".to_owned(),
+        detail: format!("{} saved, {archived} archived", list.accounts.len()),
+        hint: None,
+    });
+
+    let newest_cache = list
+        .accounts
+        .iter()
+        .filter_map(|account| account.usage.as_ref().map(|usage| usage.fetched_at))
+        .max();
+    checks.push(DoctorCheck {
+        id: "usage_cache".to_owned(),
+        status: "ok".to_owned(),
+        detail: match newest_cache {
+            Some(fetched_at) => {
+                let age = time::OffsetDateTime::now_utc() - fetched_at;
+                format!(
+                    "newest cached usage {} minute(s) old",
+                    age.whole_minutes().max(0)
+                )
+            }
+            None => "no cached usage".to_owned(),
+        },
+        hint: None,
+    });
+
+    checks.push(DoctorCheck {
+        id: "add_account_session".to_owned(),
+        status: "ok".to_owned(),
+        detail: if crate::codex::add_account_session_active(env) {
+            "pending add-account session".to_owned()
+        } else {
+            "none".to_owned()
+        },
+        hint: None,
+    });
+
+    Ok(crate::model::DoctorOutput {
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        checks,
+    })
+}
+
+/// Static description of the JSON contract. Kept in code so `schema` can never
+/// drift from the version constant it reports.
+fn schema_document(command: Option<&str>) -> String {
+    let envelope = "Every --json output includes \"contract_version\": 1 (additive).\n\
+View timestamps are RFC3339 strings; stored metadata keeps the legacy array form.\n\
+Errors print {\"contract_version\":1,\"error\":{\"code\",\"message\",\"hint\"}} to stdout.\n\
+Exit codes: 0 ok, 2 usage, 3 login/blocked, 4 lock timeout, 5 no account, 6 network, 7 keychain, 8 unsupported.";
+    match command {
+        None => format!(
+            "{envelope}\n\nCommands with typed JSON output: status, list, usage, refresh-usage, activate, delete, archive, export, import, restore-full-backup, auto-switch, auto-start-usage-windows, auto-resume-session, token-usage, quota-history, reset-outlook, doctor."
+        ),
+        Some(name) => {
+            let fields = match name {
+                "status" => {
+                    "environment, codex_root, current_account, current_account_saved_id, saved_accounts, process_warnings, vibe_usage?, codex_model?, activity?"
+                }
+                "list" => {
+                    "environment, accounts[] (id, email, plan_label, is_active, created_at, updated_at, usage, archived)"
+                }
+                "usage" => "account, usage (five_hour, weekly, credits, banked_resets, plan_label)",
+                "auto-switch" => {
+                    "enabled, status, active_account_id, candidate_account_id, candidate_display_name, detail, banked_reset_count, session_resume?, usage_unknown, warnings[]"
+                }
+                "doctor" => "version, checks[] (id, status, detail, hint?)",
+                "token-usage" => "totals, by_day, by_project",
+                "quota-history" => "account_id, samples[] (minute, five_remaining, week_remaining)",
+                _ => {
+                    "unknown command; run `codex-roster schema` for the envelope and supported commands"
+                }
+            };
+            format!("{envelope}\n\n{name}: {fields}")
+        }
+    }
+}
+
 fn run_interactive_app<S>(app: &App<S>) -> Result<()>
 where
     S: crate::secrets::SecretStore,
@@ -1240,6 +1590,24 @@ where
 }
 
 fn print_json<T>(value: &T) -> Result<()>
+where
+    T: serde::Serialize,
+{
+    // Every `--json` path goes through here, so the contract version is added
+    // once instead of on each of the 30+ output types.
+    let mut value = serde_json::to_value(value)?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "contract_version".to_owned(),
+            serde_json::Value::from(CONTRACT_VERSION),
+        );
+    }
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn print_json_unversioned<T>(value: &T) -> Result<()>
 where
     T: serde::Serialize,
 {
@@ -1684,5 +2052,47 @@ mod codex_only_cli_tests {
     fn default_cli_exposes_codex_without_external_provider_actions() {
         assert!(Cli::try_parse_from(["codex-roster", "list", "--json"]).is_ok());
         assert!(Cli::try_parse_from(["codex-roster", "providers", "status"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CONTRACT_VERSION, classify_error, schema_document};
+    use anyhow::anyhow;
+
+    #[test]
+    fn classify_error_maps_known_failures_to_exit_codes() {
+        assert_eq!(
+            classify_error(&anyhow!("--json requires ACCOUNT_ID; run list")).0,
+            2
+        );
+        assert_eq!(
+            classify_error(&anyhow!("login required for this account")).0,
+            3
+        );
+        assert_eq!(
+            classify_error(&anyhow!("timed out locking .operation.lock")).0,
+            4
+        );
+        assert_eq!(classify_error(&anyhow!("no saved account matches")).0, 5);
+        assert_eq!(
+            classify_error(&anyhow!("failed to contact OpenAI Status")).0,
+            6
+        );
+        assert_eq!(classify_error(&anyhow!("the keychain key is missing")).0, 7);
+        let (code, kind, _) = classify_error(&anyhow!("something unexpected"));
+        assert_eq!((code, kind), (1, "error"));
+    }
+
+    #[test]
+    fn schema_document_describes_the_contract() {
+        let envelope = schema_document(None);
+        assert!(envelope.contains("contract_version"));
+        assert!(envelope.contains("Exit codes"));
+        let status = schema_document(Some("status"));
+        assert!(status.contains("process_warnings"));
+        // The version is a compile-time constant; assert it in a const block so
+        // the check cannot be optimized away or flagged as a runtime assertion.
+        const { assert!(CONTRACT_VERSION >= 1) };
     }
 }

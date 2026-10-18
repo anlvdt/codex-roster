@@ -16,8 +16,12 @@ Nhánh: `main`. Chưa push `origin`. Chưa xoá dữ liệu người dùng.
 | **Storage bền vững (A2)** | `atomic_write` (temp `create_new` + mode + `sync_all` + rename + fsync dir) và `write_private_durable`; metadata + account-list backup ghi 0600 atomic; pending 0600; quota-history có lock riêng, temp unique, **không ghi khi đọc**; reset-tracker ghi atomic + sort theo thời điểm đã parse (không theo chuỗi RFC3339); credential `auth.json`/`cap_sid` `sync_all` trước rename; body feed công khai cap 2 MiB | `46c978e` | 4 test `file_store` (mode/không rác temp), 2 test `quota_history`, test `announcements_sort_by_instant_not_string` |
 | **Build/CI (C)** | `[profile.release]` LTO + `strip` + `codegen-units=1`; CI `permissions: contents: read`, `timeout-minutes`, `--locked`, 4 Actions **pin SHA**; `release.yml` mới (universal build, fail-closed nếu tag thiếu secret ký/notarize, SHA256SUMS, upload asset); build script hỗ trợ `UNIVERSAL=1` + `lipo -info`; `clean-local-artifacts.sh`; bỏ nhánh Windows chết trong `build.rs` | `57d72f6` | CLI **8,59 MB → 6,90 MB**, bundle **16 M → 14 M**; `bash scripts/build-macos-app.sh` chạy thật thành công; YAML parse ok |
 | **CLI discoverability (A3)** | Mô tả cho **toàn bộ 33 lệnh** (trước 22 lệnh trống), help cho `--json/--force/--restore/--password-stdin`, `after_help` có ví dụ, ẩn 2 lệnh deprecated khỏi help | `77a3c6f` | `--help` kiểm tra tự động: **0 lệnh thiếu mô tả**; 2 lệnh deprecated không còn hiện |
+| **macOS UX (B, phần 1)** | **Menu-bar item** `CR` với menu Mở notch / Console / Cài đặt / Giới thiệu / Thoát (trước đây notch là cửa duy nhất); `⌘,` mở Settings + About trong app menu; xoá tài khoản có **hộp thoại xác nhận** nêu email + chặn xoá tài khoản đang dùng (cả UI lẫn store) | `cb97241` | `swift build` pass |
+| **macOS UX (B, phần 2)** | Hover mở notch **không còn cướp focus** (bỏ `activate(ignoringOtherApps:)` ở đường hover; click/hotkey vẫn activate); `PassiveRefreshGate` (trước là dead code) nay gom refresh công khai khi mở notch/Operations vào cooldown 60s | `7e2c40e` | `swift build` pass |
 
 **Gate hiện tại:** `cargo fmt --check` pass · `cargo clippy --all-targets -- -D warnings` pass · **421 test pass, 0 fail, 1 ignored** · `swift build --package-path macos/NextAccount` pass · `scripts/build-macos-app.sh` pass.
+
+**Orca:** Codex đã chạy lại được (model `GPT-5.6-Terra`, còn ~2% hạn mức tháng) — task **D (docs truth-up)** đang chạy tại worktree `fix-audit-docs` (dispatch `ctx_766e394f275e`). Các provider khác vẫn cạn (Claude 22/10, Cursor 11/12/2026, OpenCode/Muse sai model).
 
 ## 2. Còn lại (theo thứ tự ưu tiên)
 
@@ -26,7 +30,7 @@ Nhánh: `main`. Chưa push `origin`. Chưa xoá dữ liệu người dùng.
 | 1 | A1: scheduler `next_probe_at` trong `auto_switch_monitor` | Phần còn lại của Q2 (đã fail-closed theo `reset_at`, chưa tối ưu nhịp poll) |
 | 2 | A2 phần còn lại: đưa cảnh báo backup vào JSON `warnings[]`, cap `preserved-metadata-*`, dọn `.cas-backup-*` cũ, cap config VibeCafe | Phần lõi đã xong |
 | 3 | A3 phần còn lại: `list` human (label/archived/local reset + `--all`), TUI search/Home/End/PgUp, `add-account-status` chi tiết | Help + safety đã xong |
-| 4 | B phần còn lại: menu-bar item, `⌘,`, delete confirm/undo, Light Mode token, a11y, freshness chip, `PassiveRefreshGate`, update badge | Chỉ mới xong phần lỗi guard |
+| 4 | B phần còn lại: Light Mode token (VIS-1), a11y label/toggle/reduce-motion, freshness chip (QTA-1), notification loop 15s, archived filter, update badge | Đã xong menu-bar/`⌘,`/xoá/hover/passive refresh |
 | 5 | E1: contract v2 (`contract_version`, RFC3339, error envelope, exit code) + `doctor` | Chưa bắt đầu |
 | 6 | E2: forecast EWMA, scoring v2 một nguồn, switch saga, harness tuning | Chưa bắt đầu |
 | 7 | D: README/CHANGELOG/PR_DESCRIPTION truth-up + archive docs cũ | Chưa bắt đầu |

@@ -332,6 +332,32 @@ pub struct AccountView {
 }
 
 /// One account proposed for removal by `dead-accounts`.
+impl AccountUsageView {
+    /// Short label for the API's *primary* rate-limit window. It is a 5-hour
+    /// window on Plus/Pro, but Free/Go plans have no weekly limit and only a
+    /// monthly one, so calling that window "5h" was wrong.
+    pub fn primary_window_label(&self) -> &'static str {
+        if let Some(kind) = self.primary_window_kind.as_deref() {
+            return match kind {
+                "monthly" => "monthly",
+                "weekly" => "weekly",
+                _ => "5h",
+            };
+        }
+        // Caches written before this field existed carry no kind, so derive it
+        // from the window's own span instead of mislabelling it "5h".
+        match self.five_hour.as_ref() {
+            Some(window) if window.reset_at - self.fetched_at > time::Duration::days(8) => {
+                "monthly"
+            }
+            Some(window) if window.reset_at - self.fetched_at > time::Duration::hours(6) => {
+                "weekly"
+            }
+            _ => "5h",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct DeadAccountEntry {
     pub account_id: Uuid,
@@ -679,6 +705,12 @@ pub struct AccountUsageView {
     /// GPT-5.6 Luna reserve pool after primary model exhaustion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub luna_reserve: Option<LunaReserveView>,
+    /// What the API's *primary* rate-limit window actually is, derived from its
+    /// span: `five_hour`, `weekly` or `monthly`. Plus/Pro expose a 5-hour window;
+    /// Free/Go have no weekly limit and only a monthly one, so labelling their
+    /// window "5h" was wrong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_window_kind: Option<String>,
     /// Whether the 5-hour window was present and parsable in the source payload.
     /// Missing fields deserialize as false so old caches force a refetch.
     #[serde(default)]

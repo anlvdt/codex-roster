@@ -2892,6 +2892,7 @@ mod tests {
         // Fresh cached quota would normally skip, but the regression forced a
         // reprove for deferred accounts even then — ensure that path is gone.
         let fresh_usage = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: OffsetDateTime::now_utc(),
             five_hour: Some(UsageWindowView {
@@ -3005,6 +3006,7 @@ mod tests {
         fetched_minutes_ago: i64,
     ) -> AccountUsageView {
         AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::LiveAccessToken,
             fetched_at: OffsetDateTime::now_utc() - time::Duration::minutes(fetched_minutes_ago),
             five_hour_known: five.is_some(),
@@ -3082,6 +3084,7 @@ mod tests {
     #[test]
     fn auto_switch_requires_every_reported_window_to_be_usable() {
         let usage = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: OffsetDateTime::now_utc(),
             five_hour: Some(UsageWindowView {
@@ -3112,6 +3115,7 @@ mod tests {
     fn auto_switch_weekly_depleted_blocks_leftover_five_hour() {
         let now = OffsetDateTime::now_utc();
         let weekly_dead = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(UsageWindowView {
@@ -3683,6 +3687,7 @@ mod tests {
     fn auto_switch_uses_usage_plan_not_stale_roster_label() {
         let now = OffsetDateTime::now_utc();
         let usage = |plan: Option<&str>| AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(UsageWindowView {
@@ -3750,6 +3755,7 @@ mod tests {
     fn auto_switch_treats_credits_as_remaining_quota() {
         let now = OffsetDateTime::now_utc();
         let usage = |remaining: u8, credits: Option<crate::model::CreditsView>| AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(UsageWindowView {
@@ -3820,6 +3826,7 @@ mod tests {
         // another request.
         let now = OffsetDateTime::now_utc();
         let depleted = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(UsageWindowView {
@@ -3856,6 +3863,7 @@ mod tests {
     fn auto_switch_reports_banked_resets_without_treating_them_as_spendable_quota() {
         let now = OffsetDateTime::now_utc();
         let usage = |plan: &str, reset_count: i64| AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(UsageWindowView {
@@ -3940,6 +3948,7 @@ mod tests {
             last_activated_at: None,
             archived: false,
             usage: Some(AccountUsageView {
+                primary_window_kind: None,
                 source: UsageSource::SavedAccessToken,
                 fetched_at: now,
                 five_hour: Some(window(remaining)),
@@ -3989,6 +3998,7 @@ mod tests {
             reset_at: now + time::Duration::hours(5),
         };
         let exhausted_usage = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(window(0)),
@@ -4055,6 +4065,7 @@ mod tests {
             reset_at: now + time::Duration::hours(5),
         };
         let recent_exhausted = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now - time::Duration::minutes(2),
             five_hour: Some(window(0)),
@@ -4072,6 +4083,7 @@ mod tests {
             ..recent_exhausted.clone()
         };
         let usable = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now - time::Duration::minutes(2),
             five_hour: Some(window(40)),
@@ -4112,6 +4124,7 @@ mod tests {
         let repo = SnapshotRepository::new(&env.app_data_dir, MemorySecretStore::default());
         let now = OffsetDateTime::now_utc();
         let exhausted_usage = |minutes_ago: i64| AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now - time::Duration::minutes(minutes_ago),
             five_hour: Some(UsageWindowView {
@@ -4321,6 +4334,7 @@ mod tests {
             plan_label: Some("Pro".to_owned()),
         };
         let exhausted_usage = |fetched_at: OffsetDateTime| AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::LiveAccessToken,
             fetched_at,
             five_hour: Some(UsageWindowView {
@@ -4700,6 +4714,7 @@ mod tests {
             reset_at: now + time::Duration::hours(5),
         };
         let usable = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(window(40)),
@@ -4736,6 +4751,7 @@ mod tests {
         active.is_active = true;
         active.usage_error = None;
         active.usage = Some(AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(window(0)),
@@ -4786,6 +4802,7 @@ mod tests {
             reset_at: now + time::Duration::hours(5),
         };
         let usable = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(window(40)),
@@ -4821,6 +4838,7 @@ mod tests {
         active.subject = Some("subject-active".to_owned());
         active.is_active = true;
         active.usage = Some(AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(window(0)),
@@ -4842,6 +4860,7 @@ mod tests {
         let mut free = candidate.clone();
         free.plan_label = Some("Free".to_owned());
         free.usage = Some(AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(window(40)),
@@ -4861,6 +4880,7 @@ mod tests {
         // Stale cache must fall through to a live AT probe.
         let mut stale = candidate.clone();
         stale.usage = Some(AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now - time::Duration::minutes(20),
             five_hour: Some(window(40)),
@@ -4902,6 +4922,7 @@ mod tests {
             last_activated_at: None,
             archived: false,
             usage: Some(AccountUsageView {
+                primary_window_kind: None,
                 source: UsageSource::SavedAccessToken,
                 fetched_at: now,
                 five_hour: Some(window(remaining)),
@@ -4981,6 +5002,7 @@ mod tests {
                 last_activated_at: None,
                 archived: false,
                 usage: Some(AccountUsageView {
+                    primary_window_kind: None,
                     source: UsageSource::SavedAccessToken,
                     fetched_at: now,
                     five_hour: Some(window(remaining)),
@@ -5108,6 +5130,7 @@ mod tests {
     fn cached_exhausted_usage_is_stale_once_the_window_resets() {
         let now = OffsetDateTime::now_utc();
         let usage = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(UsageWindowView {
@@ -5134,6 +5157,7 @@ mod tests {
         // exhausted window must be refetched, not trusted until its old reset_at.
         let now = OffsetDateTime::now_utc();
         let usage = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now,
             five_hour: Some(UsageWindowView {
@@ -5158,6 +5182,7 @@ mod tests {
     fn cached_usage_with_quota_stays_fresh_within_window() {
         let now = OffsetDateTime::now_utc();
         let usage = AccountUsageView {
+            primary_window_kind: None,
             source: UsageSource::SavedAccessToken,
             fetched_at: now - time::Duration::minutes(5),
             five_hour: Some(UsageWindowView {
@@ -5256,6 +5281,7 @@ mod tests {
                 files: vec![],
             },
             Some(AccountUsageView {
+                primary_window_kind: None,
                 source: UsageSource::SavedAccessToken,
                 fetched_at: OffsetDateTime::UNIX_EPOCH,
                 five_hour: None,
@@ -5321,6 +5347,7 @@ mod tests {
             &identity,
             &snapshot,
             Some(AccountUsageView {
+                primary_window_kind: None,
                 source: UsageSource::SavedAccessToken,
                 fetched_at: OffsetDateTime::UNIX_EPOCH,
                 five_hour: None,

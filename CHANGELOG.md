@@ -40,6 +40,7 @@ Per-item status and evidence: [IMPLEMENTATION-STATUS.md](docs/audit-2026-10-18/I
 
 ### Fixed
 
+- Free/Go accounts are no longer labelled "5h": their primary rate-limit window is monthly (they have no 7-day limit), so the CLI, TUI and deck label it `monthly`/`1M` and `primary_window_kind` records what the window really is. A missing 5h/7d window is never treated as evidence of a dead account.
 - Notch ears no longer clip their reset label ("Sun 6:00 A"): the label degrades through shorter forms (`Sun 6 PM`, then `Sun`) and the activity glyph only appears when something is actually running or waiting, so the fixed 146pt ear always fits.
 - The notch activity indicator no longer renders a literal `?` (which read as a broken glyph); it uses `bolt.fill` / `hourglass` with a VoiceOver label.
 - Activation-blocked errors are localized in the app with the blocking process list and a "Copy details" action, instead of showing raw CLI stderr.

@@ -482,6 +482,20 @@ impl UsageRateLimit {
     }
 }
 
+/// Classify a rate-limit window by how far its reset is: a 5-hour window resets
+/// within hours, a weekly one within a week, and a Free/Go monthly one is weeks
+/// out. Used for labels only — the quota math uses `reset_at` directly.
+pub fn primary_window_kind(window: &UsageWindowView, now: OffsetDateTime) -> &'static str {
+    let span = window.reset_at - now;
+    if span <= time::Duration::hours(6) {
+        "five_hour"
+    } else if span <= time::Duration::days(8) {
+        "weekly"
+    } else {
+        "monthly"
+    }
+}
+
 #[derive(Debug)]
 struct UsageWindow {
     used_percent: u8,
@@ -658,12 +672,18 @@ impl UsageResponse {
                     })
             });
         let credit_limit = self.individual_limit.as_ref().and_then(credit_limit_view);
-        let five_hour = self
+        let primary_window = self
             .rate_limit
             .as_ref()
             .and_then(|limits| limits.primary_window.as_ref())
             .map(window_view)
             .transpose()?;
+        // The payload calls this the "primary" window, but its length depends on
+        // the plan, so record what it really is instead of assuming 5 hours.
+        let primary_window_kind = primary_window
+            .as_ref()
+            .map(|window| primary_window_kind(window, now).to_owned());
+        let five_hour = primary_window;
         let weekly = self
             .rate_limit
             .as_ref()
@@ -674,6 +694,7 @@ impl UsageResponse {
         Ok(AccountUsageView {
             source,
             fetched_at: now,
+            primary_window_kind,
             five_hour_known: five_hour.is_some(),
             weekly_known: weekly.is_some(),
             five_hour,
@@ -1538,6 +1559,33 @@ mod tests {
         let resets = view.banked_resets.expect("banked reset summary");
         assert_eq!(resets.available_count, 3);
         assert!(resets.credits.is_none());
+    }
+
+    #[test]
+    fn a_monthly_primary_window_is_not_labelled_five_hour() {
+        let now = OffsetDateTime::now_utc();
+        let five = UsageWindowView {
+            used_percent: 0,
+            remaining_percent: 100,
+            reset_at: now + time::Duration::hours(4),
+        };
+        assert_eq!(super::primary_window_kind(&five, now), "five_hour");
+
+        // Free/Go: the primary window resets weeks out, so it is the monthly
+        // limit, not a 5-hour window (calling it "5h" was the bug).
+        let monthly = UsageWindowView {
+            used_percent: 100,
+            remaining_percent: 0,
+            reset_at: now + time::Duration::days(30),
+        };
+        assert_eq!(super::primary_window_kind(&monthly, now), "monthly");
+
+        let weekly = UsageWindowView {
+            used_percent: 10,
+            remaining_percent: 90,
+            reset_at: now + time::Duration::days(6),
+        };
+        assert_eq!(super::primary_window_kind(&weekly, now), "weekly");
     }
 
     #[test]

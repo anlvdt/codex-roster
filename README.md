@@ -130,7 +130,8 @@ codex-roster vibe-usage [init|sync|summary|status]
 codex-roster reset-outlook | reset-events | reset-timeline [--json]
 codex-roster open-ai-status [--json]
 codex-roster set-label ACCOUNT_ID [LABEL] [--json]
-codex-roster doctor [--json] [--bundle]
+codex-roster doctor
+codex-roster dead-accounts [--deep] [--stale-days N] [--json] [--json] [--bundle]
 codex-roster schema [COMMAND] [--json]
 ```
 

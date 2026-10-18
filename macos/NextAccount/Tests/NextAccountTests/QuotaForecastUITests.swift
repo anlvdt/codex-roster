@@ -125,3 +125,51 @@ import Testing
     let soonFull = ResetClockFormat.compact(soon, asClock: true, language: .english)
     #expect(soonMinimal.count <= soonFull.count)
 }
+
+/// Free/Go plans have no weekly limit and only a monthly one, so the primary
+/// window must not be labelled "5h" (the roster used to mislabel it).
+@Test func freeMonthlyPrimaryWindowIsLabelledMonthly() {
+    let fetched = RustDate(value: Date())
+    let monthly = UsageWindow(
+        remainingPercent: 0,
+        resetAt: RustDate(value: Date().addingTimeInterval(30 * 86_400))
+    )
+    let usage = AccountUsage(
+        fetchedAt: fetched,
+        fiveHour: monthly,
+        weekly: nil,
+        credits: nil,
+        bankedResets: nil,
+        subscriptionActiveUntil: nil,
+        lunaReserve: nil,
+        primaryWindowKind: nil   // older cache: derive it from the span
+    )
+    #expect(usage.primaryWindowLabel == "1M")
+
+    let fiveHourly = AccountUsage(
+        fetchedAt: fetched,
+        fiveHour: UsageWindow(
+            remainingPercent: 80,
+            resetAt: RustDate(value: Date().addingTimeInterval(4 * 3_600))
+        ),
+        weekly: nil,
+        credits: nil,
+        bankedResets: nil,
+        subscriptionActiveUntil: nil,
+        lunaReserve: nil,
+        primaryWindowKind: "five_hour"
+    )
+    #expect(fiveHourly.primaryWindowLabel == "5h")
+
+    let explicitMonthly = AccountUsage(
+        fetchedAt: fetched,
+        fiveHour: monthly,
+        weekly: nil,
+        credits: nil,
+        bankedResets: nil,
+        subscriptionActiveUntil: nil,
+        lunaReserve: nil,
+        primaryWindowKind: "monthly"
+    )
+    #expect(explicitMonthly.primaryWindowLabel == "1M")
+}

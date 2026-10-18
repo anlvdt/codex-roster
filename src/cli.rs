@@ -2078,7 +2078,7 @@ fn render_account_summary(account: &AccountView) -> String {
         let mut rendered_window = false;
         if let Some(usage) = &account.usage {
             for (label, window) in [
-                ("5h", usage.five_hour.as_ref()),
+                (usage.primary_window_label(), usage.five_hour.as_ref()),
                 ("weekly", usage.weekly.as_ref()),
             ] {
                 let Some(window) = window else { continue };
@@ -2528,6 +2528,7 @@ mod tests {
             last_activated_at: None,
             archived: false,
             usage: Some(crate::model::AccountUsageView {
+                primary_window_kind: None,
                 source: crate::model::UsageSource::LiveAccessToken,
                 fetched_at: now,
                 // 1% is the "exhausted" sentinel; the CLI must not print it raw
@@ -2577,6 +2578,7 @@ mod tests {
             last_activated_at: None,
             archived: true,
             usage: Some(crate::model::AccountUsageView {
+                primary_window_kind: None,
                 source: crate::model::UsageSource::LiveAccessToken,
                 fetched_at: now,
                 five_hour: Some(crate::model::UsageWindowView {

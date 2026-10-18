@@ -1273,7 +1273,9 @@ private struct PrismCompactAccountCard: View {
             }
             HStack(spacing: 16) {
                 HStack(spacing: 16) {
-                    quotaLabel("5h", percent: quota)
+                    // Free/Go plans have no weekly limit and only a monthly one,
+                    // so the primary window is labelled by what it really is.
+                    quotaLabel(account.usage?.primaryWindowLabel ?? "5h", percent: quota)
                     quotaLabel("7d", percent: week)
                 }
                 .frame(maxWidth: .infinity)

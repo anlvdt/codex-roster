@@ -5224,6 +5224,26 @@ struct AccountUsage: Decodable {
     let bankedResets: BankedResetSummary?
     let subscriptionActiveUntil: RustDate?
     let lunaReserve: LunaReserve?
+    /// What the API's primary window actually is: `five_hour`, `weekly` or
+    /// `monthly`. Free/Go plans have no weekly limit and only a monthly one, so
+    /// their primary window must not be labelled "5h".
+    let primaryWindowKind: String?
+
+    /// Label for the primary window, derived from its span when the field is
+    /// missing (caches written before the field existed).
+    var primaryWindowLabel: String {
+        switch primaryWindowKind {
+        case "monthly": return "1M"
+        case "weekly": return "1W"
+        case "five_hour": return "5h"
+        default: break
+        }
+        guard let fiveHour, let fetchedAt else { return "5h" }
+        let span = fiveHour.resetAt.value.timeIntervalSince(fetchedAt.value)
+        if span > 8 * 86_400 { return "1M" }
+        if span > 6 * 3_600 { return "1W" }
+        return "5h"
+    }
 }
 
 struct UsageCredits: Decodable {

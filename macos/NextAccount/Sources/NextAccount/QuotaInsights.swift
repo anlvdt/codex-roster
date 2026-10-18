@@ -282,3 +282,50 @@ struct CodexActivityStrip: View {
         }
     }
 }
+
+/// `codex-roster quota-forecast --json` (contract v1, additive fields).
+struct QuotaForecastOutput: Decodable {
+    let accountId: UUID?
+    let generatedAt: RustDate?
+    let fiveHour: QuotaWindowForecast?
+    let weekly: QuotaWindowForecast?
+}
+
+struct QuotaWindowForecast: Decodable {
+    let window: String
+    let remainingPercent: Double
+    let burnPerMinute: Double
+    let timeToEmptyMinutes: Double?
+    let ciLowMinutes: Double?
+    let ciHighMinutes: Double?
+    let confidence: String
+    let sampleCount: Int
+
+    /// `cạn sau ~22 phút (CI 14–35)` / `empty in ~22m (CI 14–35)`.
+    /// Returns nil when the window shows no measurable burn.
+    func summary(vietnamese: Bool) -> String? {
+        guard let timeToEmptyMinutes else { return nil }
+        let estimate = Self.humanize(timeToEmptyMinutes, vietnamese: vietnamese)
+        let interval: String
+        if let low = ciLowMinutes, let high = ciHighMinutes {
+            interval = " (CI \(Self.humanize(low, vietnamese: vietnamese))–\(Self.humanize(high, vietnamese: vietnamese)))"
+        } else {
+            interval = ""
+        }
+        let confidenceText = vietnamese ? "độ tin cậy \(confidence)" : "confidence \(confidence)"
+        return vietnamese
+            ? "cạn sau ~\(estimate)\(interval) · \(confidenceText)"
+            : "empty in ~\(estimate)\(interval) · \(confidenceText)"
+    }
+
+    static func humanize(_ minutes: Double, vietnamese: Bool) -> String {
+        let rounded = max(0, Int(minutes.rounded()))
+        if rounded >= 120 {
+            let hours = rounded / 60
+            let rest = rounded % 60
+            if rest == 0 { return vietnamese ? "\(hours) giờ" : "\(hours)h" }
+            return vietnamese ? "\(hours) giờ \(rest) phút" : "\(hours)h \(rest)m"
+        }
+        return vietnamese ? "\(rounded) phút" : "\(rounded)m"
+    }
+}

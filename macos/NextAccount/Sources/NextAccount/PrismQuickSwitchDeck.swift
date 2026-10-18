@@ -54,6 +54,15 @@ struct PrismQuickSwitchDeck: View {
 
     @State private var justSwitchedID: UUID? = nil
 
+    /// One-line burn estimate for the active account, when the forecast has
+    /// enough samples to say something. Vietnamese/English follows the UI.
+    private var quotaForecastLine: String? {
+        guard let forecast = store.quotaForecast else { return nil }
+        let vietnamese = language.language == .vietnamese
+        return forecast.fiveHour?.summary(vietnamese: vietnamese)
+            ?? forecast.weekly?.summary(vietnamese: vietnamese)
+    }
+
     private var activeAccount: SavedAccount? {
         store.accounts.first { $0.isActive && !$0.archived }
     }
@@ -275,6 +284,13 @@ struct PrismQuickSwitchDeck: View {
             // Age of the data behind those bars: without it a 12-minute-old
             // reading looks as authoritative as a fresh one (audit QTA-1).
             QuotaFreshnessLabel(fetchedAt: activeAccount?.usage?.fetchedAt?.value)
+            if let line = quotaForecastLine {
+                Text(line)
+                    .font(PrismTheme.fontCaption)
+                    .foregroundStyle(PrismTheme.labelSecondary)
+                    .lineLimit(1)
+                    .accessibilityLabel(line)
+            }
         }
         .padding(8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -953,7 +969,20 @@ struct PrismQuickSwitchDeck: View {
             }
             .frame(height: NotchRosterLayout.switchboardHeaderHeight)
 
-            if filteredAccounts.isEmpty {
+            if filteredAccounts.isEmpty && !store.hasLoadedAccounts {
+                // First load in flight: show a loading row instead of claiming the
+                // roster is empty (audit FLOW-8).
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(language.text("Đang tải danh sách tài khoản…", "Loading saved accounts…"))
+                        .font(PrismTheme.fontCaption)
+                        .foregroundStyle(PrismTheme.labelSecondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 12)
+                .frame(height: rosterGridHeight, alignment: .top)
+                .accessibilityElement(children: .combine)
+            } else if filteredAccounts.isEmpty {
                 RosterEmptyState(
                     title: store.accounts.isEmpty
                         ? language.text("Chưa có tài khoản", "No saved accounts")

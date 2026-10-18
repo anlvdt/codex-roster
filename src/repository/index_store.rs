@@ -12,6 +12,8 @@ pub(super) struct MetadataIndexStore {
     metadata_path: PathBuf,
 }
 
+/// How many preserved metadata copies a restore may leave behind.
+const PRESERVED_METADATA_LIMIT: usize = 20;
 const AUTOMATIC_BACKUP_LIMIT: usize = 20;
 
 impl MetadataIndexStore {
@@ -122,6 +124,37 @@ impl MetadataIndexStore {
             .unwrap_or(false)
     }
 
+    /// Keep only the newest `keep` `preserved-metadata-*.json` files. Failures
+    /// are ignored: housekeeping must never break a restore.
+    fn prune_preserved_metadata(&self, keep: usize) {
+        let Some(directory) = self.metadata_path.parent() else {
+            return;
+        };
+        let Ok(entries) = fs::read_dir(directory) else {
+            return;
+        };
+        let mut preserved = entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("preserved-metadata-"))
+            })
+            .filter_map(|entry| {
+                let modified = entry.metadata().ok()?.modified().ok()?;
+                Some((modified, entry.path()))
+            })
+            .collect::<Vec<_>>();
+        if preserved.len() <= keep {
+            return;
+        }
+        preserved.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+        for (_, path) in preserved.into_iter().skip(keep) {
+            let _ = fs::remove_file(path);
+        }
+    }
+
     fn best_non_empty_automatic_backup(&self) -> Result<Option<(PathBuf, MetadataIndex)>> {
         let mut backups = self.automatic_backup_candidates()?;
         backups.retain(|(_, index)| !index.accounts.is_empty());
@@ -153,6 +186,9 @@ impl MetadataIndexStore {
                     format!("failed to preserve metadata at {}", entry.path.display())
                 })?;
         }
+        // Preserved copies are a safety net, not an archive: keep the newest few
+        // so repeated restores cannot grow the directory without bound (audit A2).
+        self.prune_preserved_metadata(PRESERVED_METADATA_LIMIT);
         let mut persisted = index.clone();
         persisted.write_generation = generation.saturating_add(1);
         let json = serde_json::to_string_pretty(&persisted)?;
@@ -374,10 +410,50 @@ fn recovery_priority(kind: RecoveryFileKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::MetadataIndexStore;
+    use super::PRESERVED_METADATA_LIMIT;
     use super::parse_metadata_index;
     use crate::model::{METADATA_SCHEMA_VERSION, MetadataIndex};
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn preserved_metadata_copies_are_capped() {
+        let temp = tempdir().unwrap();
+        let store = MetadataIndexStore::new(temp.path());
+        for index in 0..(PRESERVED_METADATA_LIMIT + 5) {
+            fs::write(
+                temp.path()
+                    .join(format!("preserved-metadata-{index:04}.json")),
+                b"{}",
+            )
+            .unwrap();
+        }
+        store.prune_preserved_metadata(PRESERVED_METADATA_LIMIT);
+        let remaining = fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("preserved-metadata-"))
+            })
+            .count();
+        assert_eq!(remaining, PRESERVED_METADATA_LIMIT);
+        // A second pass is a no-op (idempotent housekeeping).
+        store.prune_preserved_metadata(PRESERVED_METADATA_LIMIT);
+        let again = fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("preserved-metadata-"))
+            })
+            .count();
+        assert_eq!(again, PRESERVED_METADATA_LIMIT);
+    }
 
     #[test]
     fn review_recovery_list_restore_keeps_generations_monotonic() {

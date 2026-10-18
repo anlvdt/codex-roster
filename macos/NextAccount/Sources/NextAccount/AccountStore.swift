@@ -307,6 +307,8 @@ final class AccountStore: ObservableObject {
     @Published private(set) var autoStartUsageWindows = false
     @Published private(set) var tokenUsage: TokenUsageSummary?
     @Published private(set) var quotaHistory: QuotaHistoryOutput?
+    /// Burn-rate estimate for the active account's windows (audit E2/F).
+    @Published private(set) var quotaForecast: QuotaForecastOutput?
     /// Increments when a 5-hour (or weekly) quota reset is confirmed — drives notch pulse.
     @Published private(set) var quotaResetPulse: UInt = 0
     @Published private(set) var resetOutlook: ResetOutlook?
@@ -326,6 +328,10 @@ final class AccountStore: ObservableObject {
     @Published private(set) var isLoadingResetOutlook = false
     @Published private(set) var isLoadingOpenAIStatus = false
     @Published private(set) var isRefreshingQuotaInBackground = false
+    /// True once the first roster load has completed. The UI must not show the
+    /// "no saved accounts" empty state while the first load is still in flight
+    /// (audit FLOW-8).
+    @Published private(set) var hasLoadedAccounts = false
     @Published private(set) var lastQuotaRefreshAt: Date?
     @Published private(set) var accountSortMode: AccountSortMode
     @Published private(set) var newAccountLoginState: NewAccountLoginState = .idle
@@ -2503,6 +2509,21 @@ final class AccountStore: ObservableObject {
         }
     }
 
+    func refreshQuotaForecast(silently: Bool = false) {
+        Task {
+            do {
+                var arguments = ["quota-forecast"]
+                if let id = accounts.first(where: \.isActive)?.id {
+                    arguments.append(id.uuidString)
+                }
+                arguments.append("--json")
+                quotaForecast = try await cli.decode(QuotaForecastOutput.self, arguments: arguments)
+            } catch {
+                if !silently { errorMessage = error.localizedDescription }
+            }
+        }
+    }
+
     func refreshQuotaHistory(silently: Bool = false) {
         Task {
             do {
@@ -2588,6 +2609,7 @@ final class AccountStore: ObservableObject {
             status, accounts, settings, autoSwitch, autoResume
         )
         applyRoster(status: loadedStatus, accounts: loadedAccounts.accounts)
+        hasLoadedAccounts = true
         let pendingLegacyArchives = legacyArchivedAccountIDs.intersection(Set(loadedAccounts.accounts.map(\.id)))
         if !pendingLegacyArchives.isEmpty {
             for accountID in pendingLegacyArchives {
@@ -2613,6 +2635,7 @@ final class AccountStore: ObservableObject {
             self.autoSwitchWhenExhausted = loadedAutoSwitch.enabled
         }
         refreshQuotaHistory(silently: true)
+        refreshQuotaForecast(silently: true)
     }
 
     private func checkAutoSwitchWhenExhausted() async {

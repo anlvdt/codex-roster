@@ -1068,6 +1068,9 @@ where
     ) -> Result<ActivateOutput> {
         let started = Instant::now();
         let _auth_lock = AuthLock::acquire(&self.env.app_data_dir)?;
+        // Housekeeping under the auth lock: staged recovery directories from a
+        // crashed switch are removed once they are clearly abandoned (audit A2).
+        codex::prune_stale_recovery_dirs(&self.env.codex_root);
         let initial_warnings = activation_process_warnings(force_running, &self.env.codex_root);
         ensure_activation_processes_stopped(&initial_warnings)?;
         let previous_account_id = self.refresh_current_saved_account_before_activation()?;

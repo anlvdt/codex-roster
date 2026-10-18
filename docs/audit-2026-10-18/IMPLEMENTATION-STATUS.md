@@ -35,20 +35,33 @@ Nhánh: `main`. Chưa push `origin`. Chưa xoá dữ liệu người dùng.
 | **macOS UX (B, phần 7 — IA-3/IA-4)** | `RosterListFilter.archived` + chip "Đã cất N" trong deck; **danh sách mặc định loại archived** (và khỏi counts); badge chấm nhỏ trên nút `⋯` khi có bản cập nhật; **xác nhận trước khi cài**, nêu rõ version | `cf922c8` | `swift build` pass |
 | **PERF-2** | Vòng thông báo reset: **2s → 15s** (30 → 4 lần wakeup/phút) và **cache quyền thông báo** (chỉ hỏi lại mỗi 5 phút) | `791001c` | `swift build` pass |
 
+| **F — Forecast lên UI** | `QuotaForecastOutput`/`QuotaWindowForecast` trong Swift + `AccountStore.quotaForecast` + dòng "cạn sau ~X (CI …) · confidence …" dưới gauge trong deck; refresh kèm quota-history | `2b59d71` | decode hợp đồng bằng chương trình Swift độc lập trên JSON thật của binary (xem [VERIFICATION.md](VERIFICATION.md) §2) |
+| **A2 — Housekeeping** | Cap `preserved-metadata-*.json` (giữ 20 mới nhất, idempotent) và dọn thư mục `.cas-backup-*`/`.cas-restore-*` bỏ hoang (>1 giờ) ngay khi bắt đầu activation dưới auth lock; cả hai best-effort, không bao giờ làm hỏng restore/activate | `e140385`, `a6903d2` | test `preserved_metadata_copies_are_capped`, `stale_recovery_dirs_are_pruned_but_fresh_and_unrelated_ones_are_kept`; **449 test pass** |
+
+| **A3 — CLI/TUI** | `list` human: hiện **label**, **plan**, `[archived]`, và **giờ reset theo múi giờ máy** (trước chỉ ngày UTC); cờ **`--all`** để gồm archived + dòng nhắc "(N archived hidden)"; TUI: **PgUp/PgDn**, **Home/End (g/G)**, **`/` tìm kiếm** (khớp không phân biệt hoa thường, nhảy tới dòng đầu tiên) + cập nhật dòng hướng dẫn phím | `cb6b602`, `d2aba9a` | test `account_summary_shows_label_plan_and_state`, `search_matches_case_insensitively_and_ignores_empty_queries`; `list --help` có `--all`; output thật hiện `reset 2026-10-18 16:03:28.0` theo giờ máy |
+| **B — Empty state (FLOW-8)** | `hasLoadedAccounts` + hàng "Đang tải danh sách tài khoản…" thay vì màn "Chưa có tài khoản" sai trong lúc load đầu | commit mới | `swift build` pass |
+
+| **A2 — Nốt phần phụ** | Cap config VibeCafe 64 KiB + response 2 MiB (bounded read, không buffer file lạ); cache VibeCafe ghi atomic 0600; `doctor` thêm check **`account_list_backup`** (tuổi backup danh sách tài khoản, warn nếu chưa có hoặc >24h) để backup lỗi không còn im lặng | `d5feeef` | test `config_reader_rejects_oversized_files`; `doctor` chạy thật: `[ok] account_list_backup newest account-list backup is 1h old` |
+| **I18N-1** | Rà toàn bộ literal hiển thị không qua `language.text`: **0 chuỗi tiếng Anh lộ** (2 hit là tên riêng attribution). Các leak audit nêu (watchdog login, export success, About) đã được bản địa hoá ở các vòng trước | — | ghi trong [VERIFICATION.md](VERIFICATION.md) §4b |
+
+**Verification độc lập:** xem [VERIFICATION.md](VERIFICATION.md) — gate đầy đủ với `--all-features` (449 test), decode hợp đồng Rust↔Swift bằng binary thật, 29/29 điểm audit then chốt PASS, và 1 gate CI (`check-auth-switch-safety.sh`) đã được sửa sau khi verification phát hiện fail.
+
 **Gate hiện tại:** `cargo fmt --check` pass · `cargo clippy --all-targets -- -D warnings` pass · **447 test pass, 0 fail, 2 ignored** · `swift build --package-path macos/NextAccount` pass · `scripts/build-macos-app.sh` pass.
 
 **Orca:** Codex chạy được 1 task nhỏ rồi **cạn hạn mức tháng đến 17/11/2026** (`You've hit your usage limit`); worker D đã được `worker-stop` + `worker-release` sạch và phần D do Lead hoàn thành. Các provider khác vẫn cạn (Claude 22/10, Cursor 11/12/2026, OpenCode/Muse sai model, antigravity/zcode fail).
 
-## 2. Còn lại (theo thứ tự ưu tiên)
+## 2. Còn lại (đã dọn theo thực tế)
 
-| # | Hạng mục | Ghi chú |
+| # | Hạng mục | Trạng thái |
 |---|---|---|
-| 2 | A2 phần còn lại: đưa cảnh báo backup vào JSON `warnings[]`, cap `preserved-metadata-*`, dọn `.cas-backup-*` cũ, cap config VibeCafe | Phần lõi đã xong |
-| 3 | A3 phần còn lại: `list` human (label/archived/local reset + `--all`), TUI search/Home/End/PgUp, `add-account-status` chi tiết | Help + safety đã xong |
-| 4 | B phần còn lại: Light Mode token (VIS-1), a11y label/toggle/reduce-motion, freshness chip (QTA-1), notification loop 15s, archived filter, update badge | Đã xong menu-bar/`⌘,`/xoá/hover/passive refresh |
-| 5 | B phần còn lại: Light Mode cho các sheet khác, i18n leaks còn sót, feedback cho các thao tác khác, empty-state loading gate | Phần lớn B đã xong |
-| 6 | F/G: Swift wave 2 (HUD, dự báo, gợi ý) + verification độc lập | Chưa bắt đầu |
-| 7 | Giới hạn đã biết: chưa có integration test cho một lần apply thành công (đường saga được phủ bởi test module + hồi quy toàn bộ suite) | Ghi nhận trung thực |
+| 1 | Đưa cảnh báo backup thất bại vào JSON `warnings[]` của lệnh ghi (hiện đã có ở `doctor` + stderr) | Chưa làm — mức ưu tiên thấp |
+| 2 | `add-account-status` chi tiết hơn (hiện trả `active`/`auth_changed`) | Chưa làm — mức ưu tiên thấp |
+| 3 | F/G wave 2: HUD/thanh dự báo nâng cao, gợi ý hành động theo ngữ cảnh | Một phần (forecast đã hiển thị trong deck) |
+| 4 | Review độc lập bởi **agent khác** (Orca worker) | Không thực hiện được: mọi provider Orca cạn quota; verification do Lead tự chạy và ghi rõ giới hạn |
+| 5 | Integration test đầu-cuối cho một lần apply thành công (đường saga) | Chưa có; đã ghi nhận trung thực |
+| 6 | Test Swift trong CI (`swift test`) | Không chạy được trên máy CLT-only; CI `macos-latest` sẽ chạy |
+
+Đã xong và không còn trong danh sách: Light Mode console + role màu ngữ nghĩa, a11y toggle/switch/hit-target, freshness chip, notification loop 15s, archived filter, update badge + xác nhận, empty-state loading gate, i18n sweep, TUI search/paging, `list --all` + giờ reset địa phương, housekeeping `.cas-*`/`preserved-metadata-*`, cap VibeCafe, check backup trong `doctor`.
 
 ## 3. Vì sao Lead làm trực tiếp thay vì worker Orca
 

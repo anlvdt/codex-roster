@@ -19,9 +19,12 @@ Nhánh: `main`. Chưa push `origin`. Chưa xoá dữ liệu người dùng.
 | **macOS UX (B, phần 1)** | **Menu-bar item** `CR` với menu Mở notch / Console / Cài đặt / Giới thiệu / Thoát (trước đây notch là cửa duy nhất); `⌘,` mở Settings + About trong app menu; xoá tài khoản có **hộp thoại xác nhận** nêu email + chặn xoá tài khoản đang dùng (cả UI lẫn store) | `cb97241` | `swift build` pass |
 | **macOS UX (B, phần 2)** | Hover mở notch **không còn cướp focus** (bỏ `activate(ignoringOtherApps:)` ở đường hover; click/hotkey vẫn activate); `PassiveRefreshGate` (trước là dead code) nay gom refresh công khai khi mở notch/Operations vào cooldown 60s | `7e2c40e` | `swift build` pass |
 
-**Gate hiện tại:** `cargo fmt --check` pass · `cargo clippy --all-targets -- -D warnings` pass · **421 test pass, 0 fail, 1 ignored** · `swift build --package-path macos/NextAccount` pass · `scripts/build-macos-app.sh` pass.
+| **Contract v2 + doctor (E1)** | Mọi output `--json` mang `"contract_version": 1` (chèn một chỗ trong `print_json`, phủ cả 46 đường xuất); timestamp ở view đổi sang **RFC3339** (struct lưu trữ giữ nguyên mảng cũ để không phá dữ liệu trên đĩa); lỗi in envelope `{"contract_version":1,"error":{code,message,hint}}` + **exit code theo lớp** (2 usage, 3 login/blocked, 4 lock timeout, 5 no account, 6 network, 7 keychain); thêm **`doctor`** (13 check: version, app_data, key file + mode, 3 lock, auth.json, thư mục `.cas-*` sót, port 1455/1457, số account, tuổi cache usage, phiên add-account) và **`schema`** | `866e78d` | `list --json` cho `contract_version: 1` + `created_at` dạng `2026-10-18T01:02:05Z`; lệnh lỗi in envelope + exit khác 0; `doctor` chạy thật ra 13 check; test `classify_error_maps_known_failures_to_exit_codes`, `schema_document_describes_the_contract` |
+| **Tài liệu (D)** | README truth-up (33 lệnh + `doctor`/`schema`, contract + exit code, kiến trúc arm64/`UNIVERSAL=1`, ngôn ngữ mặc định theo máy, validation mới, bỏ claim 24h/48h); CHANGELOG có mục **Unreleased** đầy đủ + chuyển "Known issues" khỏi v0.4.8; 5 tài liệu cũ chuyển vào `docs/archive/` kèm banner + `docs/archive/README.md`; `AGENTS.md`/`CLAUDE.md` đổi GitNexus `MUST` thành có điều kiện; `PR_DESCRIPTION.md` viết lại theo thực tế | `7fbe8fe` | Kiểm tra link markdown: **0 link hỏng** |
 
-**Orca:** Codex đã chạy lại được (model `GPT-5.6-Terra`, còn ~2% hạn mức tháng) — task **D (docs truth-up)** đang chạy tại worktree `fix-audit-docs` (dispatch `ctx_766e394f275e`). Các provider khác vẫn cạn (Claude 22/10, Cursor 11/12/2026, OpenCode/Muse sai model).
+**Gate hiện tại:** `cargo fmt --check` pass · `cargo clippy --all-targets -- -D warnings` pass · **423 test pass, 0 fail, 1 ignored** · `swift build --package-path macos/NextAccount` pass · `scripts/build-macos-app.sh` pass.
+
+**Orca:** Codex chạy được 1 task nhỏ rồi **cạn hạn mức tháng đến 17/11/2026** (`You've hit your usage limit`); worker D đã được `worker-stop` + `worker-release` sạch và phần D do Lead hoàn thành. Các provider khác vẫn cạn (Claude 22/10, Cursor 11/12/2026, OpenCode/Muse sai model, antigravity/zcode fail).
 
 ## 2. Còn lại (theo thứ tự ưu tiên)
 
@@ -31,10 +34,8 @@ Nhánh: `main`. Chưa push `origin`. Chưa xoá dữ liệu người dùng.
 | 2 | A2 phần còn lại: đưa cảnh báo backup vào JSON `warnings[]`, cap `preserved-metadata-*`, dọn `.cas-backup-*` cũ, cap config VibeCafe | Phần lõi đã xong |
 | 3 | A3 phần còn lại: `list` human (label/archived/local reset + `--all`), TUI search/Home/End/PgUp, `add-account-status` chi tiết | Help + safety đã xong |
 | 4 | B phần còn lại: Light Mode token (VIS-1), a11y label/toggle/reduce-motion, freshness chip (QTA-1), notification loop 15s, archived filter, update badge | Đã xong menu-bar/`⌘,`/xoá/hover/passive refresh |
-| 5 | E1: contract v2 (`contract_version`, RFC3339, error envelope, exit code) + `doctor` | Chưa bắt đầu |
-| 6 | E2: forecast EWMA, scoring v2 một nguồn, switch saga, harness tuning | Chưa bắt đầu |
-| 7 | D: README/CHANGELOG/PR_DESCRIPTION truth-up + archive docs cũ | Chưa bắt đầu |
-| 8 | F/G: Swift wave 2 (HUD, dự báo, gợi ý) + verification độc lập | Chưa bắt đầu |
+| 5 | E2: forecast EWMA, scoring v2 một nguồn, switch saga, harness tuning | Chưa bắt đầu |
+| 6 | F/G: Swift wave 2 (HUD, dự báo, gợi ý) + verification độc lập | Chưa bắt đầu |
 
 ## 3. Vì sao Lead làm trực tiếp thay vì worker Orca
 

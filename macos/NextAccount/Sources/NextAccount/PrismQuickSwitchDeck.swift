@@ -54,6 +54,21 @@ struct PrismQuickSwitchDeck: View {
 
     @State private var justSwitchedID: UUID? = nil
 
+    /// Forecast vs. reset deadline for the active 5-hour window.
+    private var quotaRunway: QuotaRunway? {
+        guard let forecast = store.quotaForecast?.fiveHour,
+              let timeToEmpty = forecast.timeToEmptyMinutes,
+              let resetAt = activeAccount?.usage?.fiveHour?.resetAt.value
+        else { return nil }
+        let minutesUntilReset = resetAt.timeIntervalSinceNow / 60
+        guard minutesUntilReset > 0 else { return nil }
+        return QuotaRunway(
+            minutesToEmpty: timeToEmpty,
+            minutesUntilReset: minutesUntilReset,
+            confidence: forecast.confidence
+        )
+    }
+
     /// One-line burn estimate for the active account, when the forecast has
     /// enough samples to say something. Vietnamese/English follows the UI.
     private var quotaForecastLine: String? {
@@ -290,6 +305,11 @@ struct PrismQuickSwitchDeck: View {
                     .foregroundStyle(PrismTheme.labelSecondary)
                     .lineLimit(1)
                     .accessibilityLabel(line)
+            }
+            // "Will this window survive until it resets?" is the question the
+            // numbers alone do not answer (audit F wave 2).
+            if let runway = quotaRunway {
+                QuotaRunwayBar(runway: runway)
             }
         }
         .padding(8)
@@ -1594,5 +1614,58 @@ struct QuotaFreshnessLabel: View {
         .foregroundStyle(stale ? PrismTheme.statusWarn : PrismTheme.labelSecondary)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(text)
+    }
+}
+
+/// Forecast against the reset deadline for one window.
+struct QuotaRunway {
+    let minutesToEmpty: Double
+    let minutesUntilReset: Double
+    let confidence: String
+
+    /// True when the window is projected to drain before it resets.
+    var runsOutBeforeReset: Bool { minutesToEmpty < minutesUntilReset }
+
+    /// Marker position on the bar: how much of the runway is consumed.
+    var fraction: Double {
+        guard minutesUntilReset > 0 else { return 1 }
+        return min(1, max(0, minutesToEmpty / minutesUntilReset))
+    }
+}
+
+/// Thin runway bar: green when the window outlives its reset, orange when the
+/// forecast says it will not. Low-confidence estimates stay muted so a
+/// two-sample guess cannot look like a verdict.
+struct QuotaRunwayBar: View {
+    let runway: QuotaRunway
+    @EnvironmentObject private var language: LanguageStore
+
+    var body: some View {
+        let confident = runway.confidence != "low"
+        let tint: Color = !confident
+            ? PrismTheme.labelSecondary
+            : (runway.runsOutBeforeReset ? PrismTheme.statusWarn : PrismTheme.statusOK)
+        let caption = !confident
+            ? language.text("chưa đủ mẫu để dự báo", "not enough samples to forecast")
+            : (runway.runsOutBeforeReset
+                ? language.text("dự báo cạn trước khi reset", "forecast: empties before reset")
+                : language.text("dự báo đủ tới lúc reset", "forecast: lasts until reset"))
+
+        return VStack(alignment: .leading, spacing: 3) {
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(PrismTheme.surfaceFill)
+                    Capsule()
+                        .fill(tint.opacity(0.85))
+                        .frame(width: max(4, geometry.size.width * runway.fraction))
+                }
+            }
+            .frame(height: 4)
+            Text(caption)
+                .font(PrismTheme.fontCaption)
+                .foregroundStyle(tint)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(caption)
     }
 }

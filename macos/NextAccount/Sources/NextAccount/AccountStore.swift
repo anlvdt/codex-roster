@@ -333,6 +333,21 @@ final class AccountStore: ObservableObject {
     @Published private(set) var sessionResumeCaption: String?
     @Published var errorMessage: String?
 
+    /// Transient success/failure feedback. Unlike `errorMessage` this is not a
+    /// blocking alert: it confirms an action where it was triggered (audit FLOW-2).
+    @Published var toast: RosterToast?
+    private var toastDismissTask: Task<Void, Never>?
+
+    func showToast(_ text: String, kind: RosterToastKind = .success) {
+        toast = RosterToast(text: text, kind: kind)
+        toastDismissTask?.cancel()
+        toastDismissTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            self?.toast = nil
+        }
+    }
+
     private let cli = AccountHubCLI()
     private let archivedAccountsMigrationKeys = ["codexRoster.archivedAccountIDs", "accountHub.archivedAccountIDs"]
     private var legacyArchivedAccountIDs: Set<UUID>
@@ -1187,6 +1202,10 @@ final class AccountStore: ObservableObject {
                 self.lastQuotaRefreshAt = .now
             }
             await self.applySessionResumeIfNeeded(activated.sessionResume, continueExhausted: false)
+            self.showToast(AppLanguage.text(
+                "Đã chuyển sang \(activated.account.email).",
+                "Switched to \(activated.account.email)."
+            ))
         }
     }
 
@@ -2281,7 +2300,13 @@ final class AccountStore: ObservableObject {
                 arguments: ["export", url.path, "--password-stdin", "--json"],
                 standardInput: password + "\n"
             )
-            self.backupStatusMessage = "Đã xuất bản sao lưu mã hóa."
+            let displayPath = url.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+            let message = AppLanguage.text(
+                "Đã xuất bản sao lưu mã hóa tới \(displayPath).",
+                "Encrypted backup exported to \(displayPath)."
+            )
+            self.backupStatusMessage = message
+            self.showToast(message)
         }
     }
 
@@ -2296,6 +2321,7 @@ final class AccountStore: ObservableObject {
                 "Đã nhập bản sao lưu. Snapshot có thể giữ refresh token cũ hơn phiên Codex đang sống — hãy Save current trước, và đừng kích hoạt hàng vừa khôi phục một cách mù quáng (có thể buộc đăng nhập lại).",
                 "Backup imported. Restored snapshots may hold stale refresh tokens vs live Codex — save the current session first, and do not activate restored rows blindly (that can force re-login)."
             )
+            self.showToast(AppLanguage.text("Đã nhập bản sao lưu.", "Backup imported."))
         }
     }
 
@@ -2307,6 +2333,7 @@ final class AccountStore: ObservableObject {
                 "Đã khôi phục danh sách. Snapshot có thể giữ refresh token cũ hơn phiên Codex đang sống — hãy Save current trước, và đừng kích hoạt hàng vừa khôi phục một cách mù quáng (có thể buộc đăng nhập lại).",
                 "Account list restored. Restored snapshots may hold stale refresh tokens vs live Codex — save the current session first, and do not activate restored rows blindly (that can force re-login)."
             )
+            self.showToast(AppLanguage.text("Đã khôi phục danh sách tài khoản.", "Account list restored."))
         }
     }
 
@@ -2318,6 +2345,7 @@ final class AccountStore: ObservableObject {
                 "Đã khôi phục phiên sao lưu. Snapshot có thể giữ refresh token cũ hơn phiên Codex đang sống — hãy Save current trước, và đừng kích hoạt hàng vừa khôi phục một cách mù quáng (có thể buộc đăng nhập lại).",
                 "Full backup restored. Restored snapshots may hold stale refresh tokens vs live Codex — save the current session first, and do not activate restored rows blindly (that can force re-login)."
             )
+            self.showToast(AppLanguage.text("Đã khôi phục phiên sao lưu.", "Full backup restored."))
         }
     }
 
@@ -5213,6 +5241,17 @@ struct UsageWindow: Decodable {
             ? "Đặt lại \(relativeReset(in: language))"
             : "Resets \(relativeReset(in: language))"
     }
+}
+
+enum RosterToastKind: Equatable {
+    case success
+    case failure
+}
+
+struct RosterToast: Identifiable, Equatable {
+    let id = UUID()
+    let text: String
+    let kind: RosterToastKind
 }
 
 struct RustDate: Decodable {

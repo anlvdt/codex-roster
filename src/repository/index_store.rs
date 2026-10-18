@@ -149,7 +149,7 @@ impl MetadataIndexStore {
         if preserved.len() <= keep {
             return;
         }
-        preserved.sort_by(|left, right| right.0.cmp(&left.0));
+        preserved.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
         for (_, path) in preserved.into_iter().skip(keep) {
             let _ = fs::remove_file(path);
         }

@@ -328,6 +328,10 @@ final class AccountStore: ObservableObject {
     @Published private(set) var isLoadingResetOutlook = false
     @Published private(set) var isLoadingOpenAIStatus = false
     @Published private(set) var isRefreshingQuotaInBackground = false
+    /// True once the first roster load has completed. The UI must not show the
+    /// "no saved accounts" empty state while the first load is still in flight
+    /// (audit FLOW-8).
+    @Published private(set) var hasLoadedAccounts = false
     @Published private(set) var lastQuotaRefreshAt: Date?
     @Published private(set) var accountSortMode: AccountSortMode
     @Published private(set) var newAccountLoginState: NewAccountLoginState = .idle
@@ -2605,6 +2609,7 @@ final class AccountStore: ObservableObject {
             status, accounts, settings, autoSwitch, autoResume
         )
         applyRoster(status: loadedStatus, accounts: loadedAccounts.accounts)
+        hasLoadedAccounts = true
         let pendingLegacyArchives = legacyArchivedAccountIDs.intersection(Set(loadedAccounts.accounts.map(\.id)))
         if !pendingLegacyArchives.isEmpty {
             for accountID in pendingLegacyArchives {

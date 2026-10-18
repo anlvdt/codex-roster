@@ -969,7 +969,20 @@ struct PrismQuickSwitchDeck: View {
             }
             .frame(height: NotchRosterLayout.switchboardHeaderHeight)
 
-            if filteredAccounts.isEmpty {
+            if filteredAccounts.isEmpty && !store.hasLoadedAccounts {
+                // First load in flight: show a loading row instead of claiming the
+                // roster is empty (audit FLOW-8).
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(language.text("Đang tải danh sách tài khoản…", "Loading saved accounts…"))
+                        .font(PrismTheme.fontCaption)
+                        .foregroundStyle(PrismTheme.labelSecondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 12)
+                .frame(height: rosterGridHeight, alignment: .top)
+                .accessibilityElement(children: .combine)
+            } else if filteredAccounts.isEmpty {
                 RosterEmptyState(
                     title: store.accounts.isEmpty
                         ? language.text("Chưa có tài khoản", "No saved accounts")

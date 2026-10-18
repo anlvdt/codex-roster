@@ -332,6 +332,8 @@ final class AccountStore: ObservableObject {
     /// "no saved accounts" empty state while the first load is still in flight
     /// (audit FLOW-8).
     @Published private(set) var hasLoadedAccounts = false
+    /// Non-fatal warnings reported by `status --json`.
+    @Published private(set) var statusWarnings: [String] = []
     @Published private(set) var lastQuotaRefreshAt: Date?
     @Published private(set) var accountSortMode: AccountSortMode
     @Published private(set) var newAccountLoginState: NewAccountLoginState = .idle
@@ -348,6 +350,11 @@ final class AccountStore: ObservableObject {
     /// blocking alert: it confirms an action where it was triggered (audit FLOW-2).
     @Published var toast: RosterToast?
     private var toastDismissTask: Task<Void, Never>?
+
+    /// Hide the current CLI warnings until the next status poll re-reports them.
+    func dismissStatusWarnings() {
+        statusWarnings = []
+    }
 
     func showToast(_ text: String, kind: RosterToastKind = .success) {
         toast = RosterToast(text: text, kind: kind)
@@ -3172,6 +3179,9 @@ final class AccountStore: ObservableObject {
 
     private func applyRoster(status: StatusOutput, accounts: [SavedAccount]) {
         self.status = status
+        // Surface CLI-side problems (for example a failing account-list backup)
+        // that would otherwise only appear in stderr (audit R2/A2).
+        self.statusWarnings = status.warnings ?? []
         self.accounts = accounts.map { account in
             account.withActiveState(account.id == status.currentAccountSavedId)
         }
@@ -3787,6 +3797,9 @@ struct StatusOutput: Decodable {
     let vibeUsage: VibeUsageSummary?
     let codexModel: String?
     let activity: CodexActivitySummary?
+    /// Non-fatal problems the CLI knows about, e.g. a failed automatic
+    /// account-list backup (contract v1 `warnings[]`).
+    let warnings: [String]?
 
     init(
         currentAccount: AccountIdentity?,
@@ -3794,8 +3807,10 @@ struct StatusOutput: Decodable {
         processWarnings: [RunningProcess],
         vibeUsage: VibeUsageSummary? = nil,
         codexModel: String? = nil,
-        activity: CodexActivitySummary? = nil
+        activity: CodexActivitySummary? = nil,
+        warnings: [String]? = nil
     ) {
+        self.warnings = warnings
         self.currentAccount = currentAccount
         self.currentAccountSavedId = currentAccountSavedId
         self.processWarnings = processWarnings

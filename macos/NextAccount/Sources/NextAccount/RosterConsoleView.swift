@@ -14,6 +14,13 @@ struct RosterConsoleView: View {
                 RosterToastBanner(toast: toast) { store.toast = nil }
                 Divider()
             }
+            if let warning = store.statusWarnings.first {
+                RosterToastBanner(
+                    toast: RosterToast(text: warning, kind: .failure),
+                    dismiss: { store.dismissStatusWarnings() }
+                )
+                Divider()
+            }
             Divider()
             tabContent
                 .rosterConsoleTypography()

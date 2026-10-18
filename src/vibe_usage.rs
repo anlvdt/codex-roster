@@ -51,6 +51,7 @@ pub struct VibeUsageSummary {
     pub estimated_cost_usd: f64,
     pub sessions: usize,
     pub active_seconds: u64,
+    #[serde(with = "crate::model::time_compat")]
     pub fetched_at: OffsetDateTime,
 }
 

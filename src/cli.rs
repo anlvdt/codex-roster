@@ -427,6 +427,14 @@ pub const CONTRACT_VERSION: u32 = 1;
 pub fn classify_error(error: &anyhow::Error) -> (u8, &'static str, Option<String>) {
     let message = format!("{error:#}");
     let lowered = message.to_ascii_lowercase();
+    if lowered.contains("invalid value")
+        || lowered.contains("unexpected argument")
+        || lowered.contains("unrecognized subcommand")
+        || lowered.contains("invalid subcommand")
+        || lowered.contains("a value is required")
+    {
+        return (2, "usage", None);
+    }
     if lowered.contains("requires account_id")
         || lowered.contains("is required when stdin")
         || lowered.contains("no command given and stdin is not a terminal")
@@ -486,7 +494,22 @@ pub fn classify_error(error: &anyhow::Error) -> (u8, &'static str, Option<String
 }
 
 pub fn run() -> Result<()> {
-    let cli = Cli::parse();
+    // `parse()` exits the process on bad input, which would bypass the JSON
+    // error envelope that `--json` callers rely on. Help/version still print
+    // normally and exit 0.
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            use clap::error::ErrorKind;
+            if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) {
+                error.exit();
+            }
+            return Err(anyhow::anyhow!(error.render().to_string()));
+        }
+    };
     let env = env::detect()?;
     let repository = SnapshotRepository::new(
         &env.app_data_dir,
@@ -1246,7 +1269,10 @@ pub fn run() -> Result<()> {
         Some(Command::ResetEvents { json }) => {
             let events = crate::reset_tracker::fetch_new_reset_events(&app.env().app_data_dir)?;
             if json {
-                print_json(&events)?;
+                // Wrapped in an object: `print_json` can only attach
+                // `contract_version` to an object, and a bare array left this
+                // one command unversioned (contract v2).
+                print_json(&serde_json::json!({ "events": events }))?;
             } else if events.is_empty() {
                 println!("No new verified global resets.");
             } else {
@@ -1649,25 +1675,31 @@ where
 /// drift from the version constant it reports.
 fn schema_document(command: Option<&str>) -> String {
     let envelope = "Every --json output includes \"contract_version\": 1 (additive).\n\
-View timestamps are RFC3339 strings; stored metadata keeps the legacy array form.\n\
+View timestamps are RFC3339 strings (older array-form values are still read).\n\
 Errors print {\"contract_version\":1,\"error\":{\"code\",\"message\",\"hint\"}} to stdout.\n\
 Exit codes: 0 ok, 2 usage, 3 login/blocked, 4 lock timeout, 5 no account, 6 network, 7 keychain, 8 unsupported.";
     match command {
         None => format!(
-            "{envelope}\n\nCommands with typed JSON output: status, list, usage, refresh-usage, activate, delete, archive, export, import, restore-full-backup, auto-switch, auto-start-usage-windows, auto-resume-session, token-usage, quota-history, quota-forecast, reset-outlook, doctor."
+            "{envelope}\n\nCommands with typed JSON output: status, list, save, usage, refresh-usage, activate, delete, archive, export, import, import-json, restore-account-list-backup, restore-full-backup, create-automatic-full-backup, auto-switch, auto-start-usage-windows, auto-resume-session, token-usage, quota-history, quota-forecast, reset-outlook, reset-events, reset-timeline, open-ai-status, add-account-status, set-label, enable-luna-reserve, doctor."
         ),
         Some(name) => {
             let fields = match name {
                 "status" => {
-                    "environment, codex_root, current_account, current_account_saved_id, saved_accounts, process_warnings, vibe_usage?, codex_model?, activity?"
+                    "environment, codex_root, current_account, current_account_saved_id, saved_accounts, process_warnings, vibe_usage?, codex_model?, activity?, warnings[]"
                 }
                 "list" => {
                     "environment, accounts[] (id, email, plan_label, is_active, created_at, updated_at, usage, archived)"
                 }
                 "usage" => "account, usage (five_hour, weekly, credits, banked_resets, plan_label)",
                 "auto-switch" => {
-                    "enabled, status, active_account_id, candidate_account_id, candidate_display_name, detail, banked_reset_count, session_resume?, usage_unknown, warnings[]"
+                    "enabled, status, active_account_id, candidate_account_id, candidate_display_name, detail, banked_reset_count, session_resume?, usage_unknown, warnings[], candidate_switch_score?, next_probe_seconds?"
                 }
+                "reset-events" => "events[] (id, reset_type, announced_at, summary, audience?)",
+                "reset-timeline" => "events[] (id, announced_at, summary, audience?)",
+                "add-account-status" => "active, auth_changed, state, codex_root, hint",
+                "open-ai-status" => "indicator, description, updated_at, codex_components[]",
+                "auto-start-usage-windows" => "enabled, poll_seconds",
+                "auto-resume-session" => "enabled, pending?, hint?",
                 "doctor" => "version, checks[] (id, status, detail, hint?)",
                 "token-usage" => "totals, by_day, by_project",
                 "quota-history" => "account_id, samples[] (minute, five_remaining, week_remaining)",
@@ -2332,6 +2364,27 @@ mod tests {
         assert_eq!(classify_error(&anyhow!("the keychain key is missing")).0, 7);
         let (code, kind, _) = classify_error(&anyhow!("something unexpected"));
         assert_eq!((code, kind), (1, "error"));
+    }
+
+    #[test]
+    fn clap_style_failures_classify_as_usage_errors() {
+        // `try_parse` errors now flow through classify_error so `--json` callers
+        // still get the envelope (contract v2).
+        let invalid = anyhow!("error: invalid value 'not-a-uuid' for '[ACCOUNT_ID]'");
+        assert_eq!(classify_error(&invalid).0, 2);
+        let unknown = anyhow!("error: unrecognized subcommand 'nope'");
+        assert_eq!(classify_error(&unknown).0, 2);
+        let missing = anyhow!("error: a value is required for '--json <VALUE>'");
+        assert_eq!(classify_error(&missing).0, 2);
+    }
+
+    #[test]
+    fn schema_covers_the_newer_commands_and_fields() {
+        assert!(schema_document(None).contains("quota-forecast"));
+        assert!(schema_document(None).contains("reset-events"));
+        assert!(schema_document(Some("reset-events")).contains("events[]"));
+        assert!(schema_document(Some("status")).contains("warnings[]"));
+        assert!(schema_document(Some("add-account-status")).contains("state"));
     }
 
     #[test]

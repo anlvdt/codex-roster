@@ -661,6 +661,19 @@ final class AccountStore: ObservableObject {
             self.newAccountLoginState = .saved(liveIdentity)
             try await self.load()
             self.lastQuotaRefreshAt = .now
+            // Say whether the row was added or refreshed instead of leaving the
+            // user to guess (the CLI reports `action`).
+            if saved.action == "refreshed" {
+                self.showToast(AppLanguage.text(
+                    "Đã cập nhật phiên của \(saved.account.email).",
+                    "Refreshed the saved session for \(saved.account.email)."
+                ))
+            } else {
+                self.showToast(AppLanguage.text(
+                    "Đã thêm \(saved.account.email) vào roster.",
+                    "Added \(saved.account.email) to the roster."
+                ))
+            }
         }
     }
 
@@ -1220,10 +1233,18 @@ final class AccountStore: ObservableObject {
                 self.lastQuotaRefreshAt = .now
             }
             await self.applySessionResumeIfNeeded(activated.sessionResume, continueExhausted: false)
-            self.showToast(AppLanguage.text(
-                "Đã chuyển sang \(activated.account.email).",
-                "Switched to \(activated.account.email)."
-            ))
+            let closed = activated.warnings?.count ?? 0
+            if closed > 0 {
+                self.showToast(AppLanguage.text(
+                    "Đã chuyển sang \(activated.account.email) (đã đóng \(closed) tiến trình Codex/ChatGPT).",
+                    "Switched to \(activated.account.email) (closed \(closed) Codex/ChatGPT process(es))."
+                ))
+            } else {
+                self.showToast(AppLanguage.text(
+                    "Đã chuyển sang \(activated.account.email).",
+                    "Switched to \(activated.account.email)."
+                ))
+            }
         }
     }
 
@@ -2124,10 +2145,10 @@ final class AccountStore: ObservableObject {
                     ResetNotifier.showOpenAIIncidentIfNeeded(self.openAIStatus)
                     if Date.now >= nextPublicSignalCheck {
                         if let signals = try? await self.cli.decode(
-                            [GlobalResetEvent].self,
+                            ResetEventsOutput.self,
                             arguments: ["reset-events"]
                         ) {
-                            signals.forEach { ResetNotifier.showPublicSignal($0) }
+                            signals.events.forEach { ResetNotifier.showPublicSignal($0) }
                             self.refreshResetOutlook(silently: true)
                         }
                         nextPublicSignalCheck = Date.now.addingTimeInterval(60)
@@ -3831,6 +3852,9 @@ struct VibeUsageSummary: Decodable {
 
 private struct SaveOutput: Decodable {
     let account: SavedAccount
+    /// `created` (new row) or `refreshed` (existing row updated). Emitted by the
+    /// CLI since contract v1 and previously dropped by the app.
+    let action: String?
 }
 
 private struct ImportJsonOutput: Decodable {
@@ -3886,6 +3910,8 @@ struct ActivateOutput: Decodable {
     let account: SavedAccount
     let previousAccountId: UUID?
     let sessionResume: SessionResumeHint?
+    /// Codex/ChatGPT processes the switch had to close first.
+    let warnings: [RunningProcess]?
 }
 
 struct SessionResumeHint: Decodable {
@@ -4009,6 +4035,12 @@ enum ResetOutlookPresentation {
             ? "Reset: đang theo dõi"
             : "Reset: watching"
     }
+}
+
+/// `reset-events --json` is wrapped in an object so the payload can carry
+/// `contract_version` (contract v2).
+private struct ResetEventsOutput: Decodable {
+    let events: [GlobalResetEvent]
 }
 
 private struct GlobalResetEvent: Decodable {

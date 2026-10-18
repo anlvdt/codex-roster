@@ -251,6 +251,9 @@ struct PrismQuickSwitchDeck: View {
                 compact: true
             )
             .frame(maxWidth: .infinity, alignment: .leading)
+            // Age of the data behind those bars: without it a 12-minute-old
+            // reading looks as authoritative as a fresh one (audit QTA-1).
+            QuotaFreshnessLabel(fetchedAt: activeAccount?.usage?.fetchedAt?.value)
         }
         .padding(8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -1484,5 +1487,42 @@ private struct PrismCompactAccountCard: View {
             ),
             PrismTheme.resetProximityTint(window: window, kind: kind)
         )
+    }
+}
+
+/// Data-age chip for quota surfaces. Warns once the reading is older than the
+/// same 10-minute threshold the notch badge uses, and says so when there is no
+/// reading at all instead of leaving the bars unexplained (audit QTA-1).
+struct QuotaFreshnessLabel: View {
+    let fetchedAt: Date?
+    @EnvironmentObject private var language: LanguageStore
+
+    private static let staleAfter: TimeInterval = 10 * 60
+
+    var body: some View {
+        let text: String
+        let stale: Bool
+        if let fetchedAt {
+            let age = max(0, Date().timeIntervalSince(fetchedAt))
+            stale = age > Self.staleAfter
+            let minutes = Int(age / 60)
+            if minutes < 1 {
+                text = language.text("vừa cập nhật", "updated just now")
+            } else {
+                text = language.text("cập nhật \(minutes)p trước", "updated \(minutes)m ago")
+            }
+        } else {
+            stale = false
+            text = language.text("chưa có dữ liệu quota", "no quota data yet")
+        }
+        return HStack(spacing: 4) {
+            Image(systemName: stale ? "exclamationmark.triangle.fill" : "clock")
+                .font(.system(size: 9, weight: .semibold))
+            Text(text)
+                .font(PrismTheme.fontCaption)
+        }
+        .foregroundStyle(stale ? PrismTheme.statusWarn : PrismTheme.labelSecondary)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(text)
     }
 }

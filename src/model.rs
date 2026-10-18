@@ -322,6 +322,9 @@ pub struct AutoSwitchOutput {
     /// when bookkeeping failed but the switch itself succeeded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Present once a candidate was scored (apply/status), explaining the pick.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_switch_score: Option<SwitchScoreBreakdown>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -395,6 +398,46 @@ pub struct RunningCodexProcess {
     /// "desktop" (ChatGPT/Codex.app/plugin) or "cli". Optional for older tests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+}
+
+/// Why one candidate outranks another. Exposed in `auto-switch --json` so the
+/// choice is explainable instead of a bare number (audit U5).
+#[derive(Clone, Debug, Serialize)]
+pub struct SwitchScoreBreakdown {
+    pub score: i64,
+    pub quota_component: i64,
+    pub plan_bonus: i64,
+    pub reset_bonus: i64,
+    pub freshness_penalty: i64,
+    pub banked_bonus: i64,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WindowForecast {
+    /// `five_hour` | `weekly`
+    pub window: String,
+    pub remaining_percent: f64,
+    pub burn_per_minute: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_to_empty_minutes: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_low_minutes: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_high_minutes: Option<f64>,
+    /// `high` | `medium` | `low`
+    pub confidence: String,
+    pub sample_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct QuotaForecastOutput {
+    pub account_id: Option<Uuid>,
+    pub generated_at: OffsetDateTime,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub five_hour: Option<WindowForecast>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weekly: Option<WindowForecast>,
 }
 
 #[derive(Clone, Debug, Serialize)]

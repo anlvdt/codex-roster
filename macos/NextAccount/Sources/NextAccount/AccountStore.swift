@@ -2760,6 +2760,10 @@ final class AccountStore: ObservableObject {
                 autoSwitchAllExhaustedNotified = false
                 autoSwitchCooldownUntil = Date.now.addingTimeInterval(8)
                 await self.applySessionResumeIfNeeded(applied.sessionResume, continueExhausted: true)
+            case "waiting_for_dwell":
+                // Benign: the minimum dwell between automatic switches has not
+                // elapsed yet. Do not surface this as a failure.
+                autoSwitchState = nil
             default:
                 autoSwitchState = .checkFailed
             }

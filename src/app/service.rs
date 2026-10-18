@@ -125,6 +125,7 @@ where
             session_resume: None,
             usage_unknown: false,
             warnings: Vec::new(),
+            candidate_switch_score: None,
         })
     }
 
@@ -196,6 +197,26 @@ where
             ));
         }
         let _auto_switch_lock = AutoSwitchLock::acquire(&self.env.app_data_dir)?;
+        // Finish or discard whatever a previous run left in flight before making
+        // another decision (audit U6).
+        match crate::switch_txn::reconcile(
+            &self.env.app_data_dir,
+            time::OffsetDateTime::now_utc(),
+            self.live_saved_account_id().unwrap_or(None),
+        )? {
+            crate::switch_txn::ReconcileOutcome::Completed(phase) => {
+                eprintln!(
+                    "recovered an interrupted account switch (phase {phase:?}); treating it as applied"
+                );
+                let _ = crate::switch_txn::clear(&self.env.app_data_dir);
+            }
+            crate::switch_txn::ReconcileOutcome::RolledBack => {
+                eprintln!(
+                    "recovered an interrupted account switch; the previous account is still live"
+                );
+            }
+            _ => {}
+        }
         // Apply reuses the prior decision when possible — avoid a second Keychain/network
         // fan-out that unlocks the keychain and blocks ChatGPT relaunch.
         if apply {
@@ -224,6 +245,7 @@ where
             ));
         };
         let now = time::OffsetDateTime::now_utc();
+        let settings = load_settings(&self.env.app_data_dir)?;
         // No current known window and no usable credits means the live probe
         // failed (for example an expired access token, which Roster deliberately
         // does not refresh) or the cached windows already reset. Say so instead
@@ -245,7 +267,14 @@ where
             output.usage_unknown = true;
             return Ok(output);
         }
-        if !is_exhausted_for_switch(active.usage.as_ref(), now) {
+        // An idle account (no rollout write in the last ~20s) is the only safe
+        // moment for a proactive switch: moving mid-turn would strand a turn on
+        // an account that is about to be swapped away (audit U2).
+        let activity = crate::codex_activity::summarize(&self.env.codex_root, &[]);
+        let activity_idle = activity.working == 0 && activity.waiting == 0;
+        let proactive =
+            proactive_switch_allowed(active.usage.as_ref(), &settings, activity_idle, now);
+        if !is_exhausted_for_switch(active.usage.as_ref(), now) && !proactive {
             return Ok(auto_switch_output(
                 enabled,
                 "active_has_quota",
@@ -256,7 +285,19 @@ where
             ));
         }
 
-        let settings = load_settings(&self.env.app_data_dir)?;
+        // Minimum dwell between automatic switches, on both the reactive and the
+        // proactive path: without it an exhausted roster can bounce A→B→C→A every
+        // poll (audit S5/U2).
+        if !dwell_satisfied(&settings, now) {
+            return Ok(auto_switch_output(
+                enabled,
+                "waiting_for_dwell",
+                Some(active.id),
+                None,
+                None,
+                Some("Waiting for the minimum dwell between automatic switches.".to_owned()),
+            ));
+        }
         let candidates = self.repository.list_accounts(&self.env.kind)?;
         let mut usable_candidate_ids = HashSet::new();
         for candidate in candidates.iter().filter(|candidate| {
@@ -318,9 +359,7 @@ where
             })
             .cloned()
             .collect();
-        ranked.sort_by_key(|candidate| {
-            std::cmp::Reverse(switch_quota_score(candidate.usage.as_ref(), now))
-        });
+        ranked.sort_by(|left, right| compare_candidates(left, right, now));
         // A live Codex CLI session cannot be switched past: apply would refuse
         // after the GUI already quit Desktop, bouncing the session in a loop.
         // Report `waiting_for_processes` instead of `ready` (audit S1).
@@ -345,14 +384,17 @@ where
             if let Some(candidate) =
                 self.revalidated_auto_switch_candidate(cached.id, &active, &settings, now)
             {
-                return Ok(auto_switch_output(
+                let mut output = auto_switch_output(
                     enabled,
                     "ready",
                     Some(active.id),
                     Some(candidate.id),
                     Some(account_display_name(&candidate)),
                     None,
-                ));
+                );
+                // Explain the pick before the switch happens, not only after.
+                output.candidate_switch_score = switch_score_breakdown(&candidate, now);
+                return Ok(output);
             }
         }
 
@@ -515,6 +557,11 @@ where
                 Some("Close Codex and ChatGPT before automatic switching.".to_owned()),
             ));
         }
+        // Durable saga: record the intent on disk before the first mutation so a
+        // crash leaves a recoverable trace instead of a half-applied switch
+        // (audit U6).
+        let mut txn =
+            crate::switch_txn::begin(&self.env.app_data_dir, active.id, candidate.id, now)?;
         // Freeze the live thread that hit usage limits BEFORE swapping auth.
         // Shared ~/.codex keeps that thread; the new account's quota pays for
         // the next turns. Do not use the target account's old workspace hint.
@@ -523,11 +570,59 @@ where
             &self.env.codex_root,
             active.id,
         );
-        let _activated = if force {
-            self.activate_with_expected_active(candidate.id, true, Some(active.id))?
+        txn = crate::switch_txn::advance(
+            &self.env.app_data_dir,
+            &txn,
+            crate::switch_txn::SwitchPhase::Captured,
+        )?;
+        let activated = if force {
+            self.activate_with_expected_active(candidate.id, true, Some(active.id))
         } else {
-            self.activate_if_active_matches(candidate.id, active.id)?
+            self.activate_if_active_matches(candidate.id, active.id)
         };
+        let _activated = match activated {
+            Ok(activated) => activated,
+            Err(error) => {
+                // The swap did not complete: record the rollback and clean up so
+                // the next poll is not blocked by a phantom transaction.
+                let _ = crate::switch_txn::advance(
+                    &self.env.app_data_dir,
+                    &txn,
+                    crate::switch_txn::SwitchPhase::RolledBack,
+                );
+                let _ = crate::switch_txn::clear(&self.env.app_data_dir);
+                return Err(error);
+            }
+        };
+        txn = crate::switch_txn::advance(
+            &self.env.app_data_dir,
+            &txn,
+            crate::switch_txn::SwitchPhase::AuthSwapped,
+        )?;
+        // Verify the live session really is the target. An unreadable auth file
+        // is inconclusive (not a failure); a live session that maps to another
+        // saved account means the swap did not land and must be reverted.
+        let live_after_swap = self.live_saved_account_id().unwrap_or(None);
+        if let Some(live) = live_after_swap
+            && live != candidate.id
+            && live == active.id
+        {
+            let _ = self.activate_with_expected_active(active.id, true, None);
+            let _ = crate::switch_txn::advance(
+                &self.env.app_data_dir,
+                &txn,
+                crate::switch_txn::SwitchPhase::RolledBack,
+            );
+            let _ = crate::switch_txn::clear(&self.env.app_data_dir);
+            return Err(anyhow::anyhow!(
+                "automatic switch did not take effect; the previous account was restored"
+            ));
+        }
+        crate::switch_txn::advance(
+            &self.env.app_data_dir,
+            &txn,
+            crate::switch_txn::SwitchPhase::Verified,
+        )?;
         let _operation_lock = OperationLock::acquire(&self.env.app_data_dir)?;
         let mut settings = load_settings(&self.env.app_data_dir)?;
         settings.last_auto_switch_at = Some(now);
@@ -549,6 +644,7 @@ where
             Some(account_display_name(&candidate)),
             None,
         );
+        output.candidate_switch_score = switch_score_breakdown(&candidate, now);
         let auto_resume_enabled = settings.auto_resume_session;
         match crate::session_resume::take_pending_continue_hint(
             &self.env.app_data_dir,
@@ -560,7 +656,64 @@ where
             )),
         }
         output.warnings = bookkeeping_warnings;
+        // The switch is fully applied and recorded: drop the transaction so the
+        // next run starts clean.
+        let _ = crate::switch_txn::clear(&self.env.app_data_dir);
         Ok(output)
+    }
+
+    /// Burn-rate forecast for one account's windows, from recorded samples.
+    ///
+    /// Uses cached quota (no network) and the local `quota_history` series, so it
+    /// is safe to call from the UI or a script at any time.
+    pub fn quota_forecast(
+        &self,
+        account_id: Option<Uuid>,
+    ) -> Result<crate::model::QuotaForecastOutput> {
+        let list = self.list()?;
+        let account = match account_id {
+            Some(id) => list
+                .accounts
+                .iter()
+                .find(|account| account.id == id)
+                .ok_or_else(|| anyhow::anyhow!("no saved account matches that id"))?,
+            None => list
+                .accounts
+                .iter()
+                .find(|account| account.is_active)
+                .ok_or_else(|| anyhow::anyhow!("no active account; pass an account id"))?,
+        };
+        let now = time::OffsetDateTime::now_utc();
+        let now_minute = now.unix_timestamp() / 60;
+        let samples =
+            crate::quota_history::load_samples(&self.env.app_data_dir, account.id, now).samples;
+        let usage = account.usage.as_ref();
+        let five = usage
+            .and_then(|usage| usage.five_hour.as_ref())
+            .map(|window| f64::from(window.remaining_percent));
+        let weekly = usage
+            .and_then(|usage| usage.weekly.as_ref())
+            .map(|window| f64::from(window.remaining_percent));
+        Ok(crate::model::QuotaForecastOutput {
+            account_id: Some(account.id),
+            generated_at: now,
+            five_hour: five.and_then(|remaining| {
+                crate::forecast::forecast_window(
+                    &samples,
+                    crate::forecast::WindowKind::FiveHour,
+                    remaining,
+                    now_minute,
+                )
+            }),
+            weekly: weekly.and_then(|remaining| {
+                crate::forecast::forecast_window(
+                    &samples,
+                    crate::forecast::WindowKind::Weekly,
+                    remaining,
+                    now_minute,
+                )
+            }),
+        })
     }
 
     fn revalidated_auto_switch_candidate(
@@ -1015,6 +1168,15 @@ where
             warnings,
             session_resume,
         })
+    }
+
+    /// Which saved account the live `~/.codex` session currently maps to.
+    fn live_saved_account_id(&self) -> Result<Option<Uuid>> {
+        let Some(live) = codex::try_read_live_auth_bundle(&self.env)? else {
+            return Ok(None);
+        };
+        let accounts = self.repository.list_accounts(&self.env.kind)?;
+        Ok(match_saved_account(&accounts, &live.identity).map(|account| account.id))
     }
 
     fn refresh_current_saved_account_before_activation(&self) -> Result<Option<Uuid>> {
@@ -1589,6 +1751,7 @@ fn auto_switch_output(
         session_resume: None,
         usage_unknown: false,
         warnings: Vec::new(),
+        candidate_switch_score: None,
     }
 }
 
@@ -1850,6 +2013,153 @@ fn is_cached_auto_switch_hint(
 /// Weekly-dominant ranking: `weekly * 1000 + five_hour` so any weekly gap
 /// outranks any 5H-only difference. Depleted weekly (or missing usable windows)
 /// scores `-1`.
+/// Bonus constants for candidate ranking. Documented so the numbers in the UI
+/// can be explained (audit U5): a paid plan and an imminent weekly reset are
+/// worth more than a slightly fuller window; a stale cache is worth less.
+const PLAN_BONUS_PRO: i64 = 15;
+const PLAN_BONUS_PLUS: i64 = 5;
+const WEEKLY_RESET_BONUS: i64 = 10;
+const STALE_CACHE_PENALTY: i64 = 20;
+const BANKED_RESET_BONUS: i64 = 5;
+const STALE_CACHE_MINUTES: i64 = 10;
+
+fn plan_rank(label: Option<&str>) -> i64 {
+    match label.map(|value| value.to_ascii_lowercase()) {
+        Some(value) if value.contains("pro") => 2,
+        Some(value) if value.contains("plus") => 1,
+        _ => 0,
+    }
+}
+
+/// Full ranking score for one candidate. `None` means "not eligible", which is
+/// how the caller excludes Free/Go, exhausted and unusable accounts.
+pub fn switch_score_breakdown(
+    account: &AccountView,
+    now: OffsetDateTime,
+) -> Option<crate::model::SwitchScoreBreakdown> {
+    let quota = switch_quota_score(account.usage.as_ref(), now);
+    if quota < 0 {
+        return None;
+    }
+    let plan_bonus = match plan_rank(plan_for_auto_switch(account)) {
+        2 => PLAN_BONUS_PRO,
+        1 => PLAN_BONUS_PLUS,
+        _ => 0,
+    };
+    let reset_bonus = account
+        .usage
+        .as_ref()
+        .and_then(|usage| usage.weekly.as_ref())
+        .filter(|window| {
+            window.reset_at > now && window.reset_at - now <= time::Duration::hours(24)
+        })
+        .map(|_| WEEKLY_RESET_BONUS)
+        .unwrap_or(0);
+    let freshness_penalty = account
+        .usage
+        .as_ref()
+        .filter(|usage| now - usage.fetched_at > time::Duration::minutes(STALE_CACHE_MINUTES))
+        .map(|_| STALE_CACHE_PENALTY)
+        .unwrap_or(0);
+    let banked_bonus = if banked_reset_count(account.usage.as_ref(), now) > 0 {
+        BANKED_RESET_BONUS
+    } else {
+        0
+    };
+    let score = i64::from(quota) + plan_bonus + reset_bonus - freshness_penalty + banked_bonus;
+    let mut reasons = vec![format!("quota {quota}")];
+    if plan_bonus > 0 {
+        reasons.push(format!("plan +{plan_bonus}"));
+    }
+    if reset_bonus > 0 {
+        reasons.push(format!("weekly reset +{reset_bonus}"));
+    }
+    if freshness_penalty > 0 {
+        reasons.push(format!("stale cache -{freshness_penalty}"));
+    }
+    if banked_bonus > 0 {
+        reasons.push(format!("banked reset +{banked_bonus}"));
+    }
+    Some(crate::model::SwitchScoreBreakdown {
+        score,
+        quota_component: i64::from(quota),
+        plan_bonus,
+        reset_bonus,
+        freshness_penalty,
+        banked_bonus,
+        reason: reasons.join(", "),
+    })
+}
+
+/// Minimum dwell between two automatic switches, applied to the reactive and
+/// proactive paths alike so A→B→C→A thrash cannot happen (audit S5/U2).
+fn dwell_satisfied(settings: &crate::settings::AppSettings, now: OffsetDateTime) -> bool {
+    match settings.last_auto_switch_at {
+        Some(last) => {
+            now - last >= time::Duration::minutes(settings.auto_switch_dwell_minutes as i64)
+        }
+        None => true,
+    }
+}
+
+/// Opt-in proactive trigger: switch before the 5-hour window is empty, but only
+/// when the account is idle, the weekly window is healthy, and the dwell has
+/// elapsed. Any missing signal means "do not switch" — the reactive path still
+/// handles the exhausted case.
+fn proactive_switch_allowed(
+    usage: Option<&AccountUsageView>,
+    settings: &crate::settings::AppSettings,
+    idle: bool,
+    now: OffsetDateTime,
+) -> bool {
+    if !settings.auto_switch_proactive || !idle || !dwell_satisfied(settings, now) {
+        return false;
+    }
+    let Some(usage) = usage else {
+        return false;
+    };
+    let Some(five) = usage
+        .five_hour
+        .as_ref()
+        .filter(|window| window_is_current(window, now))
+    else {
+        return false;
+    };
+    let Some(weekly) = usage
+        .weekly
+        .as_ref()
+        .filter(|window| window_is_current(window, now))
+    else {
+        return false;
+    };
+    five.remaining_percent <= settings.auto_switch_threshold_percent
+        && weekly.remaining_percent >= settings.auto_switch_weekly_floor_percent
+}
+
+/// Deterministic candidate order: score, then plan, then the least recently
+/// activated account, then id. The last two make ties stable across runs so a
+/// flip-flop between equal accounts cannot happen (audit U5).
+pub fn compare_candidates(
+    left: &AccountView,
+    right: &AccountView,
+    now: OffsetDateTime,
+) -> std::cmp::Ordering {
+    let left_score = switch_score_breakdown(left, now).map(|breakdown| breakdown.score);
+    let right_score = switch_score_breakdown(right, now).map(|breakdown| breakdown.score);
+    right_score
+        .cmp(&left_score)
+        .then_with(|| {
+            plan_rank(plan_for_auto_switch(right)).cmp(&plan_rank(plan_for_auto_switch(left)))
+        })
+        .then_with(|| match (left.last_activated_at, right.last_activated_at) {
+            (Some(left_at), Some(right_at)) => left_at.cmp(&right_at),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        })
+        .then_with(|| left.id.cmp(&right.id))
+}
+
 fn switch_quota_score(usage: Option<&AccountUsageView>, now: OffsetDateTime) -> i32 {
     let Some(usage) = usage else {
         return -1;
@@ -1923,9 +2233,7 @@ fn ranked_cached_auto_switch_candidates(
         })
         .cloned()
         .collect();
-    candidates.sort_by_key(|candidate| {
-        std::cmp::Reverse(switch_quota_score(candidate.usage.as_ref(), now))
-    });
+    candidates.sort_by(|left, right| compare_candidates(left, right, now));
     candidates
 }
 
@@ -2598,6 +2906,213 @@ mod tests {
         assert!(
             switch_quota_score(Some(&high_weekly), now)
                 > switch_quota_score(Some(&low_weekly), now)
+        );
+    }
+
+    fn scored_candidate(
+        email: &str,
+        plan: Option<&str>,
+        five: u8,
+        weekly: u8,
+        last_activated_minutes_ago: Option<i64>,
+    ) -> AccountView {
+        let now = OffsetDateTime::now_utc();
+        AccountView {
+            id: Uuid::new_v4(),
+            provider: crate::model::AiProvider::OpenAi,
+            email: email.to_owned(),
+            subject: None,
+            name: None,
+            custom_label: None,
+            plan_label: plan.map(str::to_owned),
+            environment: EnvironmentKind::Linux,
+            is_active: false,
+            created_at: now,
+            updated_at: now,
+            last_activated_at: last_activated_minutes_ago
+                .map(|minutes| now - time::Duration::minutes(minutes)),
+            archived: false,
+            // `plan_for_auto_switch` trusts the usage-reported plan once a
+            // fetch exists, so the fixture must set it there.
+            usage: Some(AccountUsageView {
+                plan_label: plan.map(str::to_owned),
+                ..usage_with(
+                    Some(window_view(five, 1)),
+                    Some(window_view(weekly, 48)),
+                    None,
+                    1,
+                )
+            }),
+            usage_error: None,
+        }
+    }
+
+    fn proactive_settings() -> crate::settings::AppSettings {
+        crate::settings::AppSettings {
+            auto_switch_proactive: true,
+            ..crate::settings::AppSettings::default()
+        }
+    }
+
+    #[test]
+    fn proactive_switch_stays_off_unless_enabled() {
+        let now = OffsetDateTime::now_utc();
+        // 3% left is inside the default 5% threshold, but the feature is opt-in.
+        let usage = usage_with(Some(window_view(3, 1)), Some(window_view(50, 48)), None, 1);
+        let settings = crate::settings::AppSettings::default();
+        assert!(!proactive_switch_allowed(
+            Some(&usage),
+            &settings,
+            true,
+            now
+        ));
+        assert!(proactive_switch_allowed(
+            Some(&usage),
+            &proactive_settings(),
+            true,
+            now
+        ));
+    }
+
+    #[test]
+    fn proactive_switch_requires_an_idle_account() {
+        let now = OffsetDateTime::now_utc();
+        let usage = usage_with(Some(window_view(3, 1)), Some(window_view(50, 48)), None, 1);
+        assert!(!proactive_switch_allowed(
+            Some(&usage),
+            &proactive_settings(),
+            false,
+            now
+        ));
+    }
+
+    #[test]
+    fn proactive_switch_respects_threshold_and_weekly_floor() {
+        let now = OffsetDateTime::now_utc();
+        let settings = proactive_settings();
+        // Above the 5% threshold: no proactive switch.
+        let healthy = usage_with(Some(window_view(40, 1)), Some(window_view(50, 48)), None, 1);
+        assert!(!proactive_switch_allowed(
+            Some(&healthy),
+            &settings,
+            true,
+            now
+        ));
+        // Below the threshold but the weekly window is nearly spent: refuse.
+        let thin_week = usage_with(Some(window_view(3, 1)), Some(window_view(10, 48)), None, 1);
+        assert!(!proactive_switch_allowed(
+            Some(&thin_week),
+            &settings,
+            true,
+            now
+        ));
+        // Unknown windows never trigger it.
+        assert!(!proactive_switch_allowed(None, &settings, true, now));
+    }
+
+    #[test]
+    fn dwell_blocks_a_second_switch_until_it_elapses() {
+        let now = OffsetDateTime::now_utc();
+        let mut settings = proactive_settings();
+        assert!(dwell_satisfied(&settings, now), "no previous switch");
+        settings.last_auto_switch_at = Some(now - time::Duration::minutes(5));
+        assert!(
+            !dwell_satisfied(&settings, now),
+            "default dwell is 10 minutes"
+        );
+        let usage = usage_with(Some(window_view(3, 1)), Some(window_view(50, 48)), None, 1);
+        assert!(!proactive_switch_allowed(
+            Some(&usage),
+            &settings,
+            true,
+            now
+        ));
+        settings.last_auto_switch_at = Some(now - time::Duration::minutes(11));
+        assert!(dwell_satisfied(&settings, now));
+        assert!(proactive_switch_allowed(Some(&usage), &settings, true, now));
+    }
+
+    #[test]
+    fn switch_score_is_monotonic_in_weekly_quota() {
+        let now = OffsetDateTime::now_utc();
+        let low = scored_candidate("low@example.com", Some("Plus"), 50, 30, None);
+        let high = scored_candidate("high@example.com", Some("Plus"), 50, 70, None);
+        let low_score = switch_score_breakdown(&low, now).expect("eligible").score;
+        let high_score = switch_score_breakdown(&high, now).expect("eligible").score;
+        assert!(
+            high_score > low_score,
+            "weekly 70 ({high_score}) must outrank weekly 30 ({low_score})"
+        );
+    }
+
+    #[test]
+    fn switch_score_explains_its_components() {
+        let now = OffsetDateTime::now_utc();
+        let account = scored_candidate("pro@example.com", Some("Pro"), 10, 80, None);
+        let breakdown = switch_score_breakdown(&account, now).expect("eligible");
+        assert_eq!(breakdown.quota_component, 80_010);
+        assert_eq!(breakdown.plan_bonus, PLAN_BONUS_PRO);
+        assert_eq!(breakdown.freshness_penalty, 0, "cache is one minute old");
+        assert_eq!(breakdown.score, 80_010 + PLAN_BONUS_PRO);
+        assert!(breakdown.reason.contains("quota 80010"));
+    }
+
+    #[test]
+    fn ineligible_candidates_have_no_score() {
+        let now = OffsetDateTime::now_utc();
+        let mut depleted = scored_candidate("empty@example.com", Some("Plus"), 0, 0, None);
+        assert!(switch_score_breakdown(&depleted, now).is_none());
+        depleted.usage = None;
+        assert!(switch_score_breakdown(&depleted, now).is_none());
+    }
+
+    #[test]
+    fn tie_break_is_deterministic_by_plan_then_age_then_id() {
+        let now = OffsetDateTime::now_utc();
+        // Identical quota: the paid plan must win, then the least recently used.
+        let pro = scored_candidate("pro@example.com", Some("Pro"), 50, 50, Some(30));
+        let plus_old = scored_candidate("plus-old@example.com", Some("Plus"), 50, 50, Some(90));
+        let plus_new = scored_candidate("plus-new@example.com", Some("Plus"), 50, 50, Some(5));
+        let mut ranked = [plus_new.clone(), pro.clone(), plus_old.clone()];
+        ranked.sort_by(|left, right| compare_candidates(left, right, now));
+        assert_eq!(ranked[0].email, pro.email, "Pro plan wins the tie");
+        assert_eq!(ranked[1].email, plus_old.email, "older activation first");
+        assert_eq!(ranked[2].email, plus_new.email);
+
+        // Sorting is stable regardless of the input order.
+        let mut reversed = [plus_new, plus_old, pro];
+        reversed.sort_by(|left, right| compare_candidates(left, right, now));
+        assert_eq!(ranked[0].email, reversed[0].email);
+        assert_eq!(ranked[1].email, reversed[1].email);
+    }
+
+    #[test]
+    fn golden_ranking_of_five_candidates() {
+        let now = OffsetDateTime::now_utc();
+        let candidates = vec![
+            scored_candidate("a@example.com", Some("Plus"), 5, 20, None),
+            scored_candidate("b@example.com", Some("Pro"), 90, 60, None),
+            scored_candidate("c@example.com", Some("Plus"), 99, 50, None),
+            scored_candidate("d@example.com", Some("Plus"), 10, 60, None),
+            // 1% is already treated as exhausted, so keep every row eligible.
+            scored_candidate("e@example.com", Some("Plus"), 4, 55, None),
+        ];
+        let mut ranked = candidates.clone();
+        ranked.sort_by(|left, right| compare_candidates(left, right, now));
+        let order: Vec<&str> = ranked
+            .iter()
+            .map(|account| account.email.as_str())
+            .collect();
+        // b (weekly 60 + Pro) > d (weekly 60) > e (weekly 55) > c (weekly 50) > a (weekly 20)
+        assert_eq!(
+            order,
+            vec![
+                "b@example.com",
+                "d@example.com",
+                "e@example.com",
+                "c@example.com",
+                "a@example.com"
+            ]
         );
     }
 

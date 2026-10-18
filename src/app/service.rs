@@ -126,6 +126,7 @@ where
             usage_unknown: false,
             warnings: Vec::new(),
             candidate_switch_score: None,
+            next_probe_seconds: None,
         })
     }
 
@@ -275,28 +276,41 @@ where
         let proactive =
             proactive_switch_allowed(active.usage.as_ref(), &settings, activity_idle, now);
         if !is_exhausted_for_switch(active.usage.as_ref(), now) && !proactive {
-            return Ok(auto_switch_output(
+            let mut output = auto_switch_output(
                 enabled,
                 "active_has_quota",
                 Some(active.id),
                 None,
                 None,
                 None,
-            ));
+            );
+            output.next_probe_seconds =
+                next_probe_seconds_for_active(active.usage.as_ref(), &settings, now);
+            return Ok(output);
         }
 
         // Minimum dwell between automatic switches, on both the reactive and the
         // proactive path: without it an exhausted roster can bounce A→B→C→A every
         // poll (audit S5/U2).
         if !dwell_satisfied(&settings, now) {
-            return Ok(auto_switch_output(
+            let mut waiting = auto_switch_output(
                 enabled,
                 "waiting_for_dwell",
                 Some(active.id),
                 None,
                 None,
                 Some("Waiting for the minimum dwell between automatic switches.".to_owned()),
-            ));
+            );
+            // Sleep exactly until the dwell ends rather than on the fixed clock.
+            waiting.next_probe_seconds = settings.last_auto_switch_at.map(|last| {
+                let elapsed = (now - last).whole_seconds().max(0) as u64;
+                settings
+                    .auto_switch_dwell_minutes
+                    .saturating_mul(60)
+                    .saturating_sub(elapsed)
+                    .clamp(1, NEXT_PROBE_MAX_IDLE_SECONDS)
+            });
+            return Ok(waiting);
         }
         let candidates = self.repository.list_accounts(&self.env.kind)?;
         let mut usable_candidate_ids = HashSet::new();
@@ -365,14 +379,16 @@ where
         // Report `waiting_for_processes` instead of `ready` (audit S1).
         let preflight = self.activation_blocking_report(true);
         if preflight.has_live_cli() {
-            return Ok(auto_switch_output(
+            let mut waiting = auto_switch_output(
                 enabled,
                 "waiting_for_processes",
                 Some(active.id),
                 None,
                 None,
                 Some(crate::process::format_blocking_report(&preflight).join("; ")),
-            ));
+            );
+            waiting.next_probe_seconds = Some(NEXT_PROBE_BLOCKED_SECONDS);
+            return Ok(waiting);
         }
 
         // Never tell the GUI to quit ChatGPT on a cache-only guess. A stale
@@ -1752,6 +1768,7 @@ fn auto_switch_output(
         usage_unknown: false,
         warnings: Vec::new(),
         candidate_switch_score: None,
+        next_probe_seconds: None,
     }
 }
 
@@ -2089,6 +2106,34 @@ pub fn switch_score_breakdown(
         banked_bonus,
         reason: reasons.join(", "),
     })
+}
+
+/// How long the monitor should wait before the next probe when the active
+/// account still has quota: nothing can change until its 5-hour window resets,
+/// so sleep until then (capped so a clock skew or a manual change is still
+/// noticed). Unknown usage keeps the normal cadence (audit A1).
+pub const NEXT_PROBE_MAX_IDLE_SECONDS: u64 = 15 * 60;
+pub const NEXT_PROBE_MIN_IDLE_SECONDS: u64 = 30;
+/// A live CLI session usually ends within seconds to minutes.
+pub const NEXT_PROBE_BLOCKED_SECONDS: u64 = 15;
+
+fn next_probe_seconds_for_active(
+    usage: Option<&AccountUsageView>,
+    settings: &crate::settings::AppSettings,
+    now: OffsetDateTime,
+) -> Option<u64> {
+    let five = usage
+        .and_then(|usage| usage.five_hour.as_ref())
+        .filter(|window| window_is_current(window, now))?;
+    if !window_is_depleted(five.remaining_percent) {
+        return None;
+    }
+    let until_reset = (five.reset_at - now).whole_seconds().max(0) as u64;
+    let dwell_seconds = settings.auto_switch_dwell_minutes.saturating_mul(60);
+    Some(until_reset.clamp(
+        NEXT_PROBE_MIN_IDLE_SECONDS,
+        NEXT_PROBE_MAX_IDLE_SECONDS.max(dwell_seconds),
+    ))
 }
 
 /// Minimum dwell between two automatic switches, applied to the reactive and
@@ -2952,6 +2997,42 @@ mod tests {
             auto_switch_proactive: true,
             ..crate::settings::AppSettings::default()
         }
+    }
+
+    #[test]
+    fn next_probe_waits_for_an_exhausted_window_to_reset() {
+        let now = OffsetDateTime::now_utc();
+        let settings = crate::settings::AppSettings::default();
+        let mut usage = usage_with(Some(window_view(0, 1)), Some(window_view(50, 48)), None, 1);
+        usage.five_hour.as_mut().unwrap().reset_at = now + time::Duration::minutes(5);
+
+        let scheduled =
+            next_probe_seconds_for_active(Some(&usage), &settings, now).expect("scheduled");
+        assert!(
+            (295..=305).contains(&scheduled),
+            "expected ~300s until the reset, got {scheduled}"
+        );
+
+        // A reset far away is capped so a manual change is still noticed.
+        usage.five_hour.as_mut().unwrap().reset_at = now + time::Duration::hours(3);
+        assert_eq!(
+            next_probe_seconds_for_active(Some(&usage), &settings, now),
+            Some(NEXT_PROBE_MAX_IDLE_SECONDS)
+        );
+    }
+
+    #[test]
+    fn a_healthy_or_unknown_window_keeps_the_normal_cadence() {
+        let now = OffsetDateTime::now_utc();
+        let settings = crate::settings::AppSettings::default();
+        // Plenty of quota: nothing to schedule, use the default poll.
+        let healthy = usage_with(Some(window_view(80, 1)), Some(window_view(90, 48)), None, 1);
+        assert_eq!(
+            next_probe_seconds_for_active(Some(&healthy), &settings, now),
+            None
+        );
+        // No usage at all: keep probing.
+        assert_eq!(next_probe_seconds_for_active(None, &settings, now), None);
     }
 
     #[test]

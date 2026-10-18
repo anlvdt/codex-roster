@@ -111,11 +111,16 @@ enum RosterListFilter: Equatable {
     case all
     case triage(AccountTriage)
     case deferredUnverified
+    /// Archived rows are hidden from the default list (and from counts) but stay
+    /// findable behind their own chip (audit IA-3).
+    case archived
 
     func matches(_ account: SavedAccount) -> Bool {
         switch self {
         case .all:
-            return true
+            return !account.archived
+        case .archived:
+            return account.archived
         case .triage(let bucket):
             return account.triage == bucket
         case .deferredUnverified:
@@ -332,6 +337,21 @@ final class AccountStore: ObservableObject {
     /// Brief notch/menu caption after Auto-resume opens a remembered workspace.
     @Published private(set) var sessionResumeCaption: String?
     @Published var errorMessage: String?
+
+    /// Transient success/failure feedback. Unlike `errorMessage` this is not a
+    /// blocking alert: it confirms an action where it was triggered (audit FLOW-2).
+    @Published var toast: RosterToast?
+    private var toastDismissTask: Task<Void, Never>?
+
+    func showToast(_ text: String, kind: RosterToastKind = .success) {
+        toast = RosterToast(text: text, kind: kind)
+        toastDismissTask?.cancel()
+        toastDismissTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            self?.toast = nil
+        }
+    }
 
     private let cli = AccountHubCLI()
     private let archivedAccountsMigrationKeys = ["codexRoster.archivedAccountIDs", "accountHub.archivedAccountIDs"]
@@ -1187,6 +1207,10 @@ final class AccountStore: ObservableObject {
                 self.lastQuotaRefreshAt = .now
             }
             await self.applySessionResumeIfNeeded(activated.sessionResume, continueExhausted: false)
+            self.showToast(AppLanguage.text(
+                "Đã chuyển sang \(activated.account.email).",
+                "Switched to \(activated.account.email)."
+            ))
         }
     }
 
@@ -2066,9 +2090,18 @@ final class AccountStore: ObservableObject {
         ResetNotifier.prepare()
         resetNotificationTask = Task { [weak self] in
             var nextPublicSignalCheck = Date.distantPast
+            // Notification authorization is a system call that cannot change
+            // without the app being foregrounded, so cache it instead of asking
+            // every tick (audit PERF-2).
+            var authorized: Bool?
+            var nextAuthorizationCheck = Date.distantPast
             while !Task.isCancelled {
                 guard let self else { return }
-                if await ResetNotifier.isAuthorized() {
+                if authorized == nil || Date.now >= nextAuthorizationCheck {
+                    authorized = await ResetNotifier.isAuthorized()
+                    nextAuthorizationCheck = Date.now.addingTimeInterval(300)
+                }
+                if authorized == true {
                     // Account-authenticated usage is the source of truth for
                     // personal banked credits and actual quota resets.
                     ResetNotifier.showAccountSignals(
@@ -2087,9 +2120,9 @@ final class AccountStore: ObservableObject {
                         nextPublicSignalCheck = Date.now.addingTimeInterval(60)
                     }
                 }
-                // Usage refreshes separately; checking the local result often
-                // makes the banner appear immediately after a signal lands.
-                try? await Task.sleep(for: .seconds(2))
+                // 15s keeps a local reset banner timely while cutting wakeups
+                // from 30/minute to 4/minute (audit PERF-2).
+                try? await Task.sleep(for: .seconds(15))
             }
         }
     }
@@ -2281,7 +2314,13 @@ final class AccountStore: ObservableObject {
                 arguments: ["export", url.path, "--password-stdin", "--json"],
                 standardInput: password + "\n"
             )
-            self.backupStatusMessage = "Đã xuất bản sao lưu mã hóa."
+            let displayPath = url.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+            let message = AppLanguage.text(
+                "Đã xuất bản sao lưu mã hóa tới \(displayPath).",
+                "Encrypted backup exported to \(displayPath)."
+            )
+            self.backupStatusMessage = message
+            self.showToast(message)
         }
     }
 
@@ -2296,6 +2335,7 @@ final class AccountStore: ObservableObject {
                 "Đã nhập bản sao lưu. Snapshot có thể giữ refresh token cũ hơn phiên Codex đang sống — hãy Save current trước, và đừng kích hoạt hàng vừa khôi phục một cách mù quáng (có thể buộc đăng nhập lại).",
                 "Backup imported. Restored snapshots may hold stale refresh tokens vs live Codex — save the current session first, and do not activate restored rows blindly (that can force re-login)."
             )
+            self.showToast(AppLanguage.text("Đã nhập bản sao lưu.", "Backup imported."))
         }
     }
 
@@ -2307,6 +2347,7 @@ final class AccountStore: ObservableObject {
                 "Đã khôi phục danh sách. Snapshot có thể giữ refresh token cũ hơn phiên Codex đang sống — hãy Save current trước, và đừng kích hoạt hàng vừa khôi phục một cách mù quáng (có thể buộc đăng nhập lại).",
                 "Account list restored. Restored snapshots may hold stale refresh tokens vs live Codex — save the current session first, and do not activate restored rows blindly (that can force re-login)."
             )
+            self.showToast(AppLanguage.text("Đã khôi phục danh sách tài khoản.", "Account list restored."))
         }
     }
 
@@ -2318,6 +2359,7 @@ final class AccountStore: ObservableObject {
                 "Đã khôi phục phiên sao lưu. Snapshot có thể giữ refresh token cũ hơn phiên Codex đang sống — hãy Save current trước, và đừng kích hoạt hàng vừa khôi phục một cách mù quáng (có thể buộc đăng nhập lại).",
                 "Full backup restored. Restored snapshots may hold stale refresh tokens vs live Codex — save the current session first, and do not activate restored rows blindly (that can force re-login)."
             )
+            self.showToast(AppLanguage.text("Đã khôi phục phiên sao lưu.", "Full backup restored."))
         }
     }
 
@@ -5213,6 +5255,17 @@ struct UsageWindow: Decodable {
             ? "Đặt lại \(relativeReset(in: language))"
             : "Resets \(relativeReset(in: language))"
     }
+}
+
+enum RosterToastKind: Equatable {
+    case success
+    case failure
+}
+
+struct RosterToast: Identifiable, Equatable {
+    let id = UUID()
+    let text: String
+    let kind: RosterToastKind
 }
 
 struct RustDate: Decodable {

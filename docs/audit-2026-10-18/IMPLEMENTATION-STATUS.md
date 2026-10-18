@@ -27,8 +27,15 @@ Nhánh: `main`. Chưa push `origin`. Chưa xoá dữ liệu người dùng.
 
 | **Switch saga bền vững (E2.5)** | `src/switch_txn.rs`: file `switch-txn.json` (0600, atomic) với phase `decided → captured → auth_swapped → verified → done/rolled_back`, `txn_id`, from/to, `started_at`, `attempt`; tích hợp vào đường apply: ghi ý định **trước khi** đổi auth, rollback khi activate lỗi, **verify danh tính live** sau khi swap (chỉ rollback khi live trỏ về account cũ; auth không đọc được = không kết luận), clear khi xong; `reconcile` lúc vào apply để chốt/dọn txn của lần chạy trước (idempotent, txn >5 phút bị coi là bỏ); `in_flight_for_pair` chặn switch trùng | `c706a2f`, `7af4a5b` | 5 test `switch_txn` (phase+clear, crash ở mọi phase + reconcile hai lần cho cùng kết quả, txn cũ bị bỏ và không chặn, live không xác định → dọn, file hỏng không gây lỗi); **445 test pass**, không hồi quy |
 | **macOS UX (B, phần 3)** | About không còn quảng cáo "tìm kiếm / lọc trạng thái / sắp xếp / thao tác hàng loạt" (UI không có) — mô tả lại đúng danh sách sắp theo quota còn lại | `3f1071d` | `swift build` pass |
+| **macOS UX (B, phần 4 — feedback)** | `AccountStore.toast` (success/failure, tự tắt sau 4s) + banner trong **Console** và pill trạng thái trong **notch**; notch không tự thu khi `isSwitching`; thông báo export/import/restore có toast + **đường dẫn đã rút gọn `~`** và được bản địa hoá (trước hardcode tiếng Việt); toast "Đã chuyển sang <email>" sau khi switch | `7c937d9` | `swift build` pass; `RosterToastBanner` dùng `systemGreen/systemOrange` + `labelColor` |
+| **macOS UX (B, phần 6 — freshness QTA-1)** | `QuotaFreshnessLabel` trong panel notch: "vừa cập nhật" / "cập nhật Np trước" / "chưa có dữ liệu quota", chuyển cảnh báo khi quá 10 phút (cùng ngưỡng với badge ở compact ear) | commit mới | `swift build` pass |
+| **macOS UX (B, phần 5 — a11y/Light Mode)** | `PrismGreenSwitchToggleStyle` có trait `.isToggle` (+`.isSelected`) và value Bật/Tắt, tôn trọng Reduce Motion; nút switch có `accessibilityLabel "Đổi sang <tên>"`; nút icon tròn đạt hit target ≥28pt; thêm role màu ngữ nghĩa (`statusOK/Warn/Error/Info`, `labelPrimary/Secondary`) theo system palette và áp cho OperationsView | `3f1071d`→ commit mới | `swift build` pass |
 
-**Gate hiện tại:** `cargo fmt --check` pass · `cargo clippy --all-targets -- -D warnings` pass · **445 test pass, 0 fail, 2 ignored** · `swift build --package-path macos/NextAccount` pass · `scripts/build-macos-app.sh` pass.
+| **Scheduler auto-switch (A1)** | `AutoSwitchOutput.next_probe_seconds` (additive): cửa sổ 5h đã cạn ⇒ ngủ tới lúc reset (kẹp 30s–15 phút, nới theo dwell); `waiting_for_processes` ⇒ 15s; `waiting_for_dwell` ⇒ đúng phần dwell còn lại; monitor dùng hint thay vì poll cố định 45s | `4ba256d` | 2 test mới (`next_probe_waits_for_an_exhausted_window_to_reset` ~300s, cap 900s; healthy/unknown ⇒ `None`); **447 test pass** |
+| **macOS UX (B, phần 7 — IA-3/IA-4)** | `RosterListFilter.archived` + chip "Đã cất N" trong deck; **danh sách mặc định loại archived** (và khỏi counts); badge chấm nhỏ trên nút `⋯` khi có bản cập nhật; **xác nhận trước khi cài**, nêu rõ version | `cf922c8` | `swift build` pass |
+| **PERF-2** | Vòng thông báo reset: **2s → 15s** (30 → 4 lần wakeup/phút) và **cache quyền thông báo** (chỉ hỏi lại mỗi 5 phút) | `791001c` | `swift build` pass |
+
+**Gate hiện tại:** `cargo fmt --check` pass · `cargo clippy --all-targets -- -D warnings` pass · **447 test pass, 0 fail, 2 ignored** · `swift build --package-path macos/NextAccount` pass · `scripts/build-macos-app.sh` pass.
 
 **Orca:** Codex chạy được 1 task nhỏ rồi **cạn hạn mức tháng đến 17/11/2026** (`You've hit your usage limit`); worker D đã được `worker-stop` + `worker-release` sạch và phần D do Lead hoàn thành. Các provider khác vẫn cạn (Claude 22/10, Cursor 11/12/2026, OpenCode/Muse sai model, antigravity/zcode fail).
 
@@ -36,11 +43,10 @@ Nhánh: `main`. Chưa push `origin`. Chưa xoá dữ liệu người dùng.
 
 | # | Hạng mục | Ghi chú |
 |---|---|---|
-| 1 | A1: scheduler `next_probe_at` trong `auto_switch_monitor` | Phần còn lại của Q2 (đã fail-closed theo `reset_at`, chưa tối ưu nhịp poll) |
 | 2 | A2 phần còn lại: đưa cảnh báo backup vào JSON `warnings[]`, cap `preserved-metadata-*`, dọn `.cas-backup-*` cũ, cap config VibeCafe | Phần lõi đã xong |
 | 3 | A3 phần còn lại: `list` human (label/archived/local reset + `--all`), TUI search/Home/End/PgUp, `add-account-status` chi tiết | Help + safety đã xong |
 | 4 | B phần còn lại: Light Mode token (VIS-1), a11y label/toggle/reduce-motion, freshness chip (QTA-1), notification loop 15s, archived filter, update badge | Đã xong menu-bar/`⌘,`/xoá/hover/passive refresh |
-| 5 | B phần còn lại: feedback layer/toast, Light Mode token, a11y label + reduce-motion, freshness chip (QTA-1), notification loop 15s, archived filter, update badge | About đã sửa; phần lớn còn lại |
+| 5 | B phần còn lại: Light Mode cho các sheet khác, i18n leaks còn sót, feedback cho các thao tác khác, empty-state loading gate | Phần lớn B đã xong |
 | 6 | F/G: Swift wave 2 (HUD, dự báo, gợi ý) + verification độc lập | Chưa bắt đầu |
 | 7 | Giới hạn đã biết: chưa có integration test cho một lần apply thành công (đường saga được phủ bởi test module + hồi quy toàn bộ suite) | Ghi nhận trung thực |
 

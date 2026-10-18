@@ -1111,6 +1111,7 @@ pub fn run() -> Result<()> {
                     usage_unknown: false,
                     warnings: Vec::new(),
                     candidate_switch_score: None,
+                    next_probe_seconds: None,
                 }
             } else {
                 app.auto_switch_with_candidate(apply, account_id, force)?

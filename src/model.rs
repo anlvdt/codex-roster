@@ -325,6 +325,11 @@ pub struct AutoSwitchOutput {
     /// Present once a candidate was scored (apply/status), explaining the pick.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub candidate_switch_score: Option<SwitchScoreBreakdown>,
+    /// How long the monitor may wait before probing again. `None` means "use the
+    /// default cadence"; a value lets the worker sleep until something can
+    /// actually change instead of polling on a fixed clock (audit A1/U8).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_probe_seconds: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

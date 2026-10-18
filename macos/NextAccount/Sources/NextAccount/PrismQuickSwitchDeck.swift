@@ -39,6 +39,8 @@ struct PrismQuickSwitchDeck: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @AppStorage("codex_roster_notch_pinned_live") private var isPinnedLive = false
+    /// Update waiting for an explicit confirmation (audit IA-4).
+    @State private var pendingUpdateInstall: GitHubUpdater.Update?
     @AppStorage(NotchRosterLayout.rosterExpandedKey) private var isRosterExpanded = false
 
     var openSettings: () -> Void = {}
@@ -159,6 +161,25 @@ struct PrismQuickSwitchDeck: View {
         .animation(reduceMotion ? nil : PrismTheme.snapSpring, value: filteredAccounts.count)
         .animation(reduceMotion ? nil : PrismTheme.snapSpring, value: hasNextActionCaption)
         .animation(reduceMotion ? nil : PrismTheme.snapSpring, value: rosterColumnCount)
+        .confirmationDialog(
+            language.text("Cài bản cập nhật?", "Install update?"),
+            isPresented: Binding(
+                get: { pendingUpdateInstall != nil },
+                set: { if !$0 { pendingUpdateInstall = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button(language.text("Cài và mở lại", "Install and relaunch"), role: .destructive) {
+                pendingUpdateInstall = nil
+                updater.installAvailableUpdate()
+            }
+            Button(language.text("Hủy", "Cancel"), role: .cancel) { pendingUpdateInstall = nil }
+        } message: {
+            Text(language.text(
+                "Codex Roster \(pendingUpdateInstall?.version ?? "") sẽ được tải và thay thế bản đang chạy.",
+                "Codex Roster \(pendingUpdateInstall?.version ?? "") will be downloaded and replace the running app."
+            ))
+        }
     }
 
     /// Compact “what to do next” line — omitted when all-clear (no mid-deck gap;
@@ -251,6 +272,9 @@ struct PrismQuickSwitchDeck: View {
                 compact: true
             )
             .frame(maxWidth: .infinity, alignment: .leading)
+            // Age of the data behind those bars: without it a 12-minute-old
+            // reading looks as authoritative as a fresh one (audit QTA-1).
+            QuotaFreshnessLabel(fetchedAt: activeAccount?.usage?.fetchedAt?.value)
         }
         .padding(8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -807,6 +831,13 @@ struct PrismQuickSwitchDeck: View {
                 if store.accounts.contains(where: { $0.triage == .needsAction }) {
                     filterTab(label: language.text("Cần xử lý", "Needs action"), filter: .triage(.needsAction))
                 }
+                let archivedCount = store.accounts.filter(\.archived).count
+                if archivedCount > 0 {
+                    filterTab(
+                        label: language.text("Đã cất \(archivedCount)", "Archived \(archivedCount)"),
+                        filter: .archived
+                    )
+                }
 
                 toolbarIconButton(
                     systemName: isRosterExpanded
@@ -902,6 +933,17 @@ struct PrismQuickSwitchDeck: View {
                         .font(PrismTheme.fontBodyCompactBold)
                         .frame(width: 26, height: 26)
                         .background(Circle().fill(PrismTheme.surfaceFill))
+                        .overlay(alignment: .topTrailing) {
+                            // A quiet dot so an available update is discoverable
+                            // without opening the menu (audit IA-4).
+                            if case .available = updater.state {
+                                Circle()
+                                    .fill(PrismTheme.statusInfo)
+                                    .frame(width: 6, height: 6)
+                                    .offset(x: 1, y: -1)
+                                    .accessibilityHidden(true)
+                            }
+                        }
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
@@ -1010,7 +1052,9 @@ struct PrismQuickSwitchDeck: View {
             EmptyView()
         }
         if RosterUpdateMenuAction.resolve(state) == .install, case .available(let update) = state {
-            Button { updater.installAvailableUpdate() } label: {
+            // Installing replaces the running app: confirm and name the version
+            // instead of starting immediately from a menu item (audit IA-4).
+            Button { pendingUpdateInstall = update } label: {
                 Label(language.text("Cài bản \(update.version)", "Install \(update.version)"), systemImage: "arrow.down.app")
             }
             .disabled(updater.state.isBusy)
@@ -1053,11 +1097,15 @@ struct PrismQuickSwitchDeck: View {
                         .font(PrismTheme.fontBodyCompactBold)
                 }
             }
+            // Visual stays 26pt; the hit target is raised to the 28pt minimum
+            // recommended for pointer targets (audit A11Y-5).
             .frame(width: 26, height: 26)
             .background(
                 Circle()
                     .fill(active ? PrismTheme.accent.opacity(0.9) : PrismTheme.surfaceFill)
             )
+            .frame(minWidth: 28, minHeight: 28)
+            .contentShape(Rectangle())
             .foregroundStyle(active ? PrismTheme.textOnAccent : Color.primary)
         }
         .buttonStyle(.plain)
@@ -1394,6 +1442,11 @@ private struct PrismCompactAccountCard: View {
                         .fill(PrismTheme.accent)
                 )
         }
+        // "Switch" alone is ambiguous with several rows on screen (audit A11Y-2).
+        .accessibilityLabel(language.text(
+            "Đổi sang \(accountForContextMenuAction(in: store.accounts, capturedID: targetID)?.displayName ?? "")",
+            "Switch to \(accountForContextMenuAction(in: store.accounts, capturedID: targetID)?.displayName ?? "")"
+        ))
         .buttonStyle(.plain)
         .pointingHandCursor()
         .disabled(store.isBusyForActions || store.isWorking)
@@ -1475,5 +1528,42 @@ private struct PrismCompactAccountCard: View {
             ),
             PrismTheme.resetProximityTint(window: window, kind: kind)
         )
+    }
+}
+
+/// Data-age chip for quota surfaces. Warns once the reading is older than the
+/// same 10-minute threshold the notch badge uses, and says so when there is no
+/// reading at all instead of leaving the bars unexplained (audit QTA-1).
+struct QuotaFreshnessLabel: View {
+    let fetchedAt: Date?
+    @EnvironmentObject private var language: LanguageStore
+
+    private static let staleAfter: TimeInterval = 10 * 60
+
+    var body: some View {
+        let text: String
+        let stale: Bool
+        if let fetchedAt {
+            let age = max(0, Date().timeIntervalSince(fetchedAt))
+            stale = age > Self.staleAfter
+            let minutes = Int(age / 60)
+            if minutes < 1 {
+                text = language.text("vừa cập nhật", "updated just now")
+            } else {
+                text = language.text("cập nhật \(minutes)p trước", "updated \(minutes)m ago")
+            }
+        } else {
+            stale = false
+            text = language.text("chưa có dữ liệu quota", "no quota data yet")
+        }
+        return HStack(spacing: 4) {
+            Image(systemName: stale ? "exclamationmark.triangle.fill" : "clock")
+                .font(.system(size: 9, weight: .semibold))
+            Text(text)
+                .font(PrismTheme.fontCaption)
+        }
+        .foregroundStyle(stale ? PrismTheme.statusWarn : PrismTheme.labelSecondary)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(text)
     }
 }

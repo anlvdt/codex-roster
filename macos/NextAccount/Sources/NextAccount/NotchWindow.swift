@@ -315,7 +315,9 @@ struct NotchWindowView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
-            if isExpanded && !isPinnedLive { collapse() }
+            // Keep the panel open while a switch is running: collapsing it hides
+            // the progress and makes the app look like it did nothing (audit FLOW-4).
+            if isExpanded && !isPinnedLive && !store.isSwitching { collapse() }
         }
         .onChange(of: store.notchPanelEnabled) { _, enabled in
             if !enabled { collapse() }
@@ -397,8 +399,44 @@ struct NotchWindowView: View {
                 .background(PrismTheme.surfacePanel.opacity(0.94), in: Capsule())
                 .padding(.top, compactHeight + NotchRosterLayout.screenSwitcherTopInset)
         }
+        // Progress and confirmation must be visible in the notch itself, not only
+        // in the console: a switch takes seconds and looks like nothing happened
+        // otherwise (audit FLOW-2/FLOW-4).
+        .overlay(alignment: .bottom) {
+            if store.isSwitching {
+                notchStatusPill(
+                    systemImage: "arrow.triangle.2.circlepath",
+                    text: language.text("Đang chuyển…", "Switching…"),
+                    tint: Color(nsColor: .systemBlue)
+                )
+            } else if let toast = store.toast {
+                notchStatusPill(
+                    systemImage: toast.kind == .success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill",
+                    text: toast.text,
+                    tint: toast.kind == .success ? Color(nsColor: .systemGreen) : Color(nsColor: .systemOrange)
+                )
+            }
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .clipped()
+    }
+
+    private func notchStatusPill(systemImage: String, text: String, tint: Color) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .foregroundStyle(tint)
+            Text(text)
+                .font(PrismTheme.fontCaption)
+                .foregroundStyle(Color(nsColor: .labelColor))
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(PrismTheme.surfacePanel.opacity(0.96), in: Capsule())
+        .padding(.bottom, 8)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(text)
     }
 
     private var compactQuota: NotchQuotaSnapshot {

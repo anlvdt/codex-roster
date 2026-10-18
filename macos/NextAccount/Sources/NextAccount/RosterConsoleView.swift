@@ -10,6 +10,10 @@ struct RosterConsoleView: View {
     var body: some View {
         VStack(spacing: 0) {
             consoleTabBar
+            if let toast = store.toast {
+                RosterToastBanner(toast: toast) { store.toast = nil }
+                Divider()
+            }
             Divider()
             tabContent
                 .rosterConsoleTypography()
@@ -161,5 +165,35 @@ struct RosterConsoleOpenBridge: ViewModifier {
 extension View {
     func rosterConsoleOpenBridge() -> some View {
         modifier(RosterConsoleOpenBridge())
+    }
+}
+
+/// Transient confirmation banner. Success and failure use different glyphs and
+/// semantic colours so it still reads in Light Mode (audit FLOW-2/VIS-1).
+struct RosterToastBanner: View {
+    let toast: RosterToast
+    let dismiss: () -> Void
+    @EnvironmentObject private var language: LanguageStore
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: toast.kind == .success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .foregroundStyle(toast.kind == .success ? Color(nsColor: .systemGreen) : Color(nsColor: .systemOrange))
+            Text(toast.text)
+                .font(.callout)
+                .foregroundStyle(Color(nsColor: .labelColor))
+                .lineLimit(2)
+            Spacer(minLength: 8)
+            Button(action: dismiss) {
+                Image(systemName: "xmark")
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(language.text("Đóng thông báo", "Dismiss notification"))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .accessibilityElement(children: .combine)
     }
 }

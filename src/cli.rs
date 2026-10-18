@@ -2408,7 +2408,10 @@ mod codex_only_cli_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{CONTRACT_VERSION, classify_error, render_account_summary, schema_document};
+    use super::{
+        CONTRACT_VERSION, classify_error, collect_cleanup_report, render_account_summary,
+        schema_document,
+    };
     use anyhow::anyhow;
     use time::OffsetDateTime;
     use uuid::Uuid;

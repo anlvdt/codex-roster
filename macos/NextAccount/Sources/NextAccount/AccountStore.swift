@@ -122,8 +122,13 @@ enum RosterListFilter: Equatable {
         case .archived:
             return account.archived
         case .triage(let bucket):
-            // Archived rows must not reappear under Ready/Needs-action and must
-            // not inflate those counters (review finding 10).
+            // The archived chip *is* `.triage(.archived)`, so that bucket must
+            // keep matching archived rows. Every other bucket must not: archived
+            // rows used to reappear under Ready/Needs-action and inflate those
+            // counters (review finding 10).
+            if bucket == .archived {
+                return account.archived
+            }
             return !account.archived && account.triage == bucket
         case .deferredUnverified:
             return !account.archived && account.hasDeferredAccessTokenRefresh

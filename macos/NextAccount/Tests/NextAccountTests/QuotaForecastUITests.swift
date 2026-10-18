@@ -121,6 +121,15 @@ import Testing
     #expect(!RosterListFilter.all.matches(archived), "archived rows stay out of the default list")
     #expect(RosterListFilter.archived.matches(archived))
     #expect(!RosterListFilter.archived.matches(active))
+
+    // The archived chip is `.triage(.archived)`: it must keep matching archived
+    // rows. A blanket `!archived` guard on every triage bucket silently emptied
+    // that chip (CI caught it).
+    #expect(RosterListFilter.triage(.archived).matches(archived))
+    #expect(!RosterListFilter.triage(.archived).matches(active))
+    #expect(RosterListFilter.triage(.active).matches(active))
+    #expect(!RosterListFilter.triage(.active).matches(archived))
+    #expect(!RosterListFilter.triage(.ready).matches(archived), "archived rows must not reappear under Ready")
 }
 
 /// Notch ear labels must degrade instead of clipping (the ears are 146pt wide).

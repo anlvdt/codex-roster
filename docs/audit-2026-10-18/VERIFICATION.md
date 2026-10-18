@@ -10,8 +10,8 @@ Mục đích: kiểm chứng lại các tuyên bố trong [IMPLEMENTATION-STATUS
 | `cargo fmt --check` | PASS |
 | `bash scripts/check-auth-switch-safety.sh` | PASS — `Auth switch safety checks passed.` (sau khi sửa, xem §3) |
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | PASS — **0 warning/error** |
-| `cargo test --locked --all-features` | **449 passed, 0 failed, 2 ignored** |
-| `cargo test` (mặc định) | **447 passed, 0 failed, 2 ignored** |
+| `cargo test --locked --all-features` | **454 passed, 0 failed, 2 ignored** |
+| `cargo test` (mặc định) | **452 passed, 0 failed, 2 ignored** |
 | `swift build --package-path macos/NextAccount` | PASS — `Build complete!` |
 | `bash scripts/build-macos-app.sh` | PASS — bundle `build/CodexRoster.app` được build + ký (ad-hoc) |
 
@@ -48,6 +48,12 @@ Script grep theo từng tuyên bố; **29/29 PASS**. Nhóm theo báo cáo gốc:
 - **CLI/TUI (A3)**: `is_quit_key` (Ctrl-C/Esc/q); guard non-TTY (`stdin().is_terminal()`); `CONTRACT_VERSION`; `doctor`/`schema`.
 - **Thuật toán (E2)**: `forecast_window` (EWMA); `switch_score_breakdown`; `switch_txn` (saga + reconcile); `next_probe_seconds_for_active`.
 - **Swift UX (B)**: `requestDelete`/`confirmPendingDelete`; hover `.open` không activate; `refreshPublicDataPassively`; vòng thông báo 15s; `installStatusItem` + `⌘,`; chip archived + `pendingUpdateInstall`; `statusOK` (role màu ngữ nghĩa); `QuotaFreshnessLabel`.
+
+## 4b. Vòng rà bổ sung (vòng 9–10)
+
+Rà lại 24 điểm then chốt sau các vòng CLI/TUI, housekeeping và B còn lại: **24/24 PASS**. Bổ sung vào danh sách §4: `list --all` + giờ reset theo múi giờ máy; TUI search/paging (`first_matching_label`); cap config/response VibeCafe (`MAX_CONFIG_BYTES`); cap `preserved-metadata-*`; dọn thư mục staging (`.cas-*`); check `account_list_backup` trong `doctor`; forecast hiển thị trong deck; toast feedback; loading gate (`hasLoadedAccounts`).
+
+**Rà i18n:** quét toàn bộ literal trong `macos/NextAccount/Sources/NextAccount/*.swift` không đi qua `language.text`/`AppLanguage.text` với ngữ cảnh hiển thị (`Text(`, `errorMessage`, `title:`, `help:`, `accessibilityLabel`, `.failed(`) — **0 chuỗi tiếng Anh lộ** (2 hit còn lại là tên riêng attribution: "Pimpmuckl / codex-account-switcher", "Ducksss / codex-profiles"). Vậy hạng mục I18N-1 đã xử lý xong trong phạm vi audit yêu cầu.
 
 ## 5. Giới hạn của lần verification này (đọc kỹ)
 

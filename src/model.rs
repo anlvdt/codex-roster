@@ -264,6 +264,10 @@ pub struct StatusOutput {
     /// Live Desktop/CLI activity strip (working / waiting / idle).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<crate::codex_activity::CodexActivitySummary>,
+    /// Non-fatal problems worth surfacing to scripts and the app, for example a
+    /// failed automatic account-list backup (audit R2/A2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

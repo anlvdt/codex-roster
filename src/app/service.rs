@@ -62,6 +62,9 @@ where
             vibe_usage: crate::vibe_usage::load_cached(&self.env.app_data_dir),
             codex_model,
             activity: Some(activity),
+            warnings: crate::repository::last_backup_warning()
+                .into_iter()
+                .collect(),
         })
     }
 

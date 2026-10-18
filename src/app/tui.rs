@@ -1229,6 +1229,7 @@ mod tests {
             vibe_usage: None,
             codex_model: None,
             activity: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -1539,6 +1540,7 @@ mod tests {
             vibe_usage: None,
             codex_model: None,
             activity: None,
+            warnings: Vec::new(),
         };
         let menu = build_menu(
             InteractiveMode::Persistent,

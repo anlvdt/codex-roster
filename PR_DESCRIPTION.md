@@ -50,3 +50,16 @@ Auto-resume review: `docs/audit-2026-10-18/AUTO-RESUME-AUDIT.md`.
 ## Not included
 
 Remaining audit items (storage warnings in JSON, TUI search, Light Mode tokens and accessibility pass, forecast/scoring v2, independent verification) are tracked in `IMPLEMENTATION-STATUS.md` and are not part of this change.
+
+## Follow-up wave (same branch)
+
+Found while validating the fixes against a real 20-account roster:
+
+- **`codex-roster dead-accounts`** (new, read-only): lists accounts that are provably deactivated (`account_deactivated`), have a rejected grant (`grant_rejected`), or are suspects (auth failing with nothing fetched for `--stale-days`), each with the exact `archive`/`delete` commands. `--deep` exchanges each inactive account's refresh token once to turn a suspicion into an answer; it never touches the account live in `~/.codex` and persists the rotated snapshot immediately. The safety script now allows exactly that one call site and requires it to stay behind `if deep {`.
+- **Free/Go accounts are no longer labelled "5h"**: their primary rate-limit window is monthly (they have no 7-day limit), so `primary_window_kind` records what the window is and the CLI, TUI, deck and both notch ears label it `1M`. The weekly column is omitted entirely for those plans instead of rendering an empty `7d —`.
+- **K12/Edu accounts get their own plan band.** Plan bands only recognised pro/plus/team/free/go, so K12 accounts were filed under "Other" even though they were detected with full quota.
+- **Notch fixes**: the ears no longer clip their reset label (`Sun 6:00 A`) — the label degrades through shorter forms — and the activity indicator no longer renders a literal `?`.
+- **Desktop helpers are not a live CLI**: Electron names its helpers `codex (renderer)` / `codex (service)`, which `is_codex_bin_name` missed, so every ChatGPT-Desktop-owned process was classified as an interactive session and `activate` failed with `activation_blocked_by_cli`, which `--force` cannot override. Desktop's `exec-server` daemon is recognised as a background server too.
+- **`account_deactivated` is terminal**: such accounts are labelled, skipped by sweeps and excluded from switch candidates.
+
+Evidence for each item (commands, outputs, and the honest list of what was not verified) is in `docs/audit-2026-10-18/IMPLEMENTATION-STATUS.md` and `docs/audit-2026-10-18/VERIFICATION.md`.

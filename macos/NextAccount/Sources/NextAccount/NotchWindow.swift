@@ -246,8 +246,7 @@ struct NotchWindowView: View {
         .task {
             store.startCoreMonitoring()
             store.refreshTokenUsage(silently: true)
-            store.refreshResetOutlook(silently: true)
-            store.refreshOpenAIStatus(silently: true)
+            store.refreshPublicDataPassively()
             store.ensureAutomaticFullBackup()
             updater.startAutomaticChecks(currentVersion: AppInfo.shortVersion)
             NotchGlobalHotKey.shared.registerIfNeeded()
@@ -465,7 +464,10 @@ struct NotchWindowView: View {
                     case .keepWaiting:
                         continue
                     case .open:
-                        NSApplication.shared.activate(ignoringOtherApps: true)
+                        // Hover must not steal keyboard focus: activating here
+                        // interrupted typing/IME whenever the pointer crossed
+                        // the notch (audit A11Y-1). Clicks and the hotkey still
+                        // activate, which is where focus is actually wanted.
                         expand()
                         return
                     case .abortDriveBy, .abortTimeout:

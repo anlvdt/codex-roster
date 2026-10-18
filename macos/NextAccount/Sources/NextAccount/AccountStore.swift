@@ -2480,6 +2480,20 @@ final class AccountStore: ObservableObject {
         quotaResetPulse &+= 1
     }
 
+    /// Shared cooldown for appear-driven public-data refreshes: opening the
+    /// notch or the Operations tab used to fire several CLI subprocesses and
+    /// network calls every time (audit PERF-1). Explicit buttons still refresh
+    /// immediately because they call the individual methods directly.
+    private var passivePublicRefreshGate = PassiveRefreshGate(interval: 60)
+
+    func refreshPublicDataPassively() {
+        guard passivePublicRefreshGate.request() else { return }
+        refreshResetOutlook(silently: true)
+        refreshResetTimeline(silently: true)
+        refreshResetJuice(silently: true)
+        refreshOpenAIStatus(silently: true)
+    }
+
     func refreshResetOutlook(silently: Bool = false) {
         guard !isLoadingResetOutlook else { return }
         isLoadingResetOutlook = true

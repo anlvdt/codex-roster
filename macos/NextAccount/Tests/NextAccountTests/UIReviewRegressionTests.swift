@@ -14,23 +14,32 @@ private func uiReviewCodexAccount(archived: Bool, active: Bool = false) -> Saved
     #expect(RosterLauncherDestination.resolve(notchEnabled: true) == .notch)
 }
 
-@Test func uiReviewDisplayedRosterIncludesArchivedAccountsInNativeBudget() {
+/// The default list hides archived rows (audit IA-3) — they live behind their own
+/// chip — so `.all` is the two live accounts while the archived chip carries the
+/// other eight. Heights are the real layout math for those counts.
+@Test func uiReviewRosterFiltersPartitionArchivedAccountsAndBudgetTheirHeight() {
     let accounts = [uiReviewCodexAccount(archived: false, active: true), uiReviewCodexAccount(archived: false)]
         + (0..<8).map { _ in uiReviewCodexAccount(archived: true) }
     let all = NotchDisplayedRoster(accounts: accounts, filter: .all)
-    #expect(all.accounts.count == 10)
-    #expect(all.sectionCounts == [10])
+    #expect(all.accounts.count == 2, "the default list hides archived rows")
+    #expect(all.sectionCounts == [2])
     #expect(NotchRosterLayout.rosterGridHeight(sectionCounts: all.sectionCounts,
-        expanded: true, maximumHeight: 10_000) == 456)
-    #expect(NotchRosterLayout.needsRosterScroll(sectionCounts: all.sectionCounts,
+        expanded: true, maximumHeight: 10_000) == 88)
+    #expect(!NotchRosterLayout.needsRosterScroll(sectionCounts: all.sectionCounts,
         expanded: true, maximumHeight: 300))
 
     let active = NotchDisplayedRoster(accounts: accounts, filter: .triage(.active))
     #expect(active.accounts.map(\.id) == [accounts[0].id])
     #expect(NotchRosterLayout.rosterGridHeight(sectionCounts: active.sectionCounts,
         expanded: true, maximumHeight: 10_000) == 88)
+
     let archived = NotchDisplayedRoster(accounts: accounts, filter: .triage(.archived))
     #expect(archived.accounts.count == 8 && archived.sectionCounts == [8])
+    #expect(NotchRosterLayout.rosterGridHeight(sectionCounts: archived.sectionCounts,
+        expanded: true, maximumHeight: 10_000) == 364)
+    #expect(NotchRosterLayout.needsRosterScroll(sectionCounts: archived.sectionCounts,
+        expanded: true, maximumHeight: 300))
+
     let empty = NotchDisplayedRoster(accounts: accounts, filter: .triage(.ready))
     #expect(empty.accounts.isEmpty && empty.sectionCounts.isEmpty)
     #expect(NotchRosterLayout.rosterGridHeight(sectionCounts: empty.sectionCounts,

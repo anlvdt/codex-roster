@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 
@@ -747,6 +747,14 @@ pub fn run() -> Result<()> {
                     app.activate_with_running_policy(account_id, force)?
                 }
                 None => {
+                    if json {
+                        bail!(
+                            "--json requires ACCOUNT_ID; run `codex-roster list --json` to find ids"
+                        );
+                    }
+                    if !std::io::stdin().is_terminal() {
+                        bail!("ACCOUNT_ID is required when stdin is not a terminal");
+                    }
                     let _ = app.interactive(InteractiveMode::ActivateOnce, force)?;
                     return Ok(());
                 }
@@ -1180,6 +1188,13 @@ fn run_interactive_app<S>(app: &App<S>) -> Result<()>
 where
     S: crate::secrets::SecretStore,
 {
+    // A non-TTY stdin makes `Term::read_key` return `Key::Unknown` forever, so
+    // an unguarded menu would spin at 100% CPU in scripts/CI (audit SAF-01).
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "no command given and stdin is not a terminal; use `codex-roster status --json` or run `codex-roster` in a terminal"
+        );
+    }
     crate::app::spawn_auto_start_usage_windows_worker(app.env().clone());
     crate::app::spawn_auto_switch_worker(app.env().clone());
     #[cfg(feature = "external-providers")]

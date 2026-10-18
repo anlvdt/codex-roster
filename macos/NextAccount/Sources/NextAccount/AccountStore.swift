@@ -2090,9 +2090,18 @@ final class AccountStore: ObservableObject {
         ResetNotifier.prepare()
         resetNotificationTask = Task { [weak self] in
             var nextPublicSignalCheck = Date.distantPast
+            // Notification authorization is a system call that cannot change
+            // without the app being foregrounded, so cache it instead of asking
+            // every tick (audit PERF-2).
+            var authorized: Bool?
+            var nextAuthorizationCheck = Date.distantPast
             while !Task.isCancelled {
                 guard let self else { return }
-                if await ResetNotifier.isAuthorized() {
+                if authorized == nil || Date.now >= nextAuthorizationCheck {
+                    authorized = await ResetNotifier.isAuthorized()
+                    nextAuthorizationCheck = Date.now.addingTimeInterval(300)
+                }
+                if authorized == true {
                     // Account-authenticated usage is the source of truth for
                     // personal banked credits and actual quota resets.
                     ResetNotifier.showAccountSignals(
@@ -2111,9 +2120,9 @@ final class AccountStore: ObservableObject {
                         nextPublicSignalCheck = Date.now.addingTimeInterval(60)
                     }
                 }
-                // Usage refreshes separately; checking the local result often
-                // makes the banner appear immediately after a signal lands.
-                try? await Task.sleep(for: .seconds(2))
+                // 15s keeps a local reset banner timely while cutting wakeups
+                // from 30/minute to 4/minute (audit PERF-2).
+                try? await Task.sleep(for: .seconds(15))
             }
         }
     }

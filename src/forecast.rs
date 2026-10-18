@@ -420,6 +420,126 @@ mod tests {
         );
     }
 
+    /// Deterministic LCG so the tuning harness is reproducible without `rand`.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next_f64(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Default)]
+    struct SimResult {
+        failed_turns: u32,
+        switches: u32,
+        disruption_seconds: f64,
+    }
+
+    /// Simulate one working day (1440 minutes) for 3 accounts under a policy.
+    ///
+    /// `threshold` is the 5h remaining percent that triggers a proactive switch;
+    /// `None` is the reactive policy (switch only at 0%). Both policies share a
+    /// 10-minute dwell so the comparison is fair.
+    fn simulate(threshold: Option<f64>, seed: u64) -> SimResult {
+        const ACCOUNTS: usize = 3;
+        const MINUTES: usize = 1440;
+        const DWELL_MINUTES: f64 = 10.0;
+        const SWITCH_COST_SECONDS: f64 = 8.0;
+        const TURN_COST_SECONDS: f64 = 25.0;
+
+        let mut rng = Lcg(seed);
+        let mut five = [100.0f64; ACCOUNTS];
+        let mut weekly = [100.0f64; ACCOUNTS];
+        let mut active = 0usize;
+        let mut last_switch_minute = f64::NEG_INFINITY;
+        let mut result = SimResult::default();
+
+        for minute in 0..MINUTES {
+            // A heavy day: ~80% of minutes are active and the window drains
+            // roughly 2.6x per day, so switching actually happens.
+            let working = rng.next_f64() < 0.8;
+            let minute = minute as f64;
+
+            let mut failed_this_minute = false;
+            if working {
+                if five[active] <= 0.0 {
+                    // The turn fails and the user waits before retrying. The
+                    // reactive policy only learns about exhaustion this way.
+                    result.failed_turns += 1;
+                    result.disruption_seconds += TURN_COST_SECONDS;
+                    failed_this_minute = true;
+                } else {
+                    let rate = 0.15 + 0.15 * rng.next_f64();
+                    five[active] = (five[active] - rate).max(0.0);
+                    weekly[active] = (weekly[active] - rate / 4.0).max(0.0);
+                }
+            }
+
+            let dwell_ok = minute - last_switch_minute >= DWELL_MINUTES;
+            let want_switch = match threshold {
+                // Reactive: only after a turn actually failed.
+                None => failed_this_minute,
+                // Proactive: near-empty while idle.
+                Some(limit) => !working && five[active] <= limit,
+            };
+            if want_switch && dwell_ok {
+                let best = (0..ACCOUNTS)
+                    .filter(|index| {
+                        *index != active && five[*index] > 15.0 && weekly[*index] > 20.0
+                    })
+                    .max_by(|left, right| {
+                        (weekly[*left] * 1000.0 + five[*left])
+                            .partial_cmp(&(weekly[*right] * 1000.0 + five[*right]))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                if let Some(best) = best {
+                    active = best;
+                    last_switch_minute = minute;
+                    result.switches += 1;
+                    result.disruption_seconds += SWITCH_COST_SECONDS;
+                }
+            }
+        }
+        result
+    }
+
+    #[test]
+    #[ignore = "tuning harness: run with --ignored --nocapture to print the table"]
+    fn simulate_reactive_versus_threshold_policies() {
+        let seeds = [1u64, 7, 42, 1234, 98765];
+        let mut policies: Vec<(&str, Option<f64>)> = vec![("reactive(0%)", None)];
+        for limit in [5.0, 10.0, 15.0, 20.0] {
+            policies.push(match limit {
+                5.0 => ("threshold(5%)", Some(limit)),
+                10.0 => ("threshold(10%)", Some(limit)),
+                15.0 => ("threshold(15%)", Some(limit)),
+                _ => ("threshold(20%)", Some(limit)),
+            });
+        }
+        println!("policy, failed_turns/day, switches/day, disruption_s/day");
+        for (name, threshold) in policies {
+            let mut total = SimResult::default();
+            for seed in seeds {
+                let result = simulate(threshold, seed);
+                total.failed_turns += result.failed_turns;
+                total.switches += result.switches;
+                total.disruption_seconds += result.disruption_seconds;
+            }
+            let runs = seeds.len() as f64;
+            println!(
+                "{name}, {:.1}, {:.1}, {:.1}",
+                f64::from(total.failed_turns) / runs,
+                f64::from(total.switches) / runs,
+                total.disruption_seconds / runs
+            );
+        }
+    }
+
     #[test]
     fn description_mentions_window_remaining_and_confidence() {
         let now = 30_000_000;

@@ -176,13 +176,16 @@ enum Command {
     },
     /// Remember Codex rollout cwd/session on switch; reopen thread after activate.
     AutoResumeSession {
-        #[arg(long, conflicts_with_all = ["disable", "continue_interrupted"])]
+        #[arg(long, conflicts_with_all = ["disable", "continue_interrupted", "capture_pending"])]
         enable: bool,
-        #[arg(long, conflicts_with_all = ["enable", "continue_interrupted"])]
+        #[arg(long, conflicts_with_all = ["enable", "continue_interrupted", "capture_pending"])]
         disable: bool,
         /// Discover interrupted / quota-blocked threads (same-account recovery).
-        #[arg(long, conflicts_with_all = ["enable", "disable"])]
+        #[arg(long, conflicts_with_all = ["enable", "disable", "capture_pending"])]
         continue_interrupted: bool,
+        /// Freeze interrupted threads into the pending-continue index (call before quitting Desktop).
+        #[arg(long, conflicts_with_all = ["enable", "disable", "continue_interrupted"])]
+        capture_pending: bool,
         #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
@@ -1159,6 +1162,7 @@ pub fn run() -> Result<()> {
             enable,
             disable,
             continue_interrupted,
+            capture_pending,
             json,
         }) => {
             if continue_interrupted {
@@ -1170,6 +1174,20 @@ pub fn run() -> Result<()> {
                         "Continue interrupted: status={} session={}",
                         hint.status,
                         hint.session_id.as_deref().unwrap_or("-")
+                    );
+                }
+                return Ok(());
+            }
+            if capture_pending {
+                let hint = app.capture_pending_continue_sessions()?;
+                if json {
+                    print_json(&hint)?;
+                } else {
+                    println!(
+                        "Captured pending continue: status={} session={} additional={}",
+                        hint.status,
+                        hint.session_id.as_deref().unwrap_or("-"),
+                        hint.additional_sessions.len()
                     );
                 }
                 return Ok(());
@@ -1972,7 +1990,7 @@ Exit codes: 0 ok, 2 usage, 3 login/blocked, 4 lock timeout, 5 no account, 6 netw
                     "apply, reclaimable_bytes, items[] (path, name, bytes, reason, removed?), review_only[]"
                 }
                 "auto-resume-session" => {
-                    "enabled (--continue-interrupted returns a SessionResumeHint: enabled, account_id, session_id, cwd, additional_sessions[])"
+                    "enabled (--continue-interrupted / --capture-pending return a SessionResumeHint: enabled, account_id, session_id, cwd, additional_sessions[])"
                 }
                 "doctor" => "version, checks[] (id, status, detail, hint?)",
                 "token-usage" => "totals, by_day, by_project",

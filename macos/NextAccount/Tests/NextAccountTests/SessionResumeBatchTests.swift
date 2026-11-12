@@ -77,3 +77,13 @@ import Testing
     #expect(!DesktopResumeEvidence.matches(failure, threadID: "one", since: since))
     #expect(DesktopResumeEvidence.matches(response, threadID: "one", since: since))
 }
+
+@Test func coldAfterRelaunchHydrationWaitsLongerThanWarm() {
+    #expect(DesktopResumeHydration.coldAfterRelaunch.minimumSettleSeconds >
+            DesktopResumeHydration.warm.minimumSettleSeconds)
+    #expect(DesktopResumeHydration.coldAfterRelaunch.confirmTimeoutSeconds >
+            DesktopResumeHydration.warm.confirmTimeoutSeconds)
+    #expect(DesktopResumeHydration.coldAfterRelaunch.openAttempts >
+            DesktopResumeHydration.warm.openAttempts)
+    #expect(DesktopResumeHydration.coldAfterRelaunch.maximumWaitSeconds >= 12)
+}

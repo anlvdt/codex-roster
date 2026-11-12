@@ -172,6 +172,44 @@ where
         )
     }
 
+    /// Freeze interrupted Desktop/CLI threads into the pending-continue index
+    /// while the live account is still active (call before quitting Desktop).
+    pub fn capture_pending_continue_sessions(&self) -> Result<crate::model::SessionResumeHint> {
+        let settings = load_settings(&self.env.app_data_dir)?;
+        let active_id = self
+            .list()?
+            .accounts
+            .into_iter()
+            .find(|account| account.is_active)
+            .map(|account| account.id);
+        let Some(active_id) = active_id else {
+            return crate::session_resume::hint_for_interrupted_sessions(
+                &self.env.codex_root,
+                false,
+                None,
+            );
+        };
+        if !settings.auto_resume_session {
+            return crate::session_resume::hint_for_interrupted_sessions(
+                &self.env.codex_root,
+                false,
+                Some(active_id),
+            );
+        }
+        crate::session_resume::capture_pending_continue(
+            &self.env.app_data_dir,
+            &self.env.codex_root,
+            active_id,
+        )?;
+        // Return the live discovery view (same shape as --continue-interrupted)
+        // so the host can log how many threads were frozen without consuming.
+        crate::session_resume::hint_for_interrupted_sessions(
+            &self.env.codex_root,
+            true,
+            Some(active_id),
+        )
+    }
+
     pub fn auto_switch(&self, apply: bool) -> Result<AutoSwitchOutput> {
         self.auto_switch_with_candidate(apply, None, false)
     }
@@ -585,11 +623,18 @@ where
         // (audit U6).
         let mut txn =
             crate::switch_txn::begin(&self.env.app_data_dir, active.id, candidate.id, now)?;
-        // Freeze the live thread that hit usage limits BEFORE swapping auth.
-        // Shared ~/.codex keeps that thread; the new account's quota pays for
-        // the next turns. Do not use the target account's old workspace hint.
+        // Freeze interrupted threads BEFORE swapping auth. Prefer a fresh
+        // pre-Desktop-quit snapshot from the macOS host — a post-quit scan
+        // often returns empty after OWL 26.1106 cold hydrate / task_started.
+        // Shared ~/.codex keeps those threads; the new account's quota pays
+        // for the next turns. Do not use the target account's old workspace.
         let mut bookkeeping_warnings = Vec::new();
-        if let Err(error) = crate::session_resume::capture_pending_continue(
+        let keep_prequit_snapshot =
+            crate::session_resume::has_fresh_nonempty_pending_continues(&self.env.app_data_dir)
+                .unwrap_or(false);
+        if keep_prequit_snapshot {
+            // Already frozen while Desktop was still up.
+        } else if let Err(error) = crate::session_resume::capture_pending_continue(
             &self.env.app_data_dir,
             &self.env.codex_root,
             active.id,

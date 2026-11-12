@@ -1245,7 +1245,12 @@ final class AccountStore: ObservableObject {
             if self.accounts.contains(where: { $0.id == activated.account.id && $0.isActive }) {
                 self.lastQuotaRefreshAt = .now
             }
-            await self.applySessionResumeIfNeeded(activated.sessionResume, continueExhausted: false)
+            // Force path quit + cleared web session — always cold hydrate.
+            await self.applySessionResumeIfNeeded(
+                activated.sessionResume,
+                continueExhausted: false,
+                hydration: force ? .coldAfterRelaunch : .warm
+            )
             let closed = activated.warnings?.count ?? 0
             if closed > 0 {
                 self.showToast(AppLanguage.text(
@@ -1288,7 +1293,8 @@ final class AccountStore: ObservableObject {
     /// - otherwise (manual Đổi): reopen that account's last remembered workspace/thread.
     private func applySessionResumeIfNeeded(
         _ hint: SessionResumeHint?,
-        continueExhausted: Bool
+        continueExhausted: Bool,
+        hydration: DesktopResumeHydration = .warm
     ) async {
         guard autoResumeSession else { return }
         guard let hint else {
@@ -1304,9 +1310,9 @@ final class AccountStore: ObservableObject {
         if continueExhausted {
             let extras = hint.additionalSessions
             logSessionResume(
-                "continueExhausted primary=\(hint.sessionId ?? "-") additional=\(extras.count) status=\(hint.status)"
+                "continueExhausted primary=\(hint.sessionId ?? "-") additional=\(extras.count) status=\(hint.status) hydration=\(hydration)"
             )
-            await resumeInterruptedThreads([hint] + extras)
+            await resumeInterruptedThreads([hint] + extras, hydration: hydration)
             return
         }
 
@@ -1350,7 +1356,7 @@ final class AccountStore: ObservableObject {
         }
 
         logSessionResume(
-            "begin continueExhausted=\(continueExhausted) status=\(hint.status) session=\(hint.sessionId ?? "-") cwd=\(hint.cwd ?? "-")"
+            "begin continueExhausted=\(continueExhausted) status=\(hint.status) session=\(hint.sessionId ?? "-") cwd=\(hint.cwd ?? "-") hydration=\(hydration)"
         )
 
         let projectName = hint.cwd.flatMap { path -> String? in
@@ -1367,23 +1373,30 @@ final class AccountStore: ObservableObject {
                 : "Resuming session · \(label)"
         )
 
-        // Cold Desktop after web-session clear needs a short settle before
-        // deep-link navigation works. Same-account recovery keeps Desktop warm.
-        let warmDesktop = ChatGPTDesktop.isRunning
+        // After quit + web-session clear, Desktop is cold even if isRunning
+        // flipped true during acceptance — use the caller-provided hydration.
         await waitForDesktopResumeReady(
-            minimumSettle: warmDesktop ? .milliseconds(400) : .seconds(2.5),
-            maximumWait: warmDesktop ? .seconds(4) : .seconds(8)
+            minimumSettle: .seconds(hydration.minimumSettleSeconds),
+            maximumWait: .seconds(hydration.maximumWaitSeconds)
         )
 
-        let result = await openRememberedWorkspace(cwd: hint.cwd, sessionID: hint.sessionId)
+        let result = await openRememberedWorkspace(
+            cwd: hint.cwd,
+            sessionID: hint.sessionId,
+            hydration: hydration
+        )
         logSessionResume("result=\(String(describing: result)) label=\(label) continueExhausted=\(continueExhausted)")
         switch result {
         case .openedThread:
             var queuedContinue = false
             if continueExhausted, let sessionID = hint.sessionId, !sessionID.isEmpty {
                 // Deep-link only selects the thread; queue a continue turn so Codex
-                // actually resumes work on the new account's quota.
-                queuedContinue = await queueContinueMessage(threadID: sessionID)
+                // actually resumes work on the new account's quota. Trust the
+                // switch snapshot — live rediscovery often goes empty after OWL hydrate.
+                queuedContinue = await queueContinueMessage(
+                    threadID: sessionID,
+                    requireLiveInterruption: false
+                )
                 if queuedContinue { recentlyContinuedThreads[sessionID] = .now }
                 logSessionResume("queue continue thread=\(sessionID) ok=\(queuedContinue)")
             }
@@ -1431,7 +1444,10 @@ final class AccountStore: ObservableObject {
     /// Open + queue each exact thread independently; a failure must not skip later threads.
     /// Deep-link open is required — `codex queue` alone often lands unread until Desktop
     /// has the thread selected (proven single-thread path before the batch refactor).
-    private func resumeInterruptedThreads(_ hints: [SessionResumeHint]) async {
+    private func resumeInterruptedThreads(
+        _ hints: [SessionResumeHint],
+        hydration: DesktopResumeHydration
+    ) async {
         var seen = Set<String>()
         let targets = hints.filter {
             guard $0.enabled, let id = $0.sessionId, !id.isEmpty else { return false }
@@ -1464,12 +1480,11 @@ final class AccountStore: ObservableObject {
             return
         }
         logSessionResume(
-            "batch begin count=\(ids.count) ids=\(ids.joined(separator: ",")) desktopRunning=\(ChatGPTDesktop.isRunning)"
+            "batch begin count=\(ids.count) ids=\(ids.joined(separator: ",")) desktopRunning=\(ChatGPTDesktop.isRunning) hydration=\(hydration)"
         )
-        let warmDesktop = ChatGPTDesktop.isRunning
         await waitForDesktopResumeReady(
-            minimumSettle: warmDesktop ? .milliseconds(400) : .seconds(2.5),
-            maximumWait: warmDesktop ? .seconds(4) : .seconds(8)
+            minimumSettle: .seconds(hydration.minimumSettleSeconds),
+            maximumWait: .seconds(hydration.maximumWaitSeconds)
         )
         let result = await SessionResumeBatch.run(
             threadIDs: ids,
@@ -1481,12 +1496,21 @@ final class AccountStore: ObservableObject {
                 )
             },
             enqueue: { id in
-                let open = await self.openRememberedWorkspace(cwd: nil, sessionID: id)
+                let open = await self.openRememberedWorkspace(
+                    cwd: nil,
+                    sessionID: id,
+                    hydration: hydration
+                )
                 self.logSessionResume("batch open thread=\(id) result=\(String(describing: open))")
                 guard case .openedThread = open, self.autoResumeSession, !Task.isCancelled else {
                     return false
                 }
-                let queued = await self.queueContinueMessage(threadID: id)
+                // Snapshot from auto-switch/quota capture is authoritative; live
+                // rediscovery races OWL hydrate and drops continues.
+                let queued = await self.queueContinueMessage(
+                    threadID: id,
+                    requireLiveInterruption: false
+                )
                 if queued { self.recentlyContinuedThreads[id] = .now }
                 self.logSessionResume("batch continue thread=\(id) queued=\(queued)")
                 return queued
@@ -1524,7 +1548,11 @@ final class AccountStore: ObservableObject {
             logSessionResume(
                 "quota recovery resume primary=\(hint.sessionId ?? "-") additional=\(hint.additionalSessions.count) desktopRunning=\(ChatGPTDesktop.isRunning)"
             )
-            await applySessionResumeIfNeeded(hint, continueExhausted: true)
+            await applySessionResumeIfNeeded(
+                hint,
+                continueExhausted: true,
+                hydration: ChatGPTDesktop.isRunning ? .warm : .coldAfterRelaunch
+            )
         } catch {
             logSessionResume("quota recovery resume failed: \(error.localizedDescription)")
         }
@@ -1597,19 +1625,21 @@ final class AccountStore: ObservableObject {
     }
 
     /// Opens the remembered thread (preferred) or project for the account just switched *to*.
-    private func openRememberedWorkspace(cwd: String?, sessionID: String?) async -> SessionResumeOpenResult {
+    private func openRememberedWorkspace(
+        cwd: String?,
+        sessionID: String?,
+        hydration: DesktopResumeHydration
+    ) async -> SessionResumeOpenResult {
         if let sessionID, !sessionID.isEmpty {
             // Retry: first deliveries during cold hydrate are often dropped.
-            // Warm Desktop (same-account recovery) confirms faster.
-            let warmDesktop = ChatGPTDesktop.isRunning
             // Warm same-account recovery rarely writes fresh Desktop log lines
             // (thread often already focused). Confirm briefly, then fall through.
-            let confirmTimeout = warmDesktop ? 0.9 : 2.0
-            let retryGap: Duration = warmDesktop ? .milliseconds(250) : .milliseconds(600)
-            let attempts = warmDesktop ? 2 : 4
+            let confirmTimeout = hydration.confirmTimeoutSeconds
+            let retryGap = Duration.seconds(hydration.retryGapSeconds)
+            let attempts = hydration.openAttempts
             var anyDelivered = false
             for attempt in 1...attempts {
-                logSessionResume("thread deep-link attempt \(attempt) id=\(sessionID)")
+                logSessionResume("thread deep-link attempt \(attempt)/\(attempts) id=\(sessionID) hydration=\(hydration)")
                 let openedAt = Date()
                 let delivered = await openCodexThreadDeepLink(sessionID: sessionID)
                 if delivered {
@@ -1625,19 +1655,21 @@ final class AccountStore: ObservableObject {
                 }
                 try? await Task.sleep(for: retryGap)
             }
-            if anyDelivered && (warmDesktop || ChatGPTDesktop.isRunning) {
+            if anyDelivered && ChatGPTDesktop.isRunning {
+                // Cold OWL often resumes via maybe_resume_success after our
+                // per-attempt window; deep-link delivery still selected the tab.
                 logSessionResume(
-                    "warm Desktop: deep-link delivered without fresh log evidence — treating as opened"
+                    "deep-link delivered without fresh log evidence — treating as opened hydration=\(hydration)"
                 )
                 return .openedThread
             }
-            // Final cold-path attempt with stricter log confirmation.
+            // Final attempt with a longer confirmation window.
             let openedAt = Date()
             if await openCodexThreadDeepLink(sessionID: sessionID),
                await desktopLogConfirmsThreadOpen(
                 sessionID: sessionID,
                 since: openedAt,
-                timeoutSeconds: 3.0
+                timeoutSeconds: max(confirmTimeout, 3.0)
                ) {
                 return .openedThread
             }
@@ -1690,16 +1722,28 @@ final class AccountStore: ObservableObject {
     }
 
     /// Queue acceptance and native Resume are separate outcomes. Never send keys or guess coordinates.
-    private func queueContinueMessage(threadID: String) async -> Bool {
-        // Revalidate after navigation: the user/native client may already have
-        // continued, completed or stopped the thread since the original capture.
-        guard autoResumeSession, !Task.isCancelled,
-              let fresh = try? await cli.decode(SessionResumeHint.self,
-                arguments: ["auto-resume-session", "--continue-interrupted", "--json"]),
-              fresh.enabled,
-              ([fresh] + fresh.additionalSessions).contains(where: { $0.sessionId == threadID }) else {
-            logSessionResume("continue skipped: thread no longer has a confirmed usage-limit interruption")
-            return false
+    ///
+    /// - `requireLiveInterruption`: when true (legacy/manual probes), re-check
+    ///   live discovery. When false (auto-switch / batch after a frozen
+    ///   snapshot), skip rediscovery — OWL hydrate often clears the interrupt
+    ///   marker before queue runs.
+    private func queueContinueMessage(
+        threadID: String,
+        requireLiveInterruption: Bool = true
+    ) async -> Bool {
+        guard autoResumeSession, !Task.isCancelled else { return false }
+        if requireLiveInterruption {
+            // Revalidate after navigation: the user/native client may already have
+            // continued, completed or stopped the thread since the original capture.
+            guard let fresh = try? await cli.decode(SessionResumeHint.self,
+                    arguments: ["auto-resume-session", "--continue-interrupted", "--json"]),
+                  fresh.enabled,
+                  ([fresh] + fresh.additionalSessions).contains(where: { $0.sessionId == threadID }) else {
+                logSessionResume("continue skipped: thread no longer has a confirmed usage-limit interruption")
+                return false
+            }
+        } else {
+            logSessionResume("continue trusting captured snapshot thread=\(threadID)")
         }
         switch CodexResumePolicy.readQueue(threadID: threadID) {
         case .owned:
@@ -2776,6 +2820,21 @@ final class AccountStore: ObservableObject {
                 let previousAccountID = decision.activeAccountId
                 let candidateName = decision.candidateDisplayName
                     ?? AppLanguage.text("tài khoản khác", "another account")
+                // Freeze interrupted threads BEFORE quitting Desktop. OWL 26.1106+
+                // often leaves post-quit discovery empty (task_started / hydrate).
+                if autoResumeSession {
+                    do {
+                        let frozen: SessionResumeHint = try await cli.decode(
+                            SessionResumeHint.self,
+                            arguments: ["auto-resume-session", "--capture-pending", "--json"]
+                        )
+                        logSessionResume(
+                            "pre-quit capture primary=\(frozen.sessionId ?? "-") additional=\(frozen.additionalSessions.count) status=\(frozen.status)"
+                        )
+                    } catch {
+                        logSessionResume("pre-quit capture failed: \(error.localizedDescription)")
+                    }
+                }
                 // Save live auth first, then close Desktop, switch ~/.codex, reopen.
                 // A live Codex CLI must defer switching even after Desktop has quit.
                 var relaunch = ChatGPTDesktop.RelaunchPlan.preferredDesktop()
@@ -2873,7 +2932,12 @@ final class AccountStore: ObservableObject {
                 autoSwitchState = .switched(applied.candidateDisplayName ?? candidateName)
                 autoSwitchAllExhaustedNotified = false
                 autoSwitchCooldownUntil = Date.now.addingTimeInterval(8)
-                await self.applySessionResumeIfNeeded(applied.sessionResume, continueExhausted: true)
+                // Always cold: apply path quit/cleared or Desktop was already down.
+                await self.applySessionResumeIfNeeded(
+                    applied.sessionResume,
+                    continueExhausted: true,
+                    hydration: .coldAfterRelaunch
+                )
             case "waiting_for_dwell":
                 // Benign: the minimum dwell between automatic switches has not
                 // elapsed yet. Do not surface this as a failure.

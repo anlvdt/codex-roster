@@ -55,6 +55,53 @@ enum LaunchInterruptedResumePolicy {
     }
 }
 
+/// Desktop hydration pace after an account switch.
+///
+/// OWL 26.1106+ needs several seconds after quit + web-session clear before
+/// `maybe_resume_success` / `thread/resume` land in Desktop logs. Treating a
+/// just-relaunched app as "warm" made Roster give up ~1s early and skip continues.
+enum DesktopResumeHydration {
+    /// Same-account recovery: Desktop stayed up.
+    case warm
+    /// Account switch / force relaunch after web-session clear.
+    case coldAfterRelaunch
+
+    var minimumSettleSeconds: Double {
+        switch self {
+        case .warm: return 0.4
+        case .coldAfterRelaunch: return 3.0
+        }
+    }
+
+    var maximumWaitSeconds: Double {
+        switch self {
+        case .warm: return 4.0
+        case .coldAfterRelaunch: return 14.0
+        }
+    }
+
+    var confirmTimeoutSeconds: Double {
+        switch self {
+        case .warm: return 0.9
+        case .coldAfterRelaunch: return 5.0
+        }
+    }
+
+    var retryGapSeconds: Double {
+        switch self {
+        case .warm: return 0.25
+        case .coldAfterRelaunch: return 0.75
+        }
+    }
+
+    var openAttempts: Int {
+        switch self {
+        case .warm: return 2
+        case .coldAfterRelaunch: return 6
+        }
+    }
+}
+
 /// A navigation is confirmed only by a fresh success record for that exact thread.
 enum DesktopResumeEvidence {
     static func matches(_ line: String, threadID: String, since: Date) -> Bool {

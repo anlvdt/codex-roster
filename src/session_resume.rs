@@ -281,6 +281,37 @@ pub fn capture_for_account(app_data_dir: &Path, codex_root: &Path, account_id: U
     })
 }
 
+/// How long a pre-quit continue snapshot stays authoritative for apply.
+/// Long enough to cover Desktop quit + auth swap; short enough that a failed
+/// switch cannot pin yesterday's interrupts forever.
+const FRESH_PENDING_CONTINUE: Duration = Duration::from_secs(10 * 60);
+
+/// True when a non-empty continue snapshot was frozen recently (typically by a
+/// pre-Desktop-quit capture). Apply must not overwrite that with a weaker
+/// post-quit scan that often returns `missing` after OWL cold hydrate.
+pub fn has_fresh_nonempty_pending_continues(app_data_dir: &Path) -> Result<bool> {
+    let _lock = SessionResumeLock::acquire(app_data_dir)?;
+    let index = load_index(app_data_dir)?;
+    Ok(pending_continues_are_fresh_nonempty(
+        &index,
+        OffsetDateTime::now_utc(),
+    ))
+}
+
+fn pending_continues_are_fresh_nonempty(
+    index: &SessionResumeIndex,
+    now: OffsetDateTime,
+) -> bool {
+    let Some(pending) = index.pending_continues.as_ref() else {
+        return false;
+    };
+    if pending.is_empty() {
+        return false;
+    }
+    let floor = now - time::Duration::seconds(FRESH_PENDING_CONTINUE.as_secs() as i64);
+    pending.iter().any(|thread| thread.captured_at >= floor)
+}
+
 /// Freeze the live thread that just hit usage limits so auto-switch can reopen
 /// it on the replacement account (same session id under shared `~/.codex`).
 pub fn capture_pending_continue(
@@ -1449,9 +1480,11 @@ mod tests {
         );
         let account = Uuid::new_v4();
         capture_pending_continue(&app, &root, account).unwrap();
+        assert!(has_fresh_nonempty_pending_continues(&app).unwrap());
         // Disabled must not consume the queue: no hint, but the batch survives.
         assert!(take_pending_continue_hint(&app, false).unwrap().is_none());
         assert!(take_pending_continue_hint(&app, true).unwrap().is_some());
+        assert!(!has_fresh_nonempty_pending_continues(&app).unwrap());
         capture_pending_continue(&app, &root, account).unwrap();
         append_event(&path, serde_json::json!({"type":"task_complete"}));
         capture_pending_continue(&app, &root, account).unwrap();

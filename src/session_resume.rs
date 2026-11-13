@@ -3,12 +3,13 @@
 //! Three modes:
 //! 1. **Per-account history** (`capture_for_account` / `hint_for_account`) — last
 //!    workspace remembered for a roster row (manual activate).
-//! 2. **Continue-exhausted thread** (`capture_pending_continue` /
-//!    `take_pending_continue_hint`) — when auto-switch fires because the live
-//!    account hit usage limits, freeze recently interrupted Desktop/CLI
-//!    threads (usage-limit window below) and reopen them after the new account
-//!    is live. Session history lives under shared `~/.codex` (auth.json is
-//!    what switches); new turns burn the replacement account's quota.
+//! 2. **Continue-exhausted / switch-interrupted thread** (`capture_pending_continue` /
+//!    `take_pending_continue_hint`) — when auto-switch fires, freeze threads that
+//!    still need continue: usage-limit errors, Desktop `turn_aborted` with
+//!    reason `interrupted` (quit mid-turn), and — at pre-quit capture only —
+//!    in-flight `task_started` turns we are about to kill. Reopen them after
+//!    the new account is live. Session history lives under shared `~/.codex`
+//!    (auth.json is what switches); new turns burn the replacement account's quota.
 //! 3. **Same-account quota recovery / launch probe** (`hint_for_interrupted_sessions`)
 //!    — after a banked reset is redeemed, any in-place quota recovery, or Roster
 //!    app restart with Auto-resume ON, reopen and continue threads that still
@@ -312,15 +313,18 @@ fn pending_continues_are_fresh_nonempty(
     pending.iter().any(|thread| thread.captured_at >= floor)
 }
 
-/// Freeze the live thread that just hit usage limits so auto-switch can reopen
-/// it on the replacement account (same session id under shared `~/.codex`).
+/// Freeze threads that still need continue so auto-switch can reopen them on
+/// the replacement account (same session id under shared `~/.codex`).
+///
+/// Includes usage-limit interrupts, Desktop `turn_aborted`/`interrupted`, and
+/// in-flight `task_started` turns (call before quitting Desktop).
 pub fn capture_pending_continue(
     app_data_dir: &Path,
     codex_root: &Path,
     from_account_id: Uuid,
 ) -> Result<()> {
     clear_warnings();
-    let sessions = discover_interrupted_sessions(codex_root)?;
+    let sessions = discover_interrupted_sessions_with(codex_root, DiscoverMode::CaptureForSwitch)?;
     let mut seen = HashSet::new();
     let pending: Vec<PendingContinueThread> = sessions
         .into_iter()
@@ -567,17 +571,42 @@ fn offset_to_system(ts: OffsetDateTime) -> SystemTime {
     }
 }
 
+/// How discovery decides a rollout still needs continue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiscoverMode {
+    /// Same-account recovery / live probe: usage-limit or Desktop
+    /// `turn_aborted`/`interrupted`. Never treat a bare in-flight
+    /// `task_started` as needing continue (turn is still running).
+    LiveRecovery,
+    /// Pre-quit / apply capture for account switch: also include in-flight
+    /// `task_started` turns that Desktop quit is about to abort.
+    CaptureForSwitch,
+}
+
 /// Discover all recently interrupted user threads, never just the most recent row.
 /// Reading only the tail bounds memory for long conversations. Unknown states
 /// are excluded instead of accidentally restarting completed work.
 ///
-/// Eligibility requires an explicit usage-limit error within
-/// [`USAGE_LIMIT_RESUME_WINDOW`]. A bare `task_started` is an active turn,
-/// not evidence of interruption, even when its rollout mtime is recent.
+/// Live recovery requires an explicit usage-limit or switch-interrupt event
+/// within [`USAGE_LIMIT_RESUME_WINDOW`]. Capture-for-switch also freezes
+/// in-flight `task_started` turns.
 fn discover_interrupted_sessions(codex_root: &Path) -> Result<Vec<DiscoveredSession>> {
+    discover_interrupted_sessions_with(codex_root, DiscoverMode::LiveRecovery)
+}
+
+fn discover_interrupted_sessions_with(
+    codex_root: &Path,
+    mode: DiscoverMode,
+) -> Result<Vec<DiscoveredSession>> {
     let now_odt = OffsetDateTime::now_utc();
     let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-    discover_interrupted_sessions_at(codex_root, SystemTime::now(), now_odt, local_offset)
+    discover_interrupted_sessions_at(
+        codex_root,
+        SystemTime::now(),
+        now_odt,
+        local_offset,
+        mode,
+    )
 }
 
 fn discover_interrupted_sessions_at(
@@ -585,6 +614,7 @@ fn discover_interrupted_sessions_at(
     now: SystemTime,
     now_odt: OffsetDateTime,
     local_offset: UtcOffset,
+    mode: DiscoverMode,
 ) -> Result<Vec<DiscoveredSession>> {
     let mut candidates = Vec::new();
     let mut db_available = false;
@@ -655,7 +685,9 @@ fn discover_interrupted_sessions_at(
         };
         match rollout_continuation_state(&path) {
             Ok(Some(state)) => {
-                if !state.needs_continue || !state.from_interrupt_event {
+                let eligible = (state.needs_continue && state.from_interrupt_event)
+                    || (mode == DiscoverMode::CaptureForSwitch && state.in_flight);
+                if !eligible {
                     continue;
                 }
                 // Fresh writes must not revive an old usage-limit error.
@@ -732,8 +764,11 @@ fn session_day_dirs(
 #[derive(Clone, Copy, Debug)]
 struct ContinuationState {
     needs_continue: bool,
-    /// True when the deciding event was usage-limit / abort (not bare task_started).
+    /// True when the deciding event was usage-limit / switch-interrupt abort
+    /// (not bare task_started).
     from_interrupt_event: bool,
+    /// Last decisive event is an open `task_started` (turn still running).
+    in_flight: bool,
     event_at: Option<SystemTime>,
 }
 
@@ -828,11 +863,13 @@ fn continuation_state(line: &str) -> Option<ContinuationState> {
         .and_then(parse_event_timestamp);
     let payload = &value["payload"];
     match payload["type"].as_str()? {
-        // A start cancels any older interruption evidence. Missing completion
-        // can mean the task is still running; never infer a crash from mtime.
+        // A start cancels any older interruption evidence. Live recovery must
+        // not treat this as needing continue (turn may still be running). Capture
+        // for switch freezes `in_flight` so quit-aborted work can resume.
         "task_started" => Some(ContinuationState {
             needs_continue: false,
             from_interrupt_event: false,
+            in_flight: true,
             event_at,
         }),
         // Desktop reports quota failures as completed turns with a nested
@@ -842,6 +879,7 @@ fn continuation_state(line: &str) -> Option<ContinuationState> {
             Some(ContinuationState {
                 needs_continue: needs,
                 from_interrupt_event: needs,
+                in_flight: false,
                 event_at,
             })
         }
@@ -857,10 +895,15 @@ fn continuation_state(line: &str) -> Option<ContinuationState> {
                 || reason.contains("usage limit")
                 || reason.contains("usage_limit")
                 || reason.contains("usagelimit")
-                || reason.contains("quota");
+                || reason.contains("quota")
+                // Desktop quit / force-interrupt mid-turn (account switch).
+                // Do not treat user_cancelled as needing continue.
+                || reason.split(|c: char| !c.is_ascii_alphanumeric())
+                    .any(|token| token == "interrupted");
             Some(ContinuationState {
                 needs_continue: needs,
                 from_interrupt_event: needs,
+                in_flight: false,
                 event_at,
             })
         }
@@ -1352,7 +1395,15 @@ mod tests {
                     &path,
                     serde_json::json!({"type":"turn_aborted", "reason":"user_cancelled"}),
                 ),
-                "stale" => filetime_set(&path, SystemTime::now() - Duration::from_secs(90 * 60)),
+                // Outside the resume window via event timestamp (mtime alone is ignored).
+                "stale" => {
+                    let old = OffsetDateTime::now_utc() - time::Duration::hours(8);
+                    append_event_at(
+                        &path,
+                        &old,
+                        serde_json::json!({"type":"task_started"}),
+                    );
+                }
                 _ => {}
             }
         }
@@ -1368,6 +1419,13 @@ mod tests {
             &duplicate,
             serde_json::json!({"type":"error", "code":"usage_limit_reached"}),
         );
+        // Live recovery: only explicit interrupts (not bare in-flight).
+        let live = discover_interrupted_sessions(&root).unwrap();
+        assert_eq!(
+            live.iter().map(|s| s.session_id.as_str()).collect::<Vec<_>>(),
+            vec!["blocked-b"]
+        );
+        // Capture-for-switch also freezes the in-flight active turn.
         capture_pending_continue(&app, &root, Uuid::new_v4()).unwrap();
         let hint = take_pending_continue_hint(&app, true).unwrap().unwrap();
         let mut ids = vec![hint.session_id.unwrap()];
@@ -1377,8 +1435,35 @@ mod tests {
                 .map(|hint| hint.session_id.unwrap()),
         );
         ids.sort();
-        assert_eq!(ids, vec!["blocked-b"]);
+        assert_eq!(ids, vec!["active-a", "blocked-b"]);
         assert!(take_pending_continue_hint(&app, true).unwrap().is_none());
+    }
+
+    #[test]
+    fn desktop_quit_interrupted_abort_is_discovered() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("codex");
+        let path = day_dir(&root).join("rollout-switch-interrupt.jsonl");
+        write_rollout(&path, "switch-interrupt", temp.path().to_str().unwrap(), "user");
+        append_event(&path, serde_json::json!({"type":"task_started"}));
+        append_event(
+            &path,
+            serde_json::json!({"type":"turn_aborted", "reason":"interrupted"}),
+        );
+        let sessions = discover_interrupted_sessions(&root).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "switch-interrupt");
+        // user_cancelled must stay excluded
+        let cancelled = day_dir(&root).join("rollout-user-cancel.jsonl");
+        write_rollout(&cancelled, "user-cancel", temp.path().to_str().unwrap(), "user");
+        append_event(&cancelled, serde_json::json!({"type":"task_started"}));
+        append_event(
+            &cancelled,
+            serde_json::json!({"type":"turn_aborted", "reason":"user_cancelled"}),
+        );
+        let sessions = discover_interrupted_sessions(&root).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "switch-interrupt");
     }
 
     #[test]

@@ -350,6 +350,8 @@ final class AccountStore: ObservableObject {
     @Published private(set) var isPendingLogin = false
     /// Which add path is in flight (nil when idle). Used by the add sheet to resume UI.
     @Published private(set) var pendingAddAccountMode: AddAccountMode?
+    /// Short bilingual line for the Chrome private-tab login (fill email / 2FA / wait).
+    @Published private(set) var loginBrowserPhase: String?
     /// Short bilingual progress line during Desktop accept / clear+relaunch retry.
     @Published private(set) var switchPhaseMessage: String?
     /// Brief notch/menu caption after Auto-resume opens a remembered workspace.
@@ -603,7 +605,10 @@ final class AccountStore: ObservableObject {
         }
     }
 
-    func startNewAccountLogin(mode: AddAccountMode = .addAndSwitch) {
+    func startNewAccountLogin(
+        mode: AddAccountMode = .addAndSwitch,
+        credentials: OpenAILoginCredentials
+    ) {
         guard !isBusyForActions, newAccountLoginState != .waiting else { return }
         isInteractiveLoginInProgress = true
         isPendingLogin = true
@@ -612,9 +617,12 @@ final class AccountStore: ObservableObject {
         run {
             switch mode {
             case .enrollOnly:
-                try await self.beginEnrollOnlyLogin()
+                try await self.beginEnrollOnlyLogin(credentials: credentials)
             case .addAndSwitch:
-                try await self.beginOrResumeAddAccountLogin(expectedEmail: nil)
+                try await self.beginOrResumeAddAccountLogin(
+                    expectedEmail: nil,
+                    credentials: credentials
+                )
             }
         }
     }
@@ -726,12 +734,18 @@ final class AccountStore: ObservableObject {
         pendingAddAccountMode = .addAndSwitch
         newAccountLoginState = .waiting
         run {
-            try await self.beginOrResumeAddAccountLogin(expectedEmail: account.email)
+            try await self.beginOrResumeAddAccountLogin(
+                expectedEmail: account.email,
+                credentials: nil
+            )
         }
         return true
     }
 
-    private func beginOrResumeAddAccountLogin(expectedEmail: String?) async throws {
+    private func beginOrResumeAddAccountLogin(
+        expectedEmail: String?,
+        credentials: OpenAILoginCredentials?
+    ) async throws {
         let addStatus = try await cli.decode(AddAccountStatusOutput.self, arguments: ["add-account-status"])
         if addStatus.active || isAddAccountSession {
             try await resumePendingLogin(expectedEmail: expectedEmail)
@@ -755,7 +769,9 @@ final class AccountStore: ObservableObject {
             isEnrollOnlyLogin = false
             expectedReloginEmail = expectedEmail
             isPendingLogin = true
-            try CodexLoginLauncher.start(codexHome: nil)
+            try CodexLoginLauncher.start(codexHome: nil, credentials: credentials) { [weak self] phase in
+                self?.loginBrowserPhase = phase
+            }
             watchForNewAccount(after: liveStatus.currentAccount)
         } catch {
             if began {
@@ -775,7 +791,7 @@ final class AccountStore: ObservableObject {
     /// Enroll a new account into the roster without replacing live `~/.codex`
     /// or restarting ChatGPT Desktop. Login writes into an isolated CODEX_HOME;
     /// the resulting auth.json is imported as a snapshot only.
-    private func beginEnrollOnlyLogin() async throws {
+    private func beginEnrollOnlyLogin(credentials: OpenAILoginCredentials) async throws {
         // Fixed OAuth callback ports — cannot free them without quitting Desktop,
         // which this mode forbids. Fail clearly so the user can pick Add & switch.
         if CodexLoginPort.isBusy {
@@ -792,7 +808,9 @@ final class AccountStore: ObservableObject {
         expectedReloginEmail = nil
         isPendingLogin = true
         do {
-            try CodexLoginLauncher.start(codexHome: home)
+            try CodexLoginLauncher.start(codexHome: home, credentials: credentials) { [weak self] phase in
+                self?.loginBrowserPhase = phase
+            }
             watchForEnrollOnlyAccount(at: home)
         } catch {
             CodexLoginLauncher.stop()
@@ -829,7 +847,9 @@ final class AccountStore: ObservableObject {
             catch { Diagnostics.logFailure("preserve live session before Desktop quit", error) }
             await closeDesktopForLogin()
         }
-        try CodexLoginLauncher.start(codexHome: nil)
+        try CodexLoginLauncher.start(codexHome: nil, credentials: nil) { [weak self] phase in
+            self?.loginBrowserPhase = phase
+        }
         watchForNewAccount(after: nil)
     }
 
@@ -1134,6 +1154,7 @@ final class AccountStore: ObservableObject {
         expectedReloginEmail = nil
         isPendingLogin = false
         pendingAddAccountMode = nil
+        loginBrowserPhase = nil
         // Enroll-only never quits Desktop; add-and-switch may have closed it for ports.
         if enrollOnlyCodexHome != nil {
             removeEnrollOnlyHome()
@@ -3465,6 +3486,8 @@ private struct CLIError: LocalizedError {
 @MainActor
 private enum CodexLoginLauncher {
     private static var process: Process?
+    private static var chromeSession: ChromePrivateLoginSession?
+    private static var outputPipe: Pipe?
 
     static var exitStatus: Int32? {
         guard let process, !process.isRunning else { return nil }
@@ -3473,10 +3496,19 @@ private enum CodexLoginLauncher {
 
     /// Start `codex login`. When `codexHome` is set, login writes credentials
     /// only into that isolated home (enroll-only); live `~/.codex` is untouched.
-    static func start(codexHome: URL?) throws {
-        // `codex login` opens its own browser sign-in (loopback/PKCE) — no device
-        // code. Run it quietly: the browser is the only UI the user needs.
+    /// The OAuth URL is intercepted into an isolated Chrome Incognito window so
+    /// each add gets a clean private tab instead of the shared default browser.
+    static func start(
+        codexHome: URL?,
+        credentials: OpenAILoginCredentials?,
+        onPhase: ((String?) -> Void)? = nil
+    ) throws {
         stop()
+        let chrome = try ChromePrivateLoginSession.begin(credentials: credentials)
+        chrome.onPhase = onPhase
+        chrome.startWatching()
+        chromeSession = chrome
+
         let login = Process()
         if let executable = resolvedCodexExecutable() {
             login.executableURL = URL(fileURLWithPath: executable)
@@ -3487,22 +3519,43 @@ private enum CodexLoginLauncher {
         }
         login.currentDirectoryURL = FileManager.default.temporaryDirectory
         var environment = ProcessInfo.processInfo.environment
+        let path = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        environment["PATH"] = "\(chrome.pathPrefix):\(path)"
+        environment["BROWSER"] = chrome.openInterceptorDirectory.appendingPathComponent("open").path
         if let codexHome {
             environment["CODEX_HOME"] = codexHome.path
         }
         login.environment = environment
-        login.standardOutput = FileHandle.nullDevice
-        login.standardError = FileHandle.nullDevice
+        let pipe = Pipe()
+        outputPipe = pipe
+        login.standardOutput = pipe
+        login.standardError = pipe
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            for token in text.split(whereSeparator: { $0.isWhitespace || $0.isNewline }) {
+                let value = String(token).trimmingCharacters(in: CharacterSet(charactersIn: "<>()\"'"))
+                guard TwoFactorLive.isOpenAILoginURL(value) else { continue }
+                Task { @MainActor in
+                    chrome.noteLoginURL(value)
+                }
+            }
+        }
         try login.run()
         process = login
     }
 
     static func stop() {
-        guard let login = process else { return }
-        process = nil
-        if login.isRunning {
-            login.terminate()
+        outputPipe?.fileHandleForReading.readabilityHandler = nil
+        outputPipe = nil
+        if let login = process {
+            process = nil
+            if login.isRunning {
+                login.terminate()
+            }
         }
+        chromeSession?.stop()
+        chromeSession = nil
     }
 
     private static func resolvedCodexExecutable() -> String? {

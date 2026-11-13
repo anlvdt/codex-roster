@@ -18,10 +18,10 @@ Native macOS account roster, quota monitor, and safe switcher for OpenAI / Codex
 
 - Save, label, archive, restore, and safely switch OpenAI / Codex account snapshots.
 - Show the active account's quota in the MacBook notch and account quota/reset state in the sidebar.
-- Launch the OpenAI browser sign-in flow without reading passwords, verification codes, or browser cookies.
+- Add accounts in an isolated Chrome Incognito tab: enter email, password, and a 2fa.live secret on the Add account sheet. Those values stay in memory for that login only and are not written to the roster.
 - **Add account** offers an explicit choice at add time:
-  - **Add only · don’t switch** — signs in under an isolated `CODEX_HOME`, imports `auth.json` into the roster, and leaves live `~/.codex` / ChatGPT Desktop on the current account (no Desktop quit, no web-session clear, no activate, no auto-resume of the new row).
-  - **Add & switch** — existing flow: backs up the live session, runs `codex login` against `~/.codex` (may quit Desktop only when login ports 1455/1457 are busy), and leaves the new credential as the live session.
+  - **Add only · don’t switch** — signs in under an isolated `CODEX_HOME` via a fresh Chrome private tab, imports `auth.json` into the roster, and leaves live `~/.codex` / ChatGPT Desktop on the current account (no Desktop quit, no web-session clear, no activate, no auto-resume of the new row).
+  - **Add & switch** — backs up the live session, runs `codex login` against `~/.codex` in a fresh Chrome private tab (may quit Desktop only when login ports 1455/1457 are busy), and leaves the new credential as the live session.
 - Close and relaunch ChatGPT/Codex Desktop after a confirmed account switch.
 - Refresh local Codex token statistics, public OpenAI Status, and the public [Codex Reset outlook](https://codex-resets.com/) (with forecast probabilities from [codex-reset.com](https://codex-reset.com/)).
 - Sync usage to [VibeCafe](https://vibecafe.ai/) via the optional [`@vibe-cafe/vibe-usage`](https://github.com/vibe-cafe/vibe-usage) collector; its token and estimated-cost statistics remain separate from OpenAI quota/banked-reset credits.
@@ -161,10 +161,10 @@ bash scripts/build-macos-app.sh
 
 - Lưu, đặt tên, lưu trữ, khôi phục và chuyển an toàn các phiên tài khoản OpenAI / Codex.
 - Hiển thị quota tài khoản đang dùng tại notch MacBook; hiển thị quota và thời điểm reset ở sidebar.
-- Mở luồng đăng nhập thiết bị OpenAI mà không đọc mật khẩu, mã xác thực hay cookie trình duyệt.
+- Thêm tài khoản trên tab Chrome riêng tư: nhập email, mật khẩu và secret 2fa.live ngay trên sheet. Các giá trị này chỉ nằm trong bộ nhớ cho lần đăng nhập đó, không ghi vào roster.
 - **Thêm tài khoản** hỏi rõ lựa chọn lúc thêm:
-  - **Chỉ thêm · không đổi phiên** — đăng nhập vào `CODEX_HOME` tạm, import `auth.json` vào roster, giữ nguyên `~/.codex` / ChatGPT Desktop trên tài khoản hiện tại (không tắt Desktop, không xóa web session, không kích hoạt / auto-resume hàng mới).
-  - **Thêm & chuyển** — luồng cũ: sao lưu phiên live, `codex login` vào `~/.codex` (có thể đóng Desktop nếu cổng 1455/1457 bận), để credential mới làm phiên đang dùng.
+  - **Chỉ thêm · không đổi phiên** — đăng nhập vào `CODEX_HOME` tạm qua tab Chrome riêng tư, import `auth.json` vào roster, giữ nguyên `~/.codex` / ChatGPT Desktop trên tài khoản hiện tại (không tắt Desktop, không xóa web session, không kích hoạt / auto-resume hàng mới).
+  - **Thêm & chuyển** — sao lưu phiên live, `codex login` vào `~/.codex` trên tab Chrome riêng tư (có thể đóng Desktop nếu cổng 1455/1457 bận), để credential mới làm phiên đang dùng.
 - Đóng rồi mở lại ChatGPT/Codex Desktop sau khi bạn xác nhận chuyển tài khoản.
 - Theo dõi token Codex cục bộ, trạng thái công khai OpenAI và [Codex Reset outlook](https://codex-resets.com/) (xác suất forecast từ [codex-reset.com](https://codex-reset.com/)).
 - Nếu đã cấu hình VibeCafe qua collector tùy chọn [`@vibe-cafe/vibe-usage`](https://github.com/vibe-cafe/vibe-usage) (tải qua `npx` với phiên bản ghim `@vibe-cafe/vibe-usage@0.13.2`; đặt `CODEX_ROSTER_VIBE_USAGE_BIN` tới binary có sẵn để không phải tải lúc chạy), Roster tự đồng bộ mỗi 30 phút và hiển thị thống kê API chính thức trong Status: token, chi phí ước tính, số phiên và thời gian hoạt động trong 7 ngày; các thống kê này tách biệt với quota/banked reset credit của OpenAI.

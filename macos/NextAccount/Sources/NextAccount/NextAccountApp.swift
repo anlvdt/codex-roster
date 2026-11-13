@@ -1473,25 +1473,36 @@ struct AddAccountSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var selectedMode: AddAccountMode = .enrollOnly
     @State private var didStartLogin = false
+    @State private var loginEmail = ""
+    @State private var loginPassword = ""
+    @State private var loginTwoFactor = ""
+
+    private var loginCredentials: OpenAILoginCredentials {
+        OpenAILoginCredentials(email: loginEmail, password: loginPassword, twoFactor: loginTwoFactor)
+    }
 
     private var isChoosingMode: Bool {
         !didStartLogin && store.newAccountLoginState == .idle
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Label(language.text("Thêm tài khoản", "Add account"), systemImage: "plus.circle.fill")
-                .font(RosterSecondaryChrome.title)
-                .foregroundStyle(.tint)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Label(language.text("Thêm tài khoản", "Add account"), systemImage: "plus.circle.fill")
+                    .font(RosterSecondaryChrome.title)
+                    .foregroundStyle(.tint)
 
-            if isChoosingMode {
-                modeChooser
-            } else {
-                progressBody
+                if isChoosingMode {
+                    modeChooser
+                } else {
+                    progressBody
+                }
             }
+            .padding(RosterSecondaryChrome.contentPadding)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(RosterSecondaryChrome.contentPadding)
         .frame(width: RosterSecondaryChrome.sheetWidth)
+        .frame(maxHeight: 720)
         .interactiveDismissDisabled(store.isPendingLogin)
         .onAppear {
             // Resume an in-flight login (app relaunch / sheet reopen).
@@ -1529,8 +1540,8 @@ struct AddAccountSheet: View {
     @ViewBuilder
     private var modeChooser: some View {
         Text(language.text(
-            "Chọn rõ trước khi đăng nhập — tránh giữ phiên cũ khi bạn muốn chuyển, và tránh đổi phiên khi bạn chỉ muốn thêm vào danh sách.",
-            "Choose explicitly before signing in — avoid staying on the old account when you meant to switch, and avoid switching when you only wanted to enroll."
+            "Nhập email, mật khẩu và 2fa.live, rồi chọn rõ trước khi Roster mở tab Chrome riêng tư — tránh giữ phiên cũ khi bạn muốn chuyển, và tránh đổi phiên khi bạn chỉ muốn thêm vào danh sách.",
+            "Enter email, password, and 2fa.live, then choose explicitly before Roster opens a Chrome private tab — avoid staying on the old account when you meant to switch, and avoid switching when you only wanted to enroll."
         ))
         .foregroundStyle(.secondary)
 
@@ -1544,6 +1555,8 @@ struct AddAccountSheet: View {
         }
         .pickerStyle(.segmented)
 
+        credentialFields
+
         GroupBox {
             VStack(alignment: .leading, spacing: 8) {
                 Text(modeDetailTitle)
@@ -1555,6 +1568,12 @@ struct AddAccountSheet: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
+        }
+
+        if let twoFactorError = loginCredentials.twoFactorParseError {
+            Label(twoFactorError, systemImage: "exclamationmark.triangle.fill")
+                .font(RosterSecondaryChrome.footnote)
+                .foregroundStyle(.orange)
         }
 
         if selectedMode == .enrollOnly, CodexLoginPort.isBusy {
@@ -1573,10 +1592,10 @@ struct AddAccountSheet: View {
             }
             Button(startButtonTitle) {
                 didStartLogin = true
-                store.startNewAccountLogin(mode: selectedMode)
+                store.startNewAccountLogin(mode: selectedMode, credentials: loginCredentials)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(store.isBusyForActions)
+            .disabled(store.isBusyForActions || !loginCredentials.isReadyToStart)
             .keyboardShortcut(.defaultAction)
         }
     }
@@ -1624,6 +1643,26 @@ struct AddAccountSheet: View {
                 .foregroundStyle(.red)
         }
 
+        if !isFinished, loginCredentials.hasTwoFactor {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                if let totp = TwoFactorLive.code(from: loginTwoFactor, at: context.date) {
+                    HStack(spacing: 10) {
+                        Text(totp.value)
+                            .font(.system(size: 16, weight: .semibold, design: .monospaced))
+                        Text(language.text("2FA còn \(totp.remaining)s", "2FA \(totp.remaining)s left"))
+                            .font(RosterSecondaryChrome.footnote)
+                            .foregroundStyle(.secondary)
+                        Button(language.text("Sao chép", "Copy")) {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(totp.value, forType: .string)
+                        }
+                        .buttonStyle(.borderless)
+                        Spacer()
+                    }
+                }
+            }
+        }
+
         Label(progressSafetyNote, systemImage: "lock.shield")
             .font(RosterSecondaryChrome.footnote)
             .foregroundStyle(.secondary)
@@ -1651,6 +1690,58 @@ struct AddAccountSheet: View {
         }
     }
 
+    @ViewBuilder
+    private var credentialFields: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(language.text("Đăng nhập OpenAI", "OpenAI sign-in"))
+                .font(RosterSecondaryChrome.section)
+            Text(language.text(
+                "Mỗi tài khoản mở một tab Chrome riêng tư (profile tạm). Email, mật khẩu và 2fa.live chỉ dùng để điền form — không lưu vào roster.",
+                "Each account opens an isolated Chrome private tab. Email, password, and 2fa.live are used only to fill the form — they are not saved to the roster."
+            ))
+            .font(RosterSecondaryChrome.footnote)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            TextField(language.text("Email / username", "Email / username"), text: $loginEmail)
+                .textContentType(.username)
+                .disableAutocorrection(true)
+            SecureField(language.text("Mật khẩu", "Password"), text: $loginPassword)
+                .textContentType(.password)
+            TextField(
+                language.text("Secret 2fa.live (không phải mã WhatsApp/SMS)", "2fa.live secret (not a WhatsApp/SMS code)"),
+                text: $loginTwoFactor
+            )
+            .textContentType(NSTextContentType(rawValue: "com.codexroster.totp-secret"))
+            .disableAutocorrection(true)
+
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                if let totp = TwoFactorLive.code(from: loginTwoFactor, at: context.date) {
+                    HStack(spacing: 10) {
+                        Text(totp.value)
+                            .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.tint)
+                        Text(language.text("còn \(totp.remaining)s", "\(totp.remaining)s left"))
+                            .font(RosterSecondaryChrome.footnote)
+                            .foregroundStyle(.secondary)
+                        Button(language.text("Sao chép mã", "Copy code")) {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(totp.value, forType: .string)
+                        }
+                        .buttonStyle(.borderless)
+                        Spacer()
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RosterSecondaryChrome.cardFill,
+            in: RoundedRectangle(cornerRadius: RosterSecondaryChrome.cardRadius)
+        )
+    }
+
     private var startButtonTitle: String {
         switch selectedMode {
         case .enrollOnly:
@@ -1673,13 +1764,13 @@ struct AddAccountSheet: View {
         switch selectedMode {
         case .enrollOnly:
             return language.text(
-                "Đăng nhập vào thư mục tạm (CODEX_HOME riêng), import auth.json vào roster. Không ghi đè ~/.codex, không tắt Desktop, không kích hoạt / auto-resume tài khoản mới. Nếu cổng 1455/1457 đang bị Desktop giữ — không thể Chỉ thêm.",
-                "Signs in under an isolated CODEX_HOME, then imports auth.json into the roster. Does not overwrite ~/.codex, quit Desktop, or activate / auto-resume the new account. If ports 1455/1457 are held by Desktop, Add only cannot run."
+                "Đăng nhập trên tab Chrome riêng tư vào thư mục tạm (CODEX_HOME riêng), import auth.json vào roster. Không ghi đè ~/.codex, không tắt Desktop, không kích hoạt / auto-resume tài khoản mới. Nếu cổng 1455/1457 đang bị Desktop giữ — không thể Chỉ thêm.",
+                "Signs in through an isolated Chrome private tab under a temporary CODEX_HOME, then imports auth.json into the roster. Does not overwrite ~/.codex, quit Desktop, or activate / auto-resume the new account. If ports 1455/1457 are held by Desktop, Add only cannot run."
             )
         case .addAndSwitch:
             return language.text(
-                "Sao lưu phiên hiện tại, đăng nhập vào ~/.codex (có thể đóng Desktop nếu cổng login bận), rồi để credential mới làm phiên live. Hủy sẽ khôi phục phiên trước.",
-                "Backs up the current session, signs into ~/.codex (may quit Desktop if login ports are busy), and leaves the new credential as the live session. Cancel restores the previous session."
+                "Sao lưu phiên hiện tại, đăng nhập vào ~/.codex trên tab Chrome riêng tư (có thể đóng Desktop nếu cổng login bận), rồi để credential mới làm phiên live. Hủy sẽ khôi phục phiên trước.",
+                "Backs up the current session, signs into ~/.codex in an isolated Chrome private tab (may quit Desktop if login ports are busy), and leaves the new credential as the live session. Cancel restores the previous session."
             )
         }
     }
@@ -1688,13 +1779,13 @@ struct AddAccountSheet: View {
         switch selectedMode {
         case .enrollOnly:
             return language.text(
-                "Hoàn tất đăng nhập OpenAI trong cửa sổ vừa mở. Roster lưu snapshot rồi giữ nguyên phiên đang dùng.",
-                "Finish signing in to OpenAI in the window that just opened. Roster saves a snapshot and keeps the current live session."
+                "Roster đang điền form trên tab Chrome riêng tư. Snapshot được lưu; phiên đang dùng không đổi.",
+                "Roster is filling the isolated Chrome private tab. A snapshot is saved; the live session stays put."
             )
         case .addAndSwitch:
             return language.text(
-                "Hoàn tất đăng nhập OpenAI trong cửa sổ vừa mở. Roster sẽ tự nhận diện và lưu tài khoản mới làm phiên hiện tại.",
-                "Finish signing in to OpenAI in the window that just opened. Roster will detect and save the new account as the live session."
+                "Roster đang điền form trên tab Chrome riêng tư, rồi tự nhận diện và lưu tài khoản mới làm phiên hiện tại.",
+                "Roster is filling the isolated Chrome private tab, then detects and saves the new account as the live session."
             )
         }
     }
@@ -1731,15 +1822,18 @@ struct AddAccountSheet: View {
     private var saveStatusText: String {
         switch store.newAccountLoginState {
         case .idle:
-            return language.text("Đang mở trang đăng nhập OpenAI…", "Opening OpenAI sign-in…")
+            return language.text("Đang mở tab Chrome riêng tư…", "Opening a Chrome private tab…")
         case .waiting:
+            if let phase = store.loginBrowserPhase, !phase.isEmpty {
+                return phase
+            }
             return language.text(
                 selectedMode == .enrollOnly
-                    ? "Không cần bấm thêm — Roster đang theo dõi credential trong thư mục tạm."
-                    : "Không cần bấm thêm — Roster đang theo dõi phiên Codex.",
+                    ? "Không cần bấm thêm — Roster đang điền tab riêng tư và theo dõi credential tạm."
+                    : "Không cần bấm thêm — Roster đang điền tab riêng tư và theo dõi phiên Codex.",
                 selectedMode == .enrollOnly
-                    ? "No more clicks needed — Roster is watching credentials in the temporary home."
-                    : "No more clicks needed — Roster is watching the Codex session."
+                    ? "No more clicks needed — Roster is filling the private tab and watching the temporary home."
+                    : "No more clicks needed — Roster is filling the private tab and watching the Codex session."
             )
         case .ready(let identity):
             return language.text("Đã nhận diện \(identity.email).", "Detected \(identity.email).")
@@ -2096,7 +2190,7 @@ struct AboutView: View {
 
                     AboutPanel(title: language.text("Quyền riêng tư", "Privacy"), icon: "hand.raised.fill") {
                         AboutBullet(icon: "internaldrive", text: language.text("Snapshot tài khoản và backup được lưu cục bộ trên máy này.", "Account snapshots and backups are stored locally on this Mac."))
-                        AboutBullet(icon: "eye.slash", text: language.text("Không đọc mật khẩu, mã xác thực hoặc cookie trình duyệt.", "Never reads passwords, verification codes, or browser cookies."))
+                        AboutBullet(icon: "eye.slash", text: language.text("Email, mật khẩu và 2fa.live nhập lúc thêm tài khoản chỉ nằm trong bộ nhớ để điền tab Chrome riêng tư — không lưu vào roster hay snapshot.", "Email, password, and 2fa.live entered while adding an account stay in memory to fill an isolated Chrome private tab — they are not saved to the roster or snapshot."))
                     }
                 }
 
@@ -2123,7 +2217,7 @@ struct AboutView: View {
 
                 AboutDisclosurePanel(title: language.text("Chi tiết tính năng", "Feature details"), icon: "checklist") {
                     AboutFeatureGroup(title: language.text("Tài khoản & phiên", "Accounts & sessions")) {
-                        AboutBullet(icon: "person.badge.plus", text: language.text("Mở đăng nhập OpenAI trên trình duyệt, sau đó lưu phiên Codex đang dùng mà không đọc mật khẩu, mã xác thực hoặc cookie trình duyệt.", "Open the OpenAI browser sign-in, then save the active Codex session without reading passwords, verification codes, or browser cookies."))
+                        AboutBullet(icon: "person.badge.plus", text: language.text("Thêm tài khoản trên tab Chrome riêng tư: nhập email, mật khẩu và 2fa.live ngay trên sheet, Roster điền form rồi lưu phiên Codex.", "Add an account in an isolated Chrome private tab: enter email, password, and 2fa.live on the sheet; Roster fills the form and then saves the Codex session."))
                         AboutBullet(icon: "pencil", text: language.text("Đặt tên, sửa, lưu trữ, khôi phục và xóa từng tài khoản đã lưu.", "Label, edit, archive, restore, and remove each saved account."))
                         AboutBullet(icon: "tablecells", text: language.text("Danh sách tài khoản trong Tổng quan, sắp xếp theo quota còn lại; bấm vào từng dòng để xem chi tiết và thao tác.", "The Overview account list, ordered by remaining quota; open a row for details and actions."))
                     }
